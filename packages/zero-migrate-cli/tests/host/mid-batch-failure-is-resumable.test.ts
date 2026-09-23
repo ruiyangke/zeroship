@@ -206,7 +206,6 @@ test("SQLite halts and resumes the same way", () => {
   const work = project();
   try {
     const appPath = join(work, "app.db");
-    const journalPath = join(work, "app.migrations.db");
 
     // Create the obstruction before any migration runs.
     const seed = new DatabaseSync(appPath);
@@ -217,10 +216,11 @@ test("SQLite halts and resumes the same way", () => {
     assert.equal(halted.code, 1, `the obstructed deploy must fail; ${halted.text}`);
 
     const readNames = (): string[] => {
-      const db = new DatabaseSync(journalPath, { readOnly: true });
+      const db = new DatabaseSync(appPath, { readOnly: true });
       const rows = db
         .prepare(
-          `SELECT name FROM schema_migrations WHERE event_kind = 'applied' ORDER BY event_seq`,
+          `SELECT name FROM "__zeroship_schema_migrations" \
+             WHERE event_kind = 'applied' ORDER BY event_seq`,
         )
         .all() as Array<{ name: string }>;
       db.close();

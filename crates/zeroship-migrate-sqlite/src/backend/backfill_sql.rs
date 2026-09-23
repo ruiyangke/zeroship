@@ -989,11 +989,10 @@ fn batch_error(last: Option<&CursorTuple>, error: SqliteActorError) -> BackfillE
 pub(crate) async fn ensure_backfill_progress(
     actor: &MigrationActor,
 ) -> Result<(), SqliteActorError> {
-    actor.ensure_journal_attached().await?;
     actor.set_mode(Mode::EngineJournal).await?;
     actor
         .exec(
-            "CREATE TABLE IF NOT EXISTS \"_mig\".schema_backfills (\
+            "CREATE TABLE IF NOT EXISTS main.\"__zeroship_schema_backfills\" (\
                 backfill_id TEXT PRIMARY KEY, \
                 checksum TEXT NOT NULL, \
                 name TEXT NOT NULL, \
@@ -1018,7 +1017,7 @@ pub(crate) async fn ensure_backfill_progress(
         )
         .await?;
     let columns = actor
-        .query("PRAGMA \"_mig\".table_info(schema_backfills)")
+        .query("PRAGMA main.table_info(\"__zeroship_schema_backfills\")")
         .await?;
     let actual = columns
         .iter()
@@ -1026,7 +1025,7 @@ pub(crate) async fn ensure_backfill_progress(
         .collect::<Vec<_>>();
     if actual.iter().map(String::as_str).collect::<Vec<_>>() != PROGRESS_COLUMNS {
         return Err(SqliteActorError::Exec(format!(
-            "schema_backfills uses a stale pre-release schema {actual:?}; recreate the development migration database (expected {PROGRESS_COLUMNS:?})"
+            "__zeroship_schema_backfills uses a stale pre-release schema {actual:?}; recreate the development migration database (expected {PROGRESS_COLUMNS:?})"
         )));
     }
     Ok(())
@@ -1038,7 +1037,7 @@ pub(crate) async fn read_progress_entries(
     actor.set_mode(Mode::EngineJournal).await?;
     let exists = actor
         .query(
-            "SELECT 1 FROM \"_mig\".sqlite_schema WHERE type = 'table' AND name = 'schema_backfills' LIMIT 1",
+            "SELECT 1 FROM main.sqlite_schema WHERE type = 'table' AND name = '__zeroship_schema_backfills' LIMIT 1",
         )
         .await?;
     if exists.is_empty() {
@@ -1047,7 +1046,7 @@ pub(crate) async fn read_progress_entries(
     ensure_backfill_progress(actor).await?;
     let rows = actor
         .query(
-            "SELECT backfill_id, checksum, complete FROM \"_mig\".schema_backfills ORDER BY backfill_id",
+            "SELECT backfill_id, checksum, complete FROM main.\"__zeroship_schema_backfills\" ORDER BY backfill_id",
         )
         .await?;
     rows.into_iter()
@@ -1100,7 +1099,7 @@ async fn read_progress(
                     stability_mode, stability_name, guard_name, guard_installed, \
                     guard_cleaned, last_cursor, end_cursor, cohort_checksum, \
                     cohort_initialized, complete \
-               FROM \"_mig\".schema_backfills WHERE backfill_id = ?1",
+               FROM main.\"__zeroship_schema_backfills\" WHERE backfill_id = ?1",
             &[SqliteBind::Text(backfill_id.to_string())],
         )
         .await?;
@@ -1303,7 +1302,7 @@ async fn initialize_progress(
         actor.set_mode(Mode::EngineJournal).await?;
         actor
             .exec_params(
-                "INSERT INTO \"_mig\".schema_backfills \
+                "INSERT INTO main.\"__zeroship_schema_backfills\" \
                     (backfill_id, checksum, name, target_table, cursor_columns, \
                      cursor_contract, stability_mode, stability_name, guard_name, \
                      guard_installed, guard_cleaned, end_cursor, cohort_checksum, \
@@ -1489,7 +1488,7 @@ async fn run_batch(
         actor.set_mode(Mode::EngineJournal).await?;
         let advanced = actor
             .query_params(
-                "UPDATE \"_mig\".schema_backfills \
+                "UPDATE main.\"__zeroship_schema_backfills\" \
                     SET last_cursor = ?1, rows_done = rows_done + ?2, \
                         batches_done = batches_done + 1 \
                   WHERE backfill_id = ?3 AND checksum = ?4 AND last_cursor IS ?5 \
@@ -1573,7 +1572,7 @@ async fn complete_progress(
         actor.set_mode(Mode::EngineJournal).await?;
         let completed = actor
             .query_params(
-                "UPDATE \"_mig\".schema_backfills \
+                "UPDATE main.\"__zeroship_schema_backfills\" \
                     SET complete = 1, guard_cleaned = CASE WHEN guard_installed = 1 THEN 1 ELSE 0 END \
                   WHERE backfill_id = ?1 AND checksum = ?2 AND cohort_checksum = ?3 \
                     AND complete IN (0, 1) \
@@ -1595,7 +1594,7 @@ async fn complete_progress(
         if let Some(identity) = identity {
             let latest = actor
                 .query(&format!(
-                    "SELECT event_kind, checksum FROM \"_mig\".schema_migrations \
+                    "SELECT event_kind, checksum FROM main.\"__zeroship_schema_migrations\" \
                       WHERE version = {} ORDER BY event_seq DESC LIMIT 1",
                     sql_lit(identity.version.as_str())
                 ))
@@ -1618,7 +1617,7 @@ async fn complete_progress(
             if !already_matching {
                 actor
                     .exec(&format!(
-                        "INSERT INTO \"_mig\".schema_migrations \
+                        "INSERT INTO main.\"__zeroship_schema_migrations\" \
                             (event_kind, version, name, checksum, \"by\", phase, outcome, kind) \
                          VALUES ('applied', {}, {}, {}, {}, 'completed', 'success', 'apply')",
                         sql_lit(identity.version.as_str()),
@@ -1824,11 +1823,8 @@ mod tests {
 
     fn open_actor(tag: &str) -> (tempfile::TempDir, MigrationActor) {
         let directory = tempfile::tempdir().expect("tempdir");
-        let actor = MigrationActor::open(
-            &directory.path().join(format!("{tag}.sqlite")),
-            &directory.path().join(format!("{tag}.journal.sqlite")),
-        )
-        .expect("open sqlite migration actor");
+        let actor = MigrationActor::open(&directory.path().join(format!("{tag}.sqlite")))
+            .expect("open sqlite migration actor");
         (directory, actor)
     }
 
@@ -2029,7 +2025,7 @@ mod tests {
             .query(
                 "SELECT cursor_columns, last_cursor, end_cursor, rows_done, \
                         batches_done, complete, stability_mode, stability_name, guard_name \
-                   FROM \"_mig\".schema_backfills",
+                   FROM main.\"__zeroship_schema_backfills\"",
             )
             .await
             .unwrap();
@@ -2043,7 +2039,7 @@ mod tests {
         assert_eq!(progress[0][7].as_deref(), Some("items_cursor_is_immutable"));
         assert_eq!(progress[0][8], None);
         let columns = actor
-            .query("PRAGMA \"_mig\".table_info(schema_backfills)")
+            .query("PRAGMA main.table_info(\"__zeroship_schema_backfills\")")
             .await
             .unwrap();
         let names = columns
@@ -2107,7 +2103,7 @@ mod tests {
         assert_eq!(first.rows_updated, 2);
         actor.set_mode(Mode::EngineJournal).await.unwrap();
         let progress = actor
-            .query("SELECT last_cursor, end_cursor FROM \"_mig\".schema_backfills")
+            .query("SELECT last_cursor, end_cursor FROM main.\"__zeroship_schema_backfills\"")
             .await
             .unwrap();
         assert_eq!(progress[0][0].as_deref(), Some(r#"["a",{"int64":"3"}]"#));
@@ -2345,15 +2341,21 @@ mod tests {
         .unwrap();
         assert!(!initialized.complete);
 
-        let journal = rusqlite::Connection::open(directory.path().join("atomic.journal.sqlite"))
-            .expect("open journal directly");
-        journal
+        // Reached on a connection of this test's own rather than through the
+        // actor: the progress table is behind the journal fence, so the actor's
+        // authorizer refuses a CREATE TRIGGER on it outside engine mode, which is
+        // the property other arms assert. A plain rusqlite handle on the same file
+        // is how an out-of-band writer would arrive.
+        let direct = rusqlite::Connection::open(directory.path().join("atomic.sqlite"))
+            .expect("open the app file directly");
+        direct
             .execute_batch(
-                "CREATE TRIGGER abort_checkpoint BEFORE UPDATE OF last_cursor ON schema_backfills \
+                "CREATE TRIGGER abort_checkpoint BEFORE UPDATE OF last_cursor \
+                 ON \"__zeroship_schema_backfills\" \
                  BEGIN SELECT RAISE(ABORT, 'checkpoint blocked'); END",
             )
             .unwrap();
-        drop(journal);
+        drop(direct);
 
         let error = run_backfill_bounded(
             &actor,
@@ -2375,7 +2377,7 @@ mod tests {
         assert_eq!(rows[0][0].as_deref(), Some("0"));
         actor.set_mode(Mode::EngineJournal).await.unwrap();
         let progress = actor
-            .query("SELECT last_cursor, rows_done, batches_done FROM \"_mig\".schema_backfills")
+            .query("SELECT last_cursor, rows_done, batches_done FROM main.\"__zeroship_schema_backfills\"")
             .await
             .unwrap();
         assert_eq!(progress[0], vec![None, Some("0".into()), Some("0".into())]);
@@ -2404,15 +2406,15 @@ mod tests {
         )
         .await
         .unwrap();
-        let journal = rusqlite::Connection::open(directory.path().join("drift.journal.sqlite"))
-            .expect("open journal directly");
-        journal
+        let direct = rusqlite::Connection::open(directory.path().join("drift.sqlite"))
+            .expect("open the app file directly");
+        direct
             .execute(
-                "UPDATE schema_backfills SET cursor_columns = '[\"other\"]'",
+                "UPDATE \"__zeroship_schema_backfills\" SET cursor_columns = '[\"other\"]'",
                 [],
             )
             .unwrap();
-        drop(journal);
+        drop(direct);
         let error = run_backfill_bounded(
             &actor,
             &spec,
@@ -2463,7 +2465,7 @@ mod tests {
 
         actor.set_mode(Mode::EngineJournal).await.unwrap();
         let progress = actor
-            .query("SELECT guard_installed, guard_cleaned, complete FROM \"_mig\".schema_backfills")
+            .query("SELECT guard_installed, guard_cleaned, complete FROM main.\"__zeroship_schema_backfills\"")
             .await
             .unwrap();
         assert_eq!(
@@ -2506,7 +2508,7 @@ mod tests {
         assert!(resumed.complete);
         actor.set_mode(Mode::EngineJournal).await.unwrap();
         let progress = actor
-            .query("SELECT guard_installed, guard_cleaned, complete FROM \"_mig\".schema_backfills")
+            .query("SELECT guard_installed, guard_cleaned, complete FROM main.\"__zeroship_schema_backfills\"")
             .await
             .unwrap();
         assert_eq!(
@@ -2549,7 +2551,7 @@ mod tests {
         assert!(error.to_string().contains("trigger"), "{error}");
         actor.set_mode(Mode::EngineJournal).await.unwrap();
         let rows = actor
-            .query("SELECT count(*) FROM \"_mig\".schema_backfills")
+            .query("SELECT count(*) FROM main.\"__zeroship_schema_backfills\"")
             .await
             .unwrap();
         assert_eq!(rows[0][0].as_deref(), Some("0"));

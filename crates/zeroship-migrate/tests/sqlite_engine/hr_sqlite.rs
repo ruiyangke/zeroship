@@ -48,18 +48,12 @@ const MIGRATION_NAMES: [&str; 17] = [
 struct Paths {
     _dir: TempDir,
     app: PathBuf,
-    journal: PathBuf,
 }
 
 fn paths() -> Paths {
     let dir = tempfile::tempdir().expect("tempdir");
     let app = dir.path().join("hr.sqlite");
-    let journal = dir.path().join("hr.migrations.sqlite");
-    Paths {
-        _dir: dir,
-        app,
-        journal,
-    }
+    Paths { _dir: dir, app }
 }
 
 fn registry() -> BTreeMap<String, String> {
@@ -78,8 +72,7 @@ fn expected_rows(rows: &[&[&str]]) -> Vec<Vec<Option<String>>> {
 #[compio::test]
 async fn hr_migrations_apply_in_sequence_on_real_sqlite() {
     let paths = paths();
-    let backend =
-        SqliteBackend::open(&paths.app, &paths.journal).expect("open hardened SQLite backend");
+    let backend = SqliteBackend::open(&paths.app).expect("open hardened SQLite backend");
     let exec_cfg = ExecutorConfig::new(PROJECT, PROJECT, support::no_inject(PROJECT));
     let registry = registry();
     let no_inject = support::no_inject(PROJECT);

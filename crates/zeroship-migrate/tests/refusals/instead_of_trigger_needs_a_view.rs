@@ -366,8 +366,7 @@ async fn sqlite_apply(
 async fn sqlite_refuses_an_instead_of_trigger_on_a_table_and_keeps_one_on_a_view() {
     let dir = tempfile::tempdir().expect("temp dir");
     let app = dir.path().join("probe.sqlite");
-    let journal = dir.path().join("probe.migrations.sqlite");
-    let backend = SqliteBackend::open(&app, &journal).expect("open the probe database");
+    let backend = SqliteBackend::open(&app).expect("open the probe database");
     let cfg = ExecutorConfig::new("main", "main", support::operator_charter("main"));
     backend
         .ensure_journal(&cfg)

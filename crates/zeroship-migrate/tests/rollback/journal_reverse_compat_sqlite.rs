@@ -9,20 +9,18 @@ use zeroship_migrate_sqlite::SqliteBackend;
 struct Paths {
     _dir: TempDir,
     app: PathBuf,
-    journal: PathBuf,
 }
 
 fn paths(case: &str) -> Paths {
     let dir = tempfile::tempdir().expect("tempdir");
     Paths {
         app: dir.path().join(format!("{case}.sqlite")),
-        journal: dir.path().join(format!("{case}.migrations.sqlite")),
         _dir: dir,
     }
 }
 
 fn backend(paths: &Paths) -> SqliteBackend {
-    SqliteBackend::open(&paths.app, &paths.journal).expect("open sqlite backend")
+    SqliteBackend::open(&paths.app).expect("open sqlite backend")
 }
 
 async fn down_column(backend: &SqliteBackend) -> Vec<Option<String>> {
@@ -33,7 +31,7 @@ async fn down_column(backend: &SqliteBackend) -> Vec<Option<String>> {
         .expect("engine journal mode");
     backend
         .actor()
-        .query("PRAGMA \"_mig\".table_info(schema_migrations)")
+        .query("PRAGMA main.table_info(\"__zeroship_schema_migrations\")")
         .await
         .expect("read journal table shape")
         .into_iter()
@@ -60,10 +58,10 @@ async fn fresh_journal_has_nullable_down_column() {
 async fn bootstrap_adds_nullable_down_to_legacy_journal() {
     let paths = paths("legacy_down");
     {
-        let journal = rusqlite::Connection::open(&paths.journal).expect("open legacy journal");
+        let journal = rusqlite::Connection::open(&paths.app).expect("open the app file");
         journal
             .execute_batch(
-                "CREATE TABLE schema_migrations (\
+                "CREATE TABLE \"__zeroship_schema_migrations\" (\
                 event_seq  INTEGER PRIMARY KEY AUTOINCREMENT, \
                 event_kind TEXT NOT NULL, \
                 version    TEXT NOT NULL, \

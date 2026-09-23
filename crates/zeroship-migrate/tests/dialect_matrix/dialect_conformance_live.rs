@@ -1226,8 +1226,7 @@ async fn sqlite_verdict(kind: &str, variant: &str, op: &Op) -> Verdict {
         }
     };
     let app: PathBuf = dir.path().join("probe.sqlite");
-    let journal: PathBuf = dir.path().join("probe.migrations.sqlite");
-    let backend = match SqliteBackend::open(&app, &journal) {
+    let backend = match SqliteBackend::open(&app) {
         Ok(backend) => backend,
         Err(error) => {
             return Verdict::of(

@@ -676,12 +676,9 @@ async fn database_with_binding(
 ) -> (Database, tempfile::TempDir) {
     crate::tests::fixtures::reset_engine();
     let directory = tempfile::tempdir().unwrap();
-    let migration_backend = zeroship_migrate_sqlite::SqliteBackend::open(
-        &directory
+    let migration_backend = zeroship_migrate_sqlite::SqliteBackend::open(&directory
             .path()
-            .join(format!("zs-{}.sqlite", binding.schema().as_str())),
-        &directory.path().join("migrations.sqlite"),
-    )
+            .join(format!("zs-{}.sqlite", binding.schema().as_str())))
     .unwrap();
     // A rendered migration unit can contain table and index statements.
     // Apply it through the migration backend's batch executor.

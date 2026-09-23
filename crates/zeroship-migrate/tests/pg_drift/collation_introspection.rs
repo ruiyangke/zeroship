@@ -42,14 +42,12 @@ fn composite_fk_ir(name: &str) -> MigrationIr {
 struct SqlitePaths {
     _dir: TempDir,
     app: PathBuf,
-    journal: PathBuf,
 }
 
 fn sqlite_paths() -> SqlitePaths {
     let dir = tempfile::tempdir().expect("tempdir");
     SqlitePaths {
         app: dir.path().join("app.sqlite"),
-        journal: dir.path().join("journal.sqlite"),
         _dir: dir,
     }
 }
@@ -83,7 +81,7 @@ fn sqlite_migration(up: &str) -> Migration {
 #[compio::test]
 async fn sqlite_exact_collation_is_introspected_drifted_and_rejected_for_composite_fk() {
     let paths = sqlite_paths();
-    let backend = SqliteBackend::open(&paths.app, &paths.journal).expect("open SQLite backend");
+    let backend = SqliteBackend::open(&paths.app).expect("open SQLite backend");
     backend
         .apply_one_additive(
             &sqlite_migration(
@@ -125,7 +123,7 @@ async fn sqlite_exact_collation_is_introspected_drifted_and_rejected_for_composi
         )
         .expect("change the live child collation out of band");
 
-    let backend = SqliteBackend::open(&paths.app, &paths.journal).expect("reopen SQLite backend");
+    let backend = SqliteBackend::open(&paths.app).expect("reopen SQLite backend");
     let actual = backend
         .snapshot_schema_sqlite()
         .await

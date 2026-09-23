@@ -50,18 +50,12 @@ const APP: &str = "app_control";
 struct Paths {
     _dir: TempDir,
     app: PathBuf,
-    journal: PathBuf,
 }
 
 fn paths(app_id: &str) -> Paths {
     let dir = tempfile::tempdir().expect("tempdir");
     let app = dir.path().join(format!("zs-{app_id}.sqlite"));
-    let journal = dir.path().join(format!("zs-{app_id}.migrations.sqlite"));
-    Paths {
-        _dir: dir,
-        app,
-        journal,
-    }
+    Paths { _dir: dir, app }
 }
 
 fn effective_policy() -> zeroship_migrate::EffectivePolicy {
@@ -200,7 +194,7 @@ fn load_and_lower(ir: &MigrationIr, live: &LiveSchema) -> Vec<PlanStep> {
 #[compio::test]
 async fn dropping_a_foreign_key_on_sqlite_still_clears_the_authoring_gate() {
     let p = paths("over_refusal_drop_fk");
-    let be = SqliteBackend::open(&p.app, &p.journal).expect("open sqlite backend");
+    let be = SqliteBackend::open(&p.app).expect("open sqlite backend");
     apply_first_deploy(&be, &v1_with_fk()).await;
 
     be.actor()
@@ -254,7 +248,7 @@ async fn dropping_a_foreign_key_on_sqlite_still_clears_the_authoring_gate() {
 #[compio::test]
 async fn adding_a_foreign_key_on_sqlite_still_clears_the_authoring_gate() {
     let p = paths("over_refusal_add_fk");
-    let be = SqliteBackend::open(&p.app, &p.journal).expect("open sqlite backend");
+    let be = SqliteBackend::open(&p.app).expect("open sqlite backend");
 
     // Deploy `posts.author` as a PLAIN column, then add the FK imperatively.
     let mut v1 = v1_with_fk();

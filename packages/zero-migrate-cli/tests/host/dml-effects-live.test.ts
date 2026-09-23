@@ -178,7 +178,7 @@ test("SQLite: the same authored migration leaves the same rows", async () => {
         migration,
         ownerApp: OWNER_APP,
         projectSchema: "main",
-        driver: { kind: "sqlite", appPath: dbPath, journalPath: join(work, "mig.db") },
+        driver: { kind: "sqlite", appPath: dbPath },
         registry: { items: OWNER_APP },
         policy: [charter("main")],
         approved: true,

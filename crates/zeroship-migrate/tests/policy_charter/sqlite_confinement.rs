@@ -5,24 +5,28 @@
 //! asserts it is DENIED (by the authorizer or DEFENSIVE), AND that the failure did
 //! not corrupt the journal (the version is NOT recorded `completed`).
 //!
+//! The journal shares the app's own file, so what separates it from the creator's
+//! tables is the `__zeroship_schema_` name fence rather than a database boundary.
+//! Every arm below therefore attacks a FENCED NAME in `main`.
+//!
 //! Attacks proven denied:
 //!   (a) ATTACH an arbitrary file
 //!   (b) PRAGMA `writable_schema=ON` then a `sqlite_master` write
 //!   (c) SELECT `load_extension`(...)
-//!   (d) DROP TABLE "_`mig".schema_migrations`
-//!   (e) DROP TRIGGER on the _mig immutability trigger
-//!   (f) INSERT INTO "_`mig".schema_migrations` ... directly
-//!   (g) CREATE TRIGGER on `app_tbl` whose body writes _mig
+//!   (d) DROP TABLE `__zeroship_schema_migrations`
+//!   (e) DROP TRIGGER on the journal's immutability trigger
+//!   (f) INSERT INTO `__zeroship_schema_migrations` ... directly
+//!   (g) CREATE TRIGGER on `app_tbl` whose body writes the journal
 //!   (h) cross-tenant: a backend for app A cannot reach app B's file
-//! Plus: direct UPDATE/DELETE on _mig rejected by the trigger; DETACH denied;
-//! version floor satisfied.
+//! Plus: direct UPDATE/DELETE on the journal rejected by the trigger; DETACH
+//! denied; version floor satisfied.
 //!
 //! Two of the hardened open sequence's dbconfig settings are pinned here rather
 //! than in `sqlite_dqs_hardening.rs`, because what they buy is confinement (what a
 //! hostile creator `up` may reach) rather than identifier resolution:
 //!   `SQLITE_DBCONFIG_DEFENSIVE` - a creator write to a virtual-table SHADOW TABLE
 //!   `SQLITE_DBCONFIG_TRUSTED_SCHEMA` - a creator VIEW body invoking a virtual
-//!   table, including one that reads the `_mig` journal's catalog
+//!   table, including one that reads the journal's catalog
 //! Both carry a positive control on a raw connection, which ships DEFENSIVE off
 //! and TRUSTED_SCHEMA on, so each of those two lines is the whole guard.
 
@@ -37,26 +41,20 @@ use zeroship_migrate_sqlite::backend::actor::SqliteActorError;
 use zeroship_migrate_sqlite::backend::authorizer::Mode;
 use zeroship_migrate_sqlite::SqliteBackend;
 
-/// A tenant's two file paths inside a fresh temp dir.
+/// A tenant's file inside a fresh temp dir. One file: the journal is in it.
 struct Paths {
     _dir: TempDir,
     app: PathBuf,
-    journal: PathBuf,
 }
 
 fn paths(app_id: &str) -> Paths {
     let dir = tempfile::tempdir().expect("tempdir");
     let app = dir.path().join(format!("zs-{app_id}.sqlite"));
-    let journal = dir.path().join(format!("zs-{app_id}.migrations.sqlite"));
-    Paths {
-        _dir: dir,
-        app,
-        journal,
-    }
+    Paths { _dir: dir, app }
 }
 
 fn backend(p: &Paths) -> SqliteBackend {
-    SqliteBackend::open(&p.app, &p.journal).expect("open hardened sqlite backend")
+    SqliteBackend::open(&p.app).expect("open hardened sqlite backend")
 }
 
 fn mig(up: &str) -> Migration {
@@ -93,7 +91,7 @@ fn mig_with_flags(up: &str, flags: MigrationFlags) -> Migration {
 /// AUTHORIZER denials must assert `is_authorizer_denied()` SPECIFICALLY, so a test
 /// cannot green-pass on an unrelated `Exec` error. The looser acceptance is
 /// reserved for genuinely-defensive cases — e.g. the creator-trigger-targeting-
-/// `_mig` vector (g), whose qualified form is rejected by `SQLite`'s PARSER, not the
+/// journal vector (g), whose qualified form is rejected by `SQLite`'s PARSER, not the
 /// authorizer.
 #[derive(Clone, Copy)]
 enum DenyKind {
@@ -141,24 +139,17 @@ async fn assert_denied_and_journal_clean(be: &SqliteBackend, attack_up: &str, ki
 }
 
 /// POSITIVE CONTROL: prove the SAME attack SQL SUCCEEDS on a raw, unhardened
-/// connection — no authorizer, no DEFENSIVE, no _mig confinement. This proves the
+/// connection — no authorizer, no DEFENSIVE, no name fence. This proves the
 /// deny in the hardened case was caused by CONFINEMENT, not by an unrelated error
 /// (a malformed statement, a missing table, etc.). The control runs against
 /// throwaway temp files so it never touches the tenant under test.
 ///
-/// `setup` seeds whatever the attack references (e.g. a `_mig`-shaped journal or an
-/// app table); `attack_sql` is then executed and MUST succeed.
+/// `setup` seeds whatever the attack references (a journal-shaped set of fenced
+/// tables, or an app table); `attack_sql` is then executed and MUST succeed.
 fn assert_attack_succeeds_unhardened(setup: &str, attack_sql: &str) {
     let dir = tempfile::tempdir().expect("control tempdir");
     let main = dir.path().join("control-main.sqlite");
-    let mig_file = dir.path().join("control-mig.sqlite");
     let conn = rusqlite::Connection::open(&main).expect("open control main");
-    // ATTACH a real `_mig` file so `"_mig".*` names resolve on the raw connection.
-    conn.execute(
-        "ATTACH DATABASE ?1 AS \"_mig\"",
-        [mig_file.to_str().unwrap()],
-    )
-    .expect("attach control _mig");
     if !setup.is_empty() {
         conn.execute_batch(setup).expect("control setup");
     }
@@ -171,14 +162,16 @@ fn assert_attack_succeeds_unhardened(setup: &str, attack_sql: &str) {
     );
 }
 
-/// The journal-shaped DDL a positive control needs so `"_mig".schema_migrations`
-/// (and its immutability trigger) resolve on the raw control connection.
+/// The journal-shaped DDL a positive control needs so
+/// `__zeroship_schema_migrations` (and its immutability trigger) resolve on the
+/// raw control connection - spelled EXACTLY as `ensure_journal` spells them, since
+/// what the hardened arms deny is these names.
 const CONTROL_JOURNAL_SETUP: &str = "\
-    CREATE TABLE \"_mig\".schema_migrations (\
+    CREATE TABLE main.\"__zeroship_schema_migrations\" (\
         event_seq INTEGER PRIMARY KEY AUTOINCREMENT, event_kind TEXT, version TEXT, \
         name TEXT, checksum TEXT, \"by\" TEXT, phase TEXT, outcome TEXT, kind TEXT); \
-    CREATE TRIGGER \"_mig\".zs_immutable_trg_schema_migrations_delete \
-        BEFORE DELETE ON \"_mig\".schema_migrations \
+    CREATE TRIGGER main.\"__zeroship_schema_migrations_immutable_delete\" \
+        BEFORE DELETE ON \"__zeroship_schema_migrations\" \
         BEGIN SELECT RAISE(ABORT,'append-only'); END;";
 
 // ---------------------------------------------------------------------------
@@ -212,7 +205,7 @@ async fn confine_b_writable_schema_denied() {
     let be = backend(&p);
     be.ensure_journal_sqlite().await.expect("bootstrap journal");
     let attack =
-        "PRAGMA writable_schema=ON; DELETE FROM \"_mig\".sqlite_master WHERE name LIKE 'zs_%';";
+        "PRAGMA writable_schema=ON; DELETE FROM main.sqlite_master WHERE name LIKE 'zs_%';";
     // The `PRAGMA writable_schema` is denied by the authorizer FIRST (PRAGMA denied
     // in CreatorUp) — so this is specifically an authorizer deny, not merely a
     // DEFENSIVE sqlite_master block.
@@ -255,15 +248,16 @@ async fn confine_c_load_extension_denied() {
 }
 
 // ---------------------------------------------------------------------------
-// (d) DROP TABLE "_mig".schema_migrations — denied at prepare (matches on the
-//     OUTER database_name == Some("_mig"); DropTable carries no db field).
+// (d) DROP TABLE `__zeroship_schema_migrations` — denied at prepare, on the
+//     action's own `table_name` (DropTable carries no database field, and the
+//     database would say `main` for a creator table too).
 // ---------------------------------------------------------------------------
 #[compio::test]
 async fn confine_d_drop_mig_table_denied() {
     let p = paths("d");
     let be = backend(&p);
     be.ensure_journal_sqlite().await.expect("bootstrap journal");
-    let attack = "DROP TABLE \"_mig\".schema_migrations;";
+    let attack = "DROP TABLE main.\"__zeroship_schema_migrations\";";
     assert_denied_and_journal_clean(&be, attack, DenyKind::Authorizer).await;
     // Positive control: dropping the journal table succeeds on a raw connection.
     assert_attack_succeeds_unhardened(CONTROL_JOURNAL_SETUP, attack);
@@ -274,29 +268,29 @@ async fn confine_d_drop_mig_table_denied() {
 }
 
 // ---------------------------------------------------------------------------
-// (e) DROP TRIGGER on the _mig immutability trigger — denied (DropTrigger keys
-//     on the OUTER database_name).
+// (e) DROP TRIGGER on the journal's immutability trigger — denied (DropTrigger
+//     carries both the trigger name and its table; either one being fenced denies).
 // ---------------------------------------------------------------------------
 #[compio::test]
 async fn confine_e_drop_mig_trigger_denied() {
     let p = paths("e");
     let be = backend(&p);
     be.ensure_journal_sqlite().await.expect("bootstrap journal");
-    let attack = "DROP TRIGGER \"_mig\".\"zs_immutable_trg_schema_migrations_delete\";";
+    let attack = "DROP TRIGGER main.\"__zeroship_schema_migrations_immutable_delete\";";
     assert_denied_and_journal_clean(&be, attack, DenyKind::Authorizer).await;
     // Positive control: dropping the immutability trigger succeeds on a raw conn.
     assert_attack_succeeds_unhardened(CONTROL_JOURNAL_SETUP, attack);
 }
 
 // ---------------------------------------------------------------------------
-// (f) Direct INSERT INTO "_mig".schema_migrations — journal-forge denied.
+// (f) Direct INSERT INTO `__zeroship_schema_migrations` — journal-forge denied.
 // ---------------------------------------------------------------------------
 #[compio::test]
 async fn confine_f_direct_journal_insert_denied() {
     let p = paths("f");
     let be = backend(&p);
     be.ensure_journal_sqlite().await.expect("bootstrap journal");
-    let attack = "INSERT INTO \"_mig\".schema_migrations \
+    let attack = "INSERT INTO main.\"__zeroship_schema_migrations\" \
          (event_kind, version, name, checksum, \"by\", phase, outcome, kind) \
          VALUES ('applied', 'forged', 'x', 'x', 'attacker', 'completed', 'success', 'apply');";
     assert_denied_and_journal_clean(&be, attack, DenyKind::Authorizer).await;
@@ -306,8 +300,8 @@ async fn confine_f_direct_journal_insert_denied() {
 }
 
 // ---------------------------------------------------------------------------
-// (g) CREATE TRIGGER on an app table whose body writes _mig — denied at the
-//     trigger's CREATE-prepare time (accessor + database_name == _mig).
+// (g) CREATE TRIGGER on an app table whose body writes the journal — denied at
+//     the trigger's CREATE-prepare time (accessor set + a fenced table name).
 // ---------------------------------------------------------------------------
 #[compio::test]
 async fn confine_g_creator_trigger_writing_mig_denied() {
@@ -320,38 +314,38 @@ async fn confine_g_creator_trigger_writing_mig_denied() {
         .await
         .expect("benign app table applies");
 
-    // SECURITY FINDING: under the confinement connection model
-    // (`main` = the app file, `_mig` = the attached journal), a creator trigger body
-    // CANNOT reach `_mig` by ANY name form, so the authorizer accessor+_mig
-    // rule is belt-and-suspenders that this vector never actually exercises:
-    //   * QUALIFIED `"_mig".schema_migrations` in a trigger body is rejected by
-    //     SQLite's PARSER ("qualified table names are not allowed ... within
-    //     triggers") — it never reaches the authorizer.
-    //   * UNQUALIFIED `schema_migrations` in a trigger body resolves to the trigger's
-    //     OWN database (`main`), NOT the attached `_mig`; at fire time it errors "no
-    //     such table: main.schema_migrations". It can never resolve to `_mig`.
-    // We therefore assert the END-TO-END property (a creator trigger cannot forge a
-    // journal row) for BOTH forms, classifying the rejection as
-    // `AuthorizerOrDefensive` (the qualified form is a genuine PARSER/DEFENSIVE block,
-    // not an authorizer DENY — asserting `Authorizer` here would be a FALSE claim).
+    // This vector is REAL now, and it was not before. While the journal sat in a
+    // second attached database, a trigger body could not name it at all: SQLite's
+    // parser rejects a qualified table name inside a trigger, and an UNQUALIFIED
+    // name resolves to the trigger's own database - which was `main`, not the
+    // journal. The accessor rule was belt-and-suspenders over an impossibility.
+    //
+    // With the journal in `main`, an unqualified `__zeroship_schema_migrations` in
+    // a trigger body RESOLVES, and the only thing between a creator trigger and a
+    // forged journal row is the authorizer denying the fenced name at the trigger's
+    // CREATE-prepare time. Both forms are asserted below, and g2's deny is now an
+    // authorizer DENY rather than a resolution failure.
 
-    // (g1) Qualified `_mig.` body — parser-rejected, journal stays clean.
+    // (g1) Qualified body — still parser-rejected before the authorizer sees it,
+    // so the classification stays `AuthorizerOrDefensive` rather than claiming a
+    // DENY that did not happen.
     let qualified = "CREATE TRIGGER t1 AFTER INSERT ON app_tbl BEGIN \
-            INSERT INTO \"_mig\".schema_migrations \
+            INSERT INTO main.\"__zeroship_schema_migrations\" \
             (event_kind, version, name, checksum, \"by\", phase, outcome, kind) \
             VALUES ('applied', 'forged', 'x', 'x', 'attacker', 'completed', 'success', 'apply'); \
          END;";
     assert_denied_and_journal_clean(&be, qualified, DenyKind::AuthorizerOrDefensive).await;
 
-    // (g2) Unqualified body that creates fine but cannot reach `_mig`: prove that
-    // even after the trigger is created AND fired, NO forged journal row appears
-    // (the body resolves to a nonexistent `main.schema_migrations`, so the fire
-    // errors and the journal is untouched). This is the real end-to-end proof that
-    // the journal is unforgeable via a creator trigger.
+    // (g2) UNQUALIFIED body naming the journal table, which now RESOLVES. SQLite
+    // authorizes a trigger's body when the TRIGGERING statement is prepared, not
+    // when the trigger is created, so the CREATE lands and the deny arrives at
+    // fire time - with `accessor` naming this trigger and the body's own fenced
+    // table on the action. That is the arm the accessor rule exists for, and until
+    // the journal moved into this file nothing could reach it.
     be.apply_one_additive(
         &mig(
             "CREATE TRIGGER t2 AFTER INSERT ON app_tbl BEGIN \
-                INSERT INTO schema_migrations \
+                INSERT INTO \"__zeroship_schema_migrations\" \
                 (event_kind, version, name, checksum, \"by\", phase, outcome, kind) \
                 VALUES ('applied', 'forged2', 'x', 'x', 'attacker', 'completed', 'success', 'apply'); \
              END;",
@@ -359,34 +353,74 @@ async fn confine_g_creator_trigger_writing_mig_denied() {
         "tester",
     )
     .await
-    .expect("the unqualified-body trigger CREATE itself is benign (resolves to main)");
-    // Firing it must fail (no such table: main.schema_migrations) — and crucially
-    // must NOT forge a journal row.
+    .expect("SQLite authorizes a trigger body at fire time, so the CREATE itself lands");
     let fired = be
-        .apply_one_additive(&mig("INSERT INTO app_tbl (id) VALUES (1);"), "tester")
-        .await;
+        .apply_one_additive(&mig("INSERT INTO app_tbl (id) VALUES (7);"), "attacker")
+        .await
+        .expect_err("firing the trigger must be denied");
     assert!(
-        fired.is_err(),
-        "firing the trigger must fail (its body resolves to a nonexistent main table)"
+        fired.is_authorizer_denied(),
+        "the body's write to a fenced table must be an AUTHORIZER deny at fire time, got: {fired}"
     );
+
+    // The control that makes g2 attributable to the FENCE and not to trigger
+    // bodies being refused wholesale. It runs on a SECOND backend, because t2 is
+    // still installed on this one and would deny every later insert into
+    // `app_tbl` - a control sharing that table would be measuring t2, not itself.
+    let q = paths("g_control");
+    let control = backend(&q);
+    control
+        .ensure_journal_sqlite()
+        .await
+        .expect("bootstrap journal");
+    control
+        .apply_one_additive(
+            &mig("CREATE TABLE app_tbl (id INTEGER); \
+                 CREATE TABLE app_log (event_kind TEXT); \
+                 CREATE TRIGGER t3 AFTER INSERT ON app_tbl BEGIN \
+                    INSERT INTO app_log (event_kind) VALUES ('applied'); \
+                 END;"),
+            "tester",
+        )
+        .await
+        .expect("a creator trigger over a creator table is not the fence's business");
+    control
+        .apply_one_additive(&mig("INSERT INTO app_tbl (id) VALUES (1);"), "tester")
+        .await
+        .expect("and firing it is allowed");
+    control
+        .actor()
+        .set_mode(Mode::CreatorUp)
+        .await
+        .expect("creator mode");
+    let logged = control
+        .actor()
+        .query("SELECT count(*) FROM app_log")
+        .await
+        .expect("read the creator's own log");
+    assert_eq!(
+        logged[0][0].as_deref(),
+        Some("1"),
+        "the control trigger must actually have written a row"
+    );
+
     let net = be.applied_sqlite().await.expect("journal readable");
     assert!(
         !net.iter()
             .any(|e| e.version == "forged" || e.version == "forged2"),
-        "no creator trigger can forge a journal row under the main=app-file model"
+        "no creator trigger can forge a journal row"
     );
 }
 
 // ---------------------------------------------------------------------------
-// (h) Cross-tenant: a backend opened for app A cannot reach app B's file. The
-//     only bound aliases are A's `app` + `_mig`; ATTACH of B is denied, and even
-//     naming a foreign alias cannot compile.
+// (h) Cross-tenant: a backend opened for app A cannot reach app B's file. `main`
+//     is the only bound database; ATTACH of B is denied, and even naming a
+//     foreign alias cannot compile.
 // ---------------------------------------------------------------------------
 #[compio::test]
 async fn confine_h_cross_tenant_denied() {
     let dir = tempfile::tempdir().expect("tempdir");
     let a_app = dir.path().join("zs-A.sqlite");
-    let a_journal = dir.path().join("zs-A.migrations.sqlite");
     let b_app = dir.path().join("zs-B.sqlite");
 
     // Pre-create B with a secret table by opening a plain (un-hardened) connection.
@@ -396,7 +430,7 @@ async fn confine_h_cross_tenant_denied() {
             .expect("seed B");
     }
 
-    let be = SqliteBackend::open(&a_app, &a_journal).expect("open A backend");
+    let be = SqliteBackend::open(&a_app).expect("open A backend");
     be.ensure_journal_sqlite()
         .await
         .expect("bootstrap A journal");
@@ -416,29 +450,29 @@ async fn confine_h_cross_tenant_denied() {
 }
 
 // ---------------------------------------------------------------------------
-// (i) a creator `up` READING the journal — `SELECT … FROM "_mig".
-//     schema_migrations` — is denied. A plain top-level read is an
-//     `AuthAction::Read { accessor: None }` on `_mig`, and the trigger-body arm
+// (i) a creator `up` READING the journal — `SELECT … FROM
+//     __zeroship_schema_migrations` — is denied. A plain top-level read is an
+//     `AuthAction::Read { accessor: None }`, and the trigger-body arm
 //     requires `accessor.is_some()`, so the backstop arm is what must deny any
-//     `_mig`-targeting action in CreatorUp, Read included; otherwise a creator
+//     fenced action in CreatorUp, Read included; otherwise a creator
 //     could exfiltrate the immutable journal into an app table.
 //     End-to-end on the REAL hardened backend.
 // ---------------------------------------------------------------------------
 #[compio::test]
 async fn confine_i_creator_read_of_mig_journal_denied() {
-    let p = paths("read_mig");
+    let p = paths("read_journal");
     let be = backend(&p);
     be.ensure_journal_sqlite().await.expect("bootstrap journal");
     // A creator `up` that copies the journal into an app table — the SELECT issues a
     // Read on `"_mig".schema_migrations`, which must be denied at prepare.
-    let attack = "CREATE TABLE stolen AS SELECT * FROM \"_mig\".schema_migrations;";
+    let attack = "CREATE TABLE stolen AS SELECT * FROM main.\"__zeroship_schema_migrations\";";
     assert_denied_and_journal_clean(&be, attack, DenyKind::Authorizer).await;
     // Positive control: the SAME read-into-table SUCCEEDS on a raw connection (no
     // authorizer), proving the hardened deny is the M1 confinement rule and not a
     // parse / missing-table / CTAS error.
     assert_attack_succeeds_unhardened(CONTROL_JOURNAL_SETUP, attack);
     // And the journal is still readable by the engine itself (EngineJournal reads
-    // are unaffected by the creator-mode `_mig` deny).
+    // are unaffected by the creator-mode fence deny).
     be.applied_sqlite()
         .await
         .expect("engine journal reads still work after the denied creator read");
@@ -452,10 +486,12 @@ async fn confine_detach_denied() {
     let p = paths("detach");
     let be = backend(&p);
     be.ensure_journal_sqlite().await.expect("bootstrap journal");
-    let attack = "DETACH DATABASE \"_mig\";";
+    let attack = "DETACH DATABASE \"other\";";
     assert_denied_and_journal_clean(&be, attack, DenyKind::Authorizer).await;
-    // Positive control: DETACH of an attached db succeeds on a raw connection.
-    assert_attack_succeeds_unhardened("", attack);
+    // Positive control: DETACH of an attached db succeeds on a raw connection. The
+    // setup binds the alias first, so the control proves the DETACH capability
+    // rather than re-proving that an unbound name has nothing to detach.
+    assert_attack_succeeds_unhardened("ATTACH DATABASE ':memory:' AS \"other\";", attack);
 }
 
 // ---------------------------------------------------------------------------
@@ -772,30 +808,30 @@ async fn confine_creator_view_cannot_invoke_a_virtual_table() {
 }
 
 // ---------------------------------------------------------------------------
-// TRUSTED_SCHEMA, the confinement half: the creator view aimed at `_mig`.
+// TRUSTED_SCHEMA, the confinement half: the creator view aimed at the journal.
 //
 // This is why the setting belongs in this file and not with the DQS pins. The
-// two-argument pragma virtual table takes a SCHEMA, so a creator view can name the
-// journal alias. Against that view the authorizer offers no protection in engine
-// mode: the pragma-vtable route presents as an `AuthAction::Pragma`, which is on
-// the engine allowlist, and never as an action whose database_name is `_mig` - so
-// neither the journal-immutability arm nor the `_mig` backstop arm sees it. With
-// TRUSTED_SCHEMA relaxed, reading this creator-authored view returns the journal
-// catalog on the very connection that answers the creator's own direct attempt
-// with an authorizer deny.
+// pragma virtual table takes the table name as a STRING ARGUMENT, so a creator
+// view can name a journal table without the authorizer ever seeing a fenced
+// `table_name`: the pragma-vtable route presents as an `AuthAction::Pragma`,
+// which is on the engine allowlist, and never as an action naming the journal -
+// so neither the journal-immutability arm nor the fenced backstop arm sees it.
+// With TRUSTED_SCHEMA relaxed, reading this creator-authored view returns the
+// journal catalog on the very connection that answers the creator's own direct
+// attempt with an authorizer deny.
 // ---------------------------------------------------------------------------
 #[compio::test]
 async fn confine_creator_view_cannot_read_the_mig_journal_through_a_pragma_vtable() {
-    let p = paths("trusted_schema_mig");
+    let p = paths("trusted_schema_journal");
     let be = backend(&p);
     be.ensure_journal_sqlite().await.expect("bootstrap journal");
-    let probe = "SELECT count(*) FROM pragma_table_info('schema_migrations','_mig')";
+    let probe = "SELECT count(*) FROM pragma_table_info('__zeroship_schema_migrations')";
     be.apply_one_additive(
-        &mig("CREATE VIEW vm AS SELECT * FROM pragma_table_info('schema_migrations','_mig');"),
+        &mig("CREATE VIEW vm AS SELECT * FROM pragma_table_info('__zeroship_schema_migrations');"),
         "creator",
     )
     .await
-    .expect("TRUSTED_SCHEMA gates USE, so the CREATE VIEW naming _mig is accepted");
+    .expect("TRUSTED_SCHEMA gates USE, so the CREATE VIEW naming the journal is accepted");
 
     // In creator mode the DIRECT read is an authorizer deny. This is the baseline
     // the view must not be able to route around.
@@ -810,7 +846,7 @@ async fn confine_creator_view_cannot_read_the_mig_journal_through_a_pragma_vtabl
         .expect_err("a creator may not read the journal catalog directly");
     assert!(
         denied.is_authorizer_denied(),
-        "the direct creator read of _mig must be an AUTHORIZER deny: {denied}"
+        "the direct creator read of the journal must be an AUTHORIZER deny: {denied}"
     );
 
     // In engine mode the engine legitimately reads its own journal catalog, so the
@@ -854,25 +890,16 @@ async fn confine_creator_view_cannot_read_the_mig_journal_through_a_pragma_vtabl
         "the refusal must be the untrusted-schema one NAMING the virtual table: {text}"
     );
 
-    // POSITIVE CONTROL: on a raw connection with a journal-shaped `_mig` attached,
-    // the identical view reads the journal's catalog. That is the leak the setting
+    // POSITIVE CONTROL: on a raw connection carrying journal-shaped tables, the
+    // identical view reads the journal's catalog. That is the leak the setting
     // closes.
     let cdir = tempfile::tempdir().expect("control tempdir");
     let conn =
         rusqlite::Connection::open(cdir.path().join("control-main.sqlite")).expect("control open");
-    conn.execute(
-        "ATTACH DATABASE ?1 AS \"_mig\"",
-        [cdir
-            .path()
-            .join("control-mig.sqlite")
-            .to_str()
-            .expect("control path")],
-    )
-    .expect("attach control _mig");
     conn.execute_batch(CONTROL_JOURNAL_SETUP)
         .expect("control journal setup");
     conn.execute_batch(
-        "CREATE VIEW vm AS SELECT * FROM pragma_table_info('schema_migrations','_mig');",
+        "CREATE VIEW vm AS SELECT * FROM pragma_table_info('__zeroship_schema_migrations');",
     )
     .expect("control view");
     let leaked: i64 = conn
@@ -888,12 +915,19 @@ async fn confine_creator_view_cannot_read_the_mig_journal_through_a_pragma_vtabl
 // REINDEX confinement + motivation (faithful on the REAL hardened
 // backend). Two faithful proofs:
 //
-//   (1) A creator `up` containing a no-arg `REINDEX;` is REJECTED. The no-arg
-//       form reindexes EVERY collation/index across all attached databases,
-//       INCLUDING the journal alias `_mig` — so it reaches the load-bearing
-//       catch-all `AuthAction::Reindex { .. } => Deny` (the `_mig` REINDEX is
-//       NOT caught by the journal-immutability arm, which omits `Reindex`).
-//       This is the confinement half: the creator may not REINDEX `_mig`.
+//   (1) A creator `up` may not REINDEX a FENCED index, and may REINDEX its own.
+//       `SQLITE_REINDEX` fires once per index with that index's NAME, so the
+//       fence is what separates the two; the deny comes from the dedicated
+//       `Reindex if targets_journal` arm, which sits AHEAD of the main/temp allow
+//       (the journal-immutability arm omits `Reindex` entirely).
+//
+//       A no-arg `REINDEX;` is ALLOWED. It used to be refused, and the refusal
+//       was an accident of placement rather than a decision: the journal was a
+//       second attached database, so the no-arg form named an alias that was
+//       neither `main` nor `temp` and fell through to the foreign-alias deny.
+//       With one database it names only `main`'s own indexes, and REINDEX
+//       rebuilds an index B-tree from the table it already indexes - it reads no
+//       row out, writes no row in, and fires no trigger.
 //
 //   (2) A real `CREATE TABLE` whose emission carries system-field indexes
 //       APPLIES cleanly under CreatorUp. CREATE INDEX fires SQLITE_REINDEX
@@ -903,32 +937,60 @@ async fn confine_creator_view_cannot_read_the_mig_journal_through_a_pragma_vtabl
 //       regression for the relaxation's MOTIVATION.
 // ---------------------------------------------------------------------------
 
-/// (1) A no-arg `REINDEX;` in a creator `up` is denied (it reaches `_mig`).
+/// (1) A creator `up` may REINDEX its own index and a no-arg `REINDEX;`, and may
+/// not REINDEX a fenced one, which the engine itself still can. The pair is what makes the deny attributable to the
+/// fence: an arm that only asserted the refusal would pass over an authorizer that
+/// refused REINDEX outright, which would break every `CREATE INDEX` (it fires
+/// `SQLITE_REINDEX` intrinsically).
 #[compio::test]
-async fn reindex_no_arg_rejected_in_creator_up() {
+async fn reindex_is_denied_on_the_journal_and_allowed_on_the_creators_own() {
     let p = paths("reindex_noarg");
     let be = backend(&p);
     be.ensure_journal_sqlite().await.expect("bootstrap journal");
-    // Seed a benign table + index so a no-arg REINDEX has something local to chew
-    // on too (the deny is driven by its reach into `_mig`, not by emptiness).
     be.apply_one_additive(
-        &mig("CREATE TABLE app_tbl (id INTEGER PRIMARY KEY, handle TEXT);"),
+        &mig(
+            "CREATE TABLE app_tbl (id INTEGER PRIMARY KEY, handle TEXT); \
+             CREATE INDEX app_tbl_handle_idx ON app_tbl (handle);",
+        ),
         "tester",
     )
     .await
     .expect("benign app table applies");
 
-    // The no-arg REINDEX (the form that reaches every attached db incl. `_mig`).
-    let m = mig("REINDEX;");
+    be.apply_one_additive(&mig("REINDEX app_tbl_handle_idx;"), "tester")
+        .await
+        .expect("a creator's own index is the creator's to reindex");
+    be.apply_one_additive(&mig("REINDEX;"), "tester")
+        .await
+        .expect("and so is every index in the one database this connection has");
+
+    // A fenced INDEX, created by the engine the way the journal's own DDL is.
+    // Without this the REINDEX below would fail with "unable to identify the
+    // object to be reindexed" - SQLite resolves the name before it authorizes, so
+    // an arm aimed at a nonexistent index would never reach the authorizer and
+    // would pass for the wrong reason.
+    be.actor()
+        .set_mode(Mode::EngineJournal)
+        .await
+        .expect("engine mode");
+    be.actor()
+        .exec(
+            "CREATE INDEX main.\"__zeroship_schema_migrations_ix\" \
+             ON \"__zeroship_schema_migrations\" (version)",
+        )
+        .await
+        .expect("the engine may create its own fenced index");
+
+    // The fenced name, which the dedicated arm refuses ahead of the allow above.
+    let m = mig("REINDEX \"__zeroship_schema_migrations_ix\";");
     let err = be
         .apply_one_additive(&m, "attacker")
         .await
-        .expect_err("a no-arg REINDEX must be rejected (it reaches the _mig journal)");
+        .expect_err("a REINDEX naming a fenced index must be rejected");
     assert!(
         err.is_authorizer_denied(),
-        "no-arg REINDEX must be an AUTHORIZER deny (reaches _mig → catch-all Deny), got: {err}"
+        "a fenced REINDEX must be an AUTHORIZER deny, got: {err}"
     );
-    // The journal is uncorrupted: the attacking version never recorded a row.
     let applied = be.applied_sqlite().await.expect("journal readable");
     let v = m.version.as_str();
     assert!(

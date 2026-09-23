@@ -223,18 +223,12 @@ fn rename_ir() -> MigrationIr {
 struct Paths {
     _dir: TempDir,
     app: PathBuf,
-    journal: PathBuf,
 }
 
 fn paths(tag: &str) -> Paths {
     let dir = tempfile::tempdir().expect("tempdir");
     let app = dir.path().join(format!("zs-{tag}.sqlite"));
-    let journal = dir.path().join(format!("zs-{tag}.migrations.sqlite"));
-    Paths {
-        _dir: dir,
-        app,
-        journal,
-    }
+    Paths { _dir: dir, app }
 }
 
 /// No `[[inject]]`. The three earlier fixes' fixtures all carried a mandatory inject and
@@ -475,7 +469,7 @@ async fn stored_index_sql(backend: &SqliteBackend, index: &str) -> String {
 #[compio::test]
 async fn a_fold_seeded_rename_of_an_indexed_column_applies() {
     let p = paths("indexed_rename");
-    let backend = SqliteBackend::open(&p.app, &p.journal).expect("open hardened sqlite backend");
+    let backend = SqliteBackend::open(&p.app).expect("open hardened sqlite backend");
     let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
     let create_ops = deploy(&backend, &engine, &create_ir()).await;
 
@@ -556,7 +550,7 @@ async fn a_fold_seeded_rename_of_an_indexed_column_applies() {
 #[compio::test]
 async fn the_rebuilt_unique_index_still_enforces_over_the_renamed_column() {
     let p = paths("indexed_rename_unique");
-    let backend = SqliteBackend::open(&p.app, &p.journal).expect("open hardened sqlite backend");
+    let backend = SqliteBackend::open(&p.app).expect("open hardened sqlite backend");
     let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
     let create_ops = deploy(&backend, &engine, &create_ir()).await;
 
@@ -629,7 +623,7 @@ async fn the_rebuilt_unique_index_still_enforces_over_the_renamed_column() {
 #[compio::test]
 async fn a_partial_predicate_and_an_expression_key_follow_the_rename() {
     let p = paths("indexed_rename_partial");
-    let backend = SqliteBackend::open(&p.app, &p.journal).expect("open hardened sqlite backend");
+    let backend = SqliteBackend::open(&p.app).expect("open hardened sqlite backend");
     let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
     let create_ops = deploy(&backend, &engine, &create_ir()).await;
     apply_fold_seeded_rename(&backend, &engine, &create_ops)
@@ -708,7 +702,7 @@ async fn a_partial_predicate_and_an_expression_key_follow_the_rename() {
 #[compio::test]
 async fn a_trigger_body_follows_the_rename_too() {
     let p = paths("indexed_rename_trigger");
-    let backend = SqliteBackend::open(&p.app, &p.journal).expect("open hardened sqlite backend");
+    let backend = SqliteBackend::open(&p.app).expect("open hardened sqlite backend");
     let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
     let create_ops = deploy(&backend, &engine, &create_ir_without_indexes()).await;
 
@@ -808,7 +802,7 @@ async fn a_trigger_body_follows_the_rename_too() {
 async fn a_catalog_sourced_rename_of_an_indexed_column_still_replays_the_stored_body() {
     let effective = charter();
     let p = paths("indexed_rename_catalog");
-    let backend = SqliteBackend::open(&p.app, &p.journal).expect("open hardened sqlite backend");
+    let backend = SqliteBackend::open(&p.app).expect("open hardened sqlite backend");
     let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
     let author = IrAuthor::new(
         zeroship_migrate::shipping_vendors(),
@@ -1025,7 +1019,7 @@ fn neither_postgres_nor_mysql_lowers_a_rename_into_a_sqlite_rebuild() {
 #[compio::test]
 async fn sqlite_refuses_a_stale_index_and_silently_stores_a_stale_trigger() {
     let p = paths("indexed_rename_semantics");
-    let backend = SqliteBackend::open(&p.app, &p.journal).expect("open hardened sqlite backend");
+    let backend = SqliteBackend::open(&p.app).expect("open hardened sqlite backend");
     let actor = backend.actor();
     actor.set_mode(Mode::EngineJournal).await.expect("mode");
     actor
@@ -1107,7 +1101,7 @@ async fn sqlite_refuses_a_stale_index_and_silently_stores_a_stale_trigger() {
 #[compio::test]
 async fn a_rename_onto_a_name_the_live_table_still_carries_is_declined_not_forced() {
     let p = paths("indexed_rename_collision");
-    let backend = SqliteBackend::open(&p.app, &p.journal).expect("open hardened sqlite backend");
+    let backend = SqliteBackend::open(&p.app).expect("open hardened sqlite backend");
     let actor = backend.actor();
 
     // First, the raw SQLite refusal, so the executor's guard is measured against the
@@ -1178,7 +1172,7 @@ async fn a_rename_onto_a_name_the_live_table_still_carries_is_declined_not_force
 #[compio::test]
 async fn a_rebuild_that_renames_one_column_and_drops_another_keeps_only_the_survivor() {
     let p = paths("indexed_rename_with_drop");
-    let backend = SqliteBackend::open(&p.app, &p.journal).expect("open hardened sqlite backend");
+    let backend = SqliteBackend::open(&p.app).expect("open hardened sqlite backend");
     let actor = backend.actor();
     actor.set_mode(Mode::EngineJournal).await.expect("mode");
     actor

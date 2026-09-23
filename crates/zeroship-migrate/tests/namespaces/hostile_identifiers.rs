@@ -178,11 +178,8 @@ async fn an_injecting_identifier_cannot_execute_a_second_statement() {
     // the rendered SQL cannot answer this; executing it can.
     for (label, raw) in QUOTE_BEARING {
         let dir = tempfile::tempdir().expect("tempdir");
-        let backend = SqliteBackend::open(
-            &dir.path().join("inject.sqlite"),
-            &dir.path().join("inject.migrations.sqlite"),
-        )
-        .expect("open the hardened sqlite backend");
+        let backend = SqliteBackend::open(&dir.path().join("inject.sqlite"))
+            .expect("open the hardened sqlite backend");
 
         backend
             .actor()
@@ -288,11 +285,8 @@ fn an_awkward_identifier_is_quoted_rather_than_refused() {
 async fn an_awkward_identifier_survives_a_real_database_unchanged() {
     for (label, raw) in AWKWARD {
         let dir = tempfile::tempdir().expect("tempdir");
-        let backend = SqliteBackend::open(
-            &dir.path().join("hostile.sqlite"),
-            &dir.path().join("hostile.migrations.sqlite"),
-        )
-        .expect("open the hardened sqlite backend");
+        let backend = SqliteBackend::open(&dir.path().join("hostile.sqlite"))
+            .expect("open the hardened sqlite backend");
 
         let statements = lower_create_table(raw, &zeroship_migrate_sqlite::DIALECT)
             .unwrap_or_else(|e| panic!("{label}: a legal identifier must lower: {e}"));

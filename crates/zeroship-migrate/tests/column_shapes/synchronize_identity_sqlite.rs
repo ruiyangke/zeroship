@@ -14,20 +14,18 @@ use zeroship_migrate_sqlite::SqliteBackend;
 struct Paths {
     _dir: TempDir,
     app: PathBuf,
-    journal: PathBuf,
 }
 
 fn paths(name: &str) -> Paths {
     let dir = tempfile::tempdir().expect("tempdir");
     Paths {
         app: dir.path().join(format!("{name}.sqlite")),
-        journal: dir.path().join(format!("{name}.migrations.sqlite")),
         _dir: dir,
     }
 }
 
 fn backend(paths: &Paths) -> SqliteBackend {
-    SqliteBackend::open(&paths.app, &paths.journal).expect("open SQLite backend")
+    SqliteBackend::open(&paths.app).expect("open SQLite backend")
 }
 
 fn cfg() -> ExecutorConfig {
@@ -144,7 +142,7 @@ async fn autoincrement_behind_is_raised_to_live_max_and_next_is_non_colliding() 
     let version = sync.migration.version.as_str().replace('\'', "''");
     let journal_rows = scalar_i64(
         &backend,
-        &format!("SELECT count(*) FROM \"_mig\".schema_migrations WHERE version = '{version}'"),
+        &format!("SELECT count(*) FROM main.\"__zeroship_schema_migrations\" WHERE version = '{version}'"),
     )
     .await;
     assert_eq!(
@@ -335,7 +333,7 @@ async fn non_rowid_integer_shapes_are_rejected_before_journaling() {
             scalar_i64(
                 &backend,
                 &format!(
-                    "SELECT count(*) FROM \"_mig\".schema_migrations WHERE version = '{version}'"
+                    "SELECT count(*) FROM main.\"__zeroship_schema_migrations\" WHERE version = '{version}'"
                 )
             )
             .await,

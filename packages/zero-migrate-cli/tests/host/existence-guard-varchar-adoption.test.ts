@@ -39,7 +39,7 @@
 // spelling -- `character varying` and `character varying(255)` alike -- to the `text`
 // affinity, so no length ever reaches the compare and the defect this file pins
 // cannot arise there. NOTHING STRUCTURAL BLOCKS A SQLITE ARM: the Node host
-// `DriverConfig` DOES carry `{ kind: "sqlite"; appPath; journalPath }`
+// `DriverConfig` DOES carry `{ kind: "sqlite"; appPath }`
 // (`packages/zero-migrate-cli/src/index.ts`), `apply()` routes it to
 // `applyIr` under an in-process driver, and `existence-guard-fold-projection.test.ts`
 // in this same

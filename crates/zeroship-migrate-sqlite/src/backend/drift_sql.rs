@@ -68,12 +68,17 @@ fn drift_err(e: SqliteActorError) -> DriftError {
     DriftError::Backend(e.to_string())
 }
 
-/// True iff `name` is a SQLite-internal object we must exclude from the app-schema
-/// snapshot: anything prefixed `sqlite_` (`sqlite_sequence`, `sqlite_stat1`,
-/// `sqlite_autoindex_*`, ...). The `_mig` journal lives in a different database
-/// (ATTACHed alias), so it never appears in a `main`-scoped read.
+/// True iff `name` is an object the app-schema snapshot must exclude: SQLite's own
+/// (`sqlite_sequence`, `sqlite_stat1`, `sqlite_autoindex_*`, ...) and the engine's
+/// own journal, which shares this database.
+///
+/// The journal half is load-bearing, not tidiness. The snapshot is what
+/// `LiveSchema::from_catalog_snapshot` assigns ownership from and what
+/// `diff_with_known_fk_targets` authors DROPs from: a journal table reaching it
+/// would be adopted as the deploying app's and dropped on the next declarative
+/// diff, and would show up as permanent `unexpected_objects` drift in between.
 fn is_internal(name: &str) -> bool {
-    name.starts_with("sqlite_")
+    name.starts_with("sqlite_") || super::authorizer::is_journal_object(name)
 }
 
 /// Single-quote a SQL string literal (engine-controlled identifiers, quoted

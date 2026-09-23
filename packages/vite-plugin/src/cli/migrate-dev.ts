@@ -22,7 +22,7 @@ import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { genTypesFromMigrations } from "../gen-types/index.js";
-import { applyMigrationsToDevSqlite, devSqlitePaths } from "../gen-types/dev-apply.js";
+import { applyMigrationsToDevSqlite, devSqliteAppPath } from "../gen-types/dev-apply.js";
 import {
   collectionNamesFrom,
   readGeneratedRuntimeDescriptorAt,
@@ -157,7 +157,7 @@ async function main(): Promise<number> {
   );
   logDatabaseUrlSource(source, databaseUrl);
 
-  const { appPath } = devSqlitePaths(root, databaseId, databaseUrl);
+  const appPath = devSqliteAppPath(root, databaseId, databaseUrl);
   const reply = await applyMigrationsToDevSqlite({
     root,
     migrationsDir,

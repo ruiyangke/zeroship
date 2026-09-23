@@ -100,18 +100,12 @@ const WIDE: &str = "12345678901234.5678";
 struct Paths {
     _dir: TempDir,
     app: PathBuf,
-    journal: PathBuf,
 }
 
 fn paths() -> Paths {
     let dir = tempfile::tempdir().expect("tempdir");
     let app = dir.path().join("app.sqlite");
-    let journal = dir.path().join("app.migrations.sqlite");
-    Paths {
-        _dir: dir,
-        app,
-        journal,
-    }
+    Paths { _dir: dir, app }
 }
 
 fn registry(tables: &[&str]) -> BTreeMap<String, String> {
@@ -347,7 +341,7 @@ fn seeded_row() -> Vec<(String, String)> {
 #[compio::test]
 async fn a_decimal_column_keeps_its_digits_through_a_fold_seeded_rebuild() {
     let paths = paths();
-    let backend = SqliteBackend::open(&paths.app, &paths.journal).expect("open the SQLite backend");
+    let backend = SqliteBackend::open(&paths.app).expect("open the SQLite backend");
 
     let history = apply(&backend, CREATE, &LiveSchema::default()).await;
     seed(&backend).await;
@@ -464,7 +458,7 @@ async fn a_decimal_column_keeps_its_digits_through_a_fold_seeded_rebuild() {
 #[compio::test]
 async fn an_unchanged_decimal_table_does_not_phantom_diff_into_a_rebuild() {
     let paths = paths();
-    let backend = SqliteBackend::open(&paths.app, &paths.journal).expect("open the SQLite backend");
+    let backend = SqliteBackend::open(&paths.app).expect("open the SQLite backend");
     let policy = support::no_inject(PROJECT);
     let exec_cfg = ExecutorConfig::new(PROJECT, PROJECT, policy.clone());
 
@@ -582,7 +576,7 @@ async fn an_unchanged_decimal_table_does_not_phantom_diff_into_a_rebuild() {
 #[compio::test]
 async fn the_deploy_path_rename_replays_the_stored_create_and_leaves_the_decimal_alone() {
     let paths = paths();
-    let backend = SqliteBackend::open(&paths.app, &paths.journal).expect("open the SQLite backend");
+    let backend = SqliteBackend::open(&paths.app).expect("open the SQLite backend");
 
     deploy(&backend, &["ledger"], &[CREATE])
         .await

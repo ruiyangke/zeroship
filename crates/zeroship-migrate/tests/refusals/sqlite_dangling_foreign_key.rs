@@ -76,12 +76,14 @@ struct Db {
 fn open_db(tag: &str) -> Db {
     let dir = tempfile::tempdir().expect("tempdir");
     let app: PathBuf = dir.path().join(format!("{tag}.sqlite"));
-    let journal: PathBuf = dir.path().join(format!("{tag}.migrations.sqlite"));
-    let backend = SqliteBackend::open(&app, &journal).expect("open hardened sqlite backend");
+    let backend = SqliteBackend::open(&app).expect("open hardened sqlite backend");
     Db { _dir: dir, backend }
 }
 
-fn lower_for(dialect: &DialectId, bytes: &str) -> Result<zeroship_migrate::LoweredArtifact, String> {
+fn lower_for(
+    dialect: &DialectId,
+    bytes: &str,
+) -> Result<zeroship_migrate::LoweredArtifact, String> {
     IrAuthor::new(
         zeroship_migrate::shipping_vendors(),
         PROJECT,

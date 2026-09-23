@@ -67,7 +67,7 @@
 //! VERBATIM + any explicit recreate_objects> [main]
 //! (engine, EngineJournal) <restore sqlite_sequence high-water mark OR remove it>
 //! (engine, EngineJournal) PRAGMA foreign_key_check -- UNSCOPED
-//! (engine, EngineJournal) INSERT _mig journal (event_seq AUTOINCREMENT)
+//! (engine, EngineJournal) INSERT the journal row (event_seq AUTOINCREMENT)
 //! (engine, EngineJournal) COMMIT
 //! (engine, AUTOCOMMIT, EngineJournal) PRAGMA foreign_keys = ON -- ALL PATHS
 //! ```
@@ -95,7 +95,7 @@
 //! The rebuild DDL runs under **CreatorUp** - it is engine-authored but operates on
 //! the creator's app schema (`main`), and CreatorUp legitimately allows
 //! CREATE/INSERT/DROP/RENAME/CREATE INDEX/TRIGGER/VIEW on `main` while still denying
-//! every `_mig` write, ATTACH/DETACH/PRAGMA/load_extension. Running the rebuild DDL
+//! every fenced write, ATTACH/DETACH/PRAGMA/load_extension. Running the rebuild DDL
 //! under the LEAST privilege that suffices means even an engine-generated statement
 //! can never touch the journal. The PRAGMA toggles, `foreign_key_check`, and the
 //! journal write run under **EngineJournal**. The mode flip lands BETWEEN separate
@@ -624,7 +624,7 @@ async fn run_rebuild_steps(
     let by = journal_sql::sql_lit(applied_by);
     actor
         .exec(&format!(
-            "INSERT INTO \"_mig\".schema_migrations \
+            "INSERT INTO main.\"__zeroship_schema_migrations\" \
              (event_kind, version, name, checksum, \"by\", exec_ms, phase, outcome, kind) \
              VALUES ('{applied}', {version}, {name}, {checksum}, {by}, {exec_ms}, \
                      'completed', 'success', 'apply')",

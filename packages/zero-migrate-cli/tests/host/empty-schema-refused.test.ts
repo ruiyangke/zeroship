@@ -1,7 +1,7 @@
 // An empty project schema must be refused BEFORE anything touches the database.
 //
 // The CLI already validates emptiness for every other required setting -- the
-// database URL, `--registry`, `--policy`, `--journal` all refuse a zero-length
+// database URL, `--registry`, `--policy` all refuse a zero-length
 // value by name. `schema` was the one that did not, from any source: the flag,
 // `ZERO_MIGRATE_SCHEMA`, or a config `schema` field.
 //

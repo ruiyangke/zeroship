@@ -917,12 +917,11 @@ fn transaction_lanes_are_capped_and_the_refusal_has_its_own_code() {
 /// statements are separate commands on one connection, so another connection
 /// can commit in between.
 ///
-/// What this fixture reaches and what it does NOT: the table lives in `main`,
-/// the session's own database, which the boot PRAGMAs put in **WAL**. That is
-/// what makes `SQLITE_BUSY_SNAPSHOT` (517) possible at all. An app's own file
-/// is a different story - see
-/// `an_app_files_write_upgrade_is_plain_busy_because_it_is_not_in_wal`, the
-/// control that pins why.
+/// The table lives in `main`, the session's own database, which the boot PRAGMAs
+/// put in **WAL** - that is what makes `SQLITE_BUSY_SNAPSHOT` (517) possible at
+/// all. `the_session_file_and_an_app_file_are_both_in_wal` records that an app's
+/// own file is in the same mode, so this schedule is reachable there too; what
+/// this fixture does not do is drive it there.
 #[test]
 fn a_write_upgrade_on_a_stale_wal_snapshot_is_refused() {
     Host::test(|host| {
@@ -1004,21 +1003,19 @@ fn a_write_upgrade_on_a_stale_wal_snapshot_is_refused() {
     })
 }
 
-/// The control that names what the arm above cannot reach: an app's own file is
-/// **not** in WAL, so the same schedule cannot produce
-/// `SQLITE_BUSY_SNAPSHOT` there.
+/// Which journal mode an app's own data is in, recorded so a change to that fact
+/// fails here rather than silently making the arm above describe a world we do
+/// not run in.
 ///
-/// `PRAGMA journal_mode` is per database and does NOT propagate across `ATTACH`
-/// (attaching a fresh file to a WAL connection leaves it `delete`),
-/// and the migration engine pins every app file to DELETE outright and refuses
-/// to run otherwise -
-/// `crates/zeroship-migrate-sqlite/src/backend/actor.rs`. So the arm
-/// above proves the mapping and the lane mechanics; it does not prove anything
-/// about app data. This one records which mode app data is actually in, so a
-/// change to that fact fails here rather than silently making the arm above
-/// describe a world we do not run in.
+/// `PRAGMA journal_mode` is per database and does NOT propagate across `ATTACH`,
+/// so an attached file keeps whatever its own header says - which for a fresh
+/// file is `delete`. `run_attach` therefore switches each app file to WAL as it
+/// binds it, and the migration engine leaves the files it creates in WAL too.
+/// Both halves are asserted, because the pair is the claim: a test that read only
+/// the app file's mode would pass on a connection where `main` had silently
+/// stopped being WAL as well.
 #[test]
-fn an_app_files_write_upgrade_is_plain_busy_because_it_is_not_in_wal() {
+fn the_session_file_and_an_app_file_are_both_in_wal() {
     Host::test(|host| {
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
@@ -1032,10 +1029,9 @@ fn an_app_files_write_upgrade_is_plain_busy_because_it_is_not_in_wal() {
                 .expect("read the attached file's journal mode");
             assert_eq!(
                 mode[0][0].as_deref(),
-                Some("delete"),
-                "an ATTACHed app file does not inherit main's WAL mode, and the migration \
-             engine pins it to DELETE; SQLITE_BUSY_SNAPSHOT cannot arise on app data \
-             while that is true"
+                Some("wal"),
+                "an app file must be in WAL: the mode does not cross ATTACH, so this is \
+             `run_attach`'s own switch and nothing else"
             );
 
             let main_mode = backend
@@ -1046,8 +1042,21 @@ fn an_app_files_write_upgrade_is_plain_busy_because_it_is_not_in_wal() {
             assert_eq!(
                 main_mode[0][0].as_deref(),
                 Some("wal"),
-                "the control: the session's own database IS in WAL, so the two databases \
-             on one connection genuinely differ"
+                "and so is the session's own database, which the boot PRAGMAs put there"
+            );
+
+            // The control that stops this passing over a PRAGMA that reports the
+            // connection's mode rather than the named database's: a file this
+            // connection has NOT attached answers `delete`, from its own header.
+            let untouched = _dir.path().join("zs-never-attached.sqlite");
+            let probe = rusqlite::Connection::open(&untouched).expect("open an unattached file");
+            let probe_mode: String = probe
+                .query_row("PRAGMA main.journal_mode", [], |row| row.get(0))
+                .expect("read its mode");
+            assert_eq!(
+                probe_mode, "delete",
+                "a SQLite file nothing switched is in a rollback journal, so the two `wal` \
+             answers above are this code's doing"
             );
         });
     })

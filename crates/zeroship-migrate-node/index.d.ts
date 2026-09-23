@@ -357,8 +357,6 @@ export interface DriverDto {
   kind: string
   /** `"inProcess"` only: the application database file. */
   appPath?: string
-  /** `"inProcess"` only: the journal database file attached beside it. */
-  journalPath?: string
   /**
    * `"host"` only, and only for the verbs that run DDL: the migrator role to
    * `SET ROLE` under (a least-privilege apply or rollback). `statusIr` takes none.

@@ -199,13 +199,12 @@ pub enum DriverTarget<C> {
         /// What this verb's host driver is allowed to narrow to and to label.
         credentials: C,
     },
-    /// The addon opens the hardened application and journal connections on its own
-    /// engine worker thread. Bundled rusqlite is the only backend it can.
+    /// The addon opens the hardened application connection on its own engine
+    /// worker thread. Bundled rusqlite is the only backend it can.
     InProcessSqlite {
-        /// The application database file.
+        /// The application database file. The journal that describes it lives
+        /// inside it, so this is the whole of what the driver opens.
         app_path: String,
-        /// The journal database file, attached beside it.
-        journal_path: String,
     },
 }
 
@@ -222,8 +221,6 @@ pub struct DriverParts<'a> {
     pub kind: &'a str,
     /// The in-process application database file.
     pub app_path: Option<&'a str>,
-    /// The in-process journal database file.
-    pub journal_path: Option<&'a str>,
     /// The host driver's least-privilege role.
     pub migrator_role: Option<&'a str>,
     /// The host driver's audit label.
@@ -248,10 +245,10 @@ impl<C: HostCredentials> DriverTarget<C> {
                         "the {HOST_DRIVER_KIND:?} driver requires a host-driver callback argument"
                     ));
                 }
-                if parts.app_path.is_some() || parts.journal_path.is_some() {
+                if parts.app_path.is_some() {
                     return Err(format!(
-                        "the {HOST_DRIVER_KIND:?} driver opens no files; appPath and \
-                         journalPath belong to the {IN_PROCESS_DRIVER_KIND:?} driver"
+                        "the {HOST_DRIVER_KIND:?} driver opens no files; appPath belongs to \
+                         the {IN_PROCESS_DRIVER_KIND:?} driver"
                     ));
                 }
                 Ok(Self::Host {
@@ -277,10 +274,9 @@ impl<C: HostCredentials> DriverTarget<C> {
                          this driver supplies"
                     ));
                 }
-                let (Some(app_path), Some(journal_path)) = (parts.app_path, parts.journal_path)
-                else {
+                let Some(app_path) = parts.app_path else {
                     return Err(format!(
-                        "the {IN_PROCESS_DRIVER_KIND:?} driver requires appPath and journalPath"
+                        "the {IN_PROCESS_DRIVER_KIND:?} driver requires appPath"
                     ));
                 };
                 // Compared against the one in-process backend rather than looked up
@@ -298,7 +294,6 @@ impl<C: HostCredentials> DriverTarget<C> {
                 }
                 Ok(Self::InProcessSqlite {
                     app_path: app_path.to_string(),
-                    journal_path: journal_path.to_string(),
                 })
             }
             unknown => Err(format!(
@@ -2060,7 +2055,6 @@ mod status_projection_tests {
         DriverParts {
             kind: HOST_DRIVER_KIND,
             app_path: None,
-            journal_path: None,
             migrator_role: None,
             applied_by: Some("host"),
             host_driver_supplied: true,
@@ -2072,7 +2066,6 @@ mod status_projection_tests {
         DriverParts {
             kind: IN_PROCESS_DRIVER_KIND,
             app_path: Some("/tmp/app.db"),
-            journal_path: Some("/tmp/app.journal.db"),
             migrator_role: None,
             applied_by: None,
             host_driver_supplied: false,
@@ -2114,7 +2107,6 @@ mod status_projection_tests {
             DriverTarget::<RoleAndLabel>::resolve("sqlite", &in_process_parts()),
             Ok(DriverTarget::InProcessSqlite {
                 app_path: "/tmp/app.db".to_string(),
-                journal_path: "/tmp/app.journal.db".to_string(),
             })
         );
     }
@@ -2224,13 +2216,13 @@ mod status_projection_tests {
         let in_process_missing_files = DriverTarget::<RoleAndLabel>::resolve(
             "sqlite",
             &DriverParts {
-                journal_path: None,
+                app_path: None,
                 ..in_process_parts()
             },
         )
-        .expect_err("the in-process driver opens two files, not one");
+        .expect_err("the in-process driver has nothing to open without appPath");
         assert!(
-            in_process_missing_files.contains("journalPath"),
+            in_process_missing_files.contains("appPath"),
             "{in_process_missing_files}"
         );
     }

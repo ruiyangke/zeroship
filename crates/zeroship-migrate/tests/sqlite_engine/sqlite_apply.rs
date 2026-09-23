@@ -20,22 +20,16 @@ use zeroship_migrate_sqlite::SqliteBackend;
 struct Paths {
     _dir: TempDir,
     app: PathBuf,
-    journal: PathBuf,
 }
 
 fn paths(app_id: &str) -> Paths {
     let dir = tempfile::tempdir().expect("tempdir");
     let app = dir.path().join(format!("zs-{app_id}.sqlite"));
-    let journal = dir.path().join(format!("zs-{app_id}.migrations.sqlite"));
-    Paths {
-        _dir: dir,
-        app,
-        journal,
-    }
+    Paths { _dir: dir, app }
 }
 
 fn backend(p: &Paths) -> SqliteBackend {
-    SqliteBackend::open(&p.app, &p.journal).expect("open hardened sqlite backend")
+    SqliteBackend::open(&p.app).expect("open hardened sqlite backend")
 }
 
 fn mig(up: &str) -> Migration {
@@ -120,7 +114,7 @@ async fn apply_create_table_then_idempotent_rerun() {
     let count_rows = be
         .actor()
         .query(&format!(
-            "SELECT COUNT(*) FROM \"_mig\".schema_migrations WHERE version = '{v}'"
+            "SELECT COUNT(*) FROM main.\"__zeroship_schema_migrations\" WHERE version = '{v}'"
         ))
         .await
         .expect("count journal rows");
@@ -258,7 +252,7 @@ async fn native_event_seq_is_monotonic() {
 
     let rows = be
         .actor()
-        .query("SELECT version, event_seq FROM \"_mig\".schema_migrations ORDER BY event_seq")
+        .query("SELECT version, event_seq FROM main.\"__zeroship_schema_migrations\" ORDER BY event_seq")
         .await
         .expect("read event_seq");
     assert_eq!(rows.len(), 2);
@@ -273,7 +267,7 @@ async fn native_event_seq_is_monotonic() {
     let cnt = be
         .actor()
         .query(
-            "SELECT count(*) FROM \"_mig\".sqlite_master \
+            "SELECT count(*) FROM main.sqlite_master \
              WHERE type = 'table' AND name = 'event_seq'",
         )
         .await
@@ -286,7 +280,7 @@ async fn native_event_seq_is_monotonic() {
     let autoinc = be
         .actor()
         .query(
-            "SELECT count(*) FROM \"_mig\".sqlite_master \
+            "SELECT count(*) FROM main.sqlite_master \
              WHERE type = 'table' AND name = 'sqlite_sequence'",
         )
         .await
@@ -315,7 +309,7 @@ async fn journal_update_delete_denied_confined() {
 
     // A creator `up` trying to UPDATE the journal — denied by the authorizer.
     let upd = mig(&format!(
-        "UPDATE \"_mig\".schema_migrations SET checksum = 'tampered' WHERE version = '{v}';"
+        "UPDATE main.\"__zeroship_schema_migrations\" SET checksum = 'tampered' WHERE version = '{v}';"
     ));
     let e = be
         .apply_one_additive(&upd, "attacker")
@@ -328,7 +322,7 @@ async fn journal_update_delete_denied_confined() {
 
     // A creator `up` trying to DELETE the journal — denied too.
     let del = mig(&format!(
-        "DELETE FROM \"_mig\".schema_migrations WHERE version = '{v}';"
+        "DELETE FROM main.\"__zeroship_schema_migrations\" WHERE version = '{v}';"
     ));
     let e = be
         .apply_one_additive(&del, "attacker")
@@ -347,9 +341,14 @@ async fn journal_update_delete_denied_confined() {
 
 // ---------------------------------------------------------------------------
 // The append-only TRIGGER backstop fires even when the authorizer
-// is NOT in the path — proving the in-DB defense independently. We open the
-// journal file with a PLAIN connection (no authorizer) and attempt UPDATE/DELETE;
-// the RAISE(ABORT) trigger must reject it.
+// is NOT in the path — proving the in-DB defense independently. We open the app
+// file with a PLAIN connection (no authorizer, no name fence) and attempt
+// UPDATE/DELETE on the journal; the RAISE(ABORT) trigger must reject it.
+//
+// This matters more than it did. While the journal sat in a second file, an
+// out-of-band writer had to go looking for that file; now the journal is in the
+// file a creator's own tooling opens, so the trigger is what stands between a
+// stray `sqlite3` session and a rewritten history.
 // ---------------------------------------------------------------------------
 #[compio::test]
 async fn journal_immutability_trigger_backstop() {
@@ -361,20 +360,28 @@ async fn journal_immutability_trigger_backstop() {
 
     // Re-open the journal file directly, no authorizer — the trigger is the only
     // defense here.
-    let conn = rusqlite::Connection::open(&p.journal).expect("open journal raw");
+    let conn = rusqlite::Connection::open(&p.app).expect("open the app file raw");
     let v = m.version.as_str();
     let upd = conn.execute_batch(&format!(
-        "UPDATE schema_migrations SET checksum = 'x' WHERE version = '{v}';"
+        "UPDATE \"__zeroship_schema_migrations\" SET checksum = 'x' WHERE version = '{v}';"
     ));
     assert!(
         upd.is_err(),
         "append-only trigger must reject UPDATE even without the authorizer"
     );
-    let del = conn.execute_batch("DELETE FROM schema_migrations;");
+    let del = conn.execute_batch("DELETE FROM \"__zeroship_schema_migrations\";");
     assert!(
         del.is_err(),
         "append-only trigger must reject DELETE even without the authorizer"
     );
+
+    // The control: this connection is genuinely unguarded, so the two refusals
+    // above are the TRIGGER and not the handle being read-only or the table
+    // missing. A creator table on the same connection takes both statements.
+    conn.execute_batch("CREATE TABLE plain (id INTEGER); INSERT INTO plain VALUES (1);")
+        .expect("the raw connection can write");
+    conn.execute_batch("UPDATE plain SET id = 2; DELETE FROM plain;")
+        .expect("and can update and delete where no trigger objects");
 }
 
 // ---------------------------------------------------------------------------
@@ -646,10 +653,9 @@ async fn read_only_plan_status_never_creates_a_fresh_journal() {
     let manifest = PlanStatusManifest::from_applied_plan(&plan, &[])
         .expect("single-step plan projects to status manifest");
 
-    assert!(
-        !p.journal.exists(),
-        "opening a fresh backend must not create or attach the journal file"
-    );
+    // The journal is a set of tables inside the app file now, so its presence is a
+    // CATALOG question, not a filesystem one. `journal_exists` is that question,
+    // and it is the only one that can still be asked.
     assert!(
         !MigrationBackend::journal_exists(&be, &c)
             .await
@@ -669,8 +675,10 @@ async fn read_only_plan_status_never_creates_a_fresh_journal() {
     assert!(fresh.applied.is_empty());
     assert_eq!(fresh.plans[0].state, ReconciledPlanState::Pending);
     assert!(
-        !p.journal.exists(),
-        "read-only status must leave the separate journal file absent"
+        !MigrationBackend::journal_exists(&be, &c)
+            .await
+            .expect("probe after read-only status"),
+        "read-only status must not bootstrap the journal"
     );
 
     assert!(
@@ -679,7 +687,6 @@ async fn read_only_plan_status_never_creates_a_fresh_journal() {
             .expect("apply after read-only status"),
         "the migration is newly applied"
     );
-    assert!(p.journal.exists(), "apply creates the journal file");
     assert!(
         MigrationBackend::journal_exists(&be, &c)
             .await
@@ -698,4 +705,106 @@ async fn read_only_plan_status_never_creates_a_fresh_journal() {
     assert_eq!(applied.applied, vec![manifest.version.clone()]);
     assert!(applied.pending.is_empty());
     assert_eq!(applied.plans[0].state, ReconciledPlanState::Applied);
+}
+
+// ---------------------------------------------------------------------------
+// A migration's DDL and its journal entry commit together, and an interruption
+// between them is not observable.
+//
+// This is the property the super-journal protocol used to buy across two files,
+// and it is why that protocol pinned BOTH files to DELETE + FULL. With the
+// journal inside the database it describes it is an ordinary single-file
+// transaction, so the assertion is the same and the machinery is gone.
+//
+// The interruption is the REAL apply path's own crash boundary,
+// `APPLY_AFTER_UP_BEFORE_COMPLETED`, armed through the executor fault seam. That
+// matters more than the assertion: a hand-driven BEGIN/up/abort sequence would
+// prove a property of the test's own statements, and would stay green over a
+// production path that committed the `up` in a transaction of its own. This one
+// goes through `apply_one_additive`.
+//
+// Both directions are asserted, because either alone is satisfiable by a database
+// that simply refuses everything (interrupt arm) or that never rolls anything
+// back (completion arm).
+// ---------------------------------------------------------------------------
+#[compio::test]
+async fn an_interrupted_apply_leaves_the_schema_and_the_journal_agreeing() {
+    let p = paths("atomic_interrupt");
+    let m = mig("CREATE TABLE interrupted (id INTEGER PRIMARY KEY);");
+    let version = m.version.as_str().to_string();
+
+    {
+        let be = backend(&p);
+        be.ensure_journal_sqlite().await.expect("bootstrap journal");
+
+        zeroship_migrate::fault::arm(
+            zeroship_migrate::fault::points::APPLY_AFTER_UP_BEFORE_COMPLETED,
+            0,
+        );
+        let crashed = be
+            .apply_one_additive(&m, "deployer")
+            .await
+            .expect_err("the armed crash must abort the apply");
+        zeroship_migrate::fault::disarm_all();
+        assert!(
+            crashed.to_string().contains("fault-injection"),
+            "the apply must fail at the ARMED boundary and not for some other \
+             reason, which would leave this measuring the wrong abort: {crashed}"
+        );
+
+        // The connection is also dropped, so the assertions below read a file no
+        // live transaction is holding - the same state a process crash leaves.
+        drop(be);
+    }
+
+    // Reopen the same file. The two must AGREE, and they agree on "nothing
+    // happened".
+    let be = backend(&p);
+    let tables = be
+        .actor()
+        .query("SELECT count(*) FROM main.sqlite_master WHERE name = 'interrupted'")
+        .await
+        .expect("read the reopened schema");
+    assert_eq!(
+        tables[0][0].as_deref(),
+        Some("0"),
+        "an interrupted apply must leave no table behind"
+    );
+    let journaled = be
+        .applied_sqlite()
+        .await
+        .expect("read the reopened journal");
+    assert!(
+        !journaled.iter().any(|e| e.version == version),
+        "and no journal row either - the schema and the journal must never disagree"
+    );
+
+    // The completion arm: the same migration, applied for real, lands BOTH.
+    assert!(
+        be.apply_one_additive(&m, "deployer")
+            .await
+            .expect("apply after the interrupted attempt"),
+        "the migration is newly applied"
+    );
+    drop(be);
+
+    let be = backend(&p);
+    let tables = be
+        .actor()
+        .query("SELECT count(*) FROM main.sqlite_master WHERE name = 'interrupted'")
+        .await
+        .expect("read the committed schema");
+    assert_eq!(
+        tables[0][0].as_deref(),
+        Some("1"),
+        "a completed apply leaves the table"
+    );
+    let journaled = be
+        .applied_sqlite()
+        .await
+        .expect("read the committed journal");
+    assert!(
+        journaled.iter().any(|e| e.version == version),
+        "and the journal row that describes it, in the same file"
+    );
 }

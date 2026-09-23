@@ -16,20 +16,18 @@ use zeroship_migrate_sqlite::SqliteBackend;
 struct Paths {
     _dir: TempDir,
     app: PathBuf,
-    journal: PathBuf,
 }
 
 fn paths(name: &str) -> Paths {
     let dir = tempfile::tempdir().expect("tempdir");
     Paths {
         app: dir.path().join(format!("{name}.sqlite")),
-        journal: dir.path().join(format!("{name}.migrations.sqlite")),
         _dir: dir,
     }
 }
 
 fn backend(paths: &Paths) -> SqliteBackend {
-    SqliteBackend::open(&paths.app, &paths.journal).expect("open SQLite backend")
+    SqliteBackend::open(&paths.app).expect("open SQLite backend")
 }
 
 fn cfg() -> ExecutorConfig {

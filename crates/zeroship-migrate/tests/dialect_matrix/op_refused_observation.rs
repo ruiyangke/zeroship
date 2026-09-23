@@ -971,9 +971,8 @@ async fn sqlite_leg(case: Case) -> Result<Leg, String> {
     let dir: TempDir =
         tempfile::tempdir().map_err(|error| format!("create a temp dir: {error}"))?;
     let app: PathBuf = dir.path().join("probe.sqlite");
-    let journal: PathBuf = dir.path().join("probe.migrations.sqlite");
-    let backend = SqliteBackend::open(&app, &journal)
-        .map_err(|error| format!("open the probe database: {error}"))?;
+    let backend =
+        SqliteBackend::open(&app).map_err(|error| format!("open the probe database: {error}"))?;
     let policy =
         support::operator_charter_with_destructive_ops(SQLITE_PROJECT, case.posture.grant());
     let cfg = ExecutorConfig::new(SQLITE_PROJECT, SQLITE_PROJECT, policy.clone());

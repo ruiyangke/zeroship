@@ -468,7 +468,7 @@ async fn journal_completed(
     let by = lit(applied_by);
     actor
         .exec(&format!(
-            "INSERT INTO \"_mig\".schema_migrations \
+            "INSERT INTO main.\"__zeroship_schema_migrations\" \
              (event_kind, version, name, checksum, \"by\", exec_ms, phase, outcome, kind) \
              VALUES ('{applied}', {version}, {name}, {checksum}, {by}, {exec_ms}, \
                      'completed', 'success', 'apply')",

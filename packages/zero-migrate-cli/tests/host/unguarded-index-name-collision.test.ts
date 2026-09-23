@@ -13,7 +13,7 @@
 // and from the journal table rather than from an engine return value.
 //
 // Does NOT cover SQLite here. Not for want of a seam: the Node host `DriverConfig`
-// DOES carry `{ kind: "sqlite"; appPath; journalPath }`
+// DOES carry `{ kind: "sqlite"; appPath }`
 // (`packages/zero-migrate-cli/src/index.ts`), `apply()` routes it to
 // `applyIr` under an in-process driver, and `existence-guard-fold-projection.test.ts`
 // in this directory

@@ -59,22 +59,16 @@ fn serial() -> std::sync::MutexGuard<'static, ()> {
 struct Paths {
     _dir: TempDir,
     app: PathBuf,
-    journal: PathBuf,
 }
 
 fn paths(tag: &str) -> Paths {
     let dir = tempfile::tempdir().expect("tempdir");
     let app = dir.path().join(format!("zs-{tag}.sqlite"));
-    let journal = dir.path().join(format!("zs-{tag}.migrations.sqlite"));
-    Paths {
-        _dir: dir,
-        app,
-        journal,
-    }
+    Paths { _dir: dir, app }
 }
 
 fn backend(p: &Paths) -> SqliteBackend {
-    SqliteBackend::open(&p.app, &p.journal).expect("open hardened sqlite backend")
+    SqliteBackend::open(&p.app).expect("open hardened sqlite backend")
 }
 
 /// Seed a `nums(id INTEGER PRIMARY KEY, val INTEGER, done INTEGER)` table with
@@ -253,7 +247,7 @@ async fn sqlite_backfill_rolls_back_when_conflict_ignore_suppresses_a_selected_r
     let progress = actor
         .query(
             "SELECT last_cursor, rows_done, batches_done, complete \
-             FROM \"_mig\".schema_backfills",
+             FROM main.\"__zeroship_schema_backfills\"",
         )
         .await
         .expect("inspect journal progress");

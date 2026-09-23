@@ -12,7 +12,7 @@
 //! - FK integrity: a rebuild whose `foreign_key_check` would FAIL aborts with a
 //!   typed error, the original table is intact, and `foreign_keys` is back ON;
 //! - confinement during rebuild: a creator `up` cannot toggle `foreign_keys` nor
-//!   reach `_mig`; after a rebuild the connection has `foreign_keys=ON`;
+//!   reach the journal; after a rebuild the connection has `foreign_keys=ON`;
 //! - failure path: an aborting rebuild leaves no wedge (the next apply succeeds) and
 //!   `foreign_keys` is back ON.
 
@@ -39,22 +39,16 @@ const APP: &str = "app_demo";
 struct Paths {
     _dir: TempDir,
     app: PathBuf,
-    journal: PathBuf,
 }
 
 fn paths(app_id: &str) -> Paths {
     let dir = tempfile::tempdir().expect("tempdir");
     let app = dir.path().join(format!("zs-{app_id}.sqlite"));
-    let journal = dir.path().join(format!("zs-{app_id}.migrations.sqlite"));
-    Paths {
-        _dir: dir,
-        app,
-        journal,
-    }
+    Paths { _dir: dir, app }
 }
 
 fn backend(p: &Paths) -> SqliteBackend {
-    SqliteBackend::open(&p.app, &p.journal).expect("open hardened sqlite backend")
+    SqliteBackend::open(&p.app).expect("open hardened sqlite backend")
 }
 
 fn sqlite_author() -> DeclarativeAuthor {
@@ -1338,7 +1332,7 @@ async fn fk_violation_aborts_rebuild_intact_and_fk_back_on() {
 
 // ---------------------------------------------------------------------------
 // (5) Confinement during rebuild: a creator `up` CANNOT toggle PRAGMA foreign_keys
-//     (still denied in CreatorUp) and cannot reach `_mig`; after a rebuild the
+//     (still denied in CreatorUp) and cannot reach the journal; after a rebuild the
 //     connection has foreign_keys=ON (asserted via PRAGMA).
 // ---------------------------------------------------------------------------
 #[compio::test]
@@ -1373,20 +1367,20 @@ async fn confinement_holds_across_rebuild() {
         "the creator foreign_keys toggle must be an authorizer DENY, got {e}"
     );
 
-    // A creator `up` cannot reach `_mig`.
+    // A creator `up` cannot reach the journal.
     let mig_attack = simple_migration(
         "mig_write_attack",
-        "INSERT INTO \"_mig\".schema_migrations (event_kind, version, name, checksum, \
+        "INSERT INTO main.\"__zeroship_schema_migrations\" (event_kind, version, name, checksum, \
          \"by\", phase, outcome, kind) VALUES ('applied', 'x', 'x', 'x', 'x', 'completed', \
          'success', 'apply');",
     );
     let e = be
         .apply_one_additive(&mig_attack, "attacker")
         .await
-        .expect_err("a creator _mig write must be denied");
+        .expect_err("a creator journal write must be denied");
     assert!(
         e.is_authorizer_denied(),
-        "the creator _mig write must be an authorizer DENY, got {e}"
+        "the creator journal write must be an authorizer DENY, got {e}"
     );
 
     // Now run a legitimate rebuild.

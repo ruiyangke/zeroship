@@ -1302,9 +1302,19 @@ const WAL_SWITCH_RETRY: std::time::Duration = std::time::Duration::from_millis(1
 /// is spent, then reported as lock contention. A file already in WAL mode needs
 /// no lock and switches on the first attempt.
 fn enter_wal(conn: &Connection) -> Result<(), DbError> {
+    enter_wal_on(conn, "main")
+}
+
+/// [`enter_wal`] for one named database on the connection.
+///
+/// `escaped_alias` has already had its double quotes doubled by the caller that
+/// built the `ATTACH`, so the two statements name the same database by
+/// construction rather than by two spellings agreeing.
+fn enter_wal_on(conn: &Connection, escaped_alias: &str) -> Result<(), DbError> {
+    let statement = format!("PRAGMA \"{escaped_alias}\".journal_mode = WAL;");
     let deadline = std::time::Instant::now() + lock_wait();
     loop {
-        let error = match conn.execute_batch("PRAGMA journal_mode = WAL;") {
+        let error = match conn.execute_batch(&statement) {
             Ok(()) => return Ok(()),
             Err(error) => from_sqlite(error),
         };
@@ -2246,7 +2256,13 @@ fn run_attach(conn: &Connection, app_id: &str, db_path: &str) -> Result<(), DbEr
     let escaped_path = db_path.replace('\'', "''");
     let escaped_alias = app_id.replace('"', "\"\"");
     let sql = format!("ATTACH DATABASE 'file:{escaped_path}' AS \"{escaped_alias}\"");
-    conn.execute_batch(&sql).map_err(from_sqlite)
+    conn.execute_batch(&sql).map_err(from_sqlite)?;
+    // `journal_mode` is PER DATABASE and does not propagate across `ATTACH`: a file
+    // attached to a WAL connection keeps whatever its own header says. Without this
+    // an app's data would sit in a rollback journal while the session file it hangs
+    // off is in WAL, which is the pair
+    // `the_session_file_and_an_app_file_are_both_in_wal` pins.
+    enter_wal_on(conn, &escaped_alias)
 }
 
 fn run_exec(conn: &Connection, sql: &str, params: &[Value]) -> Result<u64, RunError> {

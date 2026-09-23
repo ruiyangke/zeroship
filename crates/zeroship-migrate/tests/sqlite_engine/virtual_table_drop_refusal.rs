@@ -37,18 +37,12 @@ const APP: &str = "app_demo";
 struct Paths {
     _dir: TempDir,
     app: PathBuf,
-    journal: PathBuf,
 }
 
 fn paths(app_id: &str) -> Paths {
     let dir = tempfile::tempdir().expect("tempdir");
     let app = dir.path().join(format!("zs-{app_id}.sqlite"));
-    let journal = dir.path().join(format!("zs-{app_id}.migrations.sqlite"));
-    Paths {
-        _dir: dir,
-        app,
-        journal,
-    }
+    Paths { _dir: dir, app }
 }
 
 fn effective_policy() -> zeroship_migrate::EffectivePolicy {
@@ -134,7 +128,7 @@ async fn a_live_virtual_table_is_refused_by_name_and_module() {
             r#"CREATE VIRTUAL TABLE IF NOT EXISTS "posts_spatial" USING rtree(id, min_x, max_x, min_y, max_y)"#,
         ],
     );
-    let be = SqliteBackend::open(&p.app, &p.journal).expect("open backend");
+    let be = SqliteBackend::open(&p.app).expect("open backend");
 
     // The shadow tables really are there — the thing a drop would have cascaded.
     let live = be.snapshot_schema_sqlite().await.expect("introspect");
@@ -180,7 +174,7 @@ async fn the_refusal_names_the_table_the_kind_and_the_module() {
             r#"CREATE VIRTUAL TABLE IF NOT EXISTS "posts_spatial" USING rtree(id, min_x, max_x, min_y, max_y)"#,
         ],
     );
-    let be = SqliteBackend::open(&p.app, &p.journal).expect("open backend");
+    let be = SqliteBackend::open(&p.app).expect("open backend");
     let err = diff_with_total_ownership(&be)
         .await
         .expect_err("must be refused");
@@ -206,7 +200,7 @@ async fn an_ordinary_undeclared_table_still_drops() {
             r#"CREATE TABLE "abandoned" ("x" TEXT)"#,
         ],
     );
-    let be = SqliteBackend::open(&p.app, &p.journal).expect("open backend");
+    let be = SqliteBackend::open(&p.app).expect("open backend");
     let plan = diff_with_total_ownership(&be)
         .await
         .expect("an ordinary undeclared table must still plan cleanly");
@@ -236,7 +230,7 @@ async fn an_ordinary_table_named_like_an_index_still_drops() {
             r#"CREATE TABLE "notes__module_index" ("x" TEXT)"#,
         ],
     );
-    let be = SqliteBackend::open(&p.app, &p.journal).expect("open backend");
+    let be = SqliteBackend::open(&p.app).expect("open backend");
     let plan = diff_with_total_ownership(&be)
         .await
         .expect("an ordinary table with an index-shaped name must still plan cleanly");

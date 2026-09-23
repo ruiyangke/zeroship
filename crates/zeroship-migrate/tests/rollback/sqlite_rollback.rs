@@ -18,22 +18,16 @@ use zeroship_migrate_sqlite::SqliteBackend;
 struct Paths {
     _dir: TempDir,
     app: PathBuf,
-    journal: PathBuf,
 }
 
 fn paths(app_id: &str) -> Paths {
     let dir = tempfile::tempdir().expect("tempdir");
     let app = dir.path().join(format!("zs-{app_id}.sqlite"));
-    let journal = dir.path().join(format!("zs-{app_id}.migrations.sqlite"));
-    Paths {
-        _dir: dir,
-        app,
-        journal,
-    }
+    Paths { _dir: dir, app }
 }
 
 fn backend(p: &Paths) -> SqliteBackend {
-    SqliteBackend::open(&p.app, &p.journal).expect("open hardened sqlite backend")
+    SqliteBackend::open(&p.app).expect("open hardened sqlite backend")
 }
 
 /// A migration with both `up` and `down`.
@@ -104,7 +98,7 @@ async fn rollback_drop_table_then_repending_and_reapply() {
     let rb_rows = be
         .actor()
         .query(&format!(
-            "SELECT version FROM \"_mig\".schema_migrations \
+            "SELECT version FROM main.\"__zeroship_schema_migrations\" \
              WHERE event_kind='rolled_back' AND version='{v}'"
         ))
         .await
@@ -232,7 +226,7 @@ async fn rollback_rebuild_needed_returns_p3b_deferred_error() {
     let rb_rows = be
         .actor()
         .query(&format!(
-            "SELECT version FROM \"_mig\".schema_migrations \
+            "SELECT version FROM main.\"__zeroship_schema_migrations\" \
              WHERE event_kind='rolled_back' AND version='{}'",
             m.version.as_str()
         ))
@@ -251,7 +245,7 @@ async fn rollback_rebuild_needed_returns_p3b_deferred_error() {
 }
 
 // ---------------------------------------------------------------------------
-// Confinement: a malicious `down` that tries to write `_mig` (under CreatorUp)
+// Confinement: a malicious `down` that tries to write the journal (under CreatorUp)
 // is DENIED by the authorizer; the txn rolls back, no rolled_back event is
 // written, and the migration stays applied.
 // ---------------------------------------------------------------------------
@@ -269,19 +263,19 @@ async fn malicious_down_writing_mig_is_denied() {
         .expect("apply setup");
 
     // A `down` whose statements are individually additive-looking but smuggle a
-    // `_mig` write. The DROP TABLE classifies as additive (so we reach execution),
-    // then the `_mig` DELETE is denied by the CreatorUp authorizer at prepare time.
+    // journal write. The DROP TABLE classifies as additive (so we reach execution),
+    // then the journal DELETE is denied by the CreatorUp authorizer at prepare time.
     let mal = mig(
         "mal",
         "CREATE TABLE z (id INTEGER PRIMARY KEY);",
-        "DROP TABLE z; DELETE FROM \"_mig\".schema_migrations;",
+        "DROP TABLE z; DELETE FROM main.\"__zeroship_schema_migrations\";",
     );
     be.apply_one_additive(&mal, "d").await.expect("apply mal");
 
     let err = be
         .rollback_one_additive(&mal, "attacker")
         .await
-        .expect_err("a _mig-writing down must be denied");
+        .expect_err("a journal-writing down must be denied");
     // The denial surfaces as a Backend error wrapping the authorizer deny.
     let msg = format!("{err}");
     assert!(
@@ -301,7 +295,7 @@ async fn malicious_down_writing_mig_is_denied() {
     let rb = be
         .actor()
         .query(&format!(
-            "SELECT version FROM \"_mig\".schema_migrations \
+            "SELECT version FROM main.\"__zeroship_schema_migrations\" \
              WHERE event_kind='rolled_back' AND version='{}'",
             mal.version.as_str()
         ))

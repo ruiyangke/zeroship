@@ -124,7 +124,6 @@ function withSqliteFile<T>(prefix: string, run: (driver: DriverConfig) => Promis
   return run({
     kind: "sqlite",
     appPath: join(work, "app.db"),
-    journalPath: join(work, "mig.db"),
   }).finally(() => rmSync(work, { recursive: true, force: true }));
 }
 

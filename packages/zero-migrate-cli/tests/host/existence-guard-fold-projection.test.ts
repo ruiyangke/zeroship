@@ -614,7 +614,6 @@ function sqliteDriverAt(directory: string): DriverConfig {
   return {
     kind: "sqlite",
     appPath: join(directory, "app.db"),
-    journalPath: join(directory, "app.migrations.db"),
   };
 }
 
@@ -703,16 +702,18 @@ function sqliteColumnType(appPath: string, column: string): string | undefined {
   }
 }
 
-/** The versions the SQLite journal reports. Absent journal file means nothing ran. */
-function sqliteCompletedVersions(journalPath: string): string[] {
-  const db = new DatabaseSync(journalPath);
+/** The versions the SQLite journal reports. An absent journal table means nothing ran. */
+function sqliteCompletedVersions(appPath: string): string[] {
+  const db = new DatabaseSync(appPath);
   try {
     const named = db
-      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'")
+      .prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = '__zeroship_schema_migrations'",
+      )
       .all();
     if (named.length === 0) return [];
     return db
-      .prepare("SELECT version FROM schema_migrations ORDER BY version")
+      .prepare('SELECT version FROM "__zeroship_schema_migrations" ORDER BY version')
       .all()
       .map((row) => (row as { version: string }).version);
   } finally {
@@ -768,7 +769,7 @@ test("SQLite: plan and apply agree that a guarded createTable over a matching li
       "the live table is untouched: the guard proved equality and the CREATE was skipped",
     );
     assert.equal(
-      sqliteCompletedVersions(driver.kind === "sqlite" ? driver.journalPath : "").length,
+      sqliteCompletedVersions(driver.kind === "sqlite" ? driver.appPath : "").length,
       2,
       "apply reached the same verdict as plan and journaled both migrations",
     );
@@ -800,7 +801,7 @@ test("SQLite: plan and apply agree in refusing a guarded createTable over a dive
       "the refusal changed nothing: the live column keeps its own type",
     );
     const completed = sqliteCompletedVersions(
-      driver.kind === "sqlite" ? driver.journalPath : "",
+      driver.kind === "sqlite" ? driver.appPath : "",
     );
     assert.equal(
       completed.length,

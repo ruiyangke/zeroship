@@ -1,12 +1,13 @@
 //! The SQLite journal: schema, immutability, native `event_seq`, and the atomic
 //! single-connection apply.
 //!
-//! The journal lives in the attached `_mig` database (a separate file), mirroring
-//! the PG per-project meta schema. It carries the SAME logical shape as
-//! `journal.rs` (the PG side): a SINGLE consolidated `schema_migrations` events
-//! table (one row per `applied`/`rolled_back` event, discriminated by
-//! `event_kind`), a `_supersedes` edge table, an inflight side-table, and
-//! net-state computed via window functions over the native total order.
+//! The journal lives in the database it describes, behind the `__zeroship_` name
+//! fence - the same placement PostgreSQL uses inside a tenant schema. It carries
+//! the SAME logical shape as `journal.rs` (the PG side): a SINGLE consolidated
+//! `__zeroship_schema_migrations` events table (one row per `applied`/`rolled_back`
+//! event, discriminated by `event_kind`), a `_supersedes` edge table, an inflight
+//! side-table, and net-state computed via window functions over the native total
+//! order.
 //!
 //! **Native total order.** `event_seq INTEGER PRIMARY KEY AUTOINCREMENT` is the
 //! total order: SQLite assigns a strictly-increasing rowid on every INSERT (the
@@ -21,8 +22,8 @@
 //!    under `writable_schema=ON`.
 //! 2. `trusted_schema=OFF` (set at open) blocks schema objects from invoking
 //!    non-allowlisted functions.
-//! 3. The authorizer denies `PRAGMA` / writes / DROP / ALTER on `_mig` in
-//!    CreatorUp (the primary deny, at prepare time).
+//! 3. The authorizer denies `PRAGMA` / writes / DROP / ALTER on any fenced object
+//!    in CreatorUp (the primary deny, at prepare time).
 //! 4. Append-only `BEFORE UPDATE`/`BEFORE DELETE` triggers (`RAISE(ABORT,...)`) are
 //!    the in-DB backstop for row mutation (the operator path where the
 //!    authorizer relaxes; on the Confined path the authorizer already denied it).
@@ -42,19 +43,13 @@ use zeroship_migrate_ir::migration::Migration;
 use super::actor::{MigrationActor, SqliteActorError};
 use super::authorizer::Mode;
 
-/// The fixed, short, table-local immutability trigger names. ASCII-safe
-/// literals - never embed the (hyphenated-UUID) app id, which appears only in the
-/// file path.
-const IMMUTABLE_TRG: &str = "zs_immutable_trg";
-
-/// Bootstrap the `_mig` journal idempotently, under **engine mode** (the engine
-/// owns the journal objects; CreatorUp would deny these `_mig` CREATE/INSERTs).
+/// Bootstrap the journal idempotently, under **engine mode** (the engine owns the
+/// journal objects; CreatorUp denies every CREATE/INSERT behind the fence).
 ///
-/// All DDL targets the `"_mig"` alias so the authorizer keys on `database_name ==
-/// Some("_mig")` and (in engine mode) allows it. Each statement is a discrete
-/// `execute` call; the journal CREATE/INSERT/CREATE TRIGGER are all engine-mode.
+/// All DDL names fenced objects in `main`, so the authorizer keys on the object
+/// NAME and (in engine mode) allows it. Each statement is a discrete `execute`
+/// call; the journal CREATE/INSERT/CREATE TRIGGER are all engine-mode.
 pub(crate) async fn ensure_journal(actor: &MigrationActor) -> Result<(), SqliteActorError> {
-    actor.ensure_journal_attached().await?;
     actor.set_mode(Mode::EngineJournal).await?;
 
     // 1. The SINGLE consolidated append-only events table. `event_seq INTEGER
@@ -71,7 +66,7 @@ pub(crate) async fn ensure_journal(actor: &MigrationActor) -> Result<(), SqliteA
     // `event_seq` counter table and NO separate rollback-events table any more.
     actor
         .exec(
-            "CREATE TABLE IF NOT EXISTS \"_mig\".schema_migrations (\
+            "CREATE TABLE IF NOT EXISTS main.\"__zeroship_schema_migrations\" (\
                 event_seq  INTEGER PRIMARY KEY AUTOINCREMENT, \
                 event_kind TEXT NOT NULL CHECK (event_kind IN ('applied','rolled_back')), \
                 version    TEXT NOT NULL, \
@@ -84,7 +79,7 @@ pub(crate) async fn ensure_journal(actor: &MigrationActor) -> Result<(), SqliteA
                 phase      TEXT CHECK (phase IS NULL OR phase IN ('started','completed')), \
                 outcome    TEXT, \
                 kind       TEXT CHECK (kind IS NULL OR kind IN ('apply','baseline','squash','repeatable')), \
-                CONSTRAINT schema_migrations_event_shape CHECK ( \
+                CONSTRAINT __zeroship_schema_migrations_event_shape CHECK ( \
                     (event_kind = 'applied' \
                          AND kind IS NOT NULL AND phase IS NOT NULL AND outcome IS NOT NULL) \
                     OR \
@@ -96,20 +91,20 @@ pub(crate) async fn ensure_journal(actor: &MigrationActor) -> Result<(), SqliteA
     // journal directly before applying the additive legacy upgrade.
     let down_column = actor
         .query(
-            "SELECT name FROM \"_mig\".pragma_table_info('schema_migrations') \
+            "SELECT name FROM main.pragma_table_info('__zeroship_schema_migrations') \
              WHERE name = 'down'",
         )
         .await?;
     if down_column.is_empty() {
         actor
-            .exec("ALTER TABLE \"_mig\".schema_migrations ADD COLUMN down TEXT")
+            .exec("ALTER TABLE main.\"__zeroship_schema_migrations\" ADD COLUMN down TEXT")
             .await?;
     }
     // The supersedes edge table - a relation, not part of the event order, so it
     // gets its OWN native AUTOINCREMENT PK (no shared counter).
     actor
         .exec(
-            "CREATE TABLE IF NOT EXISTS \"_mig\".schema_migrations_supersedes (\
+            "CREATE TABLE IF NOT EXISTS main.\"__zeroship_schema_migrations_supersedes\" (\
                 id                 INTEGER PRIMARY KEY AUTOINCREMENT, \
                 squash_version     TEXT NOT NULL, \
                 superseded_version TEXT NOT NULL, \
@@ -122,7 +117,7 @@ pub(crate) async fn ensure_journal(actor: &MigrationActor) -> Result<(), SqliteA
     // does not exist on SQLite, so this stays empty.
     actor
         .exec(
-            "CREATE TABLE IF NOT EXISTS \"_mig\".schema_migrations_inflight (\
+            "CREATE TABLE IF NOT EXISTS main.\"__zeroship_schema_migrations_inflight\" (\
                 version    TEXT PRIMARY KEY, \
                 name       TEXT NOT NULL, \
                 checksum   TEXT NOT NULL, \
@@ -140,12 +135,20 @@ pub(crate) async fn ensure_journal(actor: &MigrationActor) -> Result<(), SqliteA
     // SQLite has no TRUNCATE and no DROP-fires-DELETE-trigger, so these defend
     // row mutation only; DROP TABLE / wholesale wipe is closed by the authorizer
     // + DEFENSIVE, not by a trigger.
-    for tbl in ["schema_migrations", "schema_migrations_supersedes"] {
+    // The trigger names are the table's own plus the operation, so they sit behind
+    // the same fence the tables do. That is not cosmetic: SQLite's trigger
+    // namespace is schema-GLOBAL and the journal now shares that schema with the
+    // creator, so an unfenced `zs_immutable_trg_*` would be a name a creator could
+    // claim, and the authorizer would have nothing to key its deny on.
+    for tbl in [
+        "__zeroship_schema_migrations",
+        "__zeroship_schema_migrations_supersedes",
+    ] {
         for op in ["UPDATE", "DELETE"] {
-            let trg = format!("{IMMUTABLE_TRG}_{tbl}_{}", op.to_ascii_lowercase());
+            let trg = format!("{tbl}_immutable_{}", op.to_ascii_lowercase());
             actor
                 .exec(&format!(
-                    "CREATE TRIGGER IF NOT EXISTS \"_mig\".\"{trg}\" \
+                    "CREATE TRIGGER IF NOT EXISTS main.\"{trg}\" \
                      BEFORE {op} ON \"{tbl}\" \
                      BEGIN SELECT RAISE(ABORT, 'migration journal is append-only (no UPDATE/DELETE)'); END"
                 ))
@@ -226,7 +229,7 @@ pub(crate) async fn journal_satisfied_noop(
         let version_lit = sql_lit(&version);
         actor
             .exec(&format!(
-                "INSERT INTO \"_mig\".schema_migrations \
+                "INSERT INTO main.\"__zeroship_schema_migrations\" \
                  (event_kind, version, name, checksum, \"by\", phase, outcome, kind) \
                  VALUES ('{applied}', {version_lit}, {name}, {checksum}, {applied_by_lit}, \
                          'completed', 'success', 'apply')",
@@ -270,7 +273,7 @@ pub(crate) async fn journal_satisfied_noop(
 /// returns, so no SQLite-specific outcome type crosses the trait.
 ///
 /// The motivating case: a dev developer who ran the OLD `run_sqlite_pipeline`
-/// has a `zs-default.sqlite` with user tables but an EMPTY `_mig` journal (the old
+/// has a `zs-default.sqlite` with user tables but an EMPTY journal (the old
 /// path was a stateless diff). The first engine boot against that file must NOT
 /// re-create the tables or drift-abort - so we adopt the live schema by journaling
 /// `m` (an `up` that DOCUMENTS the live shape but is recorded-not-run), after which
@@ -331,7 +334,7 @@ pub(crate) async fn baseline(
         // baseline is a forward event recorded-not-run).
         actor
             .exec(&format!(
-                "INSERT INTO \"_mig\".schema_migrations \
+                "INSERT INTO main.\"__zeroship_schema_migrations\" \
                  (event_kind, version, name, checksum, \"by\", phase, outcome, kind) \
                  VALUES ('{applied}', {version_lit}, {name}, {checksum}, {applied_by_lit}, \
                          'completed', 'success', 'baseline')",
@@ -431,7 +434,7 @@ pub(crate) async fn record_loaded_versions(
             let version_lit = sql_lit(&v.version);
             actor
                 .exec(&format!(
-                    "INSERT INTO \"_mig\".schema_migrations \
+                    "INSERT INTO main.\"__zeroship_schema_migrations\" \
                      (event_kind, version, name, checksum, \"by\", phase, outcome, kind) \
                      VALUES ('{applied}', {version_lit}, {name}, {checksum}, {applied_by_lit}, \
                              'completed', 'success', 'baseline')",
@@ -470,7 +473,7 @@ pub(crate) async fn record_loaded_versions(
 /// (`executor.rs`). The `template` carries `?n` placeholders and `binds` the typed
 /// values; they are bound NATIVELY (never interpolated) so a bind value cannot
 /// alter the statement shape. The DML runs under the confined
-/// **CreatorUp** authorizer mode (denied from `_mig`, from PRAGMA / transaction
+/// **CreatorUp** authorizer mode (denied from the journal, from PRAGMA / transaction
 /// boundaries / vtables), then the `completed` journal row is written under
 /// **EngineJournal** - DML + journal atomic in one `BEGIN IMMEDIATE`.
 ///
@@ -514,7 +517,7 @@ pub(crate) async fn run_dml(
         let version_lit = sql_lit(version);
         actor
             .exec(&format!(
-                "INSERT INTO \"_mig\".schema_migrations \
+                "INSERT INTO main.\"__zeroship_schema_migrations\" \
                  (event_kind, version, name, checksum, \"by\", phase, outcome, kind) \
                  VALUES ('{applied}', {version_lit}, {name_lit}, {checksum_lit}, {applied_by_lit}, \
                          'completed', 'success', 'apply')",
@@ -548,12 +551,25 @@ async fn run_apply_txn(
     // Run the rest; on ANY error, roll back and propagate.
     let result = async {
         // 2. Run the creator/AI `up` under the confined CreatorUp mode (denied
-        // from `_mig`, transaction boundaries, PRAGMA and virtual-table creation).
+        // from the journal, transaction boundaries, PRAGMA and virtual-table creation).
         actor.set_mode(Mode::CreatorUp).await?;
         // The `up` may be multiple statements; each is prepared and stepped under
         // CreatorUp via execute_batch. A creator `up` must NOT contain a journal
         // write; the authorizer denies it.
         actor.exec(&m.up).await?;
+
+        // The crash boundary between the DDL and the row that records it. This is
+        // the ONE place a two-file journal could leave the two disagreeing, which
+        // is what the super-journal protocol was arranged to prevent; with the
+        // journal inside the database it describes, a crash here rolls the `up`
+        // back because it is the same uncommitted transaction. PostgreSQL's
+        // transactional apply trips the same named point, so a crash test can put
+        // the two dialects at one boundary.
+        if let Err(error) = zeroship_migrate_backend::fault::trip(
+            zeroship_migrate_backend::fault::points::APPLY_AFTER_UP_BEFORE_COMPLETED,
+        ) {
+            return Err(SqliteActorError::Exec(error.to_string()));
+        }
 
         // 3. EngineJournal - INSERT the applied row (event_seq is AUTOINCREMENT, not
         // supplied). SEPARATE prepares from the creator `up`, with the mode flip
@@ -574,7 +590,7 @@ async fn run_apply_txn(
             .map_or_else(|| "NULL".to_string(), sql_lit);
         actor
             .exec(&format!(
-                "INSERT INTO \"_mig\".schema_migrations \
+                "INSERT INTO main.\"__zeroship_schema_migrations\" \
                  (event_kind, version, name, checksum, \"by\", phase, outcome, kind, down) \
                  VALUES ('{applied}', {version_lit}, {name}, {checksum}, {applied_by_lit}, \
                          'completed', 'success', 'apply', {down_lit})",
@@ -634,9 +650,9 @@ pub(crate) fn sql_lit(s: &str) -> String {
 /// `DISTINCT ON` -> `ROW_NUMBER OVER (PARTITION BY version ORDER BY event_seq
 /// DESC)` (SQLite window functions, >=3.25).
 pub(crate) async fn applied(actor: &MigrationActor) -> Result<Vec<AppliedEntry>, SqliteActorError> {
-    // Engine read of `_mig`: run under engine mode (the journal is engine
-    // territory; a SELECT-only read does not write, but reading `_mig` should not
-    // be gated by the creator deny on `_mig`).
+    // Engine read of the journal: run under engine mode (the journal is engine
+    // territory; a SELECT-only read does not write, but reading it should not
+    // be gated by the creator deny on fenced names).
     actor.set_mode(Mode::EngineJournal).await?;
     // An inflight marker has no sequence of its own, so it reports 0. That can
     // never be mistaken for a real one: `event_seq` is `INTEGER PRIMARY KEY
@@ -647,14 +663,14 @@ pub(crate) async fn applied(actor: &MigrationActor) -> Result<Vec<AppliedEntry>,
         WITH ranked AS ( \
             SELECT version, checksum, down, event_kind, kind AS mig_kind, event_seq, \
                    ROW_NUMBER() OVER (PARTITION BY version ORDER BY event_seq DESC) AS rn \
-              FROM \"_mig\".schema_migrations \
+              FROM main.\"__zeroship_schema_migrations\" \
         ), \
         latest AS (SELECT version, checksum, down, event_kind, mig_kind, event_seq FROM ranked WHERE rn = 1), \
         net_applied AS (SELECT version, checksum, down, mig_kind, event_seq FROM latest WHERE event_kind = '{applied}') \
         SELECT version, checksum, down, mig_kind, event_seq, 'completed' AS phase FROM net_applied \
         UNION ALL \
         SELECT i.version, i.checksum, NULL AS down, NULL AS mig_kind, 0 AS event_seq, 'started' AS phase \
-          FROM \"_mig\".schema_migrations_inflight i \
+          FROM main.\"__zeroship_schema_migrations_inflight\" i \
          WHERE NOT EXISTS (SELECT 1 FROM net_applied n WHERE n.version = i.version) \
         ORDER BY version",
         applied = EventKind::Applied.as_str()
@@ -702,7 +718,7 @@ pub(crate) async fn net_rolled_back_versions(
         WITH ranked AS ( \
             SELECT version, event_kind, \
                    ROW_NUMBER() OVER (PARTITION BY version ORDER BY event_seq DESC) AS rn \
-              FROM \"_mig\".schema_migrations \
+              FROM main.\"__zeroship_schema_migrations\" \
         ) \
         SELECT version FROM ranked \
          WHERE rn = 1 AND event_kind = '{rolled_back}' \
@@ -729,14 +745,14 @@ pub(crate) async fn superseded_versions(
         WITH ranked AS ( \
             SELECT version, event_kind, kind AS mig_kind, \
                    ROW_NUMBER() OVER (PARTITION BY version ORDER BY event_seq DESC) AS rn \
-              FROM \"_mig\".schema_migrations \
+              FROM main.\"__zeroship_schema_migrations\" \
         ), \
         latest AS (SELECT version, event_kind, mig_kind FROM ranked WHERE rn = 1), \
         net_applied_squashes AS ( \
             SELECT version FROM latest WHERE event_kind = '{applied}' AND mig_kind = 'squash' \
         ) \
         SELECT DISTINCT s.superseded_version AS v \
-          FROM \"_mig\".schema_migrations_supersedes s \
+          FROM main.\"__zeroship_schema_migrations_supersedes\" s \
           JOIN net_applied_squashes n ON n.version = s.squash_version \
          ORDER BY 1",
         applied = EventKind::Applied.as_str()
@@ -757,7 +773,7 @@ pub(crate) async fn latest_completed_checksums(
         WITH ranked AS ( \
             SELECT version, checksum, \
                    ROW_NUMBER() OVER (PARTITION BY version ORDER BY event_seq DESC) AS rn \
-              FROM \"_mig\".schema_migrations \
+              FROM main.\"__zeroship_schema_migrations\" \
              WHERE event_kind = '{applied}' AND kind = 'repeatable' \
         ) \
         SELECT version, checksum FROM ranked WHERE rn = 1",

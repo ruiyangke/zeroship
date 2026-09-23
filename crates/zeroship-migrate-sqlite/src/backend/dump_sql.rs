@@ -11,22 +11,26 @@
 //!
 //! # What is excluded (no journal / internal leakage)
 //!
-//! - The `_mig` journal lives in a SEPARATE attached database, so a `main`-scoped
+//! - The journal's objects are fenced by name, so a `main`-scoped
 //!   `sqlite_master` read never sees `schema_migrations` / its triggers.
 //! - SQLite internal objects (`sqlite_sequence`, `sqlite_autoindex_*`,
-//!   `sqlite_stat*`, ...) are filtered Rust-side (the hardened authorizer's function
-//!   allowlist has no `LIKE`, so we cannot `WHERE name NOT LIKE 'sqlite_%'`; we
-//!   match the prefix in Rust, exactly like the drift introspector).
+//!   `sqlite_stat*`, ...) and the engine's own journal objects are filtered
+//!   Rust-side, exactly like the drift introspector. A dump is the schema a
+//!   `load` replays into a fresh database, and the journal is not part of that
+//!   schema: `load` journals the trailer's versions itself, so emitting the
+//!   journal's own `CREATE TABLE` would put the engine's bookkeeping into the
+//!   creator's restore script and make `load` refuse its own output.
 //! - Rows with a NULL `sql` (the implicit rowid index of an `INTEGER PRIMARY KEY`,
 //!   internal auto-indexes) carry no DDL and are skipped.
 
 use super::actor::{MigrationActor, SqliteActorError};
 use super::authorizer::Mode;
 
-/// True iff `name` is a SQLite-internal object excluded from a schema dump (any
-/// `sqlite_`-prefixed name: `sqlite_sequence`, `sqlite_autoindex_*`, `sqlite_stat*`).
+/// True iff `name` is an object excluded from a schema dump: a `sqlite_`-prefixed
+/// internal (`sqlite_sequence`, `sqlite_autoindex_*`, `sqlite_stat*`) or one of the
+/// engine's own fenced journal objects, which share the dumped database.
 fn is_internal(name: &str) -> bool {
-    name.starts_with("sqlite_")
+    name.starts_with("sqlite_") || super::authorizer::is_journal_object(name)
 }
 
 /// A deterministic sort key for one `sqlite_master` row so the dump is reproducible:
@@ -53,7 +57,7 @@ fn kind_rank(obj_type: &str) -> u8 {
 /// Read-only; runs under engine mode (the `sqlite_master` read requires it on the
 /// hardened connection). Tables/views are emitted before indexes/triggers,
 /// each kind name-ordered, so re-running `dump` on an unchanged schema is
-/// byte-identical. The `_mig` journal + `sqlite_*` internals never appear (see the
+/// byte-identical. The journal's fenced objects and `sqlite_*` internals never appear (see the
 /// module docs).
 ///
 /// # Errors
@@ -61,11 +65,11 @@ fn kind_rank(obj_type: &str) -> u8 {
 pub(crate) async fn dump_schema(actor: &MigrationActor) -> Result<String, SqliteActorError> {
     // Least privilege: the dump is a single plain `SELECT ... FROM main.sqlite_master`
     // - an `AuthAction::Read` on `main`, which the hardened authorizer already allows
-    // under the most-confined `CreatorUp` (the `_ => Allow` catch-all; the `_mig`
+    // under the most-confined `CreatorUp` (the `_ => Allow` catch-all; the fenced
     // deny arms never fire for a `main`-scoped read). Unlike the drift introspector
     // (which ALSO issues `PRAGMA table_info/index_list/...`, and so MUST run under
     // `EngineJournal` where those PRAGMAs are allowlisted), the dump touches no
-    // PRAGMA and no `_mig`, so `EngineJournal` would be strictly broader than needed.
+    // PRAGMA and no fenced write, so `EngineJournal` would be strictly broader than needed.
     // Run under `CreatorUp`. Read-only - no DDL.
     actor.set_mode(Mode::CreatorUp).await?;
 
@@ -73,7 +77,7 @@ pub(crate) async fn dump_schema(actor: &MigrationActor) -> Result<String, Sqlite
     // `sql IS NOT NULL` filter drops the implicit indexes (rowid PK auto-index)
     // that carry no DDL; the `sqlite_%` exclusion is done Rust-side (no `LIKE` in
     // the hardened authorizer's function allowlist). `main.` scopes the read to
-    // the app file - the `_mig` journal (a separate attached DB) is never seen.
+    // the app file - the journal's own fenced objects are filtered out.
     let rows = actor
         .query(
             "SELECT type, name, sql FROM main.sqlite_master \
@@ -164,12 +168,11 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).expect("temp dir");
         let app = dir.join("app.sqlite");
-        let journal = dir.join("app.sqlite.migrations");
 
         compio::runtime::Runtime::new()
             .expect("compio runtime")
             .block_on(async move {
-                let actor = MigrationActor::open(&app, &journal).expect("open actor");
+                let actor = MigrationActor::open(&app).expect("open actor");
                 // Create a creator table the way the creator `up` would: under CreatorUp.
                 actor.set_mode(Mode::CreatorUp).await.expect("creator mode");
                 actor
