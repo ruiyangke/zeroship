@@ -871,9 +871,6 @@ export function perRowGeneratorShapes(): void {
 
   // @ts-expect-error — a TypeID prefix is text.
   generators.typeId({ prefix: 42 });
-
-  // @ts-expect-error — perRow.ulid takes no options.
-  generators.ulid({});
 }
 
 export function int64ValueShapes(): void {

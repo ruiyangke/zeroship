@@ -470,12 +470,6 @@ test("raw DML strings are never rewritten as TypeID values by the recorder", () 
   assert.equal(ops[0].rows[0][0], authored);
 });
 
-test("raw DML strings are never canonicalized as ULID values by the recorder", () => {
-  const authored = "01arz3ndektsv4rrffq69g5fav";
-  const ops = record(() => table("events").insert({ rows: { event_id: authored } }));
-  assert.equal(ops[0].rows[0][0], authored);
-});
-
 test("public and engine recorders match for t.text({ caseSensitive:false })", () => {
   const publicOps = record(() => {
     table("u").create({ columns: { email: t.text({ caseSensitive: false }) } });

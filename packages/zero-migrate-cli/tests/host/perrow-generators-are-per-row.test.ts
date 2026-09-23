@@ -24,10 +24,10 @@
 //                         memoised per intent would tie them together.
 //   format honoured       the TypeID prefix survives into the stored value
 //
-// The value-format contracts are load-bearing rather than decorative: the engine
+// The value-format contract is load-bearing rather than decorative: the engine
 // REFUSES `perRow.typeId({prefix})` into a generic `t.text()` column, because
-// generic text carries no value-format contract to validate against. The columns
-// here use `perRow.typeId(...)` and `ids.ulid()` for that reason.
+// generic text carries no value-format contract to validate against. The `tid`
+// column here is declared `t.typedId(...)` for that reason.
 //
 // GATE: `ZERO_MIGRATE_TEST_PG_URL`.
 
@@ -90,7 +90,7 @@ scope = "all"
   const seededIds = Array.from({ length: ROWS }, (_, i) => i + 1).join(", ");
   writeFileSync(
     join(work, "migrations", "20260101000000_a.ts"),
-    `import { table, t, ids } from "@zeroship/migrate";
+    `import { table, t } from "@zeroship/migrate";
 export const name = "a";
 export default {
   schema() {
@@ -101,7 +101,6 @@ export default {
         u7: t.uuid(),
         u7b: t.uuid(),
         tid: t.typedId("order" ),
-        ul: ids.ulid(),
       },
       primaryKey: ["id"],
     });
@@ -137,13 +136,12 @@ export default {
         u7: reused,
         u7b: reused,
         tid: perRow.typeId({ prefix: "order" }),
-        ul: perRow.ulid(),
       },
       cursorColumns: ["id"],
       cursorStability: { mode: "guardUpdates" },
     });
   },
-  irreversible: "overwrites u4, u7, u7b, tid, and ul for existing ${TABLE} rows; prior values are not recorded",
+  irreversible: "overwrites u4, u7, u7b, and tid for existing ${TABLE} rows; prior values are not recorded",
 };
 `,
   );
@@ -183,11 +181,11 @@ test("every perRow generator yields a distinct value per backfilled row", async 
     );
 
     const { rows } = await client.query(
-      `SELECT id, u4, u7, u7b, tid, ul FROM "${namespace}"."${TABLE}" ORDER BY id`,
+      `SELECT id, u4, u7, u7b, tid FROM "${namespace}"."${TABLE}" ORDER BY id`,
     );
     assert.equal(rows.length, ROWS, "every seeded row must still be present");
 
-    for (const column of ["u4", "u7", "u7b", "tid", "ul"] as const) {
+    for (const column of ["u4", "u7", "u7b", "tid"] as const) {
       const values = rows.map((row: Record<string, unknown>) => String(row[column]));
       assert.equal(
         new Set(values).size,
@@ -218,7 +216,6 @@ test("every perRow generator yields a distinct value per backfilled row", async 
         /^order_[0-9a-z]+$/,
         "the TypeID prefix declared on the column must be honoured by the generator",
       );
-      assert.match(String(row.ul), /^[0-9A-Z]{26}$/, "a ULID is 26 uppercase base32 chars");
     }
   } finally {
     await client
