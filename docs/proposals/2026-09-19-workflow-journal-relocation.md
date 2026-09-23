@@ -633,14 +633,15 @@ stall the defect fixes that motivate the move.
    `__zeroship_workflow_steps.record` is a serialized `StoredCheckpoint` wrapping the
    `StepCheckpoint` declared in `crates/zeroship-workflow/src/engine.rs`, whose `output`, `error`
    and `child_input` are creator values. `finish_run` writes a creator error into
-   `__zeroship_workflow_generations.error`, the column beside the two this entry is about.
+   `__zeroship_workflow_generations.error`, the column beside the one this entry is about.
    `publish` in `crates/zeroship-workflow/src/service/signals.rs` and `crates/zeroship-workflow/src/service/fanout.rs`
    store `options.payload` into `__zeroship_workflow_signals.payload` and
    `__zeroship_workflow_broadcasts.payload`, and `__zeroship_workflow_deploys.manifest` carries
-   every `ScheduleRegistration` input a deployment declared. Removing `input` and `output` alone
-   turns the assertion green and leaves the property false, which is the failure this entry was
-   written to prevent. A payload-free journal is the whole set becoming references, and the two
-   named columns are where it starts, not where it ends.
+   every `ScheduleRegistration` input a deployment declared. Emptying that set alone turns the
+   assertion green and leaves the property false, which is the failure this entry was written to
+   prevent. A payload-free journal is the whole set becoming references, and
+   `__zeroship_workflow_generations.input`, the column that set holds, is where it starts, not
+   where it ends.
 
    **Where the property is checked.** The coordinator fixture builds `workflow_manager` from
    `zeroship_workflow_server::coordinator::SCHEMA_SQL` and
@@ -679,15 +680,17 @@ stall the defect fixes that motivate the move.
    because `TaskPayloadReader::input` in `crates/zeroship-workflow-runner/src/payloads.rs` returns
    success on absence.
 
-   **The continuation marker becomes a typed field beside a distinct terminal state.** A nullable
-   typed successor column on the generation holds the successor run id and is set on any close that
-   produces a successor, and continued-as-new becomes its own `RunState` in
-   `crates/zeroship-core/src/workflow_coordination/lifecycle.rs`, joining `RunState::TERMINAL`. The
-   `{"continuedAsNew":id}` marker that the `RunUpdate::ContinuedAsNew` arm of `apply` in
-   `crates/zeroship-workflow/src/service/frontier.rs` hands to `finish_run` goes away. Temporal
-   shapes it this way: the successor is the typed `new_execution_run_id` and never rides in the
-   result payload, and the typed field and the distinct status are independent, since
-   `new_execution_run_id` also appears on an ordinary completed execution for a cron successor.
+   **The continuation successor is a typed field beside a distinct terminal state.** The nullable
+   `continued_as_new_run_id` column on the generation, added by
+   `crates/zeroship-workflow-schema/schema/migrations/0004_continued_as_new_successor.ts`, holds
+   the successor run id and is set on any close that produces one, and continued-as-new is its own
+   `RunState` in `crates/zeroship-core/src/workflow_coordination/lifecycle.rs`, among
+   `RunState::TERMINAL`. The `RunUpdate::ContinuedAsNew` arm of `apply` in
+   `crates/zeroship-workflow/src/service/frontier.rs` names the successor on the `Terminal` it
+   hands `finish_run`. Temporal shapes it this way: the successor is the typed
+   `new_execution_run_id` and never rides in the result payload, and the typed field and the
+   distinct status are independent, since `new_execution_run_id` also appears on an ordinary
+   completed execution for a cron successor.
    What it buys: a caller can tell a run that returned a value from a run that continued, without
    matching a key inside creator-controlled JSON that a creator can also produce.
 
