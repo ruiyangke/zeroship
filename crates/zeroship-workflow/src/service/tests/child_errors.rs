@@ -69,6 +69,11 @@ paired!(
 /// case depends on how long the fixture took to get here.
 const ELAPSED_TIMEOUT: &str = "2020-01-01T00:00:00Z";
 
+/// The result a child stages before it reports completion. The cancelled and
+/// completed cases stage the same bytes, so the pair differs in the standing
+/// cancellation request alone.
+const CHILD_RESULT: &[u8] = br#""child done""#;
+
 /// Start a parent and take its first dispatch to a child call, carrying
 /// `options` through to `ChildWorkflowOptions` exactly as the replay bridge
 /// emits them.
@@ -162,9 +167,13 @@ async fn parent_join_row(
 /// class, and `ChildCancelledError` is the name `@zeroship/workflows` matches.
 /// Under any other key the bridge hands the body a bare `Error` and a creator's
 /// `catch (e) { if (e instanceof ChildCancelledError) ... }` never matches.
+///
+/// The child stages its result before it reports, so the empty join is a result
+/// the cancellation withheld rather than one the child never produced.
 async fn cancelled_child(store: Rc<OrmStore>) {
     let (service, app_id, _, _deployments) = registered_service(store).await;
     let scope = service.fixture_app(app_id);
+    let objects = objects::Objects::new();
     let worker = WorkerIdentity::new("cancelled-child".into()).unwrap();
     let parent = parent_awaiting_child(&service, &scope, &worker, json!({})).await;
     let child = accepted_child(&scope, &parent).await;
@@ -174,6 +183,22 @@ async fn cancelled_child(store: Rc<OrmStore>) {
     // request already standing. That is the one variable between them.
     let task = service.poll(&worker).await.unwrap().unwrap();
     assert_eq!(task.invocation.run_id, child);
+    let result = output_reference(CHILD_RESULT);
+    let staged = service
+        .stage_payload(
+            &worker,
+            &task.id,
+            &task.token,
+            &RequestId::mint(),
+            result.clone(),
+            objects.upload(CHILD_RESULT),
+        )
+        .await
+        .unwrap();
+    assert!(
+        objects.exists(scope.app_id(), &staged.id),
+        "the child's result has to exist for the empty join to mean anything"
+    );
     scope
         .transition(&RequestId::mint(), &child, RunOperation::Cancel)
         .await
@@ -183,13 +208,15 @@ async fn cancelled_child(store: Rc<OrmStore>) {
             &worker,
             &task.id,
             &task.token,
-            execution(json!([{"kind":"RunCompleted", "output":"child done"}])),
+            execution(json!([{"kind":"RunCompleted", "outputRef":result}])),
         )
         .await
         .unwrap();
-    assert_eq!(
-        scope.status(&child).await.unwrap().state,
-        RunState::Cancelled
+    let status = scope.status(&child).await.unwrap();
+    assert_eq!(status.state, RunState::Cancelled);
+    assert!(
+        status.output.is_none(),
+        "a cancelled run keeps no result, though this one staged and reported one"
     );
     deliver_propagations(&scope).await;
 
@@ -202,26 +229,41 @@ async fn cancelled_child(store: Rc<OrmStore>) {
         "{error}"
     );
     assert!(row.output.is_none(), "{row:?}");
+    assert!(row.output_ref.is_none(), "{row:?}");
 }
 
-/// The control differing in one variable: the same parent and the same join,
-/// whose child completes instead. Without it the case above would pass for an
-/// engine that fails every join, whatever it named the failure.
+/// The control differing in one variable: the same parent, the same join and
+/// the same staged result, whose child completes instead. Without it the case
+/// above would pass for an engine that fails every join, whatever it named the
+/// failure, and for one that never hands a parent anything at all.
 async fn completed_child(store: Rc<OrmStore>) {
     let (service, app_id, _, _deployments) = registered_service(store).await;
     let scope = service.fixture_app(app_id);
+    let objects = objects::Objects::new();
     let worker = WorkerIdentity::new("completed-child".into()).unwrap();
     let parent = parent_awaiting_child(&service, &scope, &worker, json!({})).await;
     let child = accepted_child(&scope, &parent).await;
 
     let task = service.poll(&worker).await.unwrap().unwrap();
     assert_eq!(task.invocation.run_id, child);
+    let result = output_reference(CHILD_RESULT);
+    service
+        .stage_payload(
+            &worker,
+            &task.id,
+            &task.token,
+            &RequestId::mint(),
+            result.clone(),
+            objects.upload(CHILD_RESULT),
+        )
+        .await
+        .unwrap();
     service
         .complete(
             &worker,
             &task.id,
             &task.token,
-            execution(json!([{"kind":"RunCompleted", "output":"child done"}])),
+            execution(json!([{"kind":"RunCompleted", "outputRef":result}])),
         )
         .await
         .unwrap();
@@ -229,7 +271,13 @@ async fn completed_child(store: Rc<OrmStore>) {
 
     let row = parent_join_row(&service, &worker, &parent).await;
     assert!(row.error.is_none(), "{row:?}");
-    assert_eq!(row.output, Some(json!("child done")), "{row:?}");
+    assert_eq!(row.output_ref.as_ref(), Some(&result), "{row:?}");
+    assert!(row.output.is_none(), "{row:?}");
+    assert_eq!(
+        scope.read_output(&child, objects.open()).await.unwrap(),
+        CHILD_RESULT,
+        "the descriptor the join carries opens the child's own bytes"
+    );
 }
 
 /// `ChildWorkflowOptions.timeout` bounds the join, not the child: the child is

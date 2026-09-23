@@ -152,9 +152,12 @@ export interface WorkflowStep {
 export type Step = WorkflowStep;
 
 /**
- * What `run.status()` reports for a blob-backed final output. The host serialises
- * the status reply as JSON, so this descriptor is inert data: it locates the blob
- * and carries no readers. The bytes come from `run.readOutput()`.
+ * What `run.status()` reports for a run's final output. The host serialises the
+ * status reply as JSON, so this descriptor is inert data: it locates the blob and
+ * carries no readers. The bytes come from `run.readOutput()`.
+ *
+ * Every result a run returns becomes a blob, whatever it weighs, so this is the
+ * only shape `status().output` takes. A run that returned nothing reports none.
  */
 export interface StatusOutputRef {
   readonly kind: "ref";
@@ -163,8 +166,6 @@ export interface StatusOutputRef {
   readonly size: number;
   readonly contentType?: string;
 }
-
-export type StatusOutput<T = unknown> = T | StatusOutputRef;
 
 export type WorkflowRunState =
   | "queued"
@@ -198,7 +199,7 @@ export interface WorkflowRun<Output = unknown> {
   signal(opts: { type: string; payload?: unknown; idempotencyKey?: string }): Promise<void>;
   status(): Promise<{
     state: WorkflowRunState;
-    output?: StatusOutput<Output>;
+    output?: StatusOutputRef;
     error?: unknown;
     /** The run id of the successor a `continuedAsNew` close handed this run's work to. */
     continuedAsNew?: string;

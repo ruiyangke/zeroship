@@ -113,6 +113,170 @@ async fn postgres_output_preparation_and_retryable_uploads() {
     output_contract(Rc::new(fixture.store.clone())).await;
 }
 
+#[compio::test]
+async fn sqlite_every_run_output_is_a_payload_reference() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("zs-workflow.sqlite");
+    schema::initialize_sqlite(&path).unwrap();
+    run_output_reference_contract(Rc::new(sqlite_store(&path).await)).await;
+}
+#[compio::test]
+async fn postgres_every_run_output_is_a_payload_reference() {
+    let fixture = PostgresFixture::start().await;
+    run_output_reference_contract(Rc::new(fixture.store.clone())).await;
+}
+
+/// A run's result is a payload object whatever it weighs, and a run that
+/// produced no result stages nothing.
+///
+/// Size decides nothing here: `{"ok":true}` sits far inside
+/// `LIMITS.max_inline_bytes`, which the first arm asserts rather than assumes,
+/// and it is staged anyway because the journal keeps no inline slot for a run
+/// result. The empty-handed run is the control that separates "every result is
+/// referenced" from "every close mints an object". The last arm holds the cost
+/// that buys: the object a completing run stages is spent against
+/// `max_payload_objects` like any other, so a tiny result is not free.
+async fn run_output_reference_contract(store: Rc<OrmStore>) {
+    let dir = tempfile::tempdir().unwrap();
+    let (service, app, other, _deployments) = registered_service(store.clone()).await;
+    let objects =
+        PayloadObjects::open(StorageStore::from_backend(Arc::new(LocalFs::new(dir.path()))))
+            .unwrap();
+    let scope = service.fixture_app(app.clone());
+    let tasks = service.tasks(
+        WorkerIdentity::new("run-output-writer".into()).unwrap(),
+        objects.clone(),
+    );
+
+    let value = json!({"ok":true});
+    let encoded = serde_json::to_vec(&value).unwrap();
+    assert!(
+        encoded.len() < LIMITS.max_inline_bytes,
+        "the forced value must be one the size rule would have kept inline"
+    );
+    let task = claim(&scope, &tasks).await;
+    let execution = prepare(&task, json!([{"kind":"RunCompleted","output":value}]))
+        .stage(&tasks)
+        .await
+        .unwrap();
+    let StepOutcome::RunCompleted { output, output_ref } = &execution.outcomes[0] else {
+        panic!("completed run required: {:?}", execution.outcomes[0])
+    };
+    assert!(output.is_none(), "a run result must not stay inline: {output:?}");
+    let descriptor = output_ref.clone().expect("a run result must be referenced");
+    assert_eq!(descriptor.size, i64::try_from(encoded.len()).unwrap());
+    assert_eq!(descriptor.content_type.as_deref(), Some("application/json"));
+    assert_eq!(stored_rows(store.as_ref(), &task).await, 1);
+    let receipt = tasks
+        .complete(&task.id, &task.token, execution)
+        .await
+        .unwrap();
+    assert_eq!(receipt.state, RunState::Completed);
+
+    // The descriptor `StatusOutputRef` declares in packages/workflows/src/index.ts.
+    assert_eq!(
+        scope.status(&receipt.run_id).await.unwrap().output,
+        Some(json!({
+            "kind":"ref",
+            "ref":format!("wfblob:sha256:{}", descriptor.hash),
+            "hash":descriptor.hash,
+            "size":descriptor.size,
+            "contentType":"application/json",
+        })),
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(
+            &scope
+                .payloads(&objects)
+                .read(&receipt.run_id, 0, PayloadSlot::Output)
+                .await
+                .unwrap()
+                .into_bytes(256)
+                .await
+                .unwrap()
+        )
+        .unwrap(),
+        value,
+    );
+
+    // The control: a run that produced no result references nothing and stages
+    // nothing, so the arm above measures the result and not the close.
+    let task = claim(&scope, &tasks).await;
+    let execution = prepare(&task, json!([{"kind":"RunCompleted"}]))
+        .stage(&tasks)
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            &execution.outcomes[0],
+            StepOutcome::RunCompleted {
+                output: None,
+                output_ref: None
+            }
+        ),
+        "{:?}",
+        execution.outcomes[0]
+    );
+    assert_eq!(stored_rows(store.as_ref(), &task).await, 0);
+    let receipt = tasks
+        .complete(&task.id, &task.token, execution)
+        .await
+        .unwrap();
+    assert_eq!(receipt.state, RunState::Completed);
+    assert_eq!(scope.status(&receipt.run_id).await.unwrap().output, None);
+
+    // The budget. A second app starts with no objects, so one completing run
+    // with a result spends its whole allowance.
+    let budgeted = service.fixture_app(other.clone());
+    service
+        .fixture_register(
+            &other,
+            leased_policy(
+                2,
+                AppPolicy {
+                    max_payload_objects: 1,
+                    ..AppPolicy::default()
+                },
+            ),
+        )
+        .await
+        .unwrap();
+    let task = claim(&budgeted, &tasks).await;
+    let spent = prepare(&task, json!([{"kind":"RunCompleted","output":value}]))
+        .stage(&tasks)
+        .await
+        .unwrap();
+    tasks
+        .complete(&task.id, &task.token, spent)
+        .await
+        .unwrap();
+    let task = claim(&budgeted, &tasks).await;
+    assert!(
+        matches!(
+            prepare(&task, json!([{"kind":"RunCompleted","output":value}]))
+                .stage(&tasks)
+                .await,
+            Err(WorkflowServiceError::ResourceExhausted(_))
+        ),
+        "a tiny run result must be charged against the object budget"
+    );
+    // The control for the budget: the same exhausted allowance still closes a
+    // run that produced no result, so the refusal above is the object and not
+    // the app being out of credit for everything.
+    let execution = prepare(&task, json!([{"kind":"RunCompleted"}]))
+        .stage(&tasks)
+        .await
+        .unwrap();
+    assert_eq!(
+        tasks
+            .complete(&task.id, &task.token, execution)
+            .await
+            .unwrap()
+            .state,
+        RunState::Completed
+    );
+}
+
 async fn output_contract(store: Rc<OrmStore>) {
     let dir = tempfile::tempdir().unwrap();
     let (service, app, other, _deployments) = registered_service(store.clone()).await;
@@ -125,12 +289,15 @@ async fn output_contract(store: Rc<OrmStore>) {
         objects.clone(),
     );
 
-    // An inline value needs no payload object, including JSON null.
+    // A step value inside the inline budget needs no payload object, including
+    // JSON null. The run's own result is outside that claim - it is staged
+    // whatever it weighs - so these batches close their run empty-handed and
+    // `every_run_output_is_a_payload_reference` holds the other half.
     for value in [json!({"small":true}), Value::Null] {
         let task = claim(&scope, &tasks).await;
         let prepared = prepare(
             &task,
-            json!([step(value.clone()), {"kind":"RunCompleted","output":value}]),
+            json!([step(value.clone()), {"kind":"RunCompleted"}]),
         );
         let execution = prepared.stage(&tasks).await.unwrap();
         assert_eq!(stored_rows(store.as_ref(), &task).await, 0);

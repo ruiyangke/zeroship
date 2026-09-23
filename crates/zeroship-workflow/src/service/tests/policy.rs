@@ -313,6 +313,23 @@ async fn host_policy_contract(store: Rc<OrmStore>) {
         .unwrap();
     let worker = WorkerIdentity::new("customer-worker".into()).unwrap();
     let task = service.poll(&worker).await.unwrap().unwrap();
+    // Staging is admitted under the same authority as every other write, so the
+    // creator result reaches the object store while the lease is still live.
+    // What expiry is then asked about is the commit that names it.
+    const RETAINED: &[u8] = br#"{"customer":"retained"}"#;
+    let objects = Objects::new();
+    let retained = output_reference(RETAINED);
+    service
+        .stage_payload(
+            &worker,
+            &task.id,
+            &task.token,
+            &RequestId::mint(),
+            retained.clone(),
+            objects.upload(RETAINED),
+        )
+        .await
+        .unwrap();
     let expired =
         PolicySnapshot::lease(2.try_into().unwrap(), AppPolicy::default(), Instant::now()).unwrap();
     service
@@ -346,13 +363,20 @@ async fn host_policy_contract(store: Rc<OrmStore>) {
             &worker,
             &task.id,
             &task.token,
-            execution(json!([{"kind":"RunCompleted","output":{"customer":"retained"}}])),
+            execution(json!([{"kind":"RunCompleted","outputRef":retained}])),
         )
         .await
         .unwrap();
     let status = scope.status(&run.id).await.unwrap();
     assert_eq!(status.state, RunState::Completed);
-    assert_eq!(status.output, Some(json!({"customer":"retained"})));
+    assert_eq!(
+        status.output,
+        Some(json!({
+            "kind":"ref", "ref":format!("wfblob:sha256:{}", retained.hash),
+            "hash":retained.hash, "size":retained.size, "contentType":retained.content_type,
+        })),
+        "an expired lease still let the live task commit its creator result"
+    );
     assert!(service
         .fixture_app(other)
         .start(&RequestId::mint(), "Example", StartOptions::default())
@@ -410,6 +434,12 @@ async fn host_policy_contract(store: Rc<OrmStore>) {
         .start(&RequestId::mint(), "Example", StartOptions::default())
         .await
         .is_ok());
+    // Authority is live again, so the committed descriptor opens the bytes the
+    // creator returned: history survived the expiry whole, not just as a row.
+    assert_eq!(
+        scope.read_output(&run.id, objects.open()).await.unwrap(),
+        RETAINED
+    );
 }
 
 #[compio::test]

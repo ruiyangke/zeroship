@@ -9,6 +9,7 @@ paired!(
 async fn pending_corruption(store: Rc<OrmStore>) {
     let (service, app_id, foreign, _deployments) = registered_service(store).await;
     let scope = service.fixture_app(app_id.clone());
+    let objects = Objects::new();
     let worker = WorkerIdentity::new("continuation-corruption".into()).unwrap();
     let owner = parent(&service, &scope, &worker, None).await;
     let (child, accepted) = accepted(&scope, &owner).await;
@@ -27,19 +28,39 @@ async fn pending_corruption(store: Rc<OrmStore>) {
     let tx = service.begin().await.unwrap();
     set_head_revision(&tx, &member.head_id, member.revision).await;
     tx.commit().await.unwrap();
+    const REPAIRED: &[u8] = br#""repaired""#;
+    let repaired = output_reference(REPAIRED);
+    service
+        .stage_payload(
+            &worker,
+            &task.id,
+            &task.token,
+            &RequestId::mint(),
+            repaired.clone(),
+            objects.upload(REPAIRED),
+        )
+        .await
+        .unwrap();
     service
         .complete(
             &worker,
             &task.id,
             &task.token,
-            execution(json!([{"kind":"RunCompleted", "output":"repaired"}])),
+            execution(json!([{"kind":"RunCompleted", "outputRef":repaired}])),
         )
         .await
         .unwrap();
     assert_eq!(deliver_propagations(&scope).await.len(), 1);
     let parent = service.poll(&worker).await.unwrap().unwrap();
     assert_eq!(parent.invocation.run_id, owner);
-    assert_eq!(parent.invocation.journal[0].output, Some(json!("repaired")));
+    assert_eq!(
+        parent.invocation.journal[0].output_ref.as_ref(),
+        Some(&repaired)
+    );
+    assert_eq!(
+        scope.read_output(&child, objects.open()).await.unwrap(),
+        REPAIRED
+    );
 }
 
 // PostgreSQL refuses a child checkpoint without its accepted member, so no
@@ -112,7 +133,7 @@ async fn refuses_completion(
                 worker,
                 &task.id,
                 &task.token,
-                execution(json!([{"kind":"RunCompleted", "output":"must roll back"}]))
+                execution(json!([{"kind":"RunCompleted"}]))
             )
             .await,
         Err(WorkflowServiceError::Internal(_))

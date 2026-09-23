@@ -278,7 +278,7 @@ async fn prefix_receipt_contract(store: Rc<OrmStore>) {
             execution(json!([
                 {"kind":"StepCompleted","ordinal":0,"name":"keep","output":1},
                 {"kind":"StepCompleted","ordinal":1,"name":"redo","output":2},
-                {"kind":"RunCompleted","output":"original"}
+                {"kind":"RunCompleted"}
             ])),
         )
         .await
@@ -670,7 +670,7 @@ async fn finish(service: &WorkflowService, app_id: &AppId, run_id: &str) {
     app::lock_app(&mut tx, app_id).await.unwrap();
     let run = app::lock_run(&mut tx, app_id, run_id).await.unwrap();
     let now = tx.now().await.unwrap();
-    frontier::finish(&mut tx, app_id, &run, RunState::Completed, None, None, now)
+    frontier::finish(&mut tx, app_id, &run, RunState::Completed, None, now)
         .await
         .unwrap();
     tx.commit().await.unwrap();

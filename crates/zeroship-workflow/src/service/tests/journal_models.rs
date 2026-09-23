@@ -17,6 +17,19 @@ struct GenerationLifecycle {
     terminal_at: Option<i64>,
 }
 
+/// The bytes one generation's result is stored as. Distinct per app scope and
+/// per generation, so a status read that followed the wrong row reports a
+/// descriptor that does not match.
+fn result(scope: usize, generation: i64) -> Vec<u8> {
+    serde_json::to_vec(&json!({"scope":scope, "generation":generation})).unwrap()
+}
+
+/// A run's result lives in an object, so the generation row carries only its
+/// descriptor. This is the column text the service decodes it from.
+fn stored_reference(scope: usize, generation: i64) -> String {
+    serde_json::to_string(&output_reference(&result(scope, generation))).unwrap()
+}
+
 #[compio::test]
 async fn sqlite_model_journal_reads_preserve_scope_and_complete_history() {
     let directory = tempfile::tempdir().unwrap();
@@ -70,7 +83,7 @@ async fn read_contract(store: Rc<OrmStore>) {
             .update(
                 value!({"app_id":app_id.as_str(), "run_id":*run_id, "generation":0}),
                 value!({"state":"completed", "terminal_at":now,
-                "output":json!({"scope":scope, "generation":0}).to_string()}),
+                "output_ref":stored_reference(scope, 0)}),
             )
             .await
             .unwrap();
@@ -91,7 +104,7 @@ async fn read_contract(store: Rc<OrmStore>) {
                 "id":storage_id(), "app_id":app_id.as_str(), "run_id":*run_id, "generation":1, "deploy_id":deploy.id,
                 "input":json!({"scope":scope, "generation":1}).to_string(),
                 "state":"completed", "started_at":now, "terminal_at":now,
-                "output":json!({"scope":scope, "generation":1}).to_string(),
+                "output_ref":stored_reference(scope, 1),
             }))
             .await
             .unwrap();
@@ -206,9 +219,14 @@ async fn read_contract(store: Rc<OrmStore>) {
                 .await
                 .unwrap();
             assert_eq!(status.state, crate::operations::RunState::Completed);
+            let reference = output_reference(&result(scope, generation));
             assert_eq!(
                 status.output,
-                Some(json!({"scope":scope, "generation":generation}))
+                Some(json!({
+                    "kind":"ref", "ref":format!("wfblob:sha256:{}", reference.hash),
+                    "hash":reference.hash, "size":reference.size,
+                    "contentType":reference.content_type,
+                }))
             );
             let mut tx = service.begin().await.unwrap();
             app::lock_app(&mut tx, app_id).await.unwrap();

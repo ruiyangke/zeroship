@@ -5,8 +5,12 @@
 
 use super::*;
 use crate::{
+    engine::WorkflowOutputRef,
     operations::{RestartOptions, RunOperation, RunState},
-    service::{app, continuations, frontier, journal, models, AppWorkflows, WorkerIdentity},
+    service::{
+        app, continuations, frontier, journal, models, tests::objects::Objects, AppWorkflows,
+        WorkerIdentity,
+    },
 };
 use std::collections::BTreeMap;
 use zeroship_data_orm::orm::FindOptions;
@@ -157,23 +161,42 @@ async fn continue_run(
     status.continued_as_new_run_id.unwrap()
 }
 
+/// Close `expected` on the result `output` holds, staged through the same path
+/// an executor uses, and hand back the descriptor the journal carries for it.
+///
+/// A run's result is a payload object, so the bytes have to reach the store
+/// before the completion can name them.
 async fn finish_run(
     service: &WorkflowService,
+    objects: &Objects,
     worker: &WorkerIdentity,
     expected: &str,
-    output: &str,
-) {
+    output: &'static [u8],
+) -> WorkflowOutputRef {
     let task = service.poll(worker).await.unwrap().unwrap();
     assert_eq!(task.invocation.run_id, expected);
+    let reference = output_reference(output);
+    service
+        .stage_payload(
+            worker,
+            &task.id,
+            &task.token,
+            &RequestId::mint(),
+            reference.clone(),
+            objects.upload(output),
+        )
+        .await
+        .unwrap();
     service
         .complete(
             worker,
             &task.id,
             &task.token,
-            execution(json!([{"kind":"RunCompleted", "output":output}])),
+            execution(json!([{"kind":"RunCompleted", "outputRef":reference}])),
         )
         .await
         .unwrap();
+    reference
 }
 
 /// The parent's own rows, beside the frontier intents its run is named by. The
@@ -205,6 +228,7 @@ async fn parent_state(service: &WorkflowService, app: &AppId, parent: &str) -> P
 async fn pending_targets(store: Rc<OrmStore>) {
     let (service, app_id, _, _deployments) = registered_service(store).await;
     let scope = service.fixture_app(app_id.clone());
+    let objects = Objects::new();
     let worker = WorkerIdentity::new("stable-pending-joins".into()).unwrap();
     let owner = parent(&service, &scope, &worker, Some("shared")).await;
     let (child, identity) = accepted(&scope, &owner).await;
@@ -233,14 +257,19 @@ async fn pending_targets(store: Rc<OrmStore>) {
     assert_eq!(run.integer("cascade").unwrap(), 1);
     assert_eq!(run.integer("depth").unwrap(), 1);
     tx.commit().await.unwrap();
-    finish_run(&service, &worker, &head, "terminal head").await;
+    let result = finish_run(&service, &objects, &worker, &head, br#""terminal head""#).await;
     // The paused owner is not woken; it resolves the child when resumed.
     assert_eq!(deliver_propagations(&scope).await.len(), 1);
     let resumed = service.poll(&worker).await.unwrap().unwrap();
     assert_eq!(resumed.invocation.run_id, joiner);
     assert_eq!(
-        resumed.invocation.journal[0].output,
-        Some(json!("terminal head"))
+        resumed.invocation.journal[0].output_ref.as_ref(),
+        Some(&result)
+    );
+    assert!(resumed.invocation.journal[0].output.is_none());
+    assert_eq!(
+        scope.read_output(&head, objects.open()).await.unwrap(),
+        br#""terminal head""#
     );
     assert_eq!(
         resumed.invocation.journal[0].child_run_id.as_deref(),
@@ -252,6 +281,7 @@ async fn pending_targets(store: Rc<OrmStore>) {
 async fn restart_heads(store: Rc<OrmStore>) {
     let (service, app_id, _, _deployments) = registered_service(store).await;
     let scope = service.fixture_app(app_id.clone());
+    let objects = Objects::new();
     let worker = WorkerIdentity::new("restart-heads".into()).unwrap();
     let parent = parent(&service, &scope, &worker, None).await;
     let (source, accepted_id) = accepted(&scope, &parent).await;
@@ -274,7 +304,14 @@ async fn restart_heads(store: Rc<OrmStore>) {
     assert_ne!(original.head_id, restarted.head_id);
     assert!(!original.is_current);
     tx.commit().await.unwrap();
-    finish_run(&service, &worker, &source, "independent historical restart").await;
+    finish_run(
+        &service,
+        &objects,
+        &worker,
+        &source,
+        br#""independent historical restart""#,
+    )
+    .await;
     assert_eq!(parent_state(&service, &app_id, &parent).await, saved);
     scope
         .restart(&RequestId::mint(), &next, RestartOptions::default())
@@ -286,13 +323,18 @@ async fn restart_heads(store: Rc<OrmStore>) {
     assert_eq!(current.head_id, original.head_id);
     assert!(current.is_current);
     tx.commit().await.unwrap();
-    finish_run(&service, &worker, &next, "restarted head").await;
+    let result = finish_run(&service, &objects, &worker, &next, br#""restarted head""#).await;
     transition(&scope, &parent, RunOperation::Resume).await;
     let resumed = service.poll(&worker).await.unwrap().unwrap();
     assert_eq!(resumed.invocation.run_id, parent);
     assert_eq!(
-        resumed.invocation.journal[0].output,
-        Some(json!("restarted head"))
+        resumed.invocation.journal[0].output_ref.as_ref(),
+        Some(&result)
+    );
+    assert!(resumed.invocation.journal[0].output.is_none());
+    assert_eq!(
+        scope.read_output(&next, objects.open()).await.unwrap(),
+        br#""restarted head""#
     );
 }
 
@@ -529,35 +571,49 @@ async fn compensable_carry(store: Rc<OrmStore>) {
 }
 
 /// The successor a continuation mints is PLATFORM data, so it has a column of
-/// its own and the creator's output column is left to the creator.
+/// its own and nothing a creator returns can reach it.
 ///
 /// The control differs in the transition alone. Both runs are the same
 /// workflow under the same deployment; one reports `ContinueAsNew` and one
-/// reports `RunCompleted` whose creator output is an object with a
+/// reports `RunCompleted` over a staged result that is an object with a
 /// `continuedAsNew` key naming a real run. Reading the typed field is what
 /// tells them apart: a creator cannot mint a successor by returning a shape,
 /// and a continuation cannot be mistaken for a creator result.
 async fn successor_is_platform_typed(store: Rc<OrmStore>) {
     let (service, app_id, _, _deployments) = registered_service(store).await;
     let scope = service.fixture_app(app_id.clone());
+    let objects = Objects::new();
     let worker = WorkerIdentity::new("successor-is-typed".into()).unwrap();
 
     // The forgery: a creator return value carrying a `continuedAsNew` key over
-    // a well-formed run id the creator minted for itself. It is a plain result
-    // and the column it lands in is the whole of what says so.
+    // a well-formed run id the creator minted for itself. It is a plain result,
+    // and the payload object it lands in is the whole of what says so.
     let forged = json!({"continuedAsNew": typed_id::new_workflow_run_id()});
+    let body = serde_json::to_vec(&forged).unwrap();
     let completed = scope
         .start(&RequestId::mint(), "Example", StartOptions::default())
         .await
         .unwrap();
     let task = service.poll(&worker).await.unwrap().unwrap();
     assert_eq!(task.invocation.run_id, completed.id);
+    let reference = output_reference(&body);
+    service
+        .stage_payload(
+            &worker,
+            &task.id,
+            &task.token,
+            &RequestId::mint(),
+            reference.clone(),
+            objects.upload(&body),
+        )
+        .await
+        .unwrap();
     service
         .complete(
             &worker,
             &task.id,
             &task.token,
-            execution(json!([{"kind":"RunCompleted", "output":forged}])),
+            execution(json!([{"kind":"RunCompleted", "outputRef":reference}])),
         )
         .await
         .unwrap();
@@ -565,12 +621,18 @@ async fn successor_is_platform_typed(store: Rc<OrmStore>) {
     assert_eq!(
         completed_status.state,
         RunState::Completed,
-        "a creator output shaped like a continuation is still a completion"
+        "a creator result shaped like a continuation is still a completion"
     );
     assert_eq!(
-        completed_status.output.as_ref(),
-        Some(&forged),
-        "the creator output round-trips unread"
+        serde_json::from_slice::<serde_json::Value>(
+            &scope
+                .read_output(&completed.id, objects.open())
+                .await
+                .unwrap()
+        )
+        .unwrap(),
+        forged,
+        "the creator result round-trips unread"
     );
     assert_eq!(
         completed_status.continued_as_new_run_id, None,
@@ -602,6 +664,7 @@ async fn successor_is_platform_typed(store: Rc<OrmStore>) {
 async fn continued_is_terminal(store: Rc<OrmStore>) {
     let (service, app_id, _, _deployments) = registered_service(store).await;
     let scope = service.fixture_app(app_id.clone());
+    let objects = Objects::new();
     let worker = WorkerIdentity::new("continued-is-terminal".into()).unwrap();
 
     let idle = live(&service, &app_id).await;
@@ -624,7 +687,7 @@ async fn continued_is_terminal(store: Rc<OrmStore>) {
         RunState::TERMINAL.contains(&stored_state(&service, &app_id, &first.id).await.as_str()),
         "the state the journal stores for a continued run is one of the terminal names"
     );
-    finish_run(&service, &worker, &successor, "done").await;
+    finish_run(&service, &objects, &worker, &successor, br#""done""#).await;
     assert_eq!(
         live(&service, &app_id).await,
         idle,

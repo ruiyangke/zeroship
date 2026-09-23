@@ -355,6 +355,23 @@ async fn state(backend: &AppBackend, run: &str, expected: RunState) -> RunStatus
     .await
 }
 
+/// What a run returned, read back from the payload object it was staged into.
+///
+/// A run's result reaches the journal as a descriptor, so `status` names the
+/// object and the bytes come from the store. Both halves are held here: the
+/// descriptor `status` hands out is a reference, and it is the one whose object
+/// holds these bytes.
+async fn returned_value(backend: &AppBackend, run: &str) -> serde_json::Value {
+    let described = state(backend, run, RunState::Completed)
+        .await
+        .output
+        .expect("a run that returned a value names the payload holding it");
+    assert_eq!(described["kind"], "ref", "{described}");
+    let bytes = backend.read_output(run.into()).await.unwrap();
+    assert_eq!(described["size"], json!(bytes.len()), "{described}");
+    serde_json::from_slice(&bytes).unwrap()
+}
+
 async fn signal(backend: &AppBackend, run: &str) {
     retry(async || {
         backend
@@ -423,8 +440,8 @@ async fn delivered_activation_selects_the_archive_and_runs_complete_through_the_
     published(&creator).await;
     signal(&host.backend, &run).await;
     assert_eq!(
-        state(&host.backend, &run, RunState::Completed).await.output,
-        Some(json!("original:original:lazy"))
+        returned_value(&host.backend, &run).await,
+        json!("original:original:lazy")
     );
     // The workflow thread ran metered app isolates, yet delivery kept working:
     // platform metadata never runs under the app's thread-local meter.
@@ -476,8 +493,8 @@ async fn sleeping_run_resumes_from_queue_metadata_after_restart() {
     state(&host.backend, &run, RunState::Waiting).await;
     signal(&host.backend, &run).await;
     assert_eq!(
-        state(&host.backend, &run, RunState::Completed).await.output,
-        Some(json!("original:original:lazy"))
+        returned_value(&host.backend, &run).await,
+        json!("original:original:lazy")
     );
 }
 
@@ -528,10 +545,7 @@ async fn republished_bundle_activates_while_existing_runs_keep_their_pins() {
         (&new, "replacement:replacement:lazy"),
     ] {
         signal(&host.backend, run).await;
-        assert_eq!(
-            state(&host.backend, run, RunState::Completed).await.output,
-            Some(json!(expected))
-        );
+        assert_eq!(returned_value(&host.backend, run).await, json!(expected));
     }
 }
 
@@ -607,8 +621,8 @@ async fn idle_responsibility_retires_and_the_next_acceptance_reopens_it() {
     state(&host.backend, &run, RunState::Waiting).await;
     signal(&host.backend, &run).await;
     assert_eq!(
-        state(&host.backend, &run, RunState::Completed).await.output,
-        Some(json!("original:original:lazy"))
+        returned_value(&host.backend, &run).await,
+        json!("original:original:lazy")
     );
     let idle = until(async || {
         responsibility(root.path(), &app)
@@ -925,8 +939,8 @@ async fn lost_acknowledgement_replays_the_committed_turn_without_executing_again
     state(&host.backend, &run, RunState::Waiting).await;
     signal(&host.backend, &run).await;
     assert_eq!(
-        state(&host.backend, &run, RunState::Completed).await.output,
-        Some(json!("original:original:lazy"))
+        returned_value(&host.backend, &run).await,
+        json!("original:original:lazy")
     );
     // The lost first attempt keeps its manager lease until expiry, which can
     // outlast the run's later turns. Its redelivery then settles the receipt.

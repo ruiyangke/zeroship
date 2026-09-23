@@ -103,9 +103,10 @@ impl TaskExecution for Execution {
                 }));
             }
         }
-        WorkflowExecution::from_runtime_value(
-            json!({"outcomes":[{"kind":"RunCompleted","output":{"done":true}}]}),
-        )
+        // The canned dispatch closes its run and returns nothing. A result
+        // would have to be a staged payload object, and a fixture that stands
+        // in for the runtime never reaches the transport that stages one.
+        WorkflowExecution::from_runtime_value(json!({"outcomes":[{"kind":"RunCompleted"}]}))
     }
     fn cancel(&mut self) {
         self.probe.record("cancel");

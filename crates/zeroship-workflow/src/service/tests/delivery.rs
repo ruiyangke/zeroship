@@ -9,7 +9,7 @@ use crate::service::{
         attempt_budget, creator_deadline, CapturedLease, DeliveredTask, JobAcceptance,
         ATTEMPT_IO_CEILING,
     },
-    AppWorkflows, WorkerIdentity,
+    AppWorkflows, StepOutput, WorkerIdentity,
 };
 use std::time::{Duration, Instant};
 use zeroship_core::{
@@ -849,8 +849,17 @@ async fn receipts(store: Rc<OrmStore>) {
         Err(WorkflowServiceError::Conflict(_))
     ));
 
-    let execution =
-        execution(json!([{"kind":"RunCompleted", "output":{"private":"creator-output"}}]));
+    // A creator value the receipt must not carry. A run's result is a payload
+    // object the receipt has no room for either way, so the marker rides where
+    // an inline creator value still crosses this call: a step output in the
+    // reported batch. A receipt that echoed what the executor reported would
+    // carry it.
+    let objects = objects::Objects::new();
+    let execution = execution(json!([
+        {"kind":"StepCompleted", "ordinal":0, "name":"settle", "nameOccurrence":0,
+         "output":{"private":"creator-output"}},
+        {"kind":"RunCompleted"}
+    ]));
     let receipt = scope
         .complete_job(&claimed, &grant, execution.clone())
         .await
@@ -860,6 +869,16 @@ async fn receipts(store: Rc<OrmStore>) {
     assert!(!serde_json::to_string(&receipt)
         .unwrap()
         .contains("creator-output"));
+    // The marker reached the journal, so the empty receipt is one that withheld
+    // a creator value rather than one the creator never reported.
+    let StepOutput::Inline(stored) = scope
+        .read_step_output(&run.id, "settle", 0, objects.open())
+        .await
+        .unwrap()
+    else {
+        panic!("a step this small stays in the journal")
+    };
+    assert_eq!(stored, json!({"private":"creator-output"}));
     let mut expired = ProbeLease::copy(&grant);
     expired.expires = Instant::now();
     assert_eq!(
@@ -874,7 +893,7 @@ async fn receipts(store: Rc<OrmStore>) {
             .complete_job(
                 &claimed,
                 &expired,
-                super::execution(json!([{"kind":"RunCompleted", "output":"changed"}]))
+                super::execution(json!([{"kind":"RunCompleted"}]))
             )
             .await,
         Err(WorkflowServiceError::Conflict(_))
@@ -909,6 +928,7 @@ async fn retained_history(
     let tx = service.begin().await.unwrap();
     for table in [
         "tasks",
+        "steps",
         "continuation_members",
         "continuation_heads",
         "generations",

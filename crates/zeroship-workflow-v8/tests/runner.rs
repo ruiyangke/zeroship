@@ -313,6 +313,33 @@ async fn prepare_payload(fixture: &Fixture, continuation: bool) -> String {
     receipt.run_id
 }
 
+/// What a run returned, read back from the payload object it was staged into.
+///
+/// A run's result reaches the journal as a descriptor, so `status` names the
+/// object and the bytes come from the store. Both halves are asserted here:
+/// the descriptor status hands out is the one whose object holds these bytes.
+async fn returned_value(fixture: &Fixture, run: &str) -> serde_json::Value {
+    let described = fixture
+        .app
+        .status(run)
+        .await
+        .unwrap()
+        .output
+        .expect("a run that returned a value names the payload holding it");
+    assert_eq!(described["kind"], "ref", "{described}");
+    let bytes = fixture
+        .app
+        .payloads(&fixture.objects)
+        .read(run, 0, PayloadSlot::Output)
+        .await
+        .unwrap()
+        .into_bytes(4096)
+        .await
+        .unwrap();
+    assert_eq!(described["size"], json!(bytes.len()), "{described}");
+    serde_json::from_slice(&bytes).unwrap()
+}
+
 #[compio::test]
 async fn native_runner_reads_replay_payloads_through_its_task_authority() {
     let fixture = Fixture::new(
@@ -331,8 +358,8 @@ async fn native_runner_reads_replay_payloads_through_its_task_authority() {
     assert_eq!(done.run_id, run);
     assert_eq!(done.state, RunState::Completed);
     assert_eq!(
-        fixture.app.status(&run).await.unwrap().output,
-        Some(json!({"secret":"retained"}))
+        returned_value(&fixture, &run).await,
+        json!({"secret":"retained"})
     );
     fixture.assert_disposed().await;
 }
@@ -345,8 +372,8 @@ async fn native_runner_hydrates_continuation_input_before_entering_v8() {
     let done = advance_until_suspended(&mut fixture.runner(Duration::from_secs(5))).await;
     assert_eq!(done.state, RunState::Completed);
     assert_eq!(
-        fixture.app.status(&done.run_id).await.unwrap().output,
-        Some(json!({"secret":"retained"}))
+        returned_value(&fixture, &done.run_id).await,
+        json!({"secret":"retained"})
     );
     fixture.assert_disposed().await;
 }
@@ -448,8 +475,8 @@ async fn payload_outage_interrupts_app_code_and_leaves_the_frontier_retryable() 
     let done = advance_until_suspended(&mut fixture.runner(Duration::from_secs(5))).await;
     assert_eq!(done.state, RunState::Completed);
     assert_eq!(
-        fixture.app.status(&run).await.unwrap().output,
-        Some(json!({"secret":"retained"}))
+        returned_value(&fixture, &run).await,
+        json!({"secret":"retained"})
     );
     fixture.assert_disposed().await;
 }
@@ -563,15 +590,17 @@ async fn output_upload_retry_preserves_the_callback_and_stops_background_app_wor
     let mut runner = RunnerSlot::new(tasks, executor, Duration::from_secs(5)).unwrap();
     let done = advance_until_suspended(&mut runner).await;
     assert_eq!(done.state, RunState::Completed);
-    assert_eq!(
-        fixture.app.status(&run.id).await.unwrap().output,
-        Some(json!(64))
-    );
+    assert_eq!(returned_value(&fixture, &run.id).await, json!(64));
     assert_eq!(*fixture.loader.markers.0.lock().unwrap(), ["callback"]);
     {
         let requests = upload.requests.borrow();
-        assert_eq!(requests.len(), 2);
+        // The step's upload carries one identity across the lost receipt, so
+        // the retry is the same request rather than a second payload. The run's
+        // own output is staged under an identity of its own, which is what
+        // makes the repeated pair a retry and not just two uploads.
+        assert_eq!(requests.len(), 3);
         assert_eq!(requests[0], requests[1]);
+        assert_ne!(requests[1], requests[2]);
     }
     let bytes = fixture
         .app
@@ -708,7 +737,7 @@ async fn inline_output_limit_commits_a_terminal_workflow_failure() {
 
 /// Drive one body that catches whatever its own step raises, over an output of
 /// the given length, and report where the run rested and what it returned.
-async fn caught_step_output(length: usize) -> (RunState, Option<serde_json::Value>) {
+async fn caught_step_output(length: usize) -> (RunState, serde_json::Value) {
     let fixture = Fixture::new(&format!(
         r"
         export class Example {{
@@ -730,7 +759,7 @@ async fn caught_step_output(length: usize) -> (RunState, Option<serde_json::Valu
         .unwrap();
     let mut runner = fixture.runner_with_output_limits(Duration::from_secs(5), OUTPUT_LIMITS);
     let state = advance_until_suspended(&mut runner).await.state;
-    let output = fixture.app.status(&run.id).await.unwrap().output;
+    let output = returned_value(&fixture, &run.id).await;
     fixture.assert_disposed().await;
     (state, output)
 }
@@ -741,7 +770,7 @@ async fn an_oversized_step_output_reaches_the_body_as_that_step_failing() {
     // and a catch around it can take another path the run completes on.
     assert_eq!(
         caught_step_output(64).await,
-        (RunState::Completed, Some(json!("LimitExceededError")))
+        (RunState::Completed, json!("LimitExceededError"))
     );
 }
 
@@ -751,7 +780,7 @@ async fn a_step_output_inside_the_inline_budget_never_reaches_the_catch() {
     // differing only in whether the output clears the inline budget.
     assert_eq!(
         caught_step_output(8).await,
-        (RunState::Completed, Some(json!("xxxxxxxx")))
+        (RunState::Completed, json!("xxxxxxxx"))
     );
 }
 
@@ -921,8 +950,8 @@ async fn native_runner_awaits_creator_startup_before_committing_the_frontier() {
     assert_eq!(receipt.run_id, run.id);
     assert_eq!(receipt.state, RunState::Completed);
     assert_eq!(
-        fixture.app.status(&run.id).await.unwrap().output,
-        Some(json!({"squared":49}))
+        returned_value(&fixture, &run.id).await,
+        json!({"squared":49})
     );
     fixture.assert_disposed().await;
 }
@@ -997,8 +1026,8 @@ async fn replay_loads_retained_dependencies_after_redeploy_and_host_restart() {
         } else {
             assert_eq!(receipt.state, RunState::Completed);
             assert_eq!(
-                fixture.app.status(&run.id).await.unwrap().output,
-                Some(json!({"before":version,"after":version}))
+                returned_value(&fixture, &run.id).await,
+                json!({"before":version,"after":version})
             );
         }
     }
@@ -1048,8 +1077,8 @@ async fn replay_loads_retained_dependencies_after_redeploy_and_host_restart() {
     assert_eq!(receipt.run_id, old_run);
     assert_eq!(receipt.state, RunState::Completed);
     assert_eq!(
-        fixture.app.status(&old_run).await.unwrap().output,
-        Some(json!({"before":"original","after":"original"}))
+        returned_value(&fixture, &old_run).await,
+        json!({"before":"original","after":"original"})
     );
     fixture.assert_disposed().await;
 }
@@ -1335,8 +1364,8 @@ async fn delivered_jobs_resume_v8_without_a_request_isolate() {
     .await
     .expect("delivered jobs did not resume the durable signal wait");
     assert_eq!(
-        fixture.app.status(&run.id).await.unwrap().output,
-        Some(json!({"accepted":true}))
+        returned_value(&fixture, &run.id).await,
+        json!({"accepted":true})
     );
     fixture.assert_disposed().await;
 }
@@ -1437,8 +1466,8 @@ async fn native_runner_reloads_v8_to_resume_a_durable_signal_wait() {
     let done = advance_until_suspended(&mut runner).await;
     assert_eq!(done.state, RunState::Completed);
     assert_eq!(
-        fixture.app.status(&run.id).await.unwrap().output,
-        Some(json!({"prepared":{"ready":true},"payload":{"accepted":true}}))
+        returned_value(&fixture, &run.id).await,
+        json!({"prepared":{"ready":true},"payload":{"accepted":true}})
     );
     assert!(fixture.loader.probes.borrow().len() > before_signal);
     fixture.assert_disposed().await;
@@ -1498,10 +1527,7 @@ async fn native_runner_timeout_disposes_v8_before_reusing_its_slot() {
         .unwrap();
     let done = advance_until_suspended(&mut runner).await;
     assert_eq!(done.run_id, next.id);
-    assert_eq!(
-        fixture.app.status(&next.id).await.unwrap().output,
-        Some(json!("finished"))
-    );
+    assert_eq!(returned_value(&fixture, &next.id).await, json!("finished"));
     fixture.assert_disposed().await;
 }
 

@@ -188,15 +188,23 @@ impl PreparedExecution {
             // against the step that produced it, and that step's identity is
             // still here while the outcome is.
             let step = limit_step(&outcome);
-            let (value, reference, can_reference) = match &mut outcome {
+            let (value, reference, can_reference, forced) = match &mut outcome {
                 StepOutcome::StepCompleted {
                     output,
                     output_ref,
                     step_kind,
                     ..
-                } => (output, output_ref, step_kind == "run"),
-                StepOutcome::RunCompleted { output, output_ref } => (output, output_ref, true),
-                StepOutcome::ContinueAsNew { input, input_ref } => (input, input_ref, true),
+                } => (output, output_ref, step_kind == "run", false),
+                // The journal has no inline slot for a run's final output, so
+                // every value a run returns is staged, whatever it weighs. A run
+                // that returned nothing stages nothing: an absent descriptor is
+                // the whole record of it, and minting an object for `null` would
+                // spend an app's payload budget on the absence of a result.
+                StepOutcome::RunCompleted { output, output_ref } => {
+                    let forced = output.is_some();
+                    (output, output_ref, true, forced)
+                }
+                StepOutcome::ContinueAsNew { input, input_ref } => (input, input_ref, true, false),
                 _ => {
                     result.outcomes.push(outcome);
                     continue;
@@ -221,7 +229,14 @@ impl PreparedExecution {
                 result.outcomes.push(limit_failure(step));
                 break;
             }
-            if can_reference && (mode.requires_reference() || bytes.len() > limits.max_inline_bytes)
+            // A forced value never trips the refusal above. That refusal's
+            // second clause wants either an explicit `inline` mode, which a run
+            // output cannot carry because an output configuration is refused
+            // unless it names a `run` step, or an outcome that cannot reference
+            // at all, which a run output is not. Its first clause, the platform
+            // payload ceiling, still applies.
+            if can_reference
+                && (forced || mode.requires_reference() || bytes.len() > limits.max_inline_bytes)
             {
                 let descriptor = WorkflowOutputRef {
                     hash: zeroship_workflow::service::hash(&bytes),
