@@ -120,6 +120,7 @@ async fn contract(store: Rc<OrmStore>, fault: Fault) {
             "Example",
             &deploy.id,
             &StartOptions::default(),
+            None,
             now,
         )
         .await

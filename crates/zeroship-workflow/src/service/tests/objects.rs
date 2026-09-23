@@ -258,6 +258,58 @@ impl crate::StepOutputReader for StepOutputs {
     }
 }
 
+/// The host's start-input staging over this store, standing in for the object
+/// writer the workflow host supplies in production.
+#[async_trait::async_trait(?Send)]
+impl crate::InputStager for Objects {
+    async fn stage_input(
+        &self,
+        api: &crate::service::AppWorkflows,
+        request: &crate::service::RequestId,
+        input: &serde_json::Value,
+    ) -> Result<WorkflowOutputRef, WorkflowServiceError> {
+        let bytes = serde_json::to_vec(input).map_err(|_| {
+            WorkflowServiceError::InvalidRequest("invalid workflow run input".into())
+        })?;
+        let reference = WorkflowOutputRef {
+            hash: format!("{:x}", Sha256::digest(&bytes)),
+            size: i64::try_from(bytes.len()).map_err(|_| WorkflowServiceError::PayloadTooLarge)?,
+            content_type: Some("application/json".into()),
+        };
+        api.stage_input(request, reference.clone(), self.upload(&bytes))
+            .await?;
+        Ok(reference)
+    }
+}
+
+impl Objects {
+    /// This store as the seam a backend stages start inputs through.
+    pub fn stager(&self) -> crate::SharedInputStager {
+        Arc::new(self.clone())
+    }
+
+    /// The object `input` becomes, ready to be named by a start.
+    ///
+    /// A host stages a caller's start value before the journal ever sees it, so
+    /// a contract that starts a run from a value stages it the same way. The
+    /// object is ownerless until the generation that names it takes its edge,
+    /// so this runs outside any transaction the contract holds.
+    pub async fn start_input(
+        &self,
+        api: &crate::service::AppWorkflows,
+        input: serde_json::Value,
+    ) -> Option<WorkflowOutputRef> {
+        crate::service::payloads::stage_start_input(
+            self,
+            api,
+            &crate::service::RequestId::mint(),
+            &input,
+        )
+        .await
+        .unwrap()
+    }
+}
+
 fn matches(body: &[u8], reference: &WorkflowOutputRef) -> bool {
     i64::try_from(body.len()).is_ok_and(|size| size == reference.size)
         && format!("{:x}", Sha256::digest(body)) == reference.hash

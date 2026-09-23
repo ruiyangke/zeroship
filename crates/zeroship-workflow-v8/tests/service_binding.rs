@@ -93,6 +93,11 @@ impl Fixture {
         Arc::new(ObjectStepOutputs::new(self.objects.clone(), 1024).unwrap())
     }
 
+    /// The store a backend stages the values its callers start runs from into.
+    fn input_stager(&self) -> zeroship_workflow::SharedInputStager {
+        Arc::new(self.objects.clone())
+    }
+
     /// A request isolate whose `env.workflows` resolves published backends.
     fn ready_runtime(&self, apps: &ReadyApps, identity: &AppId, source: &str) -> Runtime {
         zeroship_runtime::init_v8();
@@ -117,7 +122,7 @@ impl Fixture {
             }])
             .plugins(vec![Arc::new(WorkflowBinding::service(
                 app.clone()
-                    .into_backend(&self.service, self.step_outputs())
+                    .into_backend(&self.service, self.step_outputs(), self.input_stager())
                     .unwrap(),
             ))])
             // Deliberately conflicting and mutable input must not grant authority.
@@ -421,7 +426,7 @@ async fn ready_binding_reaches_only_the_published_backend_of_its_runtime_identit
         fixture
             .other
             .clone()
-            .into_backend(&fixture.service, fixture.step_outputs())
+            .into_backend(&fixture.service, fixture.step_outputs(), fixture.input_stager())
             .unwrap(),
     );
     assert_eq!(
@@ -432,7 +437,7 @@ async fn ready_binding_reaches_only_the_published_backend_of_its_runtime_identit
         fixture
             .app
             .clone()
-            .into_backend(&fixture.service, fixture.step_outputs())
+            .into_backend(&fixture.service, fixture.step_outputs(), fixture.input_stager())
             .unwrap(),
     );
     let started = fetch(fixture.ready_runtime(&apps, &identity, source)).await;

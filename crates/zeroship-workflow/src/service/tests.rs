@@ -407,8 +407,9 @@ async fn app_contract(store: Rc<OrmStore>) {
     let a = service.fixture_app(a);
     let b = service.fixture_app(b);
     let request = RequestId::mint();
+    let objects = objects::Objects::new();
     let options = StartOptions {
-        input: json!({"hello": "world"}),
+        input_ref: objects.start_input(&a, json!({"hello": "world"})).await,
         key: Some("invoice".into()),
         on_conflict: ConflictPolicy::Join,
     };

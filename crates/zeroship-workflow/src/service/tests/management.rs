@@ -516,6 +516,7 @@ async fn outcome_contract(store: Rc<OrmStore>) {
         "Example",
         &deployment.id,
         &StartOptions::default(),
+        None,
         now,
     )
     .await

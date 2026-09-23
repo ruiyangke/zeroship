@@ -127,14 +127,19 @@ fn json_type_name(v: &Value) -> &'static str {
     }
 }
 
+/// The creator's start input, and the options the host starts it under.
+///
+/// The value stays a value here. A run's input is a payload object, and only
+/// the host can stage one, so this binding hands the value over and the backend
+/// names the object it became -- which is also why nothing a creator writes in
+/// `opts` can reach [`StartOptions`].
 fn start_body(
     scope: &mut v8::PinScope<'_, '_>,
     opts: v8::Local<v8::Value>,
-) -> Result<StartOptions, OpError> {
+) -> Result<(Value, StartOptions), OpError> {
     let mut opts = read_options_object(scope, opts, "workflows.start")?;
     let input = opts.remove("input").unwrap_or(Value::Null);
     let mut body = Map::new();
-    body.insert("input".to_string(), input);
     if let Some(key) = opts.remove("key") {
         match key {
             Value::Null => {}
@@ -167,8 +172,9 @@ fn start_body(
             }
         }
     }
-    serde_json::from_value(Value::Object(body))
-        .map_err(|error| OpError::type_error(format!("workflows.start: {error}")))
+    let options = serde_json::from_value(Value::Object(body))
+        .map_err(|error| OpError::type_error(format!("workflows.start: {error}")))?;
+    Ok((input, options))
 }
 
 fn signal_body(
@@ -319,11 +325,12 @@ fn dispatch_start<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     backend: SharedWorkflowBackend,
     workflow_name: String,
+    input: Value,
     options: StartOptions,
 ) -> v8::Local<'s, v8::Promise> {
     dispatch_run_handle(scope, backend.clone(), async move {
         backend
-            .start(workflow_name, options)
+            .start(workflow_name, input, options)
             .await
             .map(|run| run.id)
     })
@@ -404,12 +411,13 @@ impl WorkflowHandle {
         scope: &mut v8::PinScope<'s, '_>,
         opts: v8::Local<v8::Value>,
     ) -> Result<v8::Local<'s, v8::Value>, OpError> {
-        let body = start_body(scope, opts)?;
+        let (input, options) = start_body(scope, opts)?;
         Ok(dispatch_start(
             scope,
             self.backend.clone(),
             self.workflow_name.clone(),
-            body,
+            input,
+            options,
         )
         .into())
     }

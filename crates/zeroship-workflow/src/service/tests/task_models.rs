@@ -42,13 +42,16 @@ async fn postgres_replay_input_keeps_claim_credentials_in_the_host() {
 async fn claim_credentials(store: Rc<OrmStore>) {
     let (service, app, _foreign, _deployments) = registered_service(store.clone()).await;
     let worker = WorkerIdentity::new("replay-credential-worker".into()).unwrap();
-    let started = service
-        .fixture_app(app.clone())
+    let objects = objects::Objects::new();
+    let scope = service.fixture_app(app.clone());
+    let started = scope
         .start(
             &RequestId::mint(),
             "Example",
             StartOptions {
-                input: serde_json::from_str(REPLAY_INPUT).unwrap(),
+                input_ref: objects
+                    .start_input(&scope, serde_json::from_str(REPLAY_INPUT).unwrap())
+                    .await,
                 ..Default::default()
             },
         )

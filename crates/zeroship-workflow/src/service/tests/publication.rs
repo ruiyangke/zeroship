@@ -419,8 +419,11 @@ async fn recovery(store: Rc<OrmStore>, faults: &FaultDb) {
     let (service, app, other, _deployments) = registered_service(store).await;
     let scope = service.fixture_app(app.clone());
     let request = RequestId::mint();
+    let objects = objects::Objects::new();
     let options = StartOptions {
-        input: json!({"secret":"creator-private-input"}),
+        input_ref: objects
+            .start_input(&scope, json!({"secret":"creator-private-input"}))
+            .await,
         ..Default::default()
     };
     let run = scope

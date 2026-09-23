@@ -124,6 +124,7 @@ impl WorkflowRuntimeLoader for Loader {
                             Arc::new(
                                 ObjectStepOutputs::new(self.objects.clone(), 1).unwrap(),
                             ),
+                            Arc::new(self.objects.clone()),
                         )
                         .unwrap(),
                 )),
@@ -246,6 +247,26 @@ impl Fixture {
         )
         .unwrap()
     }
+    /// Start a run from `input`, staging the value first as the creator seam
+    /// does: a generation row keeps no inline slot for a run.s input.
+    async fn start(&self, input: serde_json::Value) -> zeroship_workflow::operations::StartedRun {
+        let request = RequestId::mint();
+        let options = StartOptions {
+            input_ref: Some(
+                zeroship_workflow::InputStager::stage_input(
+                    &self.objects,
+                    &self.app,
+                    &request,
+                    &input,
+                )
+                .await
+                .unwrap(),
+            ),
+            ..StartOptions::default()
+        };
+        self.app.start(&request, "Example", options).await.unwrap()
+    }
+
     async fn assert_disposed(&self) {
         compio::time::timeout(Duration::from_secs(5), async {
             while self
@@ -933,18 +954,7 @@ async fn native_runner_awaits_creator_startup_before_committing_the_frontier() {
     "#,
     )
     .await;
-    let run = fixture
-        .app
-        .start(
-            &RequestId::mint(),
-            "Example",
-            StartOptions {
-                input: json!({"number":7}),
-                ..StartOptions::default()
-            },
-        )
-        .await
-        .unwrap();
+    let run = fixture.start(json!({"number":7})).await;
     let mut runner = fixture.runner(Duration::from_secs(5));
     let receipt = advance_until_suspended(&mut runner).await;
     assert_eq!(receipt.run_id, run.id);
@@ -1006,18 +1016,7 @@ async fn replay_loads_retained_dependencies_after_redeploy_and_host_restart() {
             .activate_deploy(&app, &declaration)
             .await
             .unwrap();
-        let run = fixture
-            .app
-            .start(
-                &RequestId::mint(),
-                "Example",
-                StartOptions {
-                    input: json!({"wait":wait}),
-                    ..StartOptions::default()
-                },
-            )
-            .await
-            .unwrap();
+        let run = fixture.start(json!({"wait":wait})).await;
         let receipt = advance_until_suspended(&mut fixture.runner(Duration::from_secs(5))).await;
         assert_eq!(receipt.run_id, run.id);
         if wait {
@@ -1489,17 +1488,8 @@ async fn native_runner_timeout_disposes_v8_before_reusing_its_slot() {
     )
     .await;
     let blocked = fixture
-        .app
-        .start(
-            &RequestId::mint(),
-            "Example",
-            StartOptions {
-                input: json!({"hang":true}),
-                ..StartOptions::default()
-            },
-        )
-        .await
-        .unwrap();
+        .start(json!({"hang":true}))
+        .await;
     // Leave room for ordinary journal I/O when reusing the slot. The blocked
     // callback remains pending until the execution budget interrupts it.
     let mut runner = fixture.runner(Duration::from_secs(1));
@@ -1514,17 +1504,8 @@ async fn native_runner_timeout_disposes_v8_before_reusing_its_slot() {
         .await
         .unwrap();
     let next = fixture
-        .app
-        .start(
-            &RequestId::mint(),
-            "Example",
-            StartOptions {
-                input: json!({"hang":false}),
-                ..StartOptions::default()
-            },
-        )
-        .await
-        .unwrap();
+        .start(json!({"hang":false}))
+        .await;
     let done = advance_until_suspended(&mut runner).await;
     assert_eq!(done.run_id, next.id);
     assert_eq!(returned_value(&fixture, &next.id).await, json!("finished"));
@@ -1548,18 +1529,7 @@ const HANGING_STEP: &str = r"
 #[compio::test]
 async fn a_step_timeout_under_the_execution_bound_commits_a_step_failure() {
     let fixture = Fixture::new(HANGING_STEP).await;
-    let run = fixture
-        .app
-        .start(
-            &RequestId::mint(),
-            "Example",
-            StartOptions {
-                input: json!({"timeout":"50ms"}),
-                ..StartOptions::default()
-            },
-        )
-        .await
-        .unwrap();
+    let run = fixture.start(json!({"timeout":"50ms"})).await;
     let mut runner = fixture.runner(Duration::from_secs(10));
     assert_eq!(
         advance_until_suspended(&mut runner).await.state,
@@ -1579,17 +1549,8 @@ async fn a_step_timeout_over_the_execution_bound_never_fires() {
     // step timeout the creator configured is never the reason recorded.
     let fixture = Fixture::new(HANGING_STEP).await;
     fixture
-        .app
-        .start(
-            &RequestId::mint(),
-            "Example",
-            StartOptions {
-                input: json!({"timeout":"10m"}),
-                ..StartOptions::default()
-            },
-        )
-        .await
-        .unwrap();
+        .start(json!({"timeout":"10m"}))
+        .await;
     let mut runner = fixture.runner(Duration::from_secs(1));
     assert!(matches!(
         runner.run_once().await,

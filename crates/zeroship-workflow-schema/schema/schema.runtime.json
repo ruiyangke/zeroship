@@ -1028,17 +1028,6 @@
             "valueColumn": "deploy_id"
           }
         },
-        "input": {
-          "type": "string",
-          "required": true,
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "input"
-          }
-        },
         "input_ref": {
           "type": "string",
           "readable": true,
