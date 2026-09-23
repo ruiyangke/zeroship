@@ -2,7 +2,7 @@
 //! the defaults that carry no ID semantics at all.
 //!
 //! `drift_id_facets_pg` already pins the ID-bearing defaults (identity, UUID
-//! generators, `nextval`, TypeID/ULID keys), which reach the differ through
+//! generators, `nextval`, TypeID keys), which reach the differ through
 //! `ColumnSnapshot::id_default`. This file pins the other half: a plain
 //! `DEFAULT 42` / `DEFAULT 'active'` on a column with no ID facet, where the only
 //! evidence either side carries is the raw SQL text.

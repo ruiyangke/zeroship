@@ -162,8 +162,8 @@ pub(crate) fn authored_id_default(
 
 /// UUID columns accept several textual spellings, while PostgreSQL stores and
 /// deparses one canonical lowercase/hyphenated representation. Preserve that
-/// semantic normalization only on the UUID-typed default surface; TypeID/ULID
-/// text literals remain byte-exact.
+/// semantic normalization only on the UUID-typed default surface; TypeID text
+/// literals remain byte-exact.
 pub(crate) fn authored_uuid_id_default(
     vendors: VendorSet,
     default: Option<&IrDefault>,
@@ -182,7 +182,7 @@ pub(crate) fn authored_uuid_id_default(
     backend.normalize_uuid_literal_snapshot(snapshot)
 }
 
-/// TypeID/ULID columns persist character storage. Project authored scalar
+/// TypeID columns persist character storage. Project authored scalar
 /// literals through the actual rendered literal so a decimal carried through
 /// the descriptor bridge as a quoted string compares to that stored text on all
 /// dialects. MySQL additionally reports a non-expression `COLUMN_DEFAULT` in
@@ -269,7 +269,7 @@ pub(crate) fn catalog_uuid_id_default(
     )
 }
 
-/// [`catalog_id_default`] with the TypeID/ULID text surface's normalization applied.
+/// [`catalog_id_default`] with the TypeID text surface's normalization applied.
 pub(crate) fn catalog_text_id_default(
     vendors: VendorSet,
     default: Option<&str>,

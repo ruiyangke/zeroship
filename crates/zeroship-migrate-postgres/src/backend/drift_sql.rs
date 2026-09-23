@@ -93,7 +93,7 @@ pub async fn check_checksum_drift<D: SqlSession>(
 ///
 /// Identity and ID-default semantics are recovered from structured catalog
 /// metadata (including a `pg_depend` lookup for search-path-stable nextval
-/// identity). Engine-owned TypeID/ULID CHECKs project onto their columns, and
+/// identity). Engine-owned TypeID CHECKs project onto their columns, and
 /// foreign keys are rebuilt from ordered catalog tuples, target identity,
 /// actions, match mode, deferrability, and validation state. This avoids relying
 /// on PostgreSQL's search-path-sensitive FK/nextval deparser spelling.
@@ -1476,7 +1476,7 @@ pub(crate) async fn snapshot_schema_for<D: SqlSession>(
     // expanded with ordinality so composite column order and arity remain exact.
     //
     // CHECK definitions still come from `pg_get_constraintdef`. Engine-owned
-    // TypeID/ULID checks are recognized and projected onto their column's semantic
+    // TypeID checks are recognized and projected onto their column's semantic
     // `value_format` facet instead of also appearing as a generic constraint. An
     // altered check intentionally fails recognition and remains a constraint, so
     // the column loses its expected format and the altered body is never accepted

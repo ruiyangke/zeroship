@@ -381,7 +381,7 @@ pub struct LiveSchema {
     ///
     /// This semantic map is intentionally never inferred from the physical
     /// catalog: a text column cannot reveal whether the project declared generic
-    /// text, a TypeID (and which prefix), or a ULID. The ordered-envelope lowerer
+    /// text or a TypeID (and which prefix). The ordered-envelope lowerer
     /// advances it from each resolved IR artifact before lowering the next one.
     pub logical_columns: crate::model::validate::LogicalColumnContracts,
     /// Generation contracts for columns THIS ENVELOPE has declared, keyed by
@@ -3120,7 +3120,7 @@ impl IrAuthor {
             let reference_policy =
                 crate::render::backends::vendor(self.vendors, &self.dialect).catalog_fold;
             // PostgreSQL's catalog exposes the base storage family separately
-            // from a column's COLLATE clause. TypeID and ULID intentionally use
+            // from a column's COLLATE clause. TypeID intentionally uses
             // `text COLLATE "C"`, but information_schema reports that target as
             // `text`; compare the base family here and keep collation intent in
             // the independent check below. MySQL and SQLite need the override:

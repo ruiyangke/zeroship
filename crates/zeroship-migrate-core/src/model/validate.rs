@@ -635,7 +635,7 @@ fn schemas_may_name_same_table(left: Option<&str>, right: Option<&str>) -> bool 
 ///
 /// This key deliberately records only declarations authored by migration IR.
 /// Catalog introspection cannot reconstruct semantic value-format contracts such
-/// as TypeID prefixes or ULID casing, so it must never populate this map.
+/// as TypeID prefixes, so it must never populate this map.
 /// A reference into a target absent from this map may still be proved against
 /// the live catalog's own format evidence by `catalog_proves_reference_format`,
 /// which confirms an authored expectation rather than supplying a contract.
@@ -775,7 +775,7 @@ impl<'a> CatalogColumnEvidence<'a> {
 ///     contract, so the renderer emits no UUID CHECK there.
 ///   - MySQL and SQLite: the engine's own exact UUID spelling CHECK, recovered
 ///     into `ColumnSnapshot::catalog_uuid_format_check`.
-///   - Every dialect: an exactly equal TypeID/ULID CHECK recovered into
+///   - Every dialect: an exactly equal TypeID CHECK recovered into
 ///     `ColumnSnapshot::value_format`.
 ///
 /// What this deliberately does NOT prove: a chained typed reference, which
@@ -1458,7 +1458,7 @@ fn validate_per_row_destination(
                 format!(
                     "backfill per-row destination {qualified_table}.{column} has no logical column declaration in the project schema available to this migration"
                 ),
-                "declare the destination in createTable/addColumn before this backfill and use a matching logical UUID, TypeID, or ULID column"
+                "declare the destination in createTable/addColumn before this backfill and use a matching logical UUID or TypeID column"
                     .to_string(),
             ));
         }
@@ -4166,7 +4166,7 @@ fn expression_column_references<'a>(
                 )) => Some(expr),
                 // Named rather than wildcarded, like the Update arm above: a
                 // scalar carries no column reference, and a per-row generator is
-                // an apply-engine value producer (uuidV4/uuidV7/typeId/ulid) with
+                // an apply-engine value producer (uuidV4/uuidV7/typeId) with
                 // no expression in it. If either ever gains one, this is a
                 // compile error instead of a silently missed reference.
                 crate::model::ir::BackfillSetValue::Value(crate::model::ir::IrValue::Scalar(_))

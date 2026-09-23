@@ -1,6 +1,6 @@
 //! A column rename must follow the INLINE CHECK bodies that name that column.
 //!
-//! `ColumnSnapshot::inline_checks` is the enum / domain / UUID / TypeID-ULID
+//! `ColumnSnapshot::inline_checks` is the enum / domain / UUID / TypeID
 //! membership and format predicates, rendered to SQL text at fold time. Every one of
 //! them names ITS OWN column. `declarative::build_column_rename_rebuild` derives the
 //! post-rename table from the LIVE one by rewriting `ColumnSnapshot::name`; if the

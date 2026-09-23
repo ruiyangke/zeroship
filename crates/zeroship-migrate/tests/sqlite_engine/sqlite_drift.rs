@@ -535,7 +535,7 @@ async fn uuid_id_defaults_detect_add_remove_and_swap_without_cosmetic_drift() {
 // Portable clean oracle: compare the authored SQLite fold—not another live
 // snapshot—to the catalog. This guards the exact boundary most likely to
 // phantom-drift: bigint identity folds to physical INTEGER rowid storage, while
-// UUID/default and TypeID/ULID contracts must recover semantically.
+// UUID/default and TypeID contracts must recover semantically.
 // ---------------------------------------------------------------------------
 #[compio::test]
 async fn authored_identity_default_and_format_snapshot_matches_live_sqlite() {

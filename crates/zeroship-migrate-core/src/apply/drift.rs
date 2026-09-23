@@ -103,7 +103,7 @@ pub(crate) use zeroship_migrate_backend::drift::partition_divergences;
 ///
 /// Same-name objects present on BOTH sides are compared ATTRIBUTE-BY-ATTRIBUTE:
 /// columns include physical type/nullability, identity/auto-increment,
-/// semantic ID defaults, and enforced TypeID/ULID format; indexes include unique,
+/// semantic ID defaults, and enforced TypeID format; indexes include unique,
 /// ordered keys, method, predicate, INCLUDE columns, and storage parameters;
 /// constraints include kind plus a comparable definition. Foreign-key definitions
 /// are canonical structured identities (target schema/table, ordered local and

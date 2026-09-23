@@ -1191,7 +1191,7 @@ pub(crate) fn rename_column_in_generated_columns(
 ///
 /// The `Expr`-walking rewrite [`rename_column_in_generated_columns`] uses is not
 /// available: `ColumnSnapshot::inline_checks` is a `Vec<String>` of already-rendered
-/// SQL whose producers (the enum, domain, UUID and TypeID/ULID writers) keep no AST,
+/// SQL whose producers (the enum, domain, UUID and TypeID writers) keep no AST,
 /// and the facets two of them were built from are overwritten in the same breath, so
 /// there is nothing to re-render from either.
 ///
@@ -1369,7 +1369,7 @@ pub(crate) fn rename_column_in_check_definitions(
 /// The sibling of [`rename_column_in_generated_columns`], one field over and reached
 /// from the same two replays: the offline fold's `Op::RenameColumn` arm and the SQLite
 /// rename rebuild. `ColumnSnapshot::inline_checks` holds the enum membership, domain,
-/// UUID and TypeID/ULID predicates, and every one of them NAMES ITS OWN COLUMN. The
+/// UUID and TypeID predicates, and every one of them NAMES ITS OWN COLUMN. The
 /// rebuild derives its post-rename table from the live one by changing column NAMES,
 /// so without this the emitted `CREATE TABLE` carried
 /// `"state" TEXT NOT NULL CHECK ("status" IN (...))` over a table with no `status` -
@@ -1594,7 +1594,7 @@ pub(crate) fn column_snapshot_for_field(
     // parent id is bytewise-collated, leaving this copy on the database default
     // prevents PostgreSQL from using its ordinary B-tree index in joins. Make
     // byte ordering part of the ref type's physical contract, just as it is for
-    // TypeID and ULID value formats. Arbitrary text references retain their
+    // the TypeID value format. Arbitrary text references retain their
     // authored comparison semantics; this applies only to the closed `ref` type.
     if f.ty == "ref" {
         apply_bytewise_column_metadata(vendors, &mut column, dialect);

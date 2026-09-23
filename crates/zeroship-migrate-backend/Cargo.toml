@@ -31,7 +31,7 @@ sha2 = { workspace = true }
 # so the encoding is part of the identity, not a display detail.
 hex = { workspace = true }
 # `backfill::generate_per_row_value` materializes a backfill's per-row generator
-# (`uuidv4`/`uuidv7`/`typeid`/`ulid`) host-side, so the generated identity is the
+# (`uuidv4`/`uuidv7`/`typeid`) host-side, so the generated identity is the
 # same shape on every dialect rather than each vendor's own function.
 uuid = { workspace = true }
 # Canonical (padded) base64 — the wire form PostgreSQL and MySQL both decode for a

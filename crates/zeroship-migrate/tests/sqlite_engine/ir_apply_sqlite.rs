@@ -106,22 +106,18 @@ fn assert_exact_uuid(value: &str, version: u8) {
     );
 }
 
-fn crockford_value(byte: u8, uppercase: bool) -> Option<u8> {
-    let alphabet = if uppercase {
-        b"0123456789ABCDEFGHJKMNPQRSTVWXYZ".as_slice()
-    } else {
-        b"0123456789abcdefghjkmnpqrstvwxyz".as_slice()
-    };
+fn crockford_value(byte: u8) -> Option<u8> {
+    let alphabet = b"0123456789abcdefghjkmnpqrstvwxyz".as_slice();
     alphabet
         .iter()
         .position(|candidate| *candidate == byte)
         .map(|index| index as u8)
 }
 
-fn assert_canonical_crockford(value: &str, uppercase: bool) -> u128 {
+fn assert_canonical_crockford(value: &str) -> u128 {
     let bytes = value.as_bytes();
     assert_eq!(bytes.len(), 26, "canonical Crockford length: {value}");
-    let first = crockford_value(bytes[0], uppercase)
+    let first = crockford_value(bytes[0])
         .unwrap_or_else(|| panic!("invalid Crockford character in {value}"));
     assert!(
         first <= 7,
@@ -129,7 +125,7 @@ fn assert_canonical_crockford(value: &str, uppercase: bool) -> u128 {
     );
 
     bytes[1..].iter().fold(first as u128, |decoded, byte| {
-        let digit = crockford_value(*byte, uppercase)
+        let digit = crockford_value(*byte)
             .unwrap_or_else(|| panic!("invalid Crockford character in {value}"));
         (decoded << 5) | u128::from(digit)
     })
@@ -143,7 +139,7 @@ fn assert_exact_type_id(value: &str, prefix: &str) {
             .strip_prefix(&format!("{prefix}_"))
             .unwrap_or_else(|| panic!("TypeID must preserve prefix {prefix:?}: {value}"))
     };
-    let decoded = assert_canonical_crockford(suffix, false).to_be_bytes();
+    let decoded = assert_canonical_crockford(suffix).to_be_bytes();
     assert_eq!(
         decoded[6] >> 4,
         7,
@@ -154,10 +150,6 @@ fn assert_exact_type_id(value: &str, prefix: &str) {
         0x80,
         "TypeID suffix must encode the RFC UUID variant: {value}"
     );
-}
-
-fn assert_exact_ulid(value: &str) {
-    let _ = assert_canonical_crockford(value, true);
 }
 
 // Happy path: a valid IR envelope createTable is gated (SQLite dialect), lowered,
