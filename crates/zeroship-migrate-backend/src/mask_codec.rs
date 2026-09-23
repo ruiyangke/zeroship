@@ -183,15 +183,15 @@ mod tests {
     /// Not a tautology over the constants: every OTHER assertion in this module
     /// spells the sentinel out, so renaming a constant alone would go red there
     /// too - but only here does the failure message say what the wire is. The
-    /// peer that must agree is `zeroship_data_sql::mask_codec`'s pair of the same
-    /// names, which the data plane reads the live catalog with. Nothing in the
-    /// type system relates them (their `MaskKind`/`Classification` types are
-    /// separate), so the binding is behavioural, and it lives in the peer rather
-    /// than here: `cross_codec_parity`, at the bottom of
-    /// `crates/zeroship-data-sql/src/mask_codec.rs`, builds with THIS emitter and
-    /// parses with that codec and vice versa, over both sentinel families and
-    /// both backends' dispatch sites. It sits on that side because
-    /// `zeroship-data-sql` already carries the test-only `zeroship-migrate-core`
+    /// peer that must agree is `zeroship_data_orm::sql::mask_codec`'s pair of
+    /// the same names, which the data plane reads the live catalog with. Nothing
+    /// in the type system relates them (their `MaskKind`/`Classification` types
+    /// are separate), so the binding is behavioural, and it lives in the peer
+    /// rather than here: `cross_codec_parity`, at the bottom of
+    /// `crates/zeroship-data-orm/src/sql/mask_codec.rs`, builds with THIS
+    /// emitter and parses with that codec and vice versa, over both sentinel
+    /// families and both backends' dispatch sites. It sits on that side because
+    /// `zeroship-data-orm` already carries the test-only `zeroship-migrate-core`
     /// dev-dependency; this crate has no edge back and must not grow one.
     ///
     /// This crate's suite still needs its own sentinel guard.

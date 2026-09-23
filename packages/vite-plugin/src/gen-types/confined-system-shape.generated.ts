@@ -66,7 +66,7 @@ columns = [
   #
   # NOW() vs now(): nothing turns on the case. inject_default_to_ir lower-cases
   # the token before matching it against "now" | "now()" | "current_timestamp"
-  # (third_party/zero-migrate/crates/zeroship-migrate/src/model/table_shape.rs), so
+  # (crates/zeroship-migrate-core/src/model/table_shape.rs), so
   # all three spellings produce the identical SynthFn::Now IR, and the
   # dialect-aware render localizes THAT to CURRENT_TIMESTAMP for SQLite.
   { name = "id",         type = "text",        nullable = false, collation = "bytewise", assign = { by = "typedId",      on = "insert" } },

@@ -17,7 +17,7 @@
 //! instead of UB.
 //!
 //! The legacy underscored `__zs_is_<Class>` shim was removed
-//! per `crates/runtime-macros/STABILITY.md`. This test now exercises
+//! per `crates/zeroship-runtime-macros/STABILITY.md`. This test now exercises
 //! `<Class>::is_instance` directly — same observable behaviour, the
 //! only change is the call-site spelling.
 //!

@@ -1556,7 +1556,7 @@ export const t = {
           { code: "ID_INVALID_PREFIX" as const },
         );
       }
-      // `usr` is the platform user-id prefix (`crates/zeroship-core/src/typed_id.rs`);
+      // `usr` is the platform user-id prefix (`crates/zeroship-id/src/typed_id.rs`);
       // reserve it so a creator id can never collide with a platform user id.
       // The generated migration surface mirrors this fence.
       if (prefix === "usr") {

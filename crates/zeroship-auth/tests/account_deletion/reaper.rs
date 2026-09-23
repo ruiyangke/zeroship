@@ -195,17 +195,17 @@ async fn erasing_a_sole_owner_retains_the_organizations_invoice() {
     .await;
 }
 
-/// The binding for `db/migrations-ts/20260907000000_user_erasure_edges.ts`.
+/// The binding for the user erasure edges declared in
+/// `db/migrations-ts/20260702000600_constraints_indexes_fks.ts`.
 ///
-/// Every one of these references BLOCKED a hard delete before that migration -
-/// read out of `pg_constraint` as `confdeltype` in (`a`, `r`) - and only
-/// `oauth_clients.created_by` was on the reaper's hand-maintained list. Three of
-/// them (`identity_links` and `principal_grants`) were also
-/// `NOT NULL`, so the `SET NULL` that list performed was not a spelling they
-/// accepted: a creator who had signed in through the CLI or deployed a schema
-/// could not be erased at all.
+/// Every one of these references blocks a hard delete unless the schema itself
+/// declares its disposition - the declaration reads out of `pg_constraint` as
+/// `confdeltype` in (`a`, `r`) - and the reaper keeps no list of its own to
+/// clear them with. `identity_links` and `principal_grants` are also `NOT
+/// NULL`, so `SET NULL` is not a spelling they accept: under it a creator who
+/// has signed in through the CLI or deployed a schema cannot be erased at all.
 ///
-/// Seed one of each, then erase. What proves the migration is not that the
+/// Seed one of each, then erase. What proves the declaration is not that the
 /// DELETE succeeds but WHICH way each dependent went: identity edges gone,
 /// attribution edges surviving with a NULL.
 #[ntex::test]

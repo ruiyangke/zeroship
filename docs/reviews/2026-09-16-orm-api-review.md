@@ -59,7 +59,7 @@ may differ — DDL vs validation). Rename on one side: either db's `t.string` �
 
 ### BUG-2: `update(filter, patch)` updates exactly one row; the name hides it
 
-**Where**: `packages/db/src/collection.ts` (`Collection.update`),
+**Where**: `crates/zeroship-data-v8/js/runtime/collection.ts` (`Collection.update`),
 `docs/reference/db.md` ("By filter (returns the lowest-id match, or null)").
 
 **What**: `db.users.update({ email: "alice@..." }, patch)` updates the
@@ -101,7 +101,7 @@ ranges. Silent misses are the worst of the three options.
 
 ### BUG-4: `Query` terminals mutate shared builder state; concurrent terminals race
 
-**Where**: `packages/db/src/query.ts` — `first()`, `unique()`, `last()` each
+**Where**: `crates/zeroship-data-v8/js/runtime/query.ts` — `first()`, `unique()`, `last()` each
 assign `this._limit` / `this._sort` and restore in `finally`.
 
 **What**: `first()` sets `_limit = 1`, `unique()` sets `_limit = 2`, `last()`
@@ -172,7 +172,7 @@ exists for that reason).
 
 ### BUG-7: bulk-write count shapes are asymmetric, and the doc is stale
 
-**Where**: `packages/db/src/collection.ts` + `packages/db/src/collection/crud.ts`
+**Where**: `crates/zeroship-data-v8/js/runtime/collection.ts` + `crates/zeroship-data-v8/js/runtime/crud.ts`
 (`updateManyCollection` returns `{ count: n }`), `docs/reference/db.md`
 ("counts = { matchedCount: N, modifiedCount: N }").
 
@@ -265,7 +265,7 @@ pattern from `examples/db-todos/tests/database.test.ts` into
 
 `Collection.search` returns `_distance?: number` (optional, unitless);
 `Collection.near` returns `_distance_m: number` (required, snake_case with a
-unit suffix) — see `packages/db/src/collection.ts`. Pick one convention for
+unit suffix) — see `crates/zeroship-data-v8/js/runtime/collection.ts`. Pick one convention for
 name, optionality, and unit suffix.
 
 ### BUG-12: `bulkUnmask` returns a `Map`
@@ -278,27 +278,27 @@ layer serializes results. Return a plain record (or an array of
 ### BUG-13: three pagination APIs, one redundant
 
 `skip`/`limit` offset, `.after(id)` id-seek, and `.paginate()` cursor envelope
-coexist on `Query` (`packages/db/src/query.ts`). `.after` is a strict subset
+coexist on `Query` (`crates/zeroship-data-v8/js/runtime/query.ts`). `.after` is a strict subset
 of `paginate`. Deprecate and remove it.
 
 ### BUG-14: string-form `.sort("-score title")` is untyped
 
 `Query.sort` accepts a space-separated string alongside the typed object form
-(`packages/db/src/query.ts`). Typos in string form silently sort by nothing
+(`crates/zeroship-data-v8/js/runtime/query.ts`). Typos in string form silently sort by nothing
 useful. Remove the string form; the object form already covers multi-key
 sorts.
 
 ### BUG-15: `aggregate()` result is fully untyped
 
 `Collection.aggregate(pipeline)` → `Result<PlainObject[]>`
-(`packages/db/src/collection.ts`). Parity with Mongoose, behind Prisma/Drizzle.
+(`crates/zeroship-data-v8/js/runtime/collection.ts`). Parity with Mongoose, behind Prisma/Drizzle.
 Type the result from the stage generics, at least for the terminal
 `$group`/`$project` shape.
 
 ### BUG-16: type-only `declare` accessors vanish at runtime
 
 `Collection` declares `declare readonly Id` / `declare readonly RowInput`
-(`packages/db/src/collection.ts`) so `typeof db.users.Id` works as a type, but
+(`crates/zeroship-data-v8/js/runtime/collection.ts`) so `typeof db.users.Id` works as a type, but
 `db.users.Id` is `undefined` at runtime. Documented ("do not read them at
 runtime") but unguarded. Consider a runtime getter that throws with a clear
 message.
