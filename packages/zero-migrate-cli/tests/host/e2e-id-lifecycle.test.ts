@@ -6,13 +6,14 @@
 // independently by their URL environment variables. SQLite deliberately is not
 // duplicated here - a placement choice, not a missing seam: the Node host
 // `DriverConfig` DOES carry `{ kind: "sqlite"; appPath; journalPath }`
-// (`packages/zero-migrate-cli/src/index.ts:73`) and `apply()` routes it to
-// `applyIrSqlite`. The SQLite lifecycle matrix is caught in-process by the Rust crate
+// (`packages/zero-migrate-cli/src/index.ts`) and `apply()` routes it to
+// `applyIr` under an in-process driver. The SQLite lifecycle matrix is caught
+// in-process by the Rust crate
 // instead (`crates/zeroship-migrate/tests/uuid_generation.rs`,
 // `ulid_value_format.rs`, `type_id_value_format.rs`,
 // `synchronize_identity_sqlite.rs`). What a SQLite arm here could NOT reach either
 // way is `status`, which refuses a `sqlite` driver outright
-// (`packages/zero-migrate-cli/src/index.ts:409`); only
+// (`status()` in `packages/zero-migrate-cli/src/index.ts`); only
 // `statusEnvelopes({ readOnly: true })` accepts one.
 //
 // Plan-aware status takes a live catalog snapshot before reconciliation, so the

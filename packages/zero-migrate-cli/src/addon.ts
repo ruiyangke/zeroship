@@ -4,8 +4,10 @@
 // The addon is the V8-free Rust core (host-driven PG/MySQL over the `SqlSession`
 // seam + bundled rusqlite, no compio, no io_uring, cross-platform). It exposes:
 //  - sync, DB-free: `irVersion()`, `loadVerify(...)`
-//  - async, host-driven (fire-and-resolve over a `hostDriver` TSFN): `applyIr(...)`,
-//    `apply(...)`, `status(...)`, `history(...)`
+//  - async, fire-and-resolve: `applyIr(...)`, `apply(...)`, `status(...)`,
+//    `history(...)`. `applyIr` takes the driver as DATA (`req.driver`) and so serves
+//    both the `hostDriver` TSFN and the addon's own in-process connections; the rest
+//    are host-driven only.
 //
 // The host-driver callback contract is `hostDriver([request, done]) => void` —
 // napi delivers `(request, done)` as a SINGLE array arg. See `driver-pg.ts`.
@@ -24,7 +26,7 @@ import type {
   JsRequest as GenJsRequest,
   JsReply as GenJsReply,
   JsError as GenJsError,
-  ApplyIrSqliteRequest,
+  ApplyDriverDto,
   ApplyRequest,
   StatusRequest,
   StatusIrRequest,
@@ -46,7 +48,7 @@ import type {
 } from "zeroship-migrate-node";
 
 export type {
-  ApplyIrSqliteRequest,
+  ApplyDriverDto,
   ApplyRequest,
   StatusRequest,
   StatusIrRequest,
@@ -114,18 +116,13 @@ export interface MigrateAddon {
    *  information an operator reads before choosing to deploy. */
   advisoriesFor(source: PreviewSqlSource): AdvisoryDto[];
 
-  /** HOST-AUTHORING apply: take a typed `ApplyRequest` (the IR envelope
-   *  as a JS value), LOWER it in Rust (stamp `owner_app` + fold
-   *  `Checksum::of_ir`), then drive `executor::apply` over the host driver. Resolves
-   *  to a typed `ApplyReply`. */
-  applyIr(hostDriver: AddonHostDriver, req: ApplyRequest): Promise<ApplyReply>;
-
-  /** SQLite apply through the addon's bundled in-process rusqlite backend. */
-  applyIrSqlite(
-    appPath: string,
-    journalPath: string,
-    req: ApplyIrSqliteRequest,
-  ): Promise<ApplyReply>;
+  /** The ONE apply: take a typed `ApplyRequest` (the ordered IR envelopes as JS
+   *  values), LOWER them in Rust (stamp `owner_app` + fold `Checksum::of_ir`), then
+   *  deploy over the driver `req.driver` names — this `hostDriver` callback, or the
+   *  addon's own bundled rusqlite connections, in which case pass `null` here.
+   *  `req.dialect` selects the vendor independently. Resolves to a typed
+   *  `ApplyReply`. */
+  applyIr(hostDriver: AddonHostDriver | null, req: ApplyRequest): Promise<ApplyReply>;
 
   /** `status` over the host driver. Resolves to a typed `StatusReply`. */
   status(hostDriver: AddonHostDriver, req: StatusRequest): Promise<StatusReply>;

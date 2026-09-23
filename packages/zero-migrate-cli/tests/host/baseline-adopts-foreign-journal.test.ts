@@ -284,8 +284,10 @@ test("baseline adopts a live schema whose journal is in a foreign id family", as
  * `baseline` is not subject to it, and that is deliberate: it lowers against
  * `SchemaSnapshot::default()` rather than the live catalog, precisely because the
  * lowering it would need is the one the adopted state breaks
- * (crates/zeroship-migrate-node/src/verbs.rs:1169-1184). Once it has written,
- * nothing is pending, nothing is projected, and `status` answers.
+ * ("Why the plans are lowered against an EMPTY schema", on
+ * `baseline_ir_with_locked_backend` in crates/zeroship-migrate-node/src/verbs.rs).
+ * Once it has written, nothing is pending, nothing is projected, and `status`
+ * answers.
  */
 test("baseline repairs a database whose status verb cannot even reconcile", async () => {
   const client = await connectLivePg();

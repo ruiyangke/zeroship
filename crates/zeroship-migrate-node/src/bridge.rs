@@ -18,6 +18,11 @@
 //! a TYPED reply (`ApplyReply`/`StatusReply`/`HistoryReply`) when `block_on`
 //! completes - NO `Promise<string>`, NO per-verb copy-pasted plumbing.
 //!
+//! `applyIr` is host-driven only when its request asks to be: `req.driver` selects
+//! the transport, and an `"inProcess"` driver takes `run_in_process_verb` instead -
+//! same deferred topology, no TSFN, bundled rusqlite opened on the worker thread.
+//! The vendor rides beside it in `req.dialect`, so no verb is named after a dialect.
+//!
 //! The JS thread is **never** `join()`ed on the worker - that would deadlock
 //! libuv/Bun (the host-driver TSFN callback can't run while the JS thread is parked
 //! in the napi call). This is the fire-and-resolve topology.
@@ -80,13 +85,13 @@ use crate::verbs::{
     apply_ir_with_locked_backend, baseline_ir_with_locked_backend, charter_layer_refs,
     effective_policy_from_wire_layers, legacy_status_with_locked_backend, owner_app_project,
     parse_rollback_target, preview_dialect, resolve_pending_with_locked_backend,
-    rollback_with_locked_backend, status_ir_with_locked_backend, ApplyDialect,
+    rollback_with_locked_backend, split_host_envelopes, status_ir_with_locked_backend,
+    ApplyDialect, ApplyDriverParts, ApplyTarget,
 };
 use crate::wire::{
-    AdvisoryDto, ApplyIrSqliteRequest, ApplyReply, ApplyRequest, BaselineIrRequest, BuildInfo,
-    GenArtifactsReply, GenArtifactsSource, HistoryEventDto, HistoryReply, HistoryRequest,
-    LoadVerifyReply, PreviewSqlSource, ResolvePendingRequest, RollbackRequest, StatusIrRequest,
-    StatusRequest,
+    AdvisoryDto, ApplyReply, ApplyRequest, BaselineIrRequest, BuildInfo, GenArtifactsReply,
+    GenArtifactsSource, HistoryEventDto, HistoryReply, HistoryRequest, LoadVerifyReply,
+    PreviewSqlSource, ResolvePendingRequest, RollbackRequest, StatusIrRequest, StatusRequest,
 };
 
 // ---------------------------------------------------------------------------
@@ -552,235 +557,243 @@ fn history_reply(events: &[HistoryEvent]) -> HistoryReply {
 // The typed verbs - each is a thin `run_verb` closure over the engine.
 // ---------------------------------------------------------------------------
 
-/// `applyIr` - the HOST-AUTHORING apply entry: take a pure-JS IR envelope
-/// ENVELOPE (`{ ir_version, name, ops }`) as a typed [`ApplyRequest`], run the
+/// `applyIr` - the apply entry: take the ordered pure-JS IR envelope sequence
+/// (`{ ir_version, name, ops }` each) as a typed [`ApplyRequest`], run the
 /// fail-closed LOAD GATE + LOWER **in Rust** (stamping `owner_app` + folding the
 /// authoritative `Checksum::of_ir` - the checksum is NEVER computed in JS), then
-/// drive the complete ordered plan over the host driver. The envelope must NOT carry
-/// `owner_app`; it is stamped from `req.owner_app` (provenance).
+/// deploy. An envelope must NOT carry `owner_app`; it is stamped from
+/// `req.owner_app` (provenance).
 ///
-/// This is the entry the `zero-migrate-cli` facade's `apply` calls: the pure-JS
-/// recorder produces the envelope, this addon owns the checksum.
-/// Resolves to a typed [`ApplyReply`].
+/// `req.driver` selects WHO OPENS THE CONNECTION and `req.dialect` selects WHICH
+/// VENDOR, and they are checked against each other in one place
+/// ([`ApplyTarget::resolve`]). A `"host"` driver hands the plan to the
+/// `host_driver` callback over the `SqlSession` seam; an `"inProcess"` driver opens
+/// the hardened bundled-rusqlite connections on the engine worker thread and takes
+/// no callback. SQLite is not a different kind of apply - it is the dialect with no
+/// JavaScript driver, which is why the transport rather than the vendor is what the
+/// request names.
+///
+/// This is the entry the `zero-migrate-cli` facade's `apply` and the vite plugin's
+/// dev apply both call: the pure-JS recorder produces the envelopes, this addon owns
+/// the checksum. Resolves to a typed [`ApplyReply`].
 #[napi(ts_return_type = "Promise<ApplyReply>", catch_unwind)]
 pub fn apply_ir(
     env: Env,
     #[napi(
-        ts_arg_type = "(args: [request: JsRequest, done: (err: JsError | null, reply: JsReply | null) => void]) => void"
+        ts_arg_type = "((args: [request: JsRequest, done: (err: JsError | null, reply: JsReply | null) => void]) => void) | null"
     )]
-    host_driver: HostDriverFn,
+    host_driver: Option<HostDriverFn>,
     req: ApplyRequest,
 ) -> Result<Object<'static>> {
-    // Lower the envelope to an ordered plan in Rust (checksum folded here). The
-    // `ops` AST crossed as a real JS value; re-serialize it for the lower gate.
-    //
-    // Restore exact integers FIRST: a JS number above `u32::MAX` arrives as an f64,
-    // and re-serializing it here would write `4294967296.0`, which the IR
-    // deserializer refuses as fractional. `validate` never saw this because it hands
-    // the addon a `JSON.stringify` of the same envelope.
-    let mut envelope = req.envelope;
-    crate::wire::restore_exact_integers(&mut envelope);
-    let envelope_json = serde_json::to_string(&envelope)
-        .map_err(|e| Error::from_reason(format!("envelope is not serializable: {e}")))?;
-    let prior_envelope_json = req
-        .prior_envelopes
-        .unwrap_or_default()
-        .into_iter()
-        .map(|mut envelope| {
-            crate::wire::restore_exact_integers(&mut envelope);
-            serde_json::to_string(&envelope)
-                .map_err(|e| Error::from_reason(format!("prior envelope is not serializable: {e}")))
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let registry_json = serde_json::to_string(&req.registry)
-        .map_err(|e| Error::from_reason(format!("registry is not serializable: {e}")))?;
-    // Dialect identity selects the backend: Postgres and MySQL ride the
-    // SAME `SqlSession` seam, but each dialect's lock / journal / placeholder SQL
-    // lives in its own `MigrationBackend`: `PostgresBackend`, or `MysqlBackend`
-    // (`GET_LOCK`, MySQL journal DDL, `?` placeholders). SQLite is in-process
-    // rusqlite and never reaches the host seam, so it is not a valid host-driver
-    // dialect here.
-    let target = ApplyDialect::parse(&req.dialect).map_err(Error::from_reason)?;
-
     let ApplyRequest {
         owner_app,
         project_schema,
         dialect,
-        migrator_role,
-        approved,
-        applied_by,
-        charter_layers,
-        ..
-    } = req;
-    let approval = if approved {
-        Approval::Approved
-    } else {
-        Approval::None
-    };
-    let effective =
-        effective_policy_from_wire_layers(&charter_layers).map_err(Error::from_reason)?;
-
-    run_verb(env, host_driver, move |session| async move {
-        let mut cfg = ExecutorConfig::new(
-            owner_app_project(&project_schema),
-            project_schema.clone(),
-            effective,
-        );
-        if let Some(role) = migrator_role {
-            cfg = cfg.with_migrator_role(role);
-        }
-        match target {
-            ApplyDialect::Postgres => {
-                let backend = zeroship_migrate_postgres::PostgresBackend::new_generic(&session);
-                apply_ir_with_locked_backend(
-                    &backend,
-                    &cfg,
-                    &prior_envelope_json,
-                    &envelope_json,
-                    &owner_app,
-                    &project_schema,
-                    &dialect,
-                    &registry_json,
-                    &charter_layers,
-                    approval,
-                    &applied_by,
-                )
-                .await
-            }
-            ApplyDialect::Mysql => {
-                let backend = zeroship_migrate_mysql::MysqlBackend::new_generic(&session);
-                apply_ir_with_locked_backend(
-                    &backend,
-                    &cfg,
-                    &prior_envelope_json,
-                    &envelope_json,
-                    &owner_app,
-                    &project_schema,
-                    &dialect,
-                    &registry_json,
-                    &charter_layers,
-                    approval,
-                    &applied_by,
-                )
-                .await
-            }
-        }
-    })
-}
-
-/// `applyIrSqlite` - deploy an ordered migration-IR sequence through the bundled
-/// in-process SQLite backend. There is no host-driver callback: the hardened app
-/// and journal connections are opened on the engine worker thread, and the same
-/// high-level library deploy loop used by Rust callers owns lowering, idempotent
-/// journal skips, apply, and live-schema threading.
-#[napi(
-    js_name = "applyIrSqlite",
-    ts_return_type = "Promise<ApplyReply>",
-    catch_unwind
-)]
-pub fn apply_ir_sqlite(
-    env: Env,
-    app_path: String,
-    journal_path: String,
-    req: ApplyIrSqliteRequest,
-) -> Result<Object<'static>> {
-    let ApplyIrSqliteRequest {
-        owner_app,
-        project_schema,
+        driver,
         registry,
+        envelopes,
         charter_layers,
         approved,
-        envelopes,
     } = req;
 
-    let envelopes = envelopes
-        .into_iter()
-        .enumerate()
-        .map(|(index, mut envelope)| {
-            // Deserialized straight from the napi-converted value rather than via a
-            // JSON string, so this is the site where a widened integer reaches the
-            // IR first. Without the restore, a literal above `u32::MAX` arrives as
-            // an f64 and is refused as fractional.
-            crate::wire::restore_exact_integers(&mut envelope);
-            serde_json::from_value::<MigrationIr>(envelope).map_err(|error| {
-                Error::from_reason(format!(
-                    "envelope at index {index} is not a MigrationIr document: {error}"
-                ))
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let registry: BTreeMap<String, String> = registry.into_iter().collect();
-    let effective =
-        effective_policy_from_wire_layers(&charter_layers).map_err(Error::from_reason)?;
+    let target = ApplyTarget::resolve(
+        &dialect,
+        &ApplyDriverParts {
+            kind: &driver.kind,
+            app_path: driver.app_path.as_deref(),
+            journal_path: driver.journal_path.as_deref(),
+            migrator_role: driver.migrator_role.as_deref(),
+            applied_by: driver.applied_by.as_deref(),
+            host_driver_supplied: host_driver.is_some(),
+        },
+    )
+    .map_err(Error::from_reason)?;
+
+    // Restore exact integers FIRST, before either arm reads an envelope. The `ops`
+    // AST crossed as a real JS value, so this is the site where a widened integer
+    // reaches the IR first: a literal above `u32::MAX` arrives as an f64, and both
+    // re-serializing it (the host arm) and deserializing it (the in-process arm)
+    // would then see `4294967296.0`, which the IR deserializer refuses as fractional.
+    // `validate` never saw this because it hands the addon a `JSON.stringify` of the
+    // same envelope.
+    let mut envelopes = envelopes;
+    for envelope in &mut envelopes {
+        crate::wire::restore_exact_integers(envelope);
+    }
+
     let approval = if approved {
         Approval::Approved
     } else {
         Approval::None
     };
+    let effective =
+        effective_policy_from_wire_layers(&charter_layers).map_err(Error::from_reason)?;
 
-    run_in_process_verb(env, move || async move {
-        let backend = SqliteBackend::open(Path::new(&app_path), Path::new(&journal_path))
-            .map_err(|error| format!("failed to open SQLite migration backend: {error}"))?;
-        let exec_cfg = ExecutorConfig::new(
-            project_schema.clone(),
-            project_schema.clone(),
-            effective.clone(),
-        );
-        // The per-app unmask audit table. This host is the dev tier's schema
-        // authority - the only thing that touches the app file before the worker
-        // serves - so it is what establishes the platform tables the worker
-        // WRITES but must not CREATE.
-        //
-        // The worker must never issue DDL: it executes creator code, so schema
-        // creation belongs to the schema authority. This is the SQLite half;
-        // `zeroship-migrate-server`'s `provision_audit_unmask_table` is the
-        // Postgres half.
-        //
-        // BEFORE `deploy_envelopes`, so the apply-time ordering still prevents
-        // silent adoption if an unchecked artifact ever reaches execution.
-        // Normal declarative loading now calls the migration engine's
-        // `validate_collection` and refuses `__zeroship` before emitting SQL;
-        // the ordering remains an independent second defence rather than the
-        // creator-facing error path. Postgres gets the identical guarantee the
-        // identical way (`apply.rs` provisions before `apply_sealed`), and it is
-        // the same ordering argument the engine's own journal bootstrap relies
-        // on.
-        backend
-            .ensure_audit_unmask_table_sqlite()
-            .await
-            .map_err(|error| format!("failed to establish the unmask audit table: {error}"))?;
-        let outcome = MigrationEngine::new(zeroship_migrate::shipping_vendors())
-            .deploy_envelopes(
-                &envelopes,
-                &backend,
-                &effective,
-                &SQLITE,
-                &project_schema,
-                &owner_app,
-                &registry,
-                approval,
-                &exec_cfg,
-            )
-            .await
-            .map_err(|error| error.to_string())?;
+    match target {
+        ApplyTarget::Host {
+            dialect: backend,
+            migrator_role,
+            applied_by,
+        } => {
+            // The host seam takes JSON: the lower gate reads strings, so each
+            // envelope is re-serialized here rather than handed over as a value.
+            let serialized = envelopes
+                .iter()
+                .map(|envelope| {
+                    serde_json::to_string(envelope).map_err(|e| {
+                        Error::from_reason(format!("migration envelope is not serializable: {e}"))
+                    })
+                })
+                .collect::<Result<Vec<String>>>()?;
+            let (priors, current) =
+                split_host_envelopes(&serialized).map_err(Error::from_reason)?;
+            let prior_envelope_json = priors.to_vec();
+            let envelope_json = current.clone();
+            let registry_json = serde_json::to_string(&registry)
+                .map_err(|e| Error::from_reason(format!("registry is not serializable: {e}")))?;
+            let host_driver = host_driver
+                .ok_or_else(|| Error::from_reason("the host apply driver lost its callback"))?;
 
-        Ok(ApplyReply {
-            applied: outcome.applied,
-            skipped: outcome.skipped,
-            recovered: outcome.recovered,
-            // Empty because SQLite HAS no cross-deploy contracts, not because this
-            // path drops them. `SqliteBackend::pending_contracts` returns `None`
-            // (`zeroship-migrate-sqlite`'s `backend/mod.rs`): a rebuild rename is one atomic
-            // offline step, so no obligation is ever opened. The networked verb
-            // reaches the same value by asking - the `None => Vec::new()` arm in
-            // `verbs::apply_ir_with_locked_backend` - so the two replies agree today.
-            //
-            // They agree by coincidence of the answer, not by sharing the question.
-            // Giving SQLite a contract partition would make that verb report them and
-            // leave this constant silently empty, so that change has to reach here.
-            pending_contracts: Vec::new(),
-        })
-    })
+            run_verb(env, host_driver, move |session| async move {
+                let mut cfg = ExecutorConfig::new(
+                    owner_app_project(&project_schema),
+                    project_schema.clone(),
+                    effective,
+                );
+                if let Some(role) = migrator_role {
+                    cfg = cfg.with_migrator_role(role);
+                }
+                // Dialect identity selects the backend: Postgres and MySQL ride the
+                // SAME `SqlSession` seam, but each dialect's lock / journal /
+                // placeholder SQL lives in its own `MigrationBackend`:
+                // `PostgresBackend`, or `MysqlBackend` (`GET_LOCK`, MySQL journal
+                // DDL, `?` placeholders).
+                match backend {
+                    ApplyDialect::Postgres => {
+                        let backend =
+                            zeroship_migrate_postgres::PostgresBackend::new_generic(&session);
+                        apply_ir_with_locked_backend(
+                            &backend,
+                            &cfg,
+                            &prior_envelope_json,
+                            &envelope_json,
+                            &owner_app,
+                            &project_schema,
+                            &dialect,
+                            &registry_json,
+                            &charter_layers,
+                            approval,
+                            &applied_by,
+                        )
+                        .await
+                    }
+                    ApplyDialect::Mysql => {
+                        let backend = zeroship_migrate_mysql::MysqlBackend::new_generic(&session);
+                        apply_ir_with_locked_backend(
+                            &backend,
+                            &cfg,
+                            &prior_envelope_json,
+                            &envelope_json,
+                            &owner_app,
+                            &project_schema,
+                            &dialect,
+                            &registry_json,
+                            &charter_layers,
+                            approval,
+                            &applied_by,
+                        )
+                        .await
+                    }
+                }
+            })
+        }
+        ApplyTarget::InProcessSqlite {
+            app_path,
+            journal_path,
+        } => {
+            let envelopes = envelopes
+                .into_iter()
+                .enumerate()
+                .map(|(index, envelope)| {
+                    serde_json::from_value::<MigrationIr>(envelope).map_err(|error| {
+                        Error::from_reason(format!(
+                            "envelope at index {index} is not a MigrationIr document: {error}"
+                        ))
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let registry: BTreeMap<String, String> = registry.into_iter().collect();
+
+            run_in_process_verb(env, move || async move {
+                let backend = SqliteBackend::open(Path::new(&app_path), Path::new(&journal_path))
+                    .map_err(|error| format!("failed to open SQLite migration backend: {error}"))?;
+                let exec_cfg = ExecutorConfig::new(
+                    project_schema.clone(),
+                    project_schema.clone(),
+                    effective.clone(),
+                );
+                // The per-app unmask audit table. This host is the dev tier's schema
+                // authority - the only thing that touches the app file before the
+                // worker serves - so it is what establishes the platform tables the
+                // worker WRITES but must not CREATE.
+                //
+                // The worker must never issue DDL: it executes creator code, so
+                // schema creation belongs to the schema authority. This is the SQLite
+                // half; `zeroship-migrate-server`'s `provision_audit_unmask_table` is
+                // the Postgres half.
+                //
+                // BEFORE `deploy_envelopes`, so the apply-time ordering still
+                // prevents silent adoption if an unchecked artifact ever reaches
+                // execution. Normal declarative loading now calls the migration
+                // engine's `validate_collection` and refuses `__zeroship` before
+                // emitting SQL; the ordering remains an independent second defence
+                // rather than the creator-facing error path. Postgres gets the
+                // identical guarantee the identical way (`apply.rs` provisions before
+                // `apply_sealed`), and it is the same ordering argument the engine's
+                // own journal bootstrap relies on.
+                backend
+                    .ensure_audit_unmask_table_sqlite()
+                    .await
+                    .map_err(|error| {
+                        format!("failed to establish the unmask audit table: {error}")
+                    })?;
+                let outcome = MigrationEngine::new(zeroship_migrate::shipping_vendors())
+                    .deploy_envelopes(
+                        &envelopes,
+                        &backend,
+                        &effective,
+                        &SQLITE,
+                        &project_schema,
+                        &owner_app,
+                        &registry,
+                        approval,
+                        &exec_cfg,
+                    )
+                    .await
+                    .map_err(|error| error.to_string())?;
+
+                Ok(ApplyReply {
+                    applied: outcome.applied,
+                    skipped: outcome.skipped,
+                    recovered: outcome.recovered,
+                    // Empty because SQLite HAS no cross-deploy contracts, not because
+                    // this path drops them. `SqliteBackend::pending_contracts` returns
+                    // `None` (`zeroship-migrate-sqlite`'s `backend/mod.rs`): a rebuild
+                    // rename is one atomic offline step, so no obligation is ever
+                    // opened. The host-driven arm reaches the same value by asking -
+                    // the `None => Vec::new()` arm in
+                    // `verbs::apply_ir_with_locked_backend` - so the two replies agree
+                    // today.
+                    //
+                    // They agree by coincidence of the answer, not by sharing the
+                    // question. Giving SQLite a contract partition would make that arm
+                    // report them and leave this constant silently empty, so that
+                    // change has to reach here.
+                    pending_contracts: Vec::new(),
+                })
+            })
+        }
+    }
 }
 
 /// Decode the shared parts of a rollback request into what the verb takes.

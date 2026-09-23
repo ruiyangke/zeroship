@@ -203,10 +203,39 @@ pub struct JsRequest {
 //    into them under a napi-free test.
 // ===========================================================================
 
+/// Which side of the boundary opens the database connection an `applyIr` runs over.
+///
+/// This is a TRANSPORT choice, not a vendor one, and the two travel as separate
+/// fields on purpose. `kind` says who opens the connection; `dialect` beside it says
+/// which vendor's backend is built over it. A verb named after a vendor conflates
+/// them, and the addon has exactly one apply verb because of that.
+///
+/// The optional fields belong to one kind each, and the other kind refuses them
+/// rather than ignoring them - see `ApplyTarget::resolve` in [`crate::verbs`], which
+/// is where every pairing is decided.
+#[cfg(feature = "napi")]
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct ApplyDriverDto {
+    /// `"host"` - the host-driver callback argument owns the connection.
+    /// `"inProcess"` - the addon opens the connections itself on its engine worker
+    /// thread, and takes no callback.
+    pub kind: String,
+    /// `"inProcess"` only: the application database file.
+    pub app_path: Option<String>,
+    /// `"inProcess"` only: the journal database file attached beside it.
+    pub journal_path: Option<String>,
+    /// `"host"` only: the migrator role to `SET ROLE` under (least-privilege apply).
+    pub migrator_role: Option<String>,
+    /// `"host"` only: the audit `applied_by` label recorded in the journal. The
+    /// in-process deploy loop journals its own label and accepts none here.
+    pub applied_by: Option<String>,
+}
+
 /// The typed request for the host-authoring `applyIr` verb.
 ///
-/// The `envelope` (`{ ir_version, name, ops }`) crosses as a REAL JS value
-/// ([`JsonValue`]) - the recorder builds a JS object, no JSON string round-trip. The
+/// Each envelope (`{ ir_version, name, ops }`) crosses as a REAL JS value
+/// ([`JsonValue`]) - the recorder builds a JS object, no JSON string round-trip. An
 /// envelope MUST NOT carry `owner_app` (it is stamped from `owner_app` here -
 /// provenance).
 #[cfg(feature = "napi")]
@@ -218,50 +247,28 @@ pub struct ApplyRequest {
     pub owner_app: String,
     /// The confined project schema the lower pins ops to.
     pub project_schema: String,
-    /// The migrator role to `SET ROLE` under (least-privilege apply). Optional.
-    pub migrator_role: Option<String>,
-    /// `"postgres" | "mysql"` - selects the dialect backend (`SQLite` is in-process).
+    /// `"postgres" | "mysql" | "sqlite"` - selects the vendor backend. It is checked
+    /// against `driver`, which selects who opens the connection to it.
     pub dialect: String,
+    /// Who opens the connection this apply runs over.
+    pub driver: ApplyDriverDto,
     /// The project's `{ table: owner_app }` ownership registry. Empty on a
     /// fresh single-app project.
     pub registry: std::collections::HashMap<String, String>,
-    /// The pure-JS IR envelope `{ ir_version, name, ops }` as a JS value.
-    pub envelope: JsonValue,
-    /// Ordered authored envelopes that precede `envelope` in the project migration
-    /// set. Apply uses them only to reconstruct declared logical column contracts,
-    /// and accepts that metadata only after the corresponding plans are proven
-    /// fully applied in the journal.
-    pub prior_envelopes: Option<Vec<JsonValue>>,
+    /// The ordered authored migration set, oldest first, as real JavaScript values.
+    ///
+    /// The two drivers read it differently, and the difference is the reason it is
+    /// ONE field. The in-process driver deploys the whole sequence, applying every
+    /// envelope the journal does not already carry. The host driver applies only the
+    /// LAST, and uses the prefix solely to reconstruct declared logical column
+    /// contracts - accepting that metadata only once those plans are proven fully
+    /// applied in the journal, and refusing an empty sequence outright.
+    pub envelopes: Vec<JsonValue>,
     /// The **policy input**: an ordered list of policy charter documents (TOML).
     /// The first document is the root bound; each subsequent document narrows it.
     pub charter_layers: Vec<String>,
     /// Whether destructive changes are pre-approved.
     pub approved: bool,
-    /// The audit `applied_by` label recorded in the journal.
-    pub applied_by: String,
-}
-
-/// The typed request for the in-process SQLite `applyIrSqlite` verb.
-///
-/// Unlike [`ApplyRequest`], this carries the complete ordered envelope sequence:
-/// SQLite opens its bundled-rusqlite backend in the addon and deploys every
-/// pending envelope in one engine call, without a host-driver callback.
-#[cfg(feature = "napi")]
-#[napi(object)]
-#[derive(Debug, Clone)]
-pub struct ApplyIrSqliteRequest {
-    /// The deploying app id (`app_...`) stamped onto every lowered migration.
-    pub owner_app: String,
-    /// The logical project/schema name used by lowering and executor confinement.
-    pub project_schema: String,
-    /// The project's `{ table: owner_app }` ownership registry.
-    pub registry: std::collections::HashMap<String, String>,
-    /// Ordered policy charter documents (TOML), starting with the root bound.
-    pub charter_layers: Vec<String>,
-    /// Whether destructive changes are pre-approved.
-    pub approved: bool,
-    /// Ordered authored migration IR envelopes as real JavaScript values.
-    pub envelopes: Vec<JsonValue>,
 }
 
 /// The typed request for the `status` verb.

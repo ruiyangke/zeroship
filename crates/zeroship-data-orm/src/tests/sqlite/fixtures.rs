@@ -110,9 +110,9 @@ pub(super) async fn unmask_setup_with_schema(
     // The audit table, APPLY-AHEAD. `crud/unmask.rs` used to create it itself
     // on every dispatch; it no longer emits DDL at all, so something has to
     // stand in here for the dev-tier apply host
-    // (`zeroship-migrate-node`'s `applyIrSqlite`), exactly as the
-    // `apply_schema_ahead_of_runtime` fixtures stand in for it for creator
-    // tables.
+    // (`zeroship-migrate-node`'s `applyIr` under an in-process driver), exactly
+    // as the `apply_schema_ahead_of_runtime` fixtures stand in for it for
+    // creator tables.
     //
     // These are the PRODUCTION bytes, from the production generator, not a copy
     // of them: `audit_unmask_ddl` is the same function the host calls. The
@@ -123,7 +123,7 @@ pub(super) async fn unmask_setup_with_schema(
     //
     // WHAT THIS FIXTURE CANNOT PROVE: that the host actually calls it. It pins
     // the shape and the writer against each other, nothing more. The call in
-    // `bridge.rs::apply_ir_sqlite` is covered by no test in this file.
+    // `bridge.rs::apply_ir`'s in-process arm is covered by no test in this file.
     for stmt in zeroship_migrate_sqlite::backend::audit_unmask_ddl(&alias) {
         backend
             .execute_fixture(&stmt, &[])

@@ -24,9 +24,9 @@
  *
  * ONE IDENTITY, and it is the declared one: the apply and the runtime compose
  * the same name because they read the same `dbs_` id out of the same file.
- * Getting it wrong is the failure worth guarding against: `applyIrSqlite` would
- * report `applied: [...]` against a file nobody opens, and the app would still
- * be broken with a success line in the log.
+ * Getting it wrong is the failure worth guarding against: the apply would report
+ * `applied: [...]` against a file nobody opens, and the app would still be broken
+ * with a success line in the log.
  *
  * The app id is a different fact and keeps its own job here: it stamps
  * `owner_app` provenance on every applied migration and owns each collection in
@@ -189,12 +189,17 @@ export async function applyMigrationsToDevSqlite(opts: {
   const registry: Record<string, string> = {};
   for (const name of opts.collections) registry[name] = appId;
 
-  return loadMigrateAddon().applyIrSqlite(appPath, journalPath, {
+  return loadMigrateAddon().applyIr(null, {
     ownerApp: appId,
     // SQLite renders unqualified `main` and is schema-inert, but the value
     // still flows through lowering and executor confinement, so it must match
     // what gen-types emitted ("public").
     projectSchema: "public",
+    dialect: "sqlite",
+    // The addon opens both files itself, so there is no host driver and no
+    // network session. The dialect above is a separate fact and stays separate:
+    // this names the transport, not the vendor.
+    driver: { kind: "inProcess", appPath, journalPath },
     registry,
     charterLayers: [CONFINED_APPLY_CHARTER_TOML],
     // The operator owns the local dev file; there is no approval workflow to

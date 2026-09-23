@@ -43,8 +43,8 @@
 # `schema: "public"` - so a different project schema produces a charter that
 # refuses every file in it. The project id was the retired runner's advisory-lock
 # key; the CLI derives that key from the schema alone
-# (crates/zeroship-migrate-node/src/verbs.rs:1142-1148), so there is nothing left
-# for a second name to select.
+# (`owner_app_project` in crates/zeroship-migrate-node/src/verbs.rs), so there is
+# nothing left for a second name to select.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

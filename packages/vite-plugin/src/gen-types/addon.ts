@@ -54,7 +54,7 @@ import type {
   GenArtifactsSource,
   IndexDescriptorDto,
   RuntimeOptionsDto,
-  ApplyIrSqliteRequest,
+  ApplyRequest,
   ApplyReply,
 } from "zeroship-migrate-node";
 
@@ -64,7 +64,7 @@ export type {
   GenArtifactsSource,
   IndexDescriptorDto,
   RuntimeOptionsDto,
-  ApplyIrSqliteRequest,
+  ApplyRequest,
   ApplyReply,
 };
 
@@ -143,10 +143,15 @@ export type _NoUntriagedAddonReplyKeys = AssertNever<UntriagedReplyKeys>;
 /** The verbs the dev tier needs, so the addon's larger apply-side surface is
  *  not reachable from here.
  *
- *  `applyIrSqlite` is the dev tier's schema authority: the dev server applies
- *  the committed migrations to the dev SQLite file AHEAD of the worker, in
- *  authored order, exactly as `migrated` does for Postgres at deploy. The
- *  worker never renders the descriptor into DDL.
+ *  `applyIr` is the dev tier's schema authority: the dev server applies the
+ *  committed migrations to the dev SQLite file AHEAD of the worker, in authored
+ *  order, exactly as `migrated` does for Postgres at deploy. The worker never
+ *  renders the descriptor into DDL.
+ *
+ *  The host-driver parameter is typed `null` here rather than omitted. The addon
+ *  accepts a callback there, and one verb serves both transports; narrowing the
+ *  type is what keeps the dev tier from reaching a networked database through it.
+ *  Which side opens the connection is `req.driver`.
  *
  *  Its request/reply types are IMPORTED from `zeroship-migrate-node`, never
  *  re-declared here. A hand-mirrored copy is how a field the engine adds turns
@@ -154,11 +159,7 @@ export type _NoUntriagedAddonReplyKeys = AssertNever<UntriagedReplyKeys>;
 interface MigrateAddon {
   genArtifacts(source: GenArtifactsSource): GenArtifactsReply;
   irVersion(): number;
-  applyIrSqlite(
-    appPath: string,
-    journalPath: string,
-    req: ApplyIrSqliteRequest,
-  ): Promise<ApplyReply>;
+  applyIr(hostDriver: null, req: ApplyRequest): Promise<ApplyReply>;
 }
 
 let cached: MigrateAddon | undefined;

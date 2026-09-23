@@ -14,8 +14,9 @@
 //
 // Does NOT cover SQLite here. Not for want of a seam: the Node host `DriverConfig`
 // DOES carry `{ kind: "sqlite"; appPath; journalPath }`
-// (`packages/zero-migrate-cli/src/index.ts:73`), `apply()` routes it to
-// `applyIrSqlite`, and `existence-guard-fold-projection.test.ts` in this directory
+// (`packages/zero-migrate-cli/src/index.ts`), `apply()` routes it to
+// `applyIr` under an in-process driver, and `existence-guard-fold-projection.test.ts`
+// in this directory
 // drives live SQLite arms through it. The SQLite arm for this exact shape is caught
 // in `crates/zeroship-migrate/tests/existence_guard_sqlite.rs`
 // (`create_index_unguarded_name_owned_by_another_table_fails_closed`).

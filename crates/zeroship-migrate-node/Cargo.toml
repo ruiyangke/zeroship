@@ -88,9 +88,10 @@ zeroship-migrate-postgres = { path = "../zeroship-migrate-postgres" }
 # The MySQL backend, named directly rather than through a `zeroship-migrate`
 # re-export. The apply host builds `MysqlBackend` over the `mysql2` seam.
 zeroship-migrate-mysql = { path = "../zeroship-migrate-mysql" }
-# The SQLite backend, named the same way and for the same reason. `apply_ir_sqlite` and
-# its siblings below build `SqliteBackend` on the in-process rusqlite actor; the
-# engine stopped re-exporting it when the execution half moved into this crate.
+# The SQLite backend, named the same way and for the same reason. `apply_ir`'s
+# in-process arm and its siblings below build `SqliteBackend` on the in-process
+# rusqlite actor; the engine stopped re-exporting it when the execution half moved
+# into this crate.
 zeroship-migrate-sqlite = { path = "../zeroship-migrate-sqlite" }
 
 # N-API 3, TOKIO-FREE by construction: default-features = false drops the
