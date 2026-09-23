@@ -122,6 +122,7 @@ async fn contract(store: Rc<OrmStore>, fault: Fault) {
                 deploy: &deploy.id,
                 options: &StartOptions::default(),
                 input_source: None,
+                max_input_bytes: AppPolicy::default().max_input_bytes,
             },
             now,
         )

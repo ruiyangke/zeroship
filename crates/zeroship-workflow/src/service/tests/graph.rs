@@ -479,6 +479,7 @@ pub(super) async fn seed_run(
             ..Default::default()
         },
             input_source: None,
+            max_input_bytes: AppPolicy::default().max_input_bytes,
         },
         now,
     )

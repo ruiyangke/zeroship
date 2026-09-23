@@ -916,3 +916,110 @@ async fn postgres_collection_rechecks_references_after_waiting_for_completion() 
         b"survives"
     );
 }
+
+#[compio::test]
+async fn sqlite_a_run_input_answers_to_the_input_bound() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("zs-workflow.sqlite");
+    schema::initialize_sqlite(&path).unwrap();
+    input_bound(Rc::new(sqlite_store(&path).await)).await;
+}
+
+#[compio::test]
+async fn postgres_a_run_input_answers_to_the_input_bound() {
+    let fixture = PostgresFixture::start().await;
+    input_bound(Rc::new(fixture.store.clone())).await;
+}
+
+/// A run's input answers to `max_input_bytes`, not to the payload ceiling.
+///
+/// The executor reads the object in full and hands the body the value, so the
+/// bytes are resident alongside the isolate for the whole execution whatever
+/// held them. Staging moved where a run's input is stored; it does not move
+/// which ceiling it answers to, and `max_payload_bytes` is the budget for a
+/// blob read back on demand rather than one materialized at start.
+///
+/// Two refusals, because there are two ways in. Staging refuses a value before
+/// an object is minted, so an oversized start spends none of the app's payload
+/// budget. `insert_run` refuses a DESCRIPTOR, which is what an executor reaches
+/// the service with: the runner admits a child's input and a continuation seed
+/// against the payload ceiling, so the bound has to hold on a reference that
+/// was staged somewhere this app's policy did not gate.
+async fn input_bound(store: Rc<OrmStore>) {
+    let (service, app, _, _deployments) = registered_service(store).await;
+    let scope = service.fixture_app(app.clone());
+    let objects = Objects::new();
+    let bound = AppPolicy::default().max_input_bytes;
+
+    // A JSON string of n characters encodes to n + 2 bytes, so these land
+    // exactly on the bound and exactly one byte over it.
+    let at = serde_json::Value::String("a".repeat(bound - 2));
+    let over = serde_json::Value::String("a".repeat(bound - 1));
+    assert_eq!(crate::service::app::encode(&at).unwrap().len(), bound);
+    assert_eq!(crate::service::app::encode(&over).unwrap().len(), bound + 1);
+
+    // Staging: the control first, so the refusal below is the size and not the
+    // path refusing everything handed to it.
+    let staged = crate::service::payloads::stage_start_input(
+        &objects,
+        &scope,
+        &RequestId::mint(),
+        &at,
+        bound,
+    )
+    .await
+    .unwrap()
+    .expect("a value at the bound stages");
+    assert_eq!(staged.size, bound as i64);
+    assert!(matches!(
+        crate::service::payloads::stage_start_input(
+            &objects,
+            &scope,
+            &RequestId::mint(),
+            &over,
+            bound,
+        )
+        .await,
+        Err(WorkflowServiceError::PayloadTooLarge)
+    ));
+
+    // Nothing was minted for the refused value. The object count is the whole
+    // record of that: refusing after staging would leave one behind.
+    let tx = service.begin().await.unwrap();
+    let objects_held = journal_rows(&tx, "payloads", json!({"app_id":app.as_str()}))
+        .await
+        .len();
+    tx.commit().await.unwrap();
+    assert_eq!(objects_held, 1, "only the admitted value may hold an object");
+
+    // The descriptor: a run admitted from the staged object, then the same
+    // start with a reference whose size exceeds the bound.
+    let admitted = scope
+        .start(
+            &RequestId::mint(),
+            "Example",
+            StartOptions {
+                input_ref: Some(staged.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(!admitted.id.is_empty());
+    assert!(matches!(
+        scope
+            .start(
+                &RequestId::mint(),
+                "Example",
+                StartOptions {
+                    input_ref: Some(WorkflowOutputRef {
+                        size: bound as i64 + 1,
+                        ..staged
+                    }),
+                    ..Default::default()
+                },
+            )
+            .await,
+        Err(WorkflowServiceError::PayloadTooLarge)
+    ));
+}

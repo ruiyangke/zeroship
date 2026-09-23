@@ -46,6 +46,7 @@ async fn revocation_contract(store: Rc<OrmStore>) {
                 deploy: &deploy.id,
                 options: &StartOptions::default(),
                 input_source: None,
+                max_input_bytes: AppPolicy::default().max_input_bytes,
             },
             now,
         )

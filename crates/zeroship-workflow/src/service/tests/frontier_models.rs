@@ -258,6 +258,7 @@ async fn seed_run(tx: &mut Transaction, app_id: &AppId, id: &str, name: &str) {
             deploy: &deploy.id,
             options: &StartOptions::default(),
             input_source: None,
+            max_input_bytes: AppPolicy::default().max_input_bytes,
         },
         now,
     )

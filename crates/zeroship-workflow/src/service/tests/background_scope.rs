@@ -97,6 +97,7 @@ async fn seed_unassigned_backlog(service: &WorkflowService, source: &AppId) {
                 deploy: &deploy_id,
                 options: &StartOptions::default(),
                 input_source: None,
+                max_input_bytes: AppPolicy::default().max_input_bytes,
             },
             0,
         )

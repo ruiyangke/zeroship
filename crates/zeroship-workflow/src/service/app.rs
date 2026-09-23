@@ -404,6 +404,7 @@ impl AppWorkflows {
                 deploy: &deploy.id,
                 options: &options,
                 input_source: None,
+                max_input_bytes: policy.max_input_bytes,
             };
             insert_root_run(&mut tx, &self.app, &run, now).await?;
             StartedRun {
@@ -775,6 +776,16 @@ pub(crate) struct NewRun<'a> {
     /// successor. A run started from outside any execution names none, and its
     /// input is an object this app staged for itself and nobody owns yet.
     pub input_source: Option<&'a Row>,
+    /// The ceiling on the object this run starts from.
+    ///
+    /// A run's input is materialized in full before its body runs: the executor
+    /// reads the object and hands the body the value, so the bytes are resident
+    /// alongside the isolate for the whole execution. That is what
+    /// `AppPolicy::max_input_bytes` measures, and it measures the same quantity
+    /// whether the value reached the journal inline or as an object, so moving
+    /// a run's input into the payload store does not move it onto the payload
+    /// budget's ceiling.
+    pub max_input_bytes: usize,
 }
 
 pub(crate) async fn insert_root_run(
@@ -809,7 +820,17 @@ async fn insert_run(
         deploy,
         options,
         input_source,
+        max_input_bytes,
     } = *run;
+    // Every run's input passes here, whoever staged it. The runner admits an
+    // object against the payload ceiling, the budget for a blob read back on
+    // demand; a run's input is read in full before the body runs, so this is
+    // where it answers to the bound written for that.
+    if let Some(reference) = &options.input_ref {
+        if usize::try_from(reference.size).is_ok_and(|size| size > max_input_bytes) {
+            return Err(WorkflowServiceError::PayloadTooLarge);
+        }
+    }
     tx.database()
         .collection(models::runs::Entity::COLLECTION)?
         .insert(value!({
