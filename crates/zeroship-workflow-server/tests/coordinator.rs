@@ -429,17 +429,13 @@ async fn management_is_durable_bounded_typed_and_assignment_scoped() {
     let one = command(&app);
     assert_eq!(
         a.manager
-            .manage(
-                &service_issuer(WORKER_SERVICE_NAME).unwrap(),
-                &one,
-                &a.latest
-            )
+            .manage(&service_issuer(WORKER_SERVICE_NAME).unwrap(), &one)
             .await,
         Err(Error::Denied)
     );
     let (left, right) = futures::join!(
-        a.manager.manage(&actor, &one, &a.latest),
-        b.manager.manage(&actor, &one, &b.latest)
+        a.manager.manage(&actor, &one),
+        b.manager.manage(&actor, &one)
     );
     let receipt = left.unwrap();
     assert_eq!(receipt, right.unwrap());
@@ -449,7 +445,7 @@ async fn management_is_durable_bounded_typed_and_assignment_scoped() {
     let mut changed = one.clone();
     changed.run_id = RunId::mint();
     assert_eq!(
-        b.manager.manage(&actor, &changed, &b.latest).await,
+        b.manager.manage(&actor, &changed).await,
         Err(Error::Conflict)
     );
     let mut two = command(&app);
@@ -461,10 +457,11 @@ async fn management_is_durable_bounded_typed_and_assignment_scoped() {
             }),
             deploy: Some(RestartDeploy::Started),
         },
+        deployment: None,
     };
-    a.manager.manage(&actor, &two, &a.latest).await.unwrap();
+    a.manager.manage(&actor, &two).await.unwrap();
     assert_eq!(
-        a.manager.manage(&actor, &command(&app), &a.latest).await,
+        a.manager.manage(&actor, &command(&app)).await,
         Err(Error::Capacity)
     );
     let worker = register_worker(&a, 1).await;
@@ -525,7 +522,7 @@ async fn management_is_durable_bounded_typed_and_assignment_scoped() {
         outcome: Some(outcome),
     };
     assert_eq!(
-        b.manager.manage(&actor, &one, &b.latest).await.unwrap(),
+        b.manager.manage(&actor, &one).await.unwrap(),
         management_receipt
     );
     assert_ids_retained(&initial_ids, &fixture.stored_ids().await);
@@ -601,12 +598,10 @@ async fn management_is_durable_bounded_typed_and_assignment_scoped() {
             }),
             deploy: Some(RestartDeploy::Latest),
         },
+        deployment: None,
     };
     assert_eq!(
-        reopened
-            .manager
-            .manage(&actor, &invalid, &reopened.latest)
-            .await,
+        reopened.manager.manage(&actor, &invalid).await,
         Err(Error::Invalid)
     );
 }

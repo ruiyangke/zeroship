@@ -26,9 +26,27 @@ use zeroship_core::{
 };
 use zeroship_data_orm::orm::Database;
 
+/// A restart names its deployment exactly when its effective deploy policy is
+/// `Latest`. Both mismatches are refused: a latest restart without one leaves
+/// the manager nothing to replay against, and a started restart carrying one
+/// asserts a deployment no arm of acceptance will ever read, which would let a
+/// caller believe it had pinned a restart it had not.
 pub fn validate_request(request: &ManageRun) -> Result<(), Error> {
-    if let ManagementOperation::Restart { options } = &request.command {
-        options.effective_deploy().map_err(|_| Error::Invalid)?;
+    if let ManagementOperation::Restart {
+        options,
+        deployment,
+    } = &request.command
+    {
+        let deploy = options.effective_deploy().map_err(|_| Error::Invalid)?;
+        if (deploy == RestartDeploy::Latest) != deployment.is_some() {
+            return Err(Error::Invalid);
+        }
+        if deployment
+            .as_ref()
+            .is_some_and(|target| !zeroship_bundle::validate_hash_format(&target.deploy_hash))
+        {
+            return Err(Error::Invalid);
+        }
         if options
             .from
             .as_ref()
@@ -164,12 +182,24 @@ fn resolved_matches(
             ManagementOperation::Transition { operation: left },
             ManagementCommand::Transition { operation: right },
         ) => left == right,
-        (ManagementOperation::Restart { options }, ManagementCommand::RestartStarted { from }) => {
+        (
+            ManagementOperation::Restart { options, .. },
+            ManagementCommand::RestartStarted { from },
+        ) => {
             options.effective_deploy().map_err(|_| Error::Storage)? == RestartDeploy::Started
                 && &options.from == from
         }
-        (ManagementOperation::Restart { options }, ManagementCommand::RestartLatest { .. }) => {
+        (
+            ManagementOperation::Restart {
+                options,
+                deployment,
+            },
+            ManagementCommand::RestartLatest { deployment_id },
+        ) => {
             options.effective_deploy().map_err(|_| Error::Storage)? == RestartDeploy::Latest
+                && deployment
+                    .as_ref()
+                    .is_some_and(|target| &target.deployment_id == deployment_id)
         }
         _ => false,
     })

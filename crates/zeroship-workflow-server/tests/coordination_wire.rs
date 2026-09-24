@@ -110,9 +110,14 @@ fn management_and_nested_receipts_cannot_carry_execution_data() {
     rejects_customer_fields::<ManagementReceipt>(&json!({
         "appId":app,"requestId":request,"outcome":null
     }));
+    let deployment = json!({"deploymentId":DeploymentId::mint(),
+        "deployHash":"a".repeat(64)});
     for command in [
         json!({"kind":"transition","operation":"pause"}),
-        json!({"kind":"restart","options":{"from":{"name":"checkpoint","occurrence":0},"deploy":"started"}}),
+        json!({"kind":"restart","deployment":null,
+            "options":{"from":{"name":"checkpoint","occurrence":0},"deploy":"started"}}),
+        json!({"kind":"restart","deployment":deployment,
+            "options":{"deploy":"latest"}}),
     ] {
         rejects_customer_fields::<ManagementOperation>(&command);
         let envelope =
@@ -121,6 +126,25 @@ fn management_and_nested_receipts_cannot_carry_execution_data() {
         let mut attempted = envelope;
         attempted["command"]["input"] = json!("private");
         assert!(serde_json::from_value::<ManageRun>(attempted).is_err());
+    }
+    // `deployment` may be null but may never be absent: a producer that drops
+    // the key must fail rather than read back as a started restart.
+    assert!(serde_json::from_value::<ManagementOperation>(
+        json!({"kind":"restart","options":{"deploy":"latest"}})
+    )
+    .is_err());
+    // The named deployment carries an id and a hash, and nothing else.
+    for field in ["appId", "manifestJson", "retentionState"] {
+        let mut attempted = deployment.clone();
+        attempted[field] = json!("private");
+        assert!(
+            serde_json::from_value::<ManagementOperation>(
+                json!({"kind":"restart","deployment":attempted,
+                    "options":{"deploy":"latest"}})
+            )
+            .is_err(),
+            "accepted {field}"
+        );
     }
     for outcome in [
         json!({"kind":"applied","state":"paused"}),

@@ -158,7 +158,6 @@ async fn exercise_journal_job(fixture: &Fixture, queue: &Queue, operation: JobOp
 }
 
 async fn journal_commands(fixture: &Fixture, queue: &Queue) {
-    let source = latest_support::Source::new(fixture).await;
     let coordinator = support::coordinator(queue, CoordinatorOptions::default());
     let actor = service_issuer(CONTROL_SERVICE_NAME).unwrap();
     let mut commands: Vec<_> = [
@@ -181,6 +180,7 @@ async fn journal_commands(fixture: &Fixture, queue: &Queue) {
                 from,
                 deploy: Some(RestartDeploy::Started),
             },
+            deployment: None,
         });
     }
     for command in commands {
@@ -191,17 +191,8 @@ async fn journal_commands(fixture: &Fixture, queue: &Queue) {
             run_id: RunId::mint(),
             command,
         };
-        let pending = coordinator
-            .manage(&actor, &request, &source.latest)
-            .await
-            .unwrap();
-        assert_eq!(
-            coordinator
-                .manage(&actor, &request, &source.latest)
-                .await
-                .unwrap(),
-            pending
-        );
+        let pending = coordinator.manage(&actor, &request).await.unwrap();
+        assert_eq!(coordinator.manage(&actor, &request).await.unwrap(), pending);
         let authority = assignment(&app);
         let granted = queue.claim(&authority).await.unwrap().unwrap();
         assert_eq!(granted.delivery().job.deployment_id(), None);
@@ -250,7 +241,7 @@ async fn journal_commands(fixture: &Fixture, queue: &Queue) {
             settled
         );
         assert!(coordinator
-            .manage(&actor, &request, &source.latest)
+            .manage(&actor, &request)
             .await
             .unwrap()
             .outcome

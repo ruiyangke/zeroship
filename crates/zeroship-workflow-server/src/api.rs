@@ -190,7 +190,7 @@ async fn manage(
             state
                 .service
                 .manager
-                .manage(&actor, &command, &state.service.latest)
+                .manage(&actor, &command)
                 .await
                 .map_err(Error::from)
         }

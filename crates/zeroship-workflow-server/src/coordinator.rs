@@ -13,7 +13,6 @@ use zeroship_data_orm::{
 };
 use zeroship_workflow_manager::{
     coordinator::{Coordinator as NativeCoordinator, Options as NativeOptions},
-    deployments::latest::{self, LatestDeploymentSource},
     eligibility::{self, ControlEligibility, EligibilitySource},
     recovery::{Options as RecoveryOptions, Recovery},
     retention::HoldClient,
@@ -125,7 +124,6 @@ pub struct Coordinator {
     pool: Pool,
     pub(crate) queue: Queue,
     pub manager: NativeCoordinator,
-    pub latest: LatestDeploymentSource,
 }
 impl Coordinator {
     /// Placement reads zone and enrollment facts through `eligibility`; the
@@ -178,31 +176,10 @@ impl Coordinator {
             },
             eligibility,
         )?;
-        let latest = compio::time::timeout(options.acquire_timeout, async {
-            let database = Database::connect(
-                DbBinding::platform(
-                    "platform",
-                    "workflow-latest-deployment",
-                    SchemaName::new("zeroship").map_err(|_| Error::Invalid)?,
-                ),
-                ConnectOptions::new(url, ProjectKeySource::unavailable())
-                    .max_connections(
-                        std::num::NonZeroUsize::new(options.connections).ok_or(Error::Invalid)?,
-                    )
-                    .connection_authority(),
-                latest::collections().map_err(Error::from)?,
-            )
-            .await
-            .map_err(|_| Error::Unavailable)?;
-            LatestDeploymentSource::new(database).map_err(Error::from)
-        })
-        .await
-        .map_err(|_| Error::Unavailable)??;
         let service = Self {
             pool,
             queue,
             manager,
-            latest,
         };
         service.verify().await?;
         Ok(service)
