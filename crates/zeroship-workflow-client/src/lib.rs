@@ -21,8 +21,9 @@ pub use transport::Transport;
 
 use std::{sync::Arc, time::Duration};
 use zeroship_core::workflow_coordination::{
-    AssignedScope, Assignment, FailureCode, RegisterWorker, RegisteredWorker, ReleaseScope,
-    ScopePage, WorkerId, AUDIENCE,
+    AssignedScope, Assignment, DeliveredSignal, FailureCode, RegisterWorker, RegisteredWorker,
+    ReleaseScope, RestartRun, RestartedRun, RunFailure, RunScope, RunStatus, ScopePage, SignalRun,
+    TransitionRun, TransitionedRun, WorkerId, AUDIENCE,
 };
 use zeroship_core::{
     schema_bundle::{EnsureJournal, SchemaBundleOutcome},
@@ -75,6 +76,21 @@ pub enum Error {
     Timeout,
     #[error("workflow coordinator refused the request: {0:?}")]
     Refused(FailureCode),
+}
+
+/// How a creator-facing run call failed.
+///
+/// Two arms, because a caller acts on them differently. A transport failure
+/// establishes nothing about whether the call took effect, so a durable command
+/// is retried under its original request identity. A refusal is the engine
+/// answering, and it carries the code a creator branches on and the message a
+/// creator reads.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum RunError {
+    #[error(transparent)]
+    Transport(#[from] Error),
+    #[error("workflow refused the run call: {0:?}")]
+    Refused(RunFailure),
 }
 
 /// A runtime-local client bound to the host's enrolled worker signer.
@@ -221,5 +237,57 @@ impl WorkerCoordinator {
         self.transport
             .post(endpoints::WORKFLOW_RELEASE, request)
             .await
+    }
+
+    /// Read a run current state and, once it has settled, what it left behind.
+    ///
+    /// The reply LOCATES a run output rather than carrying it, so this exchange
+    /// stays small whatever the run returned.
+    ///
+    /// # Errors
+    /// Refuses failed exchanges and the engine own refusals.
+    pub async fn run_status(&self, request: &RunScope) -> Result<RunStatus, RunError> {
+        self.transport
+            .post_run(endpoints::WORKFLOW_RUN_STATUS, request)
+            .await
+    }
+
+    /// Deliver a signal to a waiting run.
+    ///
+    /// # Errors
+    /// Refuses failed exchanges and the engine own refusals.
+    pub async fn signal_run(&self, request: &SignalRun) -> Result<DeliveredSignal, RunError> {
+        self.transport
+            .post_run(endpoints::WORKFLOW_RUN_SIGNAL, request)
+            .await
+    }
+
+    /// Move a run through a lifecycle transition.
+    ///
+    /// # Errors
+    /// Refuses failed exchanges and the engine own refusals.
+    pub async fn transition_run(
+        &self,
+        request: &TransitionRun,
+    ) -> Result<TransitionedRun, RunError> {
+        self.transport
+            .post_run(endpoints::WORKFLOW_RUN_TRANSITION, request)
+            .await
+    }
+
+    /// Restart a run, retaining whatever journal prefix the options name.
+    ///
+    /// # Errors
+    /// Refuses failed exchanges, the engine own refusals, and a receipt for a
+    /// run other than the one asked for.
+    pub async fn restart_run(&self, request: &RestartRun) -> Result<RestartedRun, RunError> {
+        let restarted: RestartedRun = self
+            .transport
+            .post_run(endpoints::WORKFLOW_RUN_RESTART, request)
+            .await?;
+        if restarted.run_id != request.run_id.as_str() {
+            return Err(RunError::Transport(Error::InvalidResponse));
+        }
+        Ok(restarted)
     }
 }

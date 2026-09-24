@@ -1,15 +1,18 @@
 //! Metadata exchanged with the workflow coordinator.
 //!
-//! Execution inputs, journal records, customer connection information and
-//! payload descriptors belong to customer-worker contracts, not this protocol.
-//! Service authentication establishes the caller; IDs in messages select
-//! resources and never grant authority to them.
+//! Execution inputs, journal records and customer connection information
+//! belong to customer-worker contracts, not this protocol. A payload's BYTES
+//! are the same: what crosses here is at most the descriptor that locates one,
+//! as `RunStatus::output` carries, and reading it is a separate exchange with
+//! its own budget. Service authentication establishes the caller; IDs in
+//! messages select resources and never grant authority to them.
 
 pub use zeroship_id::workflow::{DeploymentId, RequestId, RunId, WorkerId};
 
 mod lifecycle;
 pub use lifecycle::{
-    InvalidRestart, RestartDeploy, RestartOptions, RestartTarget, RunOperation, RunState,
+    DeliveredSignal, InvalidRestart, RestartDeploy, RestartOptions, RestartTarget, RestartedRun,
+    RunOperation, RunState, RunStatus, SignalOptions, TransitionedRun,
 };
 
 use crate::app_id::AppId;
@@ -264,4 +267,112 @@ pub struct ManagementReceipt {
     /// yet applied it.
     #[serde(deserialize_with = "nullable")]
     pub outcome: Option<ManagementOutcome>,
+}
+
+/// Selects one run of one app for a creator-facing call.
+///
+/// The worker is absent on purpose. Placement authority is `(app, worker)`, and
+/// the worker half comes from the credential that verified the request, so a
+/// body cannot name a placement its caller does not hold.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RunScope {
+    pub scope: AssignedScope,
+    pub run_id: RunId,
+}
+
+/// Deliver a signal to a waiting run.
+///
+/// `request_id` is the idempotency of the delivery: a caller that retries after
+/// an uncertain reply sends the same one rather than delivering twice.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SignalRun {
+    pub request_id: RequestId,
+    pub scope: AssignedScope,
+    pub run_id: RunId,
+    pub options: SignalOptions,
+}
+
+/// Move a run through a lifecycle transition.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TransitionRun {
+    pub request_id: RequestId,
+    pub scope: AssignedScope,
+    pub run_id: RunId,
+    pub operation: RunOperation,
+}
+
+/// Restart a run, retaining whatever journal prefix the options name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RestartRun {
+    pub request_id: RequestId,
+    pub scope: AssignedScope,
+    pub run_id: RunId,
+    pub options: RestartOptions,
+}
+
+/// Why a creator-facing run call was refused, in the engine's own terms.
+///
+/// [`Failure`] cannot carry this. It has seven codes, no arm for a missing run,
+/// and no message at all, while creator code branches on the code AND reads the
+/// message: `invalid_request_keeps_its_message` and `conflict_keeps_its_message`
+/// in `crates/zeroship-workflow-v8/src/error.rs` pin that contract.
+///
+/// TWO ARMS CARRY NO MESSAGE FIELD, and that is the contract rather than an
+/// omission. `Internal` and `Unavailable` name a host condition a creator cannot
+/// act on, so their wording is replaced before it reaches creator code while the
+/// operator reads the original in the service log. Giving them nowhere to put a
+/// message means host wording cannot cross even by mistake.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "code",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum RunFailure {
+    InvalidRequest { message: String },
+    Unauthenticated {},
+    PermissionDenied {},
+    NotFound { message: String },
+    Conflict { message: String },
+    ResourceExhausted { message: String },
+    PayloadTooLarge {},
+    Unavailable {},
+    Timeout {},
+    /// Retry after establishing an epoch above `after`; null means none was
+    /// held and the journal has closed none. Never a durable refusal.
+    IngressFenced {
+        #[serde(deserialize_with = "nullable")]
+        after: Option<Revision>,
+    },
+    Internal {},
+}
+
+impl RunFailure {
+    /// The HTTP status this refusal is carried by.
+    ///
+    /// One authority for the pairing, so the service that writes the status and
+    /// the client that checks it cannot disagree. A reply whose status and body
+    /// disagree is not a refusal this contract describes, and the client refuses
+    /// it rather than believing either half.
+    #[must_use]
+    pub const fn status(&self) -> u16 {
+        match self {
+            Self::InvalidRequest { .. } => 400,
+            Self::Unauthenticated {} => 401,
+            Self::PermissionDenied {} => 403,
+            Self::NotFound { .. } => 404,
+            Self::Conflict { .. } => 409,
+            Self::IngressFenced { .. } => 412,
+            Self::PayloadTooLarge {} => 413,
+            Self::ResourceExhausted { .. } => 429,
+            Self::Internal {} => 500,
+            Self::Unavailable {} => 503,
+            Self::Timeout {} => 504,
+        }
+    }
 }

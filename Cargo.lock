@@ -8808,6 +8808,7 @@ dependencies = [
  "zeroship-core",
  "zeroship-data-orm",
  "zeroship-migrate-server",
+ "zeroship-workflow",
  "zeroship-workflow-client",
  "zeroship-workflow-manager",
  "zeroship-workflow-schema",

@@ -485,7 +485,13 @@ impl RestartPlan<'_> {
             run_id: run_id.into(),
             state: RunState::Queued,
             restarted_from_ordinal,
-            pinned_to: deploy,
+            // Parsed where the row is read, so a deployment id the journal
+            // cannot name fails here rather than at whichever caller first
+            // needs it typed.
+            pinned_to: zeroship_core::workflow_coordination::DeploymentId::parse_owned(deploy)
+                .map_err(|_| {
+                    WorkflowServiceError::Internal("invalid workflow restart deployment id".into())
+                })?,
         };
         emit(
             tx,

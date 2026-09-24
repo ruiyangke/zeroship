@@ -100,7 +100,7 @@ async fn transaction_and_target(store: Rc<OrmStore>) {
     let staged = plan.apply().await.unwrap();
     assert_eq!(staged.state, RunState::Queued);
     assert_eq!(staged.run_id, fixture.run);
-    assert_eq!(staged.pinned_to, fixture.original.id);
+    assert_eq!(staged.pinned_to.as_str(), fixture.original.id.as_str());
     fixture
         .assert_generation_in(&tx, 1, &fixture.original.id)
         .await;
@@ -109,7 +109,7 @@ async fn transaction_and_target(store: Rc<OrmStore>) {
     assert_eq!(fixture.snapshot().await, before);
 
     let applied = fixture.apply_exact(&fixture.original).await.unwrap();
-    assert_eq!(applied.pinned_to, fixture.original.id);
+    assert_eq!(applied.pinned_to.as_str(), fixture.original.id.as_str());
     fixture.assert_generation(1, &fixture.original.id).await;
     assert_eq!(fixture.active().await, fixture.replacement);
 
@@ -118,7 +118,7 @@ async fn transaction_and_target(store: Rc<OrmStore>) {
         .restart(&RequestId::mint(), &fixture.run, RestartOptions::default())
         .await
         .unwrap();
-    assert_eq!(ordinary.pinned_to, fixture.replacement.id);
+    assert_eq!(ordinary.pinned_to.as_str(), fixture.replacement.id.as_str());
     fixture.assert_generation(2, &fixture.replacement.id).await;
 }
 

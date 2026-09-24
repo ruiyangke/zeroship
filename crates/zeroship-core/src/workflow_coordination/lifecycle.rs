@@ -204,3 +204,76 @@ impl std::str::FromStr for RunState {
         }
     }
 }
+
+/// The value a creator delivers to a waiting run, and the kind it answers to.
+///
+/// `payload` is the creator's own JSON. It answers to `AppPolicy::max_input_bytes`
+/// wherever it is admitted, which is the same bound a run's input and a step
+/// checkpoint answer to, so a transport carrying one derives its request budget
+/// from `MAX_INPUT_BYTES_CEILING` rather than from a payload budget.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SignalOptions {
+    #[serde(rename = "type")]
+    pub signal_type: String,
+    #[serde(default)]
+    pub payload: serde_json::Value,
+}
+
+/// The signal the journal recorded, named by the id it was given.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeliveredSignal {
+    pub id: String,
+}
+
+/// What a run has settled into, and what it left behind.
+///
+/// `output` LOCATES the result rather than carrying it: a run's result is the
+/// object its descriptor names, so this field is the descriptor and the bytes
+/// come from a separate payload read. That is what keeps this reply small
+/// whatever the run returned, and it is why a status exchange needs no payload
+/// budget.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunStatus {
+    pub state: RunState,
+    pub output: Option<serde_json::Value>,
+    pub error: Option<serde_json::Value>,
+    /// The run a `continuedAsNew` close handed this run's work to.
+    ///
+    /// Typed and platform-minted, so it is not confusable with whatever JSON a
+    /// creator returned in `output`. Absent from the response unless the run
+    /// actually produced a successor.
+    #[serde(
+        default,
+        rename = "continuedAsNew",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub continued_as_new_run_id: Option<String>,
+}
+
+/// The state a lifecycle transition settled the run in.
+///
+/// The whole result of a transition is the state, which is decided inside the
+/// creator transaction and cannot be recovered from the command that asked for
+/// it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransitionedRun {
+    pub state: RunState,
+}
+
+/// What a restart decided: how much journal the new generation kept, and where
+/// it replays.
+///
+/// `run_id` is the run that was restarted. A restart advances a run's
+/// generation, never its identity, so this is always the run the command named.
+/// `restarted_from_ordinal` is the retained journal prefix, absent when the run
+/// restarted whole, and `pinned_to` is the deployment the new generation
+/// replays against, which a latest restart moves.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestartedRun {
+    pub run_id: String,
+    pub state: RunState,
+    pub restarted_from_ordinal: Option<u32>,
+    pub pinned_to: zeroship_id::workflow::DeploymentId,
+}
