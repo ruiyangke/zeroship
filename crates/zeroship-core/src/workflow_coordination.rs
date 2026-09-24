@@ -1,15 +1,18 @@
 //! Metadata exchanged with the workflow coordinator.
 //!
-//! Execution inputs, journal records, customer connection information and
-//! payload descriptors belong to customer-worker contracts, not this protocol.
-//! Service authentication establishes the caller; IDs in messages select
-//! resources and never grant authority to them.
+//! Execution inputs, journal records and customer connection information
+//! belong to customer-worker contracts, not this protocol. A payload's BYTES
+//! are the same: what crosses here is at most the descriptor that locates one,
+//! as `RunStatus::output` carries, and reading it is a separate exchange with
+//! its own budget. Service authentication establishes the caller; IDs in
+//! messages select resources and never grant authority to them.
 
 pub use zeroship_id::workflow::{DeploymentId, RequestId, RunId, WorkerId};
 
 mod lifecycle;
 pub use lifecycle::{
-    InvalidRestart, RestartDeploy, RestartOptions, RestartTarget, RunOperation, RunState,
+    DeliveredSignal, InvalidRestart, RestartDeploy, RestartOptions, RestartTarget, RunOperation,
+    RunState, RunStatus, SignalOptions,
 };
 
 use crate::app_id::AppId;
