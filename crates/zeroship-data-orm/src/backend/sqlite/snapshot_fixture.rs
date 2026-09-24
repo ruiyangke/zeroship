@@ -122,10 +122,10 @@ mod backup_sqlite {
     }
 
     /// Classify a session-level `DbError` from `VACUUM INTO` as the
-    /// `SQLITE_BUSY`-equivalent retryable error. The connection's busy
-    /// timeout (`budgets::DB_LOCK_TIMEOUT_MS`) absorbs most contention internally;
-    /// surfacing here means a schema-change race or checkpointer
-    /// holding the exclusive lock past the timeout. The
+    /// `SQLITE_BUSY`-equivalent retryable error. The session actor spends the
+    /// lock budget (`budgets::DB_LOCK_TIMEOUT_MS`) retrying the statement
+    /// before it answers, so surfacing here means a schema-change race or
+    /// checkpointer held the exclusive lock for that whole budget. The
     /// `error::from_sqlite` classifier maps `SQLITE_BUSY` to
     /// `DbError::LockContention` (per the existing classifier shape).
     fn is_busy_error(e: &DbError) -> bool {
@@ -189,10 +189,10 @@ mod backup_sqlite {
         //    the attach_alias_file path attached the file).
         //
         //    Busy-policy retry: 3 attempts at 0/100/500ms when
-        //    `opts.if_busy == Retry`. SQLite's bootstrap PRAGMA
-        //    `busy_timeout=5000` absorbs most contention internally so
-        //    a surfaced LockContention here is rare; the retry caps
-        //    additional wait at ~0.6s on top of the PRAGMA budget.
+        //    `opts.if_busy == Retry`. Each attempt has already spent the
+        //    actor's lock budget retrying, so a LockContention reaching here
+        //    is rare; this loop adds a bounded wait on top of that budget for
+        //    a holder that released just after it expired.
         let attempts: &[u64] = match opts.if_busy {
             BusyPolicy::Abort => &[0],
             BusyPolicy::Retry => &[0, 100, 500],

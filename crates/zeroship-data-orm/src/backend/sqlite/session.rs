@@ -6,6 +6,13 @@
 //! Separate connections prevent unrelated work from joining a creator transaction,
 //! but SQLite writes still contend for the database's writer lock.
 //!
+//! One thread serves every lane, so a statement that waits in place for a lock
+//! waits for a holder only this thread can advance. Autocommit statements
+//! therefore never block inside SQLite: they come back `SQLITE_BUSY` at once
+//! and the actor re-attempts them from its own retry list, spending the lock
+//! budget as a deadline. Transaction lanes keep the blocking busy handler,
+//! whose holders are outside this session.
+//!
 //! Journal settings apply per database, including attached app files. Runtime
 //! connection setup and migration requirements must agree on those settings.
 //!
@@ -1279,6 +1286,81 @@ struct Actor {
     next_command_gate: NextCommandGateSlot,
 }
 
+/// Whether the actor is taking a command off the queue or resuming one it
+/// already took.
+///
+/// It exists for exactly one rule: the autocommit lane refuses a reservation
+/// that has already run a command, and a retry has - it ran it and SQLite
+/// refused the statement for a lock. See [`Actor::check_owner`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Admission {
+    First,
+    Retry,
+}
+
+/// What one attempt at a data command decided.
+enum Attempt<T> {
+    /// Finished, for better or worse. This is the caller's reply.
+    Settled(Result<T, DbError>),
+    /// SQLite refused the statement for a lock and **nothing it would have
+    /// written was applied**: the autocommit wrapper that carried it is rolled
+    /// back, or there was no wrapper and the statement never started. The
+    /// command may be attempted again.
+    Contended(DbError),
+}
+
+/// A lock-contended command's remaining budget.
+struct Schedule {
+    /// When this command stops retrying and reports contention.
+    deadline: std::time::Instant,
+    /// The pause used before the last attempt; it doubles towards
+    /// [`LOCK_RETRY_MAX`].
+    backoff: std::time::Duration,
+    /// The contention the last attempt produced, so the caller is told what
+    /// SQLite actually said rather than a summary of it.
+    last: DbError,
+}
+
+/// One command the actor handed back to itself, waiting out a lock.
+struct Deferred {
+    command: Command,
+    /// The earliest instant the actor may attempt it again.
+    due: std::time::Instant,
+    schedule: Schedule,
+}
+
+/// What the actor picked up this iteration.
+enum Pending {
+    Fresh(Command),
+    Retry(Deferred),
+}
+
+/// Answer a deferred command's caller with a contention error.
+///
+/// Only the commands that run on `op_conn` can be deferred; any other variant
+/// reaching here means that stopped being true, and a dropped reply channel
+/// would strand its caller silently, so the mismatch is logged.
+fn report_contention(command: Command, error: DbError) {
+    match command {
+        Command::Exec { reply, .. } => {
+            let _ = reply.send(Err(error));
+        }
+        Command::Query { reply, .. } => {
+            let _ = reply.send(Err(error));
+        }
+        Command::QueryTyped { reply, .. } => {
+            let _ = reply.send(Err(error));
+        }
+        Command::VacuumInto { reply, .. } => {
+            let _ = reply.send(Err(error));
+        }
+        _ => tracing::error!(
+            %error,
+            "sqlite actor: a command that cannot be deferred reached the retry list"
+        ),
+    }
+}
+
 const BOOT_PRAGMAS: &str = "\
     PRAGMA synchronous = NORMAL; \
     PRAGMA foreign_keys = ON;";
@@ -1289,18 +1371,59 @@ fn lock_wait() -> std::time::Duration {
     std::time::Duration::from_millis(u64::from(crate::budgets::DB_LOCK_TIMEOUT_MS))
 }
 
-/// Pause between attempts to switch a file another connection holds to WAL.
-const WAL_SWITCH_RETRY: std::time::Duration = std::time::Duration::from_millis(10);
+/// Pause between attempts at a connection-setup statement another connection
+/// holds a lock against.
+const SETUP_RETRY_PAUSE: std::time::Duration = std::time::Duration::from_millis(10);
+
+/// Run one connection-setup statement, waiting out another connection's lock
+/// within the lock budget.
+///
+/// **Which statements belong here, and why it is not the retry list.** `ATTACH`,
+/// `DETACH` and the WAL switch set a connection up; no reservation issues them
+/// and no queued command is waiting on their reply's SQL. What they can lose to
+/// is a holder outside this session - a replaced session's connections still
+/// closing, another replica, a checkpointer - which this actor cannot advance
+/// by returning to its queue, so the budget is spent here.
+///
+/// They take it as a deadline rather than from the connection's busy handler
+/// for two independent reasons: the autocommit connection has no busy handler
+/// at all (see [`lane_busy_timeout`]), and SQLite does not invoke one for the
+/// WAL switch's read-to-write upgrade even where there is one.
+fn with_lock_budget(mut attempt: impl FnMut() -> Result<(), DbError>) -> Result<(), DbError> {
+    let deadline = std::time::Instant::now() + lock_wait();
+    loop {
+        let error = match attempt() {
+            Ok(()) => return Ok(()),
+            Err(error) => error,
+        };
+        let contended = matches!(error, DbError::LockContention { .. });
+        if !contended || std::time::Instant::now() >= deadline {
+            return Err(error);
+        }
+        std::thread::sleep(SETUP_RETRY_PAUSE);
+    }
+}
+
+/// The shortest pause before a lock-contended autocommit command is attempted
+/// again, and the ceiling the pause doubles towards.
+///
+/// These bound only how often an **otherwise idle** actor re-probes a lock:
+/// the loop waits on the command queue with the next attempt as its deadline,
+/// so a command arriving meanwhile is served immediately and the pause is not a
+/// sleep. The floor is short because the common case is a holder already queued
+/// on this same actor, which is released by the very next command; the ceiling
+/// stops a holder that outlasts the budget from spinning the thread.
+const LOCK_RETRY_MIN: std::time::Duration = std::time::Duration::from_millis(1);
+const LOCK_RETRY_MAX: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// Put the database in WAL mode, waiting out another connection's lock within
 /// the lock budget.
 ///
-/// The connection's busy handler covers a holder that only reads. A holder
-/// with a write transaction open is refused at once instead: the switch reads
-/// the file before it writes, and SQLite does not invoke the busy handler for a
-/// read transaction's upgrade. So the switch itself is retried until the budget
-/// is spent, then reported as lock contention. A file already in WAL mode needs
-/// no lock and switches on the first attempt.
+/// The switch reads the file before it writes, and SQLite does not invoke a
+/// busy handler for a read transaction's upgrade, so the switch itself is
+/// retried by [`with_lock_budget`] until the budget is spent and then reported
+/// as lock contention. A file already in WAL mode needs no lock and switches on
+/// the first attempt.
 fn enter_wal(conn: &Connection) -> Result<(), DbError> {
     enter_wal_on(conn, "main")
 }
@@ -1312,23 +1435,37 @@ fn enter_wal(conn: &Connection) -> Result<(), DbError> {
 /// construction rather than by two spellings agreeing.
 fn enter_wal_on(conn: &Connection, escaped_alias: &str) -> Result<(), DbError> {
     let statement = format!("PRAGMA \"{escaped_alias}\".journal_mode = WAL;");
-    let deadline = std::time::Instant::now() + lock_wait();
-    loop {
-        let error = match conn.execute_batch(&statement) {
-            Ok(()) => return Ok(()),
-            Err(error) => from_sqlite(error),
-        };
-        let contended = matches!(error, DbError::LockContention { .. });
-        if !contended || std::time::Instant::now() >= deadline {
-            return Err(error);
-        }
-        std::thread::sleep(WAL_SWITCH_RETRY);
+    with_lock_budget(|| conn.execute_batch(&statement).map_err(from_sqlite))
+}
+
+/// How long `lane`'s connection may wait inside SQLite for another
+/// connection's lock.
+///
+/// **The two lanes answer this differently, and the difference is the whole of
+/// the deadlock fix.** `busy_timeout` installs SQLite's *synchronous* busy
+/// handler: the wait happens inside the C call, on the one actor thread, which
+/// is also the only thread that can advance the transaction holding the lock.
+/// So on the autocommit lane - the lane whose statements contend with this
+/// session's own open transactions - the budget is zero. `SQLITE_BUSY` comes
+/// back at once and [`Actor::run`] spends the budget as a deadline instead,
+/// returning to the queue between attempts so the holder's `COMMIT` can run.
+///
+/// Transaction lanes keep the blocking handler. Their lock is taken once, at
+/// `BEGIN IMMEDIATE`, against holders outside this session (another replica on
+/// the same file), and no command this actor could run next would release it -
+/// so waiting in place costs nothing that re-queueing would buy, and the
+/// handler is what lets two replicas take turns instead of refusing each other.
+fn lane_busy_timeout(lane: Lane) -> std::time::Duration {
+    match lane {
+        Lane::Op => std::time::Duration::ZERO,
+        Lane::Tx(_) => lock_wait(),
     }
 }
 
 fn open_lane_connection(
     db_path: &Path,
     packet_tx: Option<&CommitSender>,
+    lane: Lane,
 ) -> Result<
     (
         Connection,
@@ -1340,13 +1477,16 @@ fn open_lane_connection(
     let conn = Connection::open(db_path).map_err(from_sqlite)?;
     // The platform's budget, chosen here rather than left at whatever the
     // driver opens with, and set before the first statement that takes a lock -
-    // the WAL switch below included.
+    // the WAL switch below included. Bootstrap runs before this connection can
+    // have a command queued behind it, so blocking here cannot strand a holder.
     conn.busy_timeout(lock_wait()).map_err(from_sqlite)?;
     super::json::register(&conn).map_err(from_sqlite)?;
     super::decimal::register(&conn).map_err(from_sqlite)?;
     super::temporal::register(&conn).map_err(from_sqlite)?;
     enter_wal(&conn)?;
     conn.execute_batch(BOOT_PRAGMAS).map_err(from_sqlite)?;
+    conn.busy_timeout(lane_busy_timeout(lane))
+        .map_err(from_sqlite)?;
     let dispatcher = match packet_tx {
         Some(tx) => Some(crate::backend::sqlite::cdc::install(&conn, tx.clone())?),
         None => None,
@@ -1355,11 +1495,9 @@ fn open_lane_connection(
 }
 
 impl Actor {
-    fn open(
-        db_path: PathBuf,
-        packet_tx: Option<CommitSender>,
-    ) -> Result<Self, DbError> {
-        let (op_conn, op_dispatcher) = open_lane_connection(&db_path, packet_tx.as_ref())?;
+    fn open(db_path: PathBuf, packet_tx: Option<CommitSender>) -> Result<Self, DbError> {
+        let (op_conn, op_dispatcher) =
+            open_lane_connection(&db_path, packet_tx.as_ref(), Lane::Op)?;
         let interrupts = Arc::new(Interrupts::new(op_conn.get_interrupt_handle()));
         Ok(Self {
             op: LaneConn {
@@ -1469,7 +1607,7 @@ impl Actor {
             return;
         };
         let generation = entry.generation + 1;
-        match open_lane_connection(&db_path, packet_tx.as_ref()) {
+        match open_lane_connection(&db_path, packet_tx.as_ref(), lane) {
             Ok((conn, dispatcher)) => {
                 for (alias, path) in &attachments {
                     if let Err(e) = run_attach(&conn, alias, path) {
@@ -1576,7 +1714,7 @@ impl Actor {
             .find(|(alias, _)| alias == app_id)
             .map(|(_, path)| path.clone());
         let (conn, dispatcher) =
-            open_lane_connection(&self.db_path, self.packet_tx.as_ref())?;
+            open_lane_connection(&self.db_path, self.packet_tx.as_ref(), Lane::Tx(id))?;
         if let Some(path) = &path {
             run_attach(&conn, app_id, path)?;
         }
@@ -1626,7 +1764,13 @@ impl Actor {
     ///   minted per command and settle at that command's completion. So its
     ///   rule is the *lifetime* one: a reservation that has already run a
     ///   command is spent, and a second command naming it is stale.
-    fn check_owner(&self, reservation: &Reservation) -> Result<(), DbError> {
+    ///
+    /// The spent rule asks whether the **caller** submitted twice, so it is
+    /// [`Admission::First`]'s to enforce. An [`Admission::Retry`] is the actor
+    /// re-attempting the one command that caller submitted; the reservation is
+    /// marked used because the first attempt marked it, and refusing it here
+    /// would turn every lock retry into `reservation_not_owner`.
+    fn check_owner(&self, reservation: &Reservation, admission: Admission) -> Result<(), DbError> {
         let lane = reservation.lane();
         let Some(entry) = self.lane_ref(lane) else {
             return Err(Self::no_such_lane(reservation));
@@ -1653,122 +1797,339 @@ impl Actor {
                     ),
                 ))
             }
-            Lane::Op if reservation.used() => Err(DbError::validation(
-                "reservation_not_owner",
-                format!(
-                    "db: autocommit reservation {} has already run its one command and no \
-                     longer owns op_conn (current owner: {:?})",
-                    reservation.id(),
-                    self.op_bound
-                ),
-            )),
+            Lane::Op if admission == Admission::First && reservation.used() => {
+                Err(DbError::validation(
+                    "reservation_not_owner",
+                    format!(
+                        "db: autocommit reservation {} has already run its one command and no \
+                         longer owns op_conn (current owner: {:?})",
+                        reservation.id(),
+                        self.op_bound
+                    ),
+                ))
+            }
             _ => Ok(()),
         }
     }
 
+    /// The apps whose transaction connections this session is holding open
+    /// **right now**, asked of SQLite rather than of our own bookkeeping:
+    /// `is_autocommit` is the same authority the terminal classifier trusts.
+    fn open_transactions(&self) -> Vec<&str> {
+        self.tx
+            .values()
+            .filter(|lane| !lane.conn.conn.is_autocommit())
+            .map(|lane| lane.app_id.as_str())
+            .collect()
+    }
+
+    /// The contention error a caller sees once its lock budget is spent.
+    ///
+    /// The variant is [`DbError::LockContention`] either way, because
+    /// `lock_not_available` parity with PostgreSQL is what the SDK branches on
+    /// and a deadline reached is a lock not acquired. What changes is the
+    /// message: when the lock was held for the whole budget by a transaction
+    /// **this same session** has open, the platform can say so and name the
+    /// remedy, instead of leaving the creator to read `database is locked` and
+    /// look for a second process that does not exist.
+    fn contention_report(&self, error: DbError) -> DbError {
+        let held = self.open_transactions();
+        if held.is_empty() {
+            return error;
+        }
+        let DbError::LockContention { message } = error else {
+            return error;
+        };
+        DbError::LockContention {
+            message: format!(
+                "{message}; the write lock is held by an open transaction on this same \
+                 database session ({}), and a statement outside that transaction cannot \
+                 proceed until it commits or rolls back",
+                held.join(", ")
+            ),
+        }
+    }
+
+    /// Service the command queue, and the lock budget of every command the
+    /// queue has handed back.
+    ///
+    /// **Why a command can come back.** The autocommit lane's connection waits
+    /// no time at all inside SQLite (see [`lane_busy_timeout`]), so a statement
+    /// that loses the write lock returns `SQLITE_BUSY` immediately with nothing
+    /// applied. Rather than the thread waiting for the holder, the command goes
+    /// into `deferred` and the thread returns here - which is the only way the
+    /// holder's own `COMMIT`, sitting further down this very queue, can ever
+    /// run. The budget the busy handler used to spend inside the C call is
+    /// spent here instead, as a deadline per command.
+    ///
+    /// **Ordering.** A deferred command is attempted before anything still in
+    /// the queue the moment its backoff elapses, and it was enqueued before all
+    /// of them, so the yield it makes is given back rather than compounded and
+    /// no command can starve. What a caller could rely on is unchanged: every
+    /// session method awaits its own reply before the next command on that
+    /// reservation can exist, so per-reservation order was never the queue's to
+    /// provide, and order *between* reservations is not observable - two
+    /// reservations are two independent futures.
     fn run(&mut self, rx: &flume::Receiver<Command>) {
-        while let Ok(cmd) = rx.recv() {
-            #[cfg(test)]
-            {
-                let armed = self
-                    .next_command_gate
-                    .lock()
-                    .expect("next_command_gate mutex poisoned")
-                    .take();
-                if let Some(gate) = armed {
-                    let _ = gate.entered_tx.send(());
-                    let _ = gate.release_rx.recv();
+        let mut deferred: Vec<Deferred> = Vec::new();
+        loop {
+            let now = std::time::Instant::now();
+            let next = if let Some(index) = deferred.iter().position(|entry| entry.due <= now) {
+                Pending::Retry(deferred.remove(index))
+            } else {
+                // Wait for the next command, but no longer than the earliest
+                // deferred one is due. The actor is parked on the queue for that
+                // wait, not sleeping, so a backoff never delays fresh work.
+                let received = deferred.iter().map(|entry| entry.due).min().map_or_else(
+                    || rx.recv().map_err(|_| flume::RecvTimeoutError::Disconnected),
+                    |due| rx.recv_deadline(due),
+                );
+                match received {
+                    Ok(cmd) => Pending::Fresh(cmd),
+                    // Nothing arrived before a deferred command came due: go
+                    // round and pick that one up.
+                    Err(flume::RecvTimeoutError::Timeout) => continue,
+                    Err(flume::RecvTimeoutError::Disconnected) => break,
                 }
-            }
-            match cmd {
-                Command::Reserve {
-                    reservation,
-                    app_id,
-                    reply,
-                } => {
-                    let result = self.run_reserve(&reservation, &app_id);
-                    let _ = reply.send(result);
-                }
-                Command::Release { reservation } => {
-                    if let Some(id) = reservation.lane().tx_id() {
-                        if self.lane_bound(reservation.lane()) == Some(reservation.id()) {
-                            self.unbind_tx(id);
+            };
+
+            let (cmd, admission, previous) = match next {
+                Pending::Fresh(cmd) => {
+                    // The gate stalls the next command a *caller* submitted. A
+                    // retry is the actor resuming one it already took, so it
+                    // must not consume an arming.
+                    #[cfg(test)]
+                    {
+                        let armed = self
+                            .next_command_gate
+                            .lock()
+                            .expect("next_command_gate mutex poisoned")
+                            .take();
+                        if let Some(gate) = armed {
+                            let _ = gate.entered_tx.send(());
+                            let _ = gate.release_rx.recv();
                         }
                     }
+                    (cmd, Admission::First, None)
                 }
-                Command::Exec {
-                    reservation,
-                    sql,
-                    params,
-                    reply,
-                } => {
-                    let result =
-                        self.run_data(&reservation, &sql, |conn| run_exec(conn, &sql, &params));
-                    let _ = reply.send(result);
-                }
-                Command::Query {
-                    reservation,
-                    sql,
-                    params,
-                    reply,
-                } => {
-                    let result =
-                        self.run_data(&reservation, &sql, |conn| run_query(conn, &sql, &params));
-                    let _ = reply.send(result);
-                }
-                Command::QueryTyped {
-                    reservation,
-                    sql,
-                    params,
-                    reply,
-                } => {
-                    let result = self.run_data(&reservation, &sql, |conn| {
-                        run_query_typed(conn, &sql, &params)
-                    });
-                    let _ = reply.send(result);
-                }
-                Command::Settle {
-                    reservation,
-                    intent,
-                    reply,
-                } => {
-                    let result = self.run_settle(&reservation, intent);
-                    let _ = reply.send(result);
-                }
-                Command::Cancel { reservation, reply } => {
-                    let outcome = self.run_cancel(&reservation);
-                    let _ = reply.send(Ok(outcome));
-                }
-                Command::Attach {
-                    app_id,
-                    db_path,
-                    reply,
-                } => {
-                    let result = self.run_attach_both(&app_id, &db_path);
-                    let _ = reply.send(result);
-                }
-                Command::VacuumInto {
-                    app_id,
-                    dest_path,
-                    reply,
-                } => {
-                    let result = run_vacuum_into(&self.op.conn, app_id.as_deref(), &dest_path);
-                    let _ = reply.send(result);
-                }
-                Command::ReattachFile {
-                    app_id,
-                    temp_path,
-                    live_path,
-                    reply,
-                } => {
-                    let result = self.run_reattach(&app_id, &temp_path, &live_path);
-                    let _ = reply.send(result);
-                }
-                Command::Shutdown => break,
+                Pending::Retry(entry) => (entry.command, Admission::Retry, Some(entry.schedule)),
+            };
+
+            if !self.dispatch(cmd, admission, previous, &mut deferred) {
+                break;
             }
+        }
+        // A caller still waiting on a deferred command outlives the loop only
+        // when the session is being torn down. Answer it with the contention
+        // that put it here rather than dropping its reply channel, which the
+        // caller would read as a dead worker.
+        for entry in deferred {
+            report_contention(entry.command, entry.schedule.last);
         }
         // Both connections drop here, closing cleanly. WAL checkpointing
         // happens on close.
+    }
+
+    /// Run one command, and say whether the actor carries on.
+    ///
+    /// `previous` is the budget a command already spent on earlier attempts,
+    /// and is `Some` exactly when `admission` is [`Admission::Retry`].
+    fn dispatch(
+        &mut self,
+        cmd: Command,
+        admission: Admission,
+        previous: Option<Schedule>,
+        deferred: &mut Vec<Deferred>,
+    ) -> bool {
+        match cmd {
+            Command::Reserve {
+                reservation,
+                app_id,
+                reply,
+            } => {
+                let result = self.run_reserve(&reservation, &app_id);
+                let _ = reply.send(result);
+            }
+            Command::Release { reservation } => {
+                if let Some(id) = reservation.lane().tx_id() {
+                    if self.lane_bound(reservation.lane()) == Some(reservation.id()) {
+                        self.unbind_tx(id);
+                    }
+                }
+            }
+            Command::Exec {
+                reservation,
+                sql,
+                params,
+                reply,
+            } => {
+                match self.run_data(&reservation, &sql, admission, |conn| {
+                    run_exec(conn, &sql, &params)
+                }) {
+                    Attempt::Settled(result) => {
+                        let _ = reply.send(result);
+                    }
+                    Attempt::Contended(error) => self.defer_or_report(
+                        deferred,
+                        Command::Exec {
+                            reservation,
+                            sql,
+                            params,
+                            reply,
+                        },
+                        previous,
+                        error,
+                    ),
+                }
+            }
+            Command::Query {
+                reservation,
+                sql,
+                params,
+                reply,
+            } => {
+                match self.run_data(&reservation, &sql, admission, |conn| {
+                    run_query(conn, &sql, &params)
+                }) {
+                    Attempt::Settled(result) => {
+                        let _ = reply.send(result);
+                    }
+                    Attempt::Contended(error) => self.defer_or_report(
+                        deferred,
+                        Command::Query {
+                            reservation,
+                            sql,
+                            params,
+                            reply,
+                        },
+                        previous,
+                        error,
+                    ),
+                }
+            }
+            Command::QueryTyped {
+                reservation,
+                sql,
+                params,
+                reply,
+            } => {
+                match self.run_data(&reservation, &sql, admission, |conn| {
+                    run_query_typed(conn, &sql, &params)
+                }) {
+                    Attempt::Settled(result) => {
+                        let _ = reply.send(result);
+                    }
+                    Attempt::Contended(error) => self.defer_or_report(
+                        deferred,
+                        Command::QueryTyped {
+                            reservation,
+                            sql,
+                            params,
+                            reply,
+                        },
+                        previous,
+                        error,
+                    ),
+                }
+            }
+            Command::Settle {
+                reservation,
+                intent,
+                reply,
+            } => {
+                let result = self.run_settle(&reservation, intent);
+                let _ = reply.send(result);
+            }
+            Command::Cancel { reservation, reply } => {
+                let outcome = self.run_cancel(&reservation);
+                let _ = reply.send(Ok(outcome));
+            }
+            Command::Attach {
+                app_id,
+                db_path,
+                reply,
+            } => {
+                let result = self.run_attach_both(&app_id, &db_path);
+                let _ = reply.send(result);
+            }
+            Command::VacuumInto {
+                app_id,
+                dest_path,
+                reply,
+            } => {
+                // It runs on `op_conn`, so it spends the budget the same
+                // way every other statement on that connection does. Its
+                // caller retries a busy snapshot too; retrying here first
+                // is the same exposure, against a connection that no longer
+                // parks the thread while it waits.
+                match run_vacuum_into(&self.op.conn, app_id.as_deref(), &dest_path).map_or_else(
+                    |error| Self::contended_or_settled(Lane::Op, error),
+                    |()| Attempt::Settled(Ok(())),
+                ) {
+                    Attempt::Settled(result) => {
+                        let _ = reply.send(result);
+                    }
+                    Attempt::Contended(error) => self.defer_or_report(
+                        deferred,
+                        Command::VacuumInto {
+                            app_id,
+                            dest_path,
+                            reply,
+                        },
+                        previous,
+                        error,
+                    ),
+                }
+            }
+            Command::ReattachFile {
+                app_id,
+                temp_path,
+                live_path,
+                reply,
+            } => {
+                let result = self.run_reattach(&app_id, &temp_path, &live_path);
+                let _ = reply.send(result);
+            }
+            Command::Shutdown => return false,
+        }
+        true
+    }
+
+    /// Put a lock-contended command back on the actor's own retry list, or -
+    /// when its budget is gone - answer the caller with the contention.
+    fn defer_or_report(
+        &self,
+        deferred: &mut Vec<Deferred>,
+        command: Command,
+        previous: Option<Schedule>,
+        error: DbError,
+    ) {
+        let now = std::time::Instant::now();
+        // The deadline starts at the first refusal, which is where
+        // `busy_timeout` used to start counting: the budget buys waiting for a
+        // lock, not queueing for the actor.
+        let (deadline, backoff) = match previous {
+            Some(schedule) => (
+                schedule.deadline,
+                (schedule.backoff * 2).min(LOCK_RETRY_MAX),
+            ),
+            None => (now + lock_wait(), LOCK_RETRY_MIN),
+        };
+        if now >= deadline {
+            report_contention(command, self.contention_report(error));
+            return;
+        }
+        deferred.push(Deferred {
+            command,
+            // Clamped so the budget buys a final attempt AT the deadline
+            // rather than one backoff short of it.
+            due: (now + backoff).min(deadline),
+            schedule: Schedule {
+                deadline,
+                backoff,
+                last: error,
+            },
+        });
     }
 
     /// Bind an app's transaction connection to `reservation`, opening it if the
@@ -1827,13 +2188,22 @@ impl Actor {
     /// (which is where a pre-start cancellation is observed), issue SQL, leave
     /// `Running`. An autocommit reservation additionally wraps the statement in
     /// `BEGIN DEFERRED ... COMMIT` where SQLite permits it.
+    ///
+    /// `Running` is entered and left per **attempt**, not per command, so a
+    /// cancellation that arrives while a contended command waits out its
+    /// backoff is observed by the next attempt's `enter_running` exactly as a
+    /// cancellation before any attempt would be. Nothing in the reservation
+    /// protocol is suspended across a retry.
     fn run_data<T>(
         &mut self,
         reservation: &Arc<Reservation>,
         sql: &str,
+        admission: Admission,
         op: impl FnOnce(&Connection) -> Result<T, RunError>,
-    ) -> Result<T, DbError> {
-        self.check_owner(reservation)?;
+    ) -> Attempt<T> {
+        if let Err(error) = self.check_owner(reservation, admission) {
+            return Attempt::Settled(Err(error));
+        }
         if reservation.lane() == Lane::Op {
             // Spend the reservation and take the lane, in that order and
             // before anything can fail: a command that reached this point has
@@ -1856,7 +2226,7 @@ impl Actor {
             // later cancel handle would aim an interrupt at, and by then the
             // actor is executing something else on that connection.
             reservation.leave_running();
-            return Err(cancelled_before_start(reservation));
+            return Attempt::Settled(Err(cancelled_before_start(reservation)));
         }
         let lane = reservation.lane();
         // Three conditions, and the middle one is not defensive. A caller that
@@ -1865,19 +2235,49 @@ impl Actor {
         // with "cannot start a transaction within a transaction". Deferring to
         // `is_autocommit` here is the same authority the terminal classifier
         // uses, applied one step earlier.
-        let wrap = reservation.kind() == ReservationKind::Autocommit
-            && self.conn_of(lane)?.is_autocommit()
-            && permits_explicit_transaction(sql);
+        let wrap = match self.conn_of(lane) {
+            Ok(conn) => {
+                reservation.kind() == ReservationKind::Autocommit
+                    && conn.is_autocommit()
+                    && permits_explicit_transaction(sql)
+            }
+            Err(error) => {
+                reservation.leave_running();
+                return Attempt::Settled(Err(error));
+            }
+        };
 
         let result = if wrap {
             self.run_wrapped_autocommit(reservation, lane, op)
         } else {
             reservation.mark_began();
-            let conn = self.conn_of(lane)?;
-            op(conn).map_err(RunError::into_db)
+            match self.conn_of(lane) {
+                // Nothing wrapped it, so a refused statement started nothing
+                // and leaves nothing to undo.
+                Ok(conn) => match op(conn) {
+                    Ok(value) => Attempt::Settled(Ok(value)),
+                    Err(error) => Self::contended_or_settled(lane, error.into_db()),
+                },
+                Err(error) => Attempt::Settled(Err(error)),
+            }
         };
         reservation.leave_running();
         result
+    }
+
+    /// Route a failed statement to the retry list when it is a lock the actor
+    /// can outlast, and to the caller otherwise.
+    ///
+    /// **Only the autocommit lane.** A transaction lane's statement runs inside
+    /// a creator transaction, and the only way to make a retry safe there would
+    /// be to roll that transaction back - which is the creator's call, never
+    /// ours. Its connection keeps the blocking busy handler for the same
+    /// reason, so it rarely arrives here at all.
+    fn contended_or_settled<T>(lane: Lane, error: DbError) -> Attempt<T> {
+        match (lane, &error) {
+            (Lane::Op, DbError::LockContention { .. }) => Attempt::Contended(error),
+            _ => Attempt::Settled(Err(error)),
+        }
     }
 
     fn run_wrapped_autocommit<T>(
@@ -1885,17 +2285,23 @@ impl Actor {
         reservation: &Arc<Reservation>,
         lane: Lane,
         op: impl FnOnce(&Connection) -> Result<T, RunError>,
-    ) -> Result<T, DbError> {
+    ) -> Attempt<T> {
         {
-            let conn = self.conn_of(lane)?;
+            let conn = match self.conn_of(lane) {
+                Ok(conn) => conn,
+                Err(error) => return Attempt::Settled(Err(error)),
+            };
             reservation.mark_began();
             if let Err(e) = conn.execute_batch("BEGIN DEFERRED") {
-                return Err(from_sqlite(e));
+                return Attempt::Settled(Err(from_sqlite(e)));
             }
         }
 
         let raw = {
-            let conn = self.conn_of(lane)?;
+            let conn = match self.conn_of(lane) {
+                Ok(conn) => conn,
+                Err(error) => return Attempt::Settled(Err(error)),
+            };
             op(conn)
         };
 
@@ -1903,33 +2309,49 @@ impl Actor {
             Err(e) => {
                 // SC-2 consequence 3: an autocommit operation error must never
                 // be followed by a COMMIT. Terminalize first.
-                let conn = self.conn_of(lane)?;
+                let conn = match self.conn_of(lane) {
+                    Ok(conn) => conn,
+                    Err(error) => return Attempt::Settled(Err(error)),
+                };
                 let rollback = conn.execute_batch("ROLLBACK");
                 let outcome = reservation::classify_rollback(conn, rollback, false, None);
+                // A wrapper the rollback could not prove undone is a connection
+                // about to be recycled, and a retry would land on a different
+                // incarnation under a stale generation. Report instead.
+                let quarantines = outcome.quarantines();
                 self.apply_outcome(lane, &outcome);
-                Err(e.into_db())
+                if quarantines {
+                    return Attempt::Settled(Err(e.into_db()));
+                }
+                Self::contended_or_settled(lane, e.into_db())
             }
             Ok(value) => {
                 if !reservation.claim_completed() {
                     // A cancellation claimed the terminal first. Roll back and
                     // report the cancellation; the value is discarded because
                     // its transaction is about to be undone.
-                    let conn = self.conn_of(lane)?;
+                    let conn = match self.conn_of(lane) {
+                        Ok(conn) => conn,
+                        Err(error) => return Attempt::Settled(Err(error)),
+                    };
                     let rollback = conn.execute_batch("ROLLBACK");
                     let outcome = reservation::classify_rollback(conn, rollback, true, None);
                     reservation.store_outcome(outcome.clone());
                     self.apply_outcome(lane, &outcome);
-                    return Err(outcome.into_result().unwrap_err());
+                    return Attempt::Settled(Err(outcome.into_result().unwrap_err()));
                 }
-                let conn = self.conn_of(lane)?;
+                let conn = match self.conn_of(lane) {
+                    Ok(conn) => conn,
+                    Err(error) => return Attempt::Settled(Err(error)),
+                };
                 let commit = conn.execute_batch("COMMIT");
                 let outcome = reservation::classify_commit(conn, commit);
                 reservation.store_outcome(outcome.clone());
                 self.apply_outcome(lane, &outcome);
-                match outcome {
+                Attempt::Settled(match outcome {
                     TerminalOutcome::Committed => Ok(value),
                     other => Err(other.into_result().unwrap_err()),
-                }
+                })
             }
         }
     }
@@ -1939,7 +2361,7 @@ impl Actor {
         reservation: &Arc<Reservation>,
         intent: TerminalIntent,
     ) -> Result<TerminalOutcome, DbError> {
-        self.check_owner(reservation)?;
+        self.check_owner(reservation, Admission::First)?;
         let lane = reservation.lane();
 
         if intent == TerminalIntent::Commit && !reservation.claim_completed() {
@@ -2256,7 +2678,7 @@ fn run_attach(conn: &Connection, app_id: &str, db_path: &str) -> Result<(), DbEr
     let escaped_path = db_path.replace('\'', "''");
     let escaped_alias = app_id.replace('"', "\"\"");
     let sql = format!("ATTACH DATABASE 'file:{escaped_path}' AS \"{escaped_alias}\"");
-    conn.execute_batch(&sql).map_err(from_sqlite)?;
+    with_lock_budget(|| conn.execute_batch(&sql).map_err(from_sqlite))?;
     // `journal_mode` is PER DATABASE and does not propagate across `ATTACH`: a file
     // attached to a WAL connection keeps whatever its own header says. Without this
     // an app's data would sit in a rollback journal while the session file it hangs
@@ -2428,20 +2850,21 @@ fn run_reattach_file(
     let attach_live_sql = format!("ATTACH DATABASE 'file:{escaped_live}' AS \"{escaped_alias}\"");
 
     // Step 1 - DETACH the alias on both connections.
-    op_conn
-        .execute_batch(&detach_sql)
-        .map_err(|e| DbError::Internal {
+    with_lock_budget(|| op_conn.execute_batch(&detach_sql).map_err(from_sqlite)).map_err(|e| {
+        DbError::Internal {
             message: format!(
-                "ReattachFile: DETACH \"{app_id}\" on op_conn failed (live file untouched): {}",
-                from_sqlite(e)
+                "ReattachFile: DETACH \"{app_id}\" on op_conn failed (live file untouched): {e}"
             ),
-        })?;
+        }
+    })?;
     // `tx_conn` is `None` when this app has no transaction connection open -
     // the common case, since a lane exists only after the app's first
     // `db.transaction()`. There is then nothing to detach and nothing to
     // restore.
     let tx_detach = match tx_conn {
-        Some(tx_conn) => tx_conn.execute_batch(&detach_sql),
+        Some(tx_conn) => {
+            with_lock_budget(|| tx_conn.execute_batch(&detach_sql).map_err(from_sqlite))
+        }
         None => Ok(()),
     };
     if let Err(e) = tx_detach {
@@ -2450,8 +2873,7 @@ fn run_reattach_file(
         let _ = op_conn.execute_batch(&attach_live_sql);
         return Err(DbError::Internal {
             message: format!(
-                "ReattachFile: DETACH \"{app_id}\" on tx_conn failed (live file untouched): {}",
-                from_sqlite(e)
+                "ReattachFile: DETACH \"{app_id}\" on tx_conn failed (live file untouched): {e}"
             ),
         });
     }
@@ -2478,16 +2900,16 @@ fn run_reattach_file(
         None => vec![(op_conn, "op_conn")],
     };
     for (conn, name) in targets {
-        conn.execute_batch(&attach_live_sql)
-            .map_err(|e| DbError::Internal {
+        with_lock_budget(|| conn.execute_batch(&attach_live_sql).map_err(from_sqlite)).map_err(
+            |e| DbError::Internal {
                 message: format!(
                     "ReattachFile: ATTACH new file as \"{app_id}\" on {name} failed AFTER \
                      rename - the renamed snapshot is now the live file but that connection \
                      has no alias attached. The app file must be re-attached for this app_id \
-                     before the session can serve it again. Underlying error: {}",
-                    from_sqlite(e)
+                     before the session can serve it again. Underlying error: {e}"
                 ),
-            })?;
+            },
+        )?;
     }
 
     Ok(())

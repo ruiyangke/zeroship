@@ -27,6 +27,20 @@ async fn pragma_value(backend: &SqliteBackend, pragma: &str) -> String {
     rows[0][0].clone().unwrap_or_default()
 }
 
+/// [`pragma_value`] asked of the autocommit connection instead of a
+/// transaction lane. The two lanes answer `busy_timeout` differently, so a
+/// helper that could only reach one of them cannot state the contract.
+async fn autocommit_pragma_value(backend: &SqliteBackend, pragma: &str) -> String {
+    let sql = format!("PRAGMA {pragma}");
+    let rows = backend
+        .autocommit_client()
+        .query(&sql, &[])
+        .await
+        .expect("PRAGMA query on op_conn");
+    assert_eq!(rows.len(), 1, "PRAGMA {pragma} must return exactly one row");
+    rows[0][0].clone().unwrap_or_default()
+}
+
 #[test]
 fn pragma_journal_mode_is_wal_after_open() {
     Host::test(|host| {
@@ -43,16 +57,34 @@ fn pragma_journal_mode_is_wal_after_open() {
     })
 }
 
+/// **Where each lane spends the lock budget**, asserted as the pair it is.
+///
+/// A transaction lane waits inside SQLite: its busy handler is what lets two
+/// replicas racing one file take turns, and no command this session could run
+/// next would release the lock it is waiting on anyway.
+///
+/// The autocommit lane waits nowhere inside SQLite. Its statements contend with
+/// this session's *own* open transactions, whose `COMMIT` is queued behind them
+/// on the one actor thread, so a wait in place is a wait for a holder that
+/// cannot move. `SQLITE_BUSY` comes back at once and the actor spends the same
+/// budget as a deadline between attempts instead.
+///
+/// Read as one claim: a run that asserted only the transaction lane would pass
+/// with the autocommit lane back on the blocking handler, which is the defect.
 #[test]
-fn pragma_busy_timeout_set() {
+fn the_lock_budget_is_spent_inside_sqlite_only_on_transaction_lanes() {
     Host::test(|host| {
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
-            let timeout = pragma_value(&backend, "busy_timeout").await;
             assert_eq!(
-                timeout,
+                pragma_value(&backend, "busy_timeout").await,
                 crate::budgets::DB_LOCK_TIMEOUT_MS.to_string(),
-                "every connection waits on a lock for the lock budget"
+                "a transaction lane waits on a lock for the lock budget"
+            );
+            assert_eq!(
+                autocommit_pragma_value(&backend, "busy_timeout").await,
+                "0",
+                "the autocommit connection must not block the actor thread inside SQLite"
             );
         });
     })

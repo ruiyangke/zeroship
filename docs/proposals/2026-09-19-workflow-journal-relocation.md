@@ -574,6 +574,21 @@ stall the defect fixes that motivate the move.
 
 ## Open
 
+Every item below is answered or decided; what is still genuinely open lives INSIDE them, and
+this index is where to find it. Read an item in full before acting on it - the reasoning is the
+part that dates, not the verdict.
+
+| | verdict | what is still open in it |
+|---|---|---|
+| 1 | ANSWERED - payload is the gate, not latency | nothing; re-run the instrument rather than trusting the prose |
+| 2 | DECIDED - a ceiling governs both sides | nothing |
+| 3 | DECIDED - its own database | **what verifies a worker** once `active_key` goes; and whether the replay store moves |
+| 4 | DECIDED - zone-local | nothing; the work it waits on is Open 3's |
+| 5 | pre-launch, no in-flight runs | the answer expires at launch |
+| 6 | ANSWERED as a description | nothing; the credential question it raised moved to Open 3 |
+| 7 | ANSWERED - creator payload is not in the journal | nothing |
+| 8 | ANSWERED - a run input is an ordinary payload object | nothing |
+
 1. **ANSWERED - latency is not the gate; payload is.** Measured before anything was built, by
    `crates/zeroship-workflow-client/tests/round_trip_cost.rs`, which exercises the shipped
    transport with a real assertion minted per call and a peer that really verifies it. Re-run it
@@ -749,6 +764,15 @@ stall the defect fixes that motivate the move.
    the audience is checked before the store is consulted, so a per-service table keeps single
    use - but whether it should move is the live disagreement recorded below.
 
+   **The move made one thing depend on topology that nothing enforces.** The ledger's revision
+   has to be monotonic PER APP, and it now lives in a store the deployment chooses, so the
+   property holds only while an app is served by exactly one workflow store. Zone-local
+   topology plus the zone match in `crates/zeroship-workflow-manager/src/coordinator/placement.rs`
+   - `current.active && current.zone == facts.zone` - makes that true today, but neither states
+   it as an invariant about STORES, and nothing refuses a second store for one app. Two stores
+   serving one app would not error; the revisions would simply stop ordering the inputs they
+   were computed from.
+
    **`docs/proposals/2026-09-20-platform-service-database-split.md` already assigns an owner to
    every table in this set, and this document should not re-derive one.** Its table gives
    `workflow_policy_ledger` and `workflow_rollout_config` to workflow, which agrees with the
@@ -807,6 +831,15 @@ stall the defect fixes that motivate the move.
    control-signed, audience-bound, short-lived capabilities with no production caller. What it
    costs is that revocation stops being immediate and becomes bounded by the attestation's
    lifetime, because Control cannot un-say what it has signed. That is the decision.
+
+   **And it is the load-bearing one, not a peer of the others.** `zeroship.worker_instances` is
+   what keeps the Control database binding alive: `PostgresWorkerRegistry` in
+   `crates/zeroship-workflow-server/src/auth.rs` reads it twice - the readiness probe and
+   `active_key` - and `ControlEligibility` in
+   `crates/zeroship-workflow-manager/src/eligibility.rs` projects its worker half for placement.
+   Moving the `apps` reads thins the seam without cutting it, because that table outlives them.
+   So the order to settle these in is authentication first, and the rest afterwards.
+
 
    **A gap this uncovered, unrelated to the move.** `workflow_rollout_config` has no production
    writer: every caller of `set_rollout` and `set_plan_policy` in
