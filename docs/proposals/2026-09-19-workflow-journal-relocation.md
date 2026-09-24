@@ -14,8 +14,9 @@ Open 3 names three pieces behind a store of its own: splitting the corpus, sever
 service's control-plane reads, and giving the service a deployment site. The first and third
 have landed, and the second is part done - the two tables the service owns have moved into
 `workflow_manager`, which deletes a cross-database write rather than transporting it, and what
-remains is the reads that stay. One of those is authentication and one is bounded by a transport
-fence the deployment names, so both are decisions rather than plumbing.
+remains is the reads that stay. The transport fence that blocked reaching Control is decided and
+built - plaintext now reaches only peers an operator named - so what is left of that piece is
+the reads themselves, one of which is authentication and still a decision.
 
 The journal is installed into the creator's own schema today and written by the worker over the
 creator's own connection; this moves storage and the durable fold into the workflow service,
@@ -843,37 +844,30 @@ stall the defect fixes that motivate the move.
    credentials had to be created for it to run at all: `zeroship_workflow` carried no password,
    and no path wrote `svc-workflow.pem` or published `svc/workflow` to the peer document.
 
-   **What it cannot do yet is reach Control, and the reason is a trust-model decision rather
-   than a setting.** `Transport::configuration` in
-   `crates/zeroship-workflow-client/src/transport.rs` admits an origin only when the scheme is
-   `https`, or the scheme is `http` and the host is a loopback IP LITERAL. Every platform
-   service on the compose bridge speaks plain HTTP under its service name and nothing terminates
-   TLS between containers, so `http://control:9090` is refused at startup and `https://` binds
-   over a transport that cannot handshake with a plaintext peer. This client is the only one
-   with that fence - the gateway reaches Control at `--control-url http://control:9090`. Either
-   the transport relaxes for a private network or the platform grows internal TLS, and that is
-   the same class of decision as the authentication one above.
+   **DECIDED, and built: the transport admits plaintext only to peers an operator named.**
+   `Transport::configuration` in `crates/zeroship-workflow-client/src/transport.rs` admits
+   `https` always, plain `http` to a loopback IP literal, and plain `http` to an exact origin
+   listed in `plaintext_peers` - a shared setting reaching all three supply tiers, empty by
+   default, so a deployment that says nothing keeps the old refusal. The list matches an origin
+   exactly rather than a host, so a name repointed at a public address re-arms the fence by
+   itself, and nothing resolves a name or classifies an address range.
 
-   **That fence gates the severing work, not only the deployment.** `ControlHolds` in
-   `crates/zeroship-workflow-server/src/server.rs` wraps `QueueDeploymentHolds`, which holds a
-   `Transport` (`crates/zeroship-workflow-client/src/queue_holds.rs`), and `server.rs` validates
-   `control_url` through `Transport::validate_config` at startup. So the one working
-   `svc/workflow` to Control client already answers to this rule, and any NEW control endpoint -
-   the app-row read the three eventual crossings would share, for instance - inherits it too. A
-   design that moves those reads behind Control's API is not buildable against a plaintext
-   bridge until this is settled, which makes the transport decision a prerequisite rather than
-   an ergonomics question.
+   **What the list cannot do is written at the predicate, and it bounds every use of it.** It
+   decides WHICH peer may be reached in clear; it cannot make plaintext safe. Assertions on
+   these edges are verified under the full profile with a single-use `jti`, so straight replay
+   is closed - but an assertion carries `iss, sub, aud, exp, iat, jti` and no digest of the
+   request it accompanies, so an on-path attacker inside that network can lift a live one onto
+   a MODIFIED body within its window. The list is also per PROCESS rather than per role, so
+   naming an origin for one client authorizes every client that process builds to reach it in
+   clear. Every origin on the list is therefore one whose entire network path is trusted, and
+   **internal TLS remains the end state this defers rather than replaces.**
 
-   **And it is stated design rather than an oversight, which narrows the decision.**
-   `worker.workflow_manager_url` in `crates/zeroship-worker/src/config.rs` carries the rule in
-   its own doc: "Remote managers must use HTTPS; plain HTTP is accepted only for literal
-   loopback addresses." So relaxing the transport contradicts an invariant written at the
-   configuration surface, and internal TLS is the direction the tree already anticipates.
-
-   That setting is also empty in compose, and nothing sets it, so the worker reaches no manager
-   in the dev stack at all: the service added for the deployment piece is unreachable from the
-   only thing that would call it. The fence blocks both directions, which is why wiring the
-   worker to it is part of settling this rather than a follow-up to it.
+   The prose that stated the old rule moved with it, including
+   `worker.workflow_manager_url`'s own doc in `crates/zeroship-worker/src/config.rs`. What the
+   relaxation unblocks is both directions: the workflow service reaching Control and the
+   migrate service, and - once compose sets `worker.workflow_manager_url`, which it still does
+   not - the worker reaching the manager. Any new control endpoint the severing work adds
+   inherits the same fence and the same list.
 
 4. **DECIDED - the service is zone-local. One workflow store per zone, an app's runs in its own
    zone.** So Open 1's dispatch-crossing term stays the small one it was measured to be, and the
