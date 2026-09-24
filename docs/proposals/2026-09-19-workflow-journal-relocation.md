@@ -329,9 +329,21 @@ protocol. This extends a working client rather than inventing one.
    yet. Verify that the schema installs, that one stamp row covers the installation, and that
    the creator-schema path is untouched.
 
-2. **Let `AppBackend` bind the service's own store.** It already implements `WorkflowBackend`;
-   today it assumes a creator binding. Make the binding a parameter rather than an assumption.
-   Still nothing remote. Verify the existing suites pass with the service store behind it.
+2. **Bind `AppBackend` to the service's own store.** The store is already a parameter:
+   `into_backend` in `crates/zeroship-workflow/src/service/backend.rs` takes the journal, checks
+   the handle's binding against that journal's policy registry, and swaps the store. What the
+   worker passes it is a service opened over the creator database
+   (`crates/zeroship-worker/src/workflow_creator.rs`). The work is to pass a service opened over
+   the service's store instead.
+
+   Two things bound how far this reaches. `same_binding` compares registry identity, app and
+   policy generation, so both services must share the host's `HostPolicies`; that holds for any
+   store, since `WorkflowService` keeps store and registry as separate fields. And the worker has
+   no database handle to the service's schema at all - it reaches the manager over HTTP - so this
+   step is demonstrable where a service store exists, the workflow server and the fixtures in
+   `crates/zeroship-workflow-runner/src/assignments/tests/fixture.rs`, and the worker itself
+   waits for step 5. Still nothing remote. Verify the existing suites pass with the service store
+   behind it.
 
 3. **Serve the creator methods, and add a client for them** in `zeroship-workflow-client`.
    Not yet wired into the worker. Verify each method round-trips against the service store.
