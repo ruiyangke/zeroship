@@ -70,6 +70,10 @@ test("storefront, checkout, recovery, ownership, support and fulfillment", async
       })
     ).status(),
   ).toBe(404);
+  // The checkout the customer does get is the control: the count of zero is a
+  // page without the operator's payment control, not a page that never
+  // rendered a form.
+  await expect(page.getByRole("checkbox")).toHaveCount(1);
   await expect(page.getByLabel("Payment scenario")).toHaveCount(0);
   await page.getByRole("checkbox").check();
   await page.getByRole("button", { name: "Place order", exact: true }).click();
