@@ -2326,11 +2326,12 @@ async fn apply_api_rate_limits_each_source_ip_across_the_shared_store_pg() {
     let _ = std::fs::remove_dir_all(second_tmp);
 }
 
-/// Rollback is not implemented yet, but it is already a mutating route. Bind
-/// the security gate before Phase 2 replaces the stub so that implementation
-/// cannot accidentally publish an unthrottled DDL path.
+/// The throttle sits in `authorize_mutation`, ahead of the binding admission
+/// and every side effect, so a caller over the limit is refused before an
+/// apply can reach a schema. Asserting it on the apply route is asserting it
+/// on the one mutating route there is.
 #[ntex::test]
-async fn rollback_route_passes_through_the_mutation_rate_limiter() {
+async fn the_apply_route_passes_through_the_mutation_rate_limiter() {
     let app_id = AppId::mint();
     let owner_id = UserId::mint();
     let auth = Arc::new(StaticAuthenticator::new());
@@ -2356,9 +2357,13 @@ async fn rollback_route_passes_through_the_mutation_rate_limiter() {
     )
     .await;
 
+    // A well-formed body and a parseable database id: the extractor runs before
+    // the handler, so a request the throttle should refuse must still be one
+    // the route would otherwise accept.
     let request = test::TestRequest::post()
-        .uri(&format!("/v1/apps/{}/migrations/rollback", app_id.as_str()))
+        .uri(&apply_uri(&app_id, &DatabaseId::mint()))
         .header("authorization", "Bearer good-token")
+        .set_json(&create_notes_request())
         .to_request();
     let response = test::call_service(&service, request).await;
     assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
