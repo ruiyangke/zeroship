@@ -362,10 +362,12 @@ protocol. This extends a working client rather than inventing one.
    endpoints, their `svc/worker` grants, the request envelopes, the `RunFailure` refusal
    envelope and the client methods are in; `RunService` in
    `crates/zeroship-workflow-server/src/runs.rs` binds an app per request from the server's own
-   policy registry, and `bind` in `api/runs.rs` takes the worker from the credential that
-   verified the call rather than from the body, so a request cannot name a placement its caller
-   does not hold. `status_answers_from_the_service_journal` in `tests/http_runs.rs` reads a
-   run's state back through the endpoint and compares it against the row, and
+   policy registry, and `bind` in `crates/zeroship-workflow-server/src/api/runs.rs` takes the
+   worker from the credential that verified the call rather than from the body, so a request
+   cannot name a placement its caller does not hold.
+   `status_answers_from_the_service_journal` in
+   `crates/zeroship-workflow-server/tests/http_runs.rs` reads a run's state back through the
+   endpoint and compares it against the row, and
    `a_signal_served_over_the_wire_is_in_the_journal` does the same for a write.
 
    **The ingress epoch is established, and survives the reinstall.** `RunService::app`
@@ -400,8 +402,9 @@ protocol. This extends a working client rather than inventing one.
    `crates/zeroship-core/src/service_identity.rs`. `record_verified` in
    `crates/zeroship-workflow/src/service/deploys.rs` is the only writer of the deploys table and
    every path to it needs an `AppDeployments` this service never installs. So the endpoints
-   above operate on rows nothing here produces, which is why `tests/http_runs.rs` seeds by raw
-   SQL. That is a sequencing constraint on steps 4 and 5 rather than a gap in this step.
+   above operate on rows nothing here produces, which is why
+   `crates/zeroship-workflow-server/tests/http_runs.rs` seeds by raw SQL. That is a sequencing
+   constraint on steps 4 and 5 rather than a gap in this step.
 
 4. **Carry the three direct calls across, merged into the claims that already cross.** This is
    the step that earns its own review, and it is not "add a remote `TaskTransport`".
@@ -673,16 +676,27 @@ stall the defect fixes that motivate the move.
    `SELECT public_key FROM zeroship.worker_instances WHERE id=$1 AND status='active'`, and
    `crates/zeroship-workflow-manager/src/policy/control/models.rs` declares "Native
    projections of Control-owned policy inputs and publication metadata" over `apps`, `plans`,
-   `workflow_rollout_config` and `workflow_policy_ledger`. Enumerate those reads from the tree
-   rather than from this paragraph before sizing the work.
+   `workflow_rollout_config` and `workflow_policy_ledger`, and it WRITES the ledger as well as
+   reading it, so a cache cannot answer the whole of it. The highest-frequency crossing is in
+   another schema entirely and a search for `zeroship.` cannot find it:
+   `SharedClientReplayStore` (`crates/zeroship-authn/src/service_replay.rs`), constructed in
+   `crates/zeroship-workflow-server/src/server.rs`, upserts
+   `service_authn.service_assertion_replay` once per authenticated inbound call. Enumerate
+   these from the tree rather than from this paragraph before sizing the work, and enumerate
+   by the grants rather than by the SQL: the grant files have to name every schema they reach.
 
    **The corpus is partitionable; role identity is what still binds it.** No migration writes
    into two databases' worth of schemas any more:
-   `db/migrations-ts/20260911000050_workflow_platform_grants.ts` holds the workflow login's
-   reach outside its own schema - USAGE on `zeroship` and `service_authn`, column-scoped
+   `db/migrations-ts/20260911000050_workflow_platform_grants.ts` carries most of the workflow
+   login's reach outside its own schema - USAGE on `zeroship` and `service_authn`, column-scoped
    `SELECT` on the Control tables its coordinator and policy reads project, and DML on the
    shared assertion replay store - and `20260911000000_workflow_coordination.ts` keeps the
-   schema, its roles and its own grants.
+   schema, its roles and its own grants. **Two files grant that reach, not one:**
+   `db/migrations-ts/20260914000600_placement_eligibility.ts` also grants
+   `SELECT (execution_zone_id,deleted_at)` on `zeroship.apps` and
+   `SELECT (execution_zone_id,expires_at)` on `zeroship.worker_instances`. Editing only the
+   first leaves the eligibility reads working and nothing fails, so a change meant to remove a
+   crossing would leave it in place.
 
    What still crosses is the roles, which are cluster-scoped rather than
    database-scoped. `20260914000600_placement_eligibility.ts` is a control migration granting
