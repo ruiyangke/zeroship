@@ -685,6 +685,39 @@ stall the defect fixes that motivate the move.
    these from the tree rather than from this paragraph before sizing the work, and enumerate
    by the grants rather than by the SQL: the grant files have to name every schema they reach.
 
+   **These crossings are three problems, not one, and only one of them is transport.**
+
+   Some of what crosses is the service's OWN data, sitting in the wrong database.
+   `workflow_policy_ledger` is read and written only by
+   `crates/zeroship-workflow-manager/src/policy/control/store.rs`, carries no foreign key, and
+   its revision has to be monotonic per app - which one store satisfies, since an app belongs to
+   one zone and the service is zone-local. `service_authn.service_assertion_replay` is the same
+   shape: the audience is checked before the store is consulted, so a per-service table keeps
+   single use. **For both, the answer is to move the table, not to transport the access,** and
+   the write that a cache could never have answered disappears with it.
+
+   Some is Control's authority read on a path that is ALREADY eventual.
+   `crates/zeroship-workflow-manager/src/eligibility.rs` says so itself - "THIS IS A LIVENESS
+   HINT, NOT AN AUTHORIZATION FENCE" - and policy already runs through a cache with a
+   source-supplied validity. These need a reachable source of truth and a bounded staleness the
+   tree already has machinery for, not a synchronous read. Note that several of them are read
+   INSIDE open queue transactions, so turning them into network calls would hold locks across a
+   round trip, which Open 4's zone-local decision makes worse rather than better.
+
+   And one is authentication. `active_key` is what verifies a worker, so severing it is a
+   trust-model decision rather than a plumbing one, and it is the piece to decide before the
+   rest. `crates/zeroship-workflow/src/service/capability.rs` already mints and verifies
+   control-signed, audience-bound, short-lived capabilities and nothing in production calls it;
+   `crates/zeroship-workflow-server/src/server.rs` already refuses to start without Control's
+   verification key. The machinery for a control-signed enrolment attestation exists and is
+   unwired.
+
+   **A gap this uncovered, unrelated to the move.** `workflow_rollout_config` has no production
+   writer: every caller of `set_rollout` and `set_plan_policy` in
+   `crates/zeroship-workflow-manager/src/policy/control/store.rs` is a test, and `read_source`
+   inner-joins that table, so a deployment with no row published by hand fails every policy
+   observation. Whether hand-provisioning is the intended posture is its own question.
+
    **The corpus is partitionable; role identity is what still binds it.** No migration writes
    into two databases' worth of schemas any more:
    `db/migrations-ts/20260911000050_workflow_platform_grants.ts` carries most of the workflow
