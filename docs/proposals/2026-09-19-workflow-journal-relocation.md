@@ -10,12 +10,12 @@ its own ingress epoch; `restart` refuses, naming the prerequisite it still needs
 production writes this journal yet - there is no `start` endpoint - so step 5 is what gives the
 endpoints rows to operate on.
 
-Open 3 names three pieces behind a store of its own, and all three have landed: no migration in the
-corpus writes into two databases' worth of schemas, and the two tables the service
-owns have moved into `workflow_manager`, which deletes a cross-database write rather than
-transporting it, and the service has a compose deployment. What remains is severing the reads
-that stay, plus one transport fence the deployment names - and the one of those that is
-authentication is a trust-model decision rather than plumbing.
+Open 3 names three pieces behind a store of its own: splitting the corpus, severing the
+service's control-plane reads, and giving the service a deployment site. The first and third
+have landed, and the second is part done - the two tables the service owns have moved into
+`workflow_manager`, which deletes a cross-database write rather than transporting it, and what
+remains is the reads that stay. One of those is authentication and one is bounded by a transport
+fence the deployment names, so both are decisions rather than plumbing.
 
 The journal is installed into the creator's own schema today and written by the worker over the
 creator's own connection; this moves storage and the durable fold into the workflow service,
