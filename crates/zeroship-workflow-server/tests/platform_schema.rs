@@ -69,16 +69,33 @@ async fn journal_tables_in(
 }
 
 /// The journal lives in the SERVICE's own schema, is stamped once for the whole
-/// installation, and is read by nobody.
+/// installation, and is reached by exactly one role.
 ///
-/// Installing it is the whole of this step. No role receives a privilege on it,
-/// so an installation that also handed the runtime login - or any other - reach
-/// over every app's workflow state fails here rather than passing as a step
-/// that "works". The stamp is compared against the same constants the creator
-/// bundle declares (`journal_bundle` in
-/// `crates/zeroship-workflow-server/src/journal.rs`), so the two installation
-/// sites cannot describe different journals.
-async fn journal_is_installed_and_unread(fixture: &platform::Platform) {
+/// `zeroship_workflow` holds the four DML privileges and nothing else: no
+/// TRUNCATE, no REFERENCES, no TRIGGER, and no DDL, which `Coordinator::verify`
+/// separately refuses at startup. Every other role holds nothing at all.
+///
+/// WHAT THIS NO LONGER CATCHES. The service login and the journal's grantee are
+/// now the same role, so for `zeroship_workflow` this assertion cannot tell a
+/// grant the migration made deliberately from one that arrived by accident -
+/// a stray `GRANT ... TO zeroship_workflow` somewhere else reads identically.
+/// Its green is not evidence that the grant is minimal or that it came from the
+/// intended place. That discrimination is gone, and it went the moment one
+/// login both serves the schema and owns the journal.
+///
+/// WHAT IT STILL CATCHES, which is the half with the detection value: any OTHER
+/// role gaining reach over every app's workflow state, and this login gaining
+/// anything beyond DML. Those are the failures that matter, and the four-role
+/// sweep below is what would surface them.
+///
+/// The role here is spelled out rather than derived. The migration derives its
+/// grantee from the catalog; an oracle that repeated that derivation would
+/// agree with the migration by construction and assert nothing.
+///
+/// The stamp is compared against the same constants the creator bundle declares
+/// (`journal_bundle` in `crates/zeroship-workflow-server/src/journal.rs`), so
+/// the two installation sites cannot describe different journals.
+async fn journal_is_installed_and_served_by_one_role(fixture: &platform::Platform) {
     let stamp = fixture
         .admin
         .query(
@@ -107,30 +124,59 @@ async fn journal_is_installed_and_unread(fixture: &platform::Platform) {
         zeroship_workflow_schema::fingerprint(zeroship_workflow_schema::POSTGRES).unwrap()
     );
 
+    // The DML the service needs, and the three table privileges it does not.
+    // Splitting them is the point: a grant of ALL PRIVILEGES satisfies the first
+    // list and fails the second, so it cannot pass as the intended grant.
+    const SERVED: [&str; 4] = ["SELECT", "INSERT", "UPDATE", "DELETE"];
+    const WITHHELD: [&str; 3] = ["TRUNCATE", "REFERENCES", "TRIGGER"];
+
     let tables = journal_tables();
+    assert!(
+        !tables.is_empty(),
+        "no journal tables were read, so an empty sweep is not evidence"
+    );
     for table in &tables {
         let qualified = format!("workflow_manager.{table}");
+        for privilege in SERVED {
+            let granted = fixture
+                .admin
+                .query_one(
+                    "SELECT has_table_privilege($1, $2, $3)",
+                    &[&"zeroship_workflow", &qualified, &privilege],
+                )
+                .await
+                .unwrap();
+            assert!(
+                granted.get::<_, bool>(0),
+                "the service login lacks {privilege} on {qualified}"
+            );
+        }
+        for privilege in WITHHELD {
+            let granted = fixture
+                .admin
+                .query_one(
+                    "SELECT has_table_privilege($1, $2, $3)",
+                    &[&"zeroship_workflow", &qualified, &privilege],
+                )
+                .await
+                .unwrap();
+            assert!(
+                !granted.get::<_, bool>(0),
+                "the service login has {privilege} on {qualified}"
+            );
+        }
         for role in [
-            "zeroship_workflow",
             "zeroship_control",
             "zeroship_worker",
             "zeroship_gateway",
             "zeroship_app",
         ] {
-            for privilege in [
-                "SELECT",
-                "INSERT",
-                "UPDATE",
-                "DELETE",
-                "TRUNCATE",
-                "REFERENCES",
-                "TRIGGER",
-            ] {
+            for privilege in SERVED.iter().chain(WITHHELD.iter()) {
                 let granted = fixture
                     .admin
                     .query_one(
                         "SELECT has_table_privilege($1, $2, $3)",
-                        &[&role, &qualified, &privilege],
+                        &[&role, &qualified, privilege],
                     )
                     .await
                     .unwrap();
@@ -271,7 +317,7 @@ async fn payload_columns(
 }
 
 #[ntex::test]
-async fn platform_role_can_coordinate_without_customer_or_journal_privileges() {
+async fn platform_role_serves_the_journal_without_customer_or_ddl_privileges() {
     let fixture = platform::Platform::new().await;
     let eligibility = Rc::new(
         connect_eligibility(&fixture.runtime_url, Options::default())
@@ -339,7 +385,7 @@ async fn platform_role_can_coordinate_without_customer_or_journal_privileges() {
         );
     }
     manager_queue_authority(&fixture, &runtime).await;
-    journal_is_installed_and_unread(&fixture).await;
+    journal_is_installed_and_served_by_one_role(&fixture).await;
     journal_payload_columns_are_a_closed_set(&fixture).await;
     manager_recovery_authority(&fixture).await;
     manager_scheduling_authority(&fixture).await;
