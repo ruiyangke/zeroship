@@ -1,4 +1,4 @@
-use super::{Error, Options};
+use super::{Error, Options, RunError};
 use futures::StreamExt;
 use serde::{Serialize, de::DeserializeOwned};
 use std::{io::Write, sync::Arc};
@@ -7,7 +7,7 @@ use zeroship_core::{
     service_assertion::ServiceIssuer,
     service_identity::ServiceEndpoint,
     service_peers::ServiceAuth,
-    workflow_coordination::{Failure, FailureCode},
+    workflow_coordination::{Failure, FailureCode, RunFailure},
 };
 
 /// Bounded authenticated exchanges shared by native metadata client adapters.
@@ -76,17 +76,20 @@ impl Transport {
         Ok(base)
     }
 
-    /// Send metadata with a fresh assertion and deserialize a bounded receipt.
-    /// The caller binds the receipt to the operation's scope and identity.
+    /// One authenticated exchange, returning its status and bounded body.
+    ///
+    /// Reading the refusal is the CALLER own, because two contracts share this
+    /// transport: coordination refuses with a closed code, and a creator-facing
+    /// run call refuses in the engine own terms.
     ///
     /// # Errors
     /// Rejects missing credentials, oversized metadata, failed exchanges,
-    /// redirects and responses outside the closed service error contract.
-    pub async fn post<T: Serialize, R: DeserializeOwned>(
+    /// redirects and oversized responses.
+    async fn exchange<T: Serialize>(
         &self,
         endpoint: ServiceEndpoint,
         request: &T,
-    ) -> Result<R, Error> {
+    ) -> Result<(u16, Vec<u8>), Error> {
         let mut body = BoundedBody {
             bytes: Vec::new(),
             limit: self.options.max_request_bytes,
@@ -134,14 +137,64 @@ impl Transport {
                 }
                 bytes.extend_from_slice(&chunk);
             }
-            if status != 200 {
-                return Err(refusal(status, &bytes));
-            }
-            serde_json::from_slice(&bytes).map_err(|_| Error::InvalidResponse)
+            Ok((status, bytes))
         };
         compio::time::timeout(self.options.timeout, exchange)
             .await
             .map_err(|_| Error::Timeout)?
+    }
+
+    /// Send metadata with a fresh assertion and deserialize a bounded receipt.
+    /// The caller binds the receipt to the operation scope and identity.
+    ///
+    /// # Errors
+    /// Rejects failed exchanges and responses outside the closed service error
+    /// contract.
+    pub async fn post<T: Serialize, R: DeserializeOwned>(
+        &self,
+        endpoint: ServiceEndpoint,
+        request: &T,
+    ) -> Result<R, Error> {
+        let (status, bytes) = self.exchange(endpoint, request).await?;
+        if status != 200 {
+            return Err(refusal(status, &bytes));
+        }
+        serde_json::from_slice(&bytes).map_err(|_| Error::InvalidResponse)
+    }
+
+    /// Send a creator-facing run call and deserialize its reply.
+    ///
+    /// A refusal arrives in the engine own terms rather than as a closed
+    /// coordination code, because creator code branches on the code and reads
+    /// the message.
+    ///
+    /// # Errors
+    /// Rejects failed exchanges, and a reply whose status and refusal body
+    /// disagree about which refusal it is.
+    pub(crate) async fn post_run<T: Serialize, R: DeserializeOwned>(
+        &self,
+        endpoint: ServiceEndpoint,
+        request: &T,
+    ) -> Result<R, RunError> {
+        let (status, bytes) = self
+            .exchange(endpoint, request)
+            .await
+            .map_err(RunError::Transport)?;
+        if status != 200 {
+            return Err(run_refusal(status, &bytes));
+        }
+        serde_json::from_slice(&bytes)
+            .map_err(|_| RunError::Transport(Error::InvalidResponse))
+    }
+}
+
+/// A refusal body is believed only when the status it arrived with is the one
+/// its own code pairs with. A mismatch is a peer this contract does not
+/// describe, not a refusal to hand a creator.
+fn run_refusal(status: u16, bytes: &[u8]) -> RunError {
+    match serde_json::from_slice::<RunFailure>(bytes) {
+        Ok(failure) if failure.status() == status => RunError::Refused(failure),
+        _ => RunError::Transport(Error::InvalidResponse),
     }
 }
 
