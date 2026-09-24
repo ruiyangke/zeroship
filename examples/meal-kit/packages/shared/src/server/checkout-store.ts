@@ -9,11 +9,22 @@ export async function requirePaymentReady(
   owner: string,
   market: string,
 ) {
-  const unfinished = await tx.meal_checkout_attempts.find({
-    owner_id: owner,
-    market,
-    payment: { $in: ["processing", "requires_action"] },
-  });
+  // An attempt blocks only while its RESERVATION is live. `expireReservations`
+  // releases the stock, moves the order to `checkout_expired` and tells the
+  // shopper their meals are no longer reserved - but it leaves `payment` at
+  // whatever the provider last said, because that is a record rather than a
+  // lifecycle. Blocking on `payment` alone therefore locked a customer out of
+  // the market forever: the one attempt nobody can settle any more is the one
+  // the refusal pointed them at. `reservationActive` is the single definition
+  // of live, so this reuses it instead of restating the deadline here.
+  const unfinished = (
+    await tx.meal_checkout_attempts.find({
+      owner_id: owner,
+      market,
+      reservation: "active",
+      payment: { $in: ["processing", "requires_action"] },
+    })
+  ).filter((attempt) => reservationActive(attempt));
   if (unfinished.length)
     fail(
       /* i18n */ "You have a payment in progress. Open My deliveries to finish it before starting another order.",
