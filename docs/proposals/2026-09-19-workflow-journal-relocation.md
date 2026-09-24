@@ -10,10 +10,11 @@ its own ingress epoch; `restart` refuses, naming the prerequisite it still needs
 production writes this journal yet - there is no `start` endpoint - so step 5 is what gives the
 endpoints rows to operate on.
 
-Open 3 names three pieces behind a store of its own, and two have landed: no migration in the
+Open 3 names three pieces behind a store of its own, and all three have landed: no migration in the
 corpus writes into two databases' worth of schemas, and the two tables the service
 owns have moved into `workflow_manager`, which deletes a cross-database write rather than
-transporting it. What remains is severing the reads that stay - and the one of those that is
+transporting it, and the service has a compose deployment. What remains is severing the reads
+that stay, plus one transport fence the deployment names - and the one of those that is
 authentication is a trust-model decision rather than plumbing.
 
 The journal is installed into the creator's own schema today and written by the worker over the
@@ -776,10 +777,23 @@ stall the defect fixes that motivate the move.
    `42704` for a role that does not exist, so a separate cluster aborts the apply at that
    statement rather than stepping over it. Settle the roles before the routing.
 
-   **The third piece is that the service has nowhere to be deployed.** It has no service in
-   `deploy/compose/docker-compose.yml` and no chart template, and `workflow.database_url`,
-   which `crates/zeroship-workflow-server/src/server.rs` requires at startup, is set nowhere
-   outside test fixtures. That is where a second store would first be named.
+   **The third piece is the deployment site, and it has landed with one blocker named.** The
+   `workflow` service in `deploy/compose/docker-compose.yml` supplies the four settings
+   `crates/zeroship-workflow-server/src/server.rs` refuses to start without, under the runtime
+   login rather than the migrator, and that is where a second store would first be named. Two
+   credentials had to be created for it to run at all: `zeroship_workflow` carried no password,
+   and no path wrote `svc-workflow.pem` or published `svc/workflow` to the peer document.
+
+   **What it cannot do yet is reach Control, and the reason is a trust-model decision rather
+   than a setting.** `Transport::configuration` in
+   `crates/zeroship-workflow-client/src/transport.rs` admits an origin only when the scheme is
+   `https`, or the scheme is `http` and the host is a loopback IP LITERAL. Every platform
+   service on the compose bridge speaks plain HTTP under its service name and nothing terminates
+   TLS between containers, so `http://control:9090` is refused at startup and `https://` binds
+   over a transport that cannot handshake with a plaintext peer. This client is the only one
+   with that fence - the gateway reaches Control at `--control-url http://control:9090`. Either
+   the transport relaxes for a private network or the platform grows internal TLS, and that is
+   the same class of decision as the authentication one above.
 
 4. **DECIDED - the service is zone-local. One workflow store per zone, an app's runs in its own
    zone.** So Open 1's dispatch-crossing term stays the small one it was measured to be, and the
