@@ -33,6 +33,7 @@ use zeroship_migrate_postgres::{PostgresBackend, DIALECT as POSTGRES};
 /// which errors are reachable, not which backend runs.
 const VENDORS: zeroship_migrate_backend::registry::VendorSet = zeroship_migrate::shipping_vendors();
 
+use crate::capability_grants::{grant_capability_columns, CapabilityGrantError};
 use crate::policy::{
     confined_guard_policy_for_schema, CreatorPolicyDraft, EffectivePolicy, ManagedPolicyConfig,
     ManagedPolicyError, SealVerifier,
@@ -232,6 +233,8 @@ pub enum ApplyRequestError {
     ProvisionAuditUnmask(compio_postgres::Error),
     #[error("app publication provision: {0}")]
     ProvisionPublication(#[from] PublicationError),
+    #[error("capability column grants: {0}")]
+    GrantCapabilityColumns(#[from] CapabilityGrantError),
     #[error("{action} migration project advisory lock: {source}")]
     ProjectLock {
         action: &'static str,
@@ -491,8 +494,8 @@ async fn run_apply(
     // every co-tenant of this database - which is precisely the reach
     // `GRANT ... WITH SET FALSE` on the binding-to-database edge exists to
     // deny. What an app may read and write on this database is carried by the
-    // two capability roles the reconciler minted, narrowed per column from the
-    // owner's own IR.
+    // two capability roles the reconciler minted, narrowed per column by
+    // `grant_capability_columns` below.
     let outcome = apply_sealed(
         backend,
         sealed_policy.sealed,
@@ -504,6 +507,19 @@ async fn run_apply(
         &applied_by,
     )
     .await?;
+    // The capability grants, over every creator table this database now holds.
+    //
+    // AFTER the DDL and INSIDE the project lock, which is the strongest
+    // bracket this host can put around them. The engine opens and commits its
+    // own transaction per lowered unit over the `SqlSession` seam
+    // (`zeroship_migrate_postgres::backend::session::apply_transactional`), and
+    // that seam carries no host hook, so there is no way to emit a grant in the
+    // same transaction as the statement that created the table. The window a
+    // separate transaction opens is a table that exists and is unreachable,
+    // which is the direction that fails closed, and the emission states a
+    // desired state rather than a delta - so a crash inside the window is
+    // repaired by the next apply rather than leaving a partial ACL.
+    grant_capability_columns(admin, database_id).await?;
     // The publication reconciliation takes the DATABASE: the object is the
     // datastore's one shared publication and the membership being edited is the
     // set of relations in this database's schema.
@@ -1029,6 +1045,7 @@ pub fn apply_error_kind(err: &ApplyRequestError) -> (ntex::http::StatusCode, &'s
         | ApplyRequestError::ProvisionRole(_)
         | ApplyRequestError::ProvisionAuditUnmask(_)
         | ApplyRequestError::ProvisionPublication(_)
+        | ApplyRequestError::GrantCapabilityColumns(_)
         | ApplyRequestError::ProjectLock { .. }
         | ApplyRequestError::HistoryAttestation(_) => (
             ntex::http::StatusCode::SERVICE_UNAVAILABLE,

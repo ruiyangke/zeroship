@@ -30,20 +30,15 @@
 //! # Per-column grants are not emitted here
 //!
 //! The capability roles get `USAGE` on the schema and nothing else. Which
-//! COLUMNS each of them may read or write is derived from the owner's own
-//! migration IR - a classified column is withheld and the column holding its
-//! mask granted instead - so they belong to the apply path, inside the same
-//! transaction as the DDL that creates the table.
+//! COLUMNS each of them may read or write is a fact about the TABLES an apply
+//! creates, not about the database, so it belongs to the apply path:
+//! [`crate::capability_grants::grant_capability_columns`] converges it over the
+//! live catalog on every apply, withholding a masked field's real-value column
+//! and granting the column that holds its mask.
 //!
-//! **THE APPLY DOES NOT EMIT THEM YET.** It grants only the unmask audit table
-//! to the capability roles (`provisioning::grant_audit_unmask_to_capabilities`).
-//! Until that lands, a converged database holds `USAGE` and no column
-//! privileges, so creator tables are unreachable by the capability roles
-//! rather than over-granted - the gap fails closed, and it is the next slice.
-//! Do not read this module as evidence the seam is covered. A reconciler
-//! that granted table-wide privileges here would return the plaintext of every
-//! classified column: a table-level `GRANT SELECT` beside a column list does
-//! not narrow it, it widens it.
+//! A reconciler that granted table-wide privileges here would return the
+//! plaintext of every classified column: a table-level `GRANT SELECT` beside a
+//! column list does not narrow it, it widens it.
 
 use compio_postgres::Client;
 use zeroship_core::database_derivation;
