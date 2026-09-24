@@ -815,8 +815,8 @@ with this queue namespace; it is not a second authoritative placement store.
 | `zeroship.app_deploys` | Control-owned immutable deployment metadata and reclamation state. |
 | `zeroship.app_deploy_holds` | Control-owned app/deployment/holder generation and retention state. |
 | `zeroship.apps`, `zeroship.plans` | Control-owned lifecycle, entitlement and complete workflow policy inputs, and each app's frozen execution zone. The manager receives column-scoped read access. |
-| `zeroship.workflow_rollout_config` | Operator dispatch/ingress switches and the finite source-validity bound. |
-| `zeroship.workflow_policy_ledger` | Durable per-app ordered policy publication. The manager locks and updates this row, without writing its app or plan inputs. An unpublished row grants nothing. |
+| `workflow_manager.workflow_rollout_config` | Operator dispatch/ingress switches and the finite source-validity bound. |
+| `workflow_manager.workflow_policy_ledger` | Durable per-app ordered policy publication. The manager locks and updates this row, without writing its app or plan inputs. An unpublished row grants nothing. |
 
 Capacity demand lives in `capacity_demands` and `capacity_targets`, beside the
 queue it describes. Prefer extending the owning manager models over adding
