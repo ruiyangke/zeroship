@@ -15,6 +15,7 @@ use zeroship_workflow_manager::{
     coordinator::{Coordinator as NativeCoordinator, Options as NativeOptions},
     deployments::latest::{self, LatestDeploymentSource},
     eligibility::{self, ControlEligibility, EligibilitySource},
+    recovery::{Options as RecoveryOptions, Recovery},
     retention::HoldClient,
     Options as QueueOptions, Queue,
 };
@@ -205,6 +206,17 @@ impl Coordinator {
         };
         service.verify().await?;
         Ok(service)
+    }
+
+    /// Recovery responsibility over this coordinator's queue.
+    ///
+    /// The run service establishes ingress epochs through it, so acceptance
+    /// and the maintenance lanes that close a scope act on the same rows.
+    ///
+    /// # Errors
+    /// Rejects invalid recovery options.
+    pub fn recovery(&self, options: RecoveryOptions) -> Result<Recovery, Error> {
+        Ok(Recovery::new(self.queue.clone(), options)?)
     }
 
     /// # Errors

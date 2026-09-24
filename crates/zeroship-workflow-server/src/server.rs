@@ -194,6 +194,7 @@ pub async fn run(settings: WorkflowSettings, options: ServerOptions) -> Result<(
         options.replay_sweep,
     ));
     let coordinator = options.coordinator;
+    let recovery = options.driver.recovery;
     let max_request_bytes = options.max_request_bytes;
     let server = web::HttpServer::new(move || {
         let url = url.clone();
@@ -219,22 +220,22 @@ pub async fn run(settings: WorkflowSettings, options: ServerOptions) -> Result<(
                         )?)
                     };
                     let eligibility = Rc::new(connect_eligibility(&url, coordinator).await?);
+                    let service =
+                        Coordinator::connect(&url, coordinator, Rc::new(holds), eligibility)
+                            .await?;
                     // The journal shares the service own database and login;
                     // it is the same url the coordinator opened, narrowed to a
-                    // different schema by its binding.
+                    // different schema by its binding. Its ingress epochs are
+                    // established against the coordinator's own recovery
+                    // scopes, the ones the driver's lanes also close, so
+                    // acceptance and closure meet on the same rows.
                     let runs = Rc::new(
-                        crate::runs::RunService::connect(&url)
+                        crate::runs::RunService::connect(&url, service.recovery(recovery)?)
                             .await
                             .map_err(|_| crate::coordinator::Error::Unavailable)?,
                     );
                     Ok::<_, crate::coordinator::Error>(Rc::new(WorkflowHttpState {
-                        service: Coordinator::connect(
-                            &url,
-                            coordinator,
-                            Rc::new(holds),
-                            eligibility,
-                        )
-                        .await?,
+                        service,
                         auth,
                         policy_source: Some(Rc::new(
                             connect_policies(&url, coordinator, observations).await?,
