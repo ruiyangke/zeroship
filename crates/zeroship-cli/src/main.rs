@@ -4,7 +4,7 @@
 //!   zeroship serve   <file-or-dir> [--port=3000] [--workers=0]
 //!   zeroship db      create|list|bind|unbind|bindings|delete
 //!   zeroship deploy  [<path-to-.zship>] [--app=<id>] [--app-name=<name>] [--control=URL] [--token=TOKEN] [--no-create] [--command-id=<id>] [--config=PATH] [--env=NAME]
-//!   zeroship migrate [<path-to-migrations-dir>] [--app=<id>] [--app-name=<name>]
+//!   zeroship migrate [<path-to-migrations-dir>] [--database=<label>]
 //!                    [--control=URL] [--token=TOKEN] [--config=PATH] [--env=NAME] [--yes]
 //!   zeroship config show [--config=PATH] [--env=NAME]
 //!   zeroship config path [--config=PATH]
@@ -536,12 +536,12 @@ fn cmd_deploy(args: &[String]) {
         std::process::exit(1);
     });
 
-    // BEFORE the upload, not after it. A reminder printed after a successful
-    // deploy names a step the deploy has already made it too late to take in
-    // order; control REFUSES a deploy whose migrations have not been applied,
-    // so this line is what a creator reads on the way to that 409 rather than
-    // a footnote under a green result.
-    print_migrate_reminder(&app, &control_url, label.as_deref(), resolved.as_ref());
+    // BEFORE the upload, not after it. Nothing behind it checks: a deploy whose
+    // migrations are unapplied is accepted, and the first query against a
+    // missing column fails at query time. So this line is the only warning on
+    // the way in, and one printed after a green result is a footnote under a
+    // success the creator has already stopped reading.
+    print_migrate_reminder(&control_url, label.as_deref(), resolved.as_ref());
 
     eprintln!(
         "Deploying {} ({:.1}KB) to {control_url}/api/apps/{app}/deploy...",
@@ -791,7 +791,6 @@ fn record_created_app(
 /// `42703 undefined_column`, which names the column. This line is the only
 /// warning on the way in, which is why it prints before the upload.
 fn print_migrate_reminder(
-    app: &str,
     control_url: &str,
     label: Option<&str>,
     resolved: Option<&project_config::Resolved>,
@@ -820,7 +819,7 @@ fn print_migrate_reminder(
     eprintln!();
     eprintln!("This app has committed migrations. Deploy does NOT apply them:");
     for database in pending {
-        eprintln!("  zeroship migrate --app={app} --database={database} --control={control_url}");
+        eprintln!("  zeroship migrate --database={database} --control={control_url}");
     }
     eprintln!("Deploy does not check this: an unmigrated column fails at query time.");
 }
@@ -1465,13 +1464,17 @@ fn print_usage() {
     eprintln!("                   --app takes the app's ID; --app-name its routing label.");
     eprintln!("                   --command-id resumes a deploy whose outcome was not reported.");
     eprintln!("                   Token source: --token, ZEROSHIP_TOKEN, or zeroship login.");
-    eprintln!("  zeroship migrate  [<path-to-migrations-dir>] [--app=<id>] [--app-name=<name>] [--control=URL] [--token=TOKEN] [--config=PATH] [--env=NAME] [--yes]");
-    eprintln!("                   Apply the app's committed migrations to its DEPLOYED database.");
+    eprintln!("  zeroship migrate  [<path-to-migrations-dir>] [--database=<label>] [--control=URL] [--token=TOKEN] [--config=PATH] [--env=NAME] [--yes]");
+    eprintln!("                   Apply a database's committed migrations to it.");
+    eprintln!("                   --database names a zeroship.jsonc `databases` label (the id");
+    eprintln!("                   itself when there is no file). A workspace declaring one");
+    eprintln!("                   database implies it. No app is named or needed: the apply is");
+    eprintln!("                   authorized at the database's own project.");
     eprintln!("                   Records the migrations/*.ts itself (needs Node, as the build");
     eprintln!("                   does). Without a path, reads the selected database's");
     eprintln!("                   `migrations` from zeroship.jsonc; without either, it errors.");
-    eprintln!("                   An app that uses env.db needs this after deploy,");
-    eprintln!("                   or its first database call fails with a missing-role error.");
+    eprintln!("                   An app that uses env.db needs this, or its first database");
+    eprintln!("                   call fails with schema_not_migrated naming this command.");
     eprintln!("  zeroship config   show [--config=PATH] [--env=NAME]");
     eprintln!("  zeroship config   path [--config=PATH]");
     eprintln!("                   Show the resolved project config or its selected path.");

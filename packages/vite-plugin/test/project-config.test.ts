@@ -43,6 +43,7 @@ import {
   readProjectConfig,
   resolveProjectConfig,
   selectBuildTarget,
+  selectDatabase,
 } from "../src/project-config/index.js";
 
 const FULL = `{
@@ -560,6 +561,81 @@ describe("app selection", () => {
     const body = FULL.replace('"app": "app_034klb07lrb9jgma6imvmx000", ', "");
     assert.notEqual(body, FULL, "the fixture must still carry the id this removes");
     assert.equal(selectBuildTarget(resolveProjectConfig(parsed(body))).appId, undefined);
+  });
+});
+
+describe("database selection", () => {
+  // `analytics` is declared by the workspace and used by NO app. That is the
+  // state `zeroship db create` leaves behind and the one an app-scoped
+  // selection could not name, so every arm below runs against it.
+  const TWO = FULL.replace(
+    '"main": { "id": "dbs_03evr3oqx1200yyd6zj2cebfw", "migrations": "migrations", "out": "generated/zeroship" }',
+    '"main": { "id": "dbs_03evr3oqx1200yyd6zj2cebfw", "migrations": "migrations", "out": "generated/zeroship" },\n' +
+      '    "analytics": { "id": "dbs_03evr3oqx1200qyvgmdnjrsla", "migrations": "migrations/analytics", "out": "generated/zeroship/analytics" }',
+  ).replace(
+    '"databases": { "main": { "id": "dbs_03evr3oqx1200uzh8k6gycpgg" } }',
+    '"databases": { "main": { "id": "dbs_03evr3oqx1200uzh8k6gycpgg" }, "analytics": { "id": "dbs_03evr3oqx12012zcpsh30ivwy" } }',
+  );
+
+  test("one declared database is the target, and no app names it", () => {
+    const selected = selectDatabase(resolveProjectConfig(parsed()));
+    assert.equal(selected?.label, "main");
+    assert.equal(selected?.id, "dbs_03evr3oqx1200yyd6zj2cebfw");
+    assert.equal(selected?.primary, true);
+  });
+
+  test("a database NO app uses is selectable by label", () => {
+    const config = resolveProjectConfig(parsed(TWO));
+    assert.notEqual(TWO, FULL, "the two-database body must differ from the one-database one");
+    assert.deepEqual(
+      Object.values(config.apps ?? {}).flatMap((app) => app.databases ?? []),
+      ["main"],
+      "the precondition: no app in this file uses `analytics`",
+    );
+
+    const selected = selectDatabase(config, { database: "analytics" });
+    assert.equal(selected?.label, "analytics");
+    assert.equal(selected?.id, "dbs_03evr3oqx1200qyvgmdnjrsla");
+    // A database no app makes its `env.db` is not a primary, and the generated
+    // `env.db.ts` must declare it on `EnvDatabases` without declaring `Env.db`.
+    assert.equal(selected?.primary, false);
+  });
+
+  test("several declared and none named is refused, naming the flag", () => {
+    assert.throws(
+      () => selectDatabase(resolveProjectConfig(parsed(TWO))),
+      (error: Error) => {
+        assert.match(error.message, /more than one database/);
+        assert.match(error.message, /main, analytics/);
+        assert.match(error.message, /--database=<label>/);
+        return true;
+      },
+    );
+  });
+
+  test("a label the file does not declare is refused rather than applied", () => {
+    assert.throws(
+      () => selectDatabase(resolveProjectConfig(parsed(TWO)), { database: "events" }),
+      (error: Error) => {
+        assert.match(error.message, /"events" is not declared/);
+        assert.match(error.message, /main, analytics/);
+        return true;
+      },
+    );
+  });
+
+  test("a workspace declaring no database selects none, which is not an error", () => {
+    // Every `databases` in the file goes, root and environment alike: an
+    // environment must cover exactly the labels the root declares, so emptying
+    // one without the other is a document the reader refuses for another reason.
+    const body = FULL.replace(
+      '"main": { "id": "dbs_03evr3oqx1200yyd6zj2cebfw", "migrations": "migrations", "out": "generated/zeroship" }',
+      "",
+    )
+      .replace('"main": { "id": "dbs_03evr3oqx1200uzh8k6gycpgg" }', "")
+      .replace('"databases": ["main"], "primary": "main"', '"databases": []');
+    assert.notEqual(body, FULL, "the fixture must still carry the databases this empties");
+    assert.equal(selectDatabase(resolveProjectConfig(parsed(body))), undefined);
   });
 });
 

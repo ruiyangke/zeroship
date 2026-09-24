@@ -1,9 +1,9 @@
-//! `zeroship migrate` - apply a database's committed migrations to the DEPLOYED
-//! database that app is bound to.
+//! `zeroship migrate` - apply a database's committed migrations to that
+//! deployed database.
 //!
 //! Shape:
-//!   zeroship migrate [path-to-migrations-dir] [--app=<id>] [--app-name=<name>]
-//!                    [--database=<label>] [--control=URL] [--token=TOKEN]
+//!   zeroship migrate [path-to-migrations-dir] [--database=<label>]
+//!                    [--control=URL] [--token=TOKEN]
 //!                    [--config=PATH] [--env=NAME] [--yes]
 //!
 //! The directory comes from that database's `migrations` in `zeroship.jsonc`
@@ -32,16 +32,23 @@
 //!
 //! **The target is the DATABASE, and it is in the URL rather than the body**,
 //! precisely because the body is posted as the recorder produced it. `--database`
-//! names one of the labels this app declares, and the CLI dereferences it to a
-//! `dbs_` id here, before the request: a label is local to one `zeroship.jsonc`
-//! and must never travel as an identifier.
+//! names one of the labels the workspace declares, and the CLI dereferences it
+//! to a `dbs_` id here, before the request: a label is local to one
+//! `zeroship.jsonc` and must never travel as an identifier.
+//!
+//! **NO APP REACHES THIS COMMAND.** A migration is authorized at the database's
+//! own project - `Action::DatabaseMigrate` on `Resource::Database`, answered
+//! from `zeroship.databases.project_id` - so an app id would be a value the
+//! service does not read and a coupling the creator cannot escape. A database
+//! `zeroship db create` left `active` with no binding is a legal target, and it
+//! is the state only this command can fill.
 //!
 //! WHY THIS COMMAND EXISTS. Applying migrations is what puts a creator's tables
 //! in their database. Deploy an app that uses `env.db` without applying its
 //! migrations and the FIRST database call fails with
-//! `42703 undefined_column` or a missing relation, which reaches the end user as
-//! `{"message":"internal error"}`. Before this command there was no supported
-//! way for a creator to run the step at all.
+//! `42703 undefined_column` or a missing relation, which the runtime classifies
+//! as `schema_not_migrated` and names this command in the message. Before this
+//! command there was no supported way for a creator to run the step at all.
 //!
 //! The request uses the configured control URL, but the edge sends the
 //! migration-service path directly to `zeroship-migrate-server`. Control is not
@@ -50,13 +57,10 @@
 
 use std::path::{Path, PathBuf};
 
-use zeroship_core::{AppId, DatabaseId};
+use zeroship_core::DatabaseId;
 
 use crate::project_config::{self, ProjectConfig, Resolved};
-use crate::{
-    app_id_or_refuse, flag_str, parse_app_id, parse_flag, resolve_bearer_token, run_curl,
-    AppTarget, ControlResponse,
-};
+use crate::{flag_str, parse_flag, resolve_bearer_token, run_curl, ControlResponse};
 
 /// The migrations to record: a positional directory, else that database's own
 /// `migrations` from `zeroship.jsonc`.
@@ -65,12 +69,12 @@ use crate::{
 /// recorded set is never written to disk, so a path to one names a shape nothing
 /// in the toolchain produces; a positional that IS a file is refused by name
 /// rather than read, because its documents are whatever was put in it rather
-/// than what this app's `.ts` declare.
+/// than what this database's `.ts` declare.
 ///
 /// **A relative positional is resolved against `cwd` HERE**, before it can be
 /// handed to a child process whose own working directory is the recording
 /// target: re-resolving `migrations` inside `.../migrations` would name a
-/// directory that does not exist and report an app with no migrations.
+/// directory that does not exist and report a database with no migrations.
 fn resolve_migrations_dir(
     args: &[String],
     cwd: &Path,
@@ -129,7 +133,7 @@ fn record_apply_request(migrations_dir: &Path) -> Result<String, String> {
     }
     if !migrations_dir.is_dir() {
         return Err(format!(
-            "no migrations directory at {}. An app with no migrations has none to apply.",
+            "no migrations directory at {}. A database with no migrations has none to apply.",
             migrations_dir.display()
         ));
     }
@@ -172,15 +176,18 @@ fn record_apply_request(migrations_dir: &Path) -> Result<String, String> {
 /// The database this apply targets, as the `dbs_` id that will be sent.
 ///
 /// **The label is dereferenced HERE, before any request.** With a config file
-/// present, `--database` names one of the labels `apps.<app>.databases`
-/// declares - the file is the namespace the CLI resolves in, so a name two
+/// present, `--database` names one of the labels the file declares under
+/// `databases` - the file is the namespace the CLI resolves in, so a name two
 /// workspaces could both choose never reaches a wire. With NO file there are no
 /// labels, so `--database` is a `dbs_` id. The two cases are told apart by
 /// whether there is a file, never by inspecting the value.
+///
+/// **The selection consults no app.** A database belongs to its project and is
+/// migratable with no app bound to it at all, so narrowing the candidates to
+/// one app's `databases` would hide the targets this command exists to reach.
 fn resolve_migrate_database(
     args: &[String],
     cfg: Option<&Resolved>,
-    app_label: Option<&str>,
 ) -> Result<(Option<String>, DatabaseId), String> {
     let Some(cfg) = cfg else {
         let raw = parse_flag(args, "--database").ok_or_else(|| {
@@ -200,13 +207,7 @@ fn resolve_migrate_database(
         })?;
         return Ok((None, id));
     };
-    let app_label = app_label.ok_or_else(|| {
-        format!(
-            "{} declares no app for this command to read databases from.",
-            cfg.path.display()
-        )
-    })?;
-    let label = project_config::select_database(args, cfg, app_label)?;
+    let label = project_config::select_database(args, cfg)?;
     let raw_id = cfg.database_id(&label)?;
     let id = DatabaseId::parse(raw_id).map_err(|_| {
         format!(
@@ -226,7 +227,12 @@ fn resolve_migrate_database(
 /// control plane named on the command line, and applying a migration set to
 /// the wrong database is not something an error message afterwards can undo.
 const MIGRATE_KNOWN_FLAGS: &[&str] = &[
-    "--app", "--app-name", "--database", "--control", "--token", "--config", "--env", "--yes",
+    "--database",
+    "--control",
+    "--token",
+    "--config",
+    "--env",
+    "--yes",
 ];
 
 pub fn cmd_migrate(args: &[String]) -> Result<(), String> {
@@ -249,22 +255,17 @@ pub fn cmd_migrate(args: &[String]) -> Result<(), String> {
         (None, None) => None,
     };
 
-    let (label, app, target) = resolve_migrate_app(args, resolved.as_ref())?;
     let control_url = project_config::resolve_control(args, resolved.as_ref())?;
     let token = resolve_bearer_token(args)?;
 
-    let (database_label, database) =
-        resolve_migrate_database(args, resolved.as_ref(), label.as_deref())?;
+    let (database_label, database) = resolve_migrate_database(args, resolved.as_ref())?;
     let migrations =
         resolve_migrations_dir(args, &cwd, resolved.as_ref(), database_label.as_deref())?;
 
     // BEFORE the POST, always. Applying a migration set to the wrong database
     // "is not something an error message afterwards can undo", and with a
     // config file the target is no longer visible in the command itself.
-    project_config::print_provenance(
-        "migrate",
-        &[("app", &app), ("control", &control_url)],
-    );
+    project_config::print_provenance("migrate", &[("control", &control_url)]);
     eprintln!("zeroship migrate: migrations = {}", migrations.display());
     // The LABEL and the id it dereferenced to, side by side. The label is local
     // to this file and never travels; the id is what a server sees, and seeing
@@ -290,19 +291,18 @@ pub fn cmd_migrate(args: &[String]) -> Result<(), String> {
         ));
     }
 
-    let (app, control_url) = (app.value, control_url.value);
+    let control_url = control_url.value;
     // RECORDED AFTER the protected-environment refusal, so a run that is about
     // to be refused does not first evaluate the creator's migrations.
     let body = record_apply_request(&migrations)?;
 
     let mut client = CurlMigrateClient;
-    let outcome = apply_migrations(&mut client, &control_url, &target, &database, &token, &body)?;
+    let outcome = apply_migrations(&mut client, &control_url, &database, &token, &body)?;
 
     eprintln!(
-        "Applied {} migration op(s) to database {} for app {} ({} skipped).",
+        "Applied {} migration op(s) to database {} ({} skipped).",
         outcome.applied,
         database.as_str(),
-        app,
         outcome.skipped
     );
     if let Some(id) = outcome.migration_id {
@@ -313,8 +313,8 @@ pub fn cmd_migrate(args: &[String]) -> Result<(), String> {
 
 /// The first non-flag argument after the subcommand, if any.
 ///
-/// `zeroship migrate --app=x` must NOT read `--app=x` as the directory; the
-/// default applies instead.
+/// `zeroship migrate --database=x` must NOT read `--database=x` as the
+/// directory; the default applies instead.
 fn positional_path(args: &[String]) -> Option<String> {
     args.get(2)
         .filter(|arg| !arg.starts_with("--"))
@@ -337,7 +337,7 @@ pub(crate) fn check_unknown_migrate_flags(args: &[String]) -> Result<(), String>
                  falling back to its default would apply migrations to \
                  http://localhost:9090 instead of the control plane you named. \
                  Usage: zeroship migrate [path-to-migrations-dir] \
-                 [--app=<id>] [--app-name=<name>] [--control=<url>] [--token=<token>] \
+                 [--database=<label>] [--control=<url>] [--token=<token>] \
                  [--config=<path>] [--env=<name>] [--yes]"
             ));
         }
@@ -357,26 +357,24 @@ pub(crate) trait MigrateClient {
     fn apply(
         &mut self,
         control_url: &str,
-        app_id: &AppId,
         database_id: &DatabaseId,
         token: &str,
         body: &str,
     ) -> Result<ControlResponse, String>;
-
-    fn list_apps(&mut self, control_url: &str, token: &str) -> Result<ControlResponse, String>;
 }
 
 struct CurlMigrateClient;
 
-/// The apply route, composed from two PARSED typed ids.
+/// The apply route, composed from ONE PARSED typed id.
 ///
-/// Both segments go through their id types before they reach this function, so
-/// neither can be a label, a name, or anything else a path segment must not
-/// carry. The app authorizes the call; the database is the target schema.
-fn migration_apply_url(control_url: &str, app_id: &AppId, database_id: &DatabaseId) -> String {
+/// The segment goes through `DatabaseId` before it reaches this function, so it
+/// cannot be a label, a name, or anything else a path segment must not carry.
+/// The database is both the target schema and the authorization subject: the
+/// migration service resolves it to its owning project through
+/// `zeroship.databases.project_id` and demands a qualifying seat there.
+fn migration_apply_url(control_url: &str, database_id: &DatabaseId) -> String {
     format!(
-        "{control_url}/v1/apps/{}/databases/{}/migrations/apply",
-        app_id.as_str(),
+        "{control_url}/v1/databases/{}/migrations/apply",
         database_id.as_str()
     )
 }
@@ -385,12 +383,11 @@ impl MigrateClient for CurlMigrateClient {
     fn apply(
         &mut self,
         control_url: &str,
-        app_id: &AppId,
         database_id: &DatabaseId,
         token: &str,
         body: &str,
     ) -> Result<ControlResponse, String> {
-        let url = migration_apply_url(control_url, app_id, database_id);
+        let url = migration_apply_url(control_url, database_id);
         let auth = format!("Authorization: Bearer {token}");
         let mut command = std::process::Command::new("curl");
         command.args([
@@ -415,79 +412,23 @@ impl MigrateClient for CurlMigrateClient {
         ]);
         run_curl(&mut command, Some(body.as_bytes()))
     }
-
-    fn list_apps(&mut self, control_url: &str, token: &str) -> Result<ControlResponse, String> {
-        let url = format!("{control_url}/api/apps");
-        let auth = format!("Authorization: Bearer {token}");
-        let mut command = std::process::Command::new("curl");
-        command.args(["-s", "-w", "\n%{http_code}", "-H", &auth, &url]);
-        run_curl(&mut command, None)
-    }
 }
 
-/// Decide WHAT `migrate` was pointed at, from which input carried the value.
+/// POST the recorded body to the migration service, for ONE database.
 ///
-/// The same rule as `deploy`'s `resolve_deploy_app` and one deliberate
-/// difference: there is NO `name` fallback. `migrate`'s `app` key is required,
-/// because the fallback's purpose - a brand-new project that has no id yet -
-/// is a deploy affordance, and letting it apply here is the mint-and-migrate
-/// failure the command's own docs describe.
-fn resolve_migrate_app(
-    args: &[String],
-    resolved: Option<&Resolved>,
-) -> Result<(Option<String>, project_config::Sourced, AppTarget), String> {
-    if let Some(name) = parse_flag(args, "--app-name") {
-        if parse_flag(args, "--app").is_some() {
-            return Err(
-                "--app and --app-name both name a target; pass one. --app names an app \
-                 the config file declares (an app ID when there is no file), --app-name \
-                 its routing label."
-                    .to_string(),
-            );
-        }
-        return Ok((
-            None,
-            project_config::Sourced {
-                value: name.clone(),
-                source: project_config::Source::Flag("--app-name"),
-            },
-            AppTarget::Name(name),
-        ));
-    }
-
-    let selection = project_config::select_app(args, resolved)?;
-    let sourced = selection.id.ok_or_else(|| {
-        format!(
-            "`apps.{}` carries no `app` id yet. `zeroship migrate` never creates an app; \
-             run `zeroship deploy` first.",
-            selection.label.as_deref().unwrap_or("<none>")
-        )
-    })?;
-    let id = app_id_or_refuse(&sourced.value)?;
-    Ok((selection.label, sourced, AppTarget::Id(id)))
-}
-
-/// POST the body to the app `app` names, resolving a name through the app list.
-///
-/// Deliberately NOT auto-creating a missing app, unlike `deploy`: creating an
-/// app is the right answer to "push this code somewhere new", and the wrong
-/// answer to "apply my schema" - a typo'd name would mint an empty app and
-/// migrate it while the real app stayed unmigrated, which is the exact silent
-/// failure this command exists to end.
+/// There is no app to resolve and no app list to read. The database carries the
+/// whole request: it names the schema the documents land in and it is what the
+/// service authorizes, so a token holding `database:migrate` on the owning
+/// project's seat is sufficient and an app the creator never deployed is not
+/// required.
 pub(crate) fn apply_migrations<C: MigrateClient>(
     client: &mut C,
     control_url: &str,
-    app: &AppTarget,
     database: &DatabaseId,
     token: &str,
     body: &str,
 ) -> Result<MigrateOutcome, String> {
-    let app_id = match app {
-        AppTarget::Id(id) => id.clone(),
-        AppTarget::Name(name) => resolve_app_id_by_name(client, control_url, token, name)?,
-    };
-
-    let response = client.apply(control_url, &app_id, database, token, body)?;
+    let response = client.apply(control_url, database, token, body)?;
     if response.status != 200 {
         return Err(format!(
             "Migration apply failed (HTTP {}): {}",
@@ -495,35 +436,6 @@ pub(crate) fn apply_migrations<C: MigrateClient>(
         ));
     }
     parse_outcome(&response.body)
-}
-
-fn resolve_app_id_by_name<C: MigrateClient>(
-    client: &mut C,
-    control_url: &str,
-    token: &str,
-    name: &str,
-) -> Result<AppId, String> {
-    let list = client.list_apps(control_url, token)?;
-    if list.status != 200 {
-        return Err(format!(
-            "app lookup failed (HTTP {}): {}",
-            list.status, list.body
-        ));
-    }
-    let json = serde_json::from_str::<serde_json::Value>(&list.body)
-        .map_err(|e| format!("parse app list response: {e}"))?;
-    let apps = json
-        .as_array()
-        .ok_or_else(|| "parse app list response: expected array".to_string())?;
-    for app in apps {
-        if app.get("name").and_then(|n| n.as_str()) == Some(name) {
-            return parse_app_id(&app.to_string(), "app list response");
-        }
-    }
-    Err(format!(
-        "app `{name}` not found; `zeroship migrate` never creates an app - \
-         deploy it first, or pass its id with --app="
-    ))
 }
 
 fn parse_outcome(body: &str) -> Result<MigrateOutcome, String> {
@@ -554,12 +466,7 @@ mod tests {
         v.iter().map(|s| s.to_string()).collect()
     }
 
-    const APP_ID: &str = "app_034klb07lrb9jgma6imvmx000";
     const DATABASE_ID: &str = "dbs_03cgepu94hyemwpcipafo7264";
-
-    fn app_id(raw: &str) -> AppId {
-        AppId::parse(raw).expect("test app id must be canonical")
-    }
 
     fn database_id(raw: &str) -> DatabaseId {
         DatabaseId::parse(raw).expect("test database id must be canonical")
@@ -567,28 +474,18 @@ mod tests {
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     enum FakeCall {
-        Apply(String, String),
-        List,
+        Apply(String),
     }
 
     #[derive(Default)]
     struct FakeMigrateClient {
         calls: Vec<FakeCall>,
         applies: VecDeque<ControlResponse>,
-        lists: VecDeque<ControlResponse>,
     }
 
     impl FakeMigrateClient {
         fn with_apply(mut self, status: u16, body: &str) -> Self {
             self.applies.push_back(ControlResponse {
-                status,
-                body: body.to_string(),
-            });
-            self
-        }
-
-        fn with_list(mut self, status: u16, body: &str) -> Self {
-            self.lists.push_back(ControlResponse {
                 status,
                 body: body.to_string(),
             });
@@ -600,37 +497,23 @@ mod tests {
         fn apply(
             &mut self,
             _control_url: &str,
-            app_id: &AppId,
             database_id: &DatabaseId,
             _token: &str,
             _body: &str,
         ) -> Result<ControlResponse, String> {
-            self.calls.push(FakeCall::Apply(
-                app_id.as_str().to_string(),
-                database_id.as_str().to_string(),
-            ));
+            self.calls
+                .push(FakeCall::Apply(database_id.as_str().to_string()));
             self.applies
                 .pop_front()
                 .ok_or_else(|| "unexpected apply call".to_string())
         }
-
-        fn list_apps(
-            &mut self,
-            _control_url: &str,
-            _token: &str,
-        ) -> Result<ControlResponse, String> {
-            self.calls.push(FakeCall::List);
-            self.lists
-                .pop_front()
-                .ok_or_else(|| "unexpected list call".to_string())
-        }
     }
 
-    /// An id goes straight to the apply endpoint - no lookup, so a creator
-    /// whose token cannot list apps can still migrate the one they own.
+    /// The database goes straight to the apply endpoint, and it is the ONLY
+    /// thing that goes: no app lookup, so a creator whose token cannot list
+    /// apps - or who has deployed no app at all - can still migrate.
     #[test]
-    fn typed_app_applies_without_a_lookup() {
-        let app = app_id(APP_ID);
+    fn the_database_applies_with_no_other_call() {
         let mut client = FakeMigrateClient::default().with_apply(
             200,
             r#"{"migration_id":"0197f8a1-2b3c-7d4e-8f90-1a2b3c4d5e6f","applied":["20260101000000_create_todos"],"skipped":[],"pending_contract":[]}"#,
@@ -639,84 +522,38 @@ mod tests {
         let outcome = apply_migrations(
             &mut client,
             "http://control.test",
-            &AppTarget::Id(app),
             &database_id(DATABASE_ID),
             "tok",
             "{}",
         )
-        .expect("apply by id");
+        .expect("apply by database");
 
         assert_eq!(outcome.applied, 1);
         assert_eq!(outcome.skipped, 0);
         assert_eq!(
             client.calls,
-            vec![FakeCall::Apply(APP_ID.to_string(), DATABASE_ID.to_string())]
+            vec![FakeCall::Apply(DATABASE_ID.to_string())],
+            "the apply is the whole exchange"
         );
     }
 
+    /// The route carries ONE id, and it is the database's.
+    ///
+    /// The app is not a segment of it: a migration is authorized at the
+    /// database's project, so an app id in the path would be a value the
+    /// service never reads and a prior deploy the creator does not need.
     #[test]
-    fn apply_url_names_the_app_and_the_database_it_targets() {
+    fn apply_url_names_the_database_and_nothing_else() {
+        let url = migration_apply_url("https://control.zeroship.ai", &database_id(DATABASE_ID));
         assert_eq!(
-            migration_apply_url(
-                "https://control.zeroship.ai",
-                &app_id(APP_ID),
-                &database_id(DATABASE_ID),
-            ),
-            "https://control.zeroship.ai/v1/apps/app_034klb07lrb9jgma6imvmx000/databases/\
+            url,
+            "https://control.zeroship.ai/v1/databases/\
              dbs_03cgepu94hyemwpcipafo7264/migrations/apply",
         );
-    }
-
-    /// A name is resolved through the app list before the apply.
-    #[test]
-    fn name_app_resolves_then_applies_by_id() {
-        let mut client = FakeMigrateClient::default()
-            .with_list(
-                200,
-                r#"[{"id":"app_034klb07lrb9jgma6imvmx000","name":"todos"}]"#,
-            )
-            .with_apply(200, r#"{"applied":[],"skipped":["a","b"]}"#);
-
-        let outcome = apply_migrations(
-            &mut client,
-            "http://control.test",
-            &AppTarget::Name("todos".to_string()),
-            &database_id(DATABASE_ID),
-            "tok",
-            "{}",
-        )
-        .expect("apply by name");
-
-        assert_eq!(outcome.applied, 0);
-        assert_eq!(outcome.skipped, 2);
-        assert_eq!(
-            client.calls,
-            vec![
-                FakeCall::List,
-                FakeCall::Apply(APP_ID.to_string(), DATABASE_ID.to_string()),
-            ]
+        assert!(
+            !url.contains("/apps/"),
+            "the apply route must not address an app: {url}"
         );
-    }
-
-    /// A name that matches nothing must NOT create an app, and must say so.
-    /// `deploy` creates on first push; migrate must not, or a typo silently
-    /// migrates a brand-new empty app while the real one stays broken.
-    #[test]
-    fn unknown_name_fails_without_creating_anything() {
-        let mut client = FakeMigrateClient::default().with_list(200, "[]");
-
-        let err = apply_migrations(
-            &mut client,
-            "http://control.test",
-            &AppTarget::Name("typo".to_string()),
-            &database_id(DATABASE_ID),
-            "tok",
-            "{}",
-        )
-        .expect_err("unknown app must fail");
-
-        assert!(err.contains("never creates an app"), "{err}");
-        assert_eq!(client.calls, vec![FakeCall::List]);
     }
 
     /// The migration service's own status and body must survive to the user.
@@ -724,7 +561,6 @@ mod tests {
     /// a generic message reproduces the failure this command exists to end.
     #[test]
     fn service_error_body_reaches_the_user() {
-        let app = app_id(APP_ID);
         let mut client = FakeMigrateClient::default().with_apply(
             422,
             r#"{"error":"migration_malformed","detail":"malformed IR document (20260101000000_create_todos.ir.json): unknown op"}"#,
@@ -733,7 +569,6 @@ mod tests {
         let err = apply_migrations(
             &mut client,
             "http://control.test",
-            &AppTarget::Id(app),
             &database_id(DATABASE_ID),
             "tok",
             "{}",
@@ -747,7 +582,12 @@ mod tests {
     /// A typo'd flag is rejected before any request is built.
     #[test]
     fn unknown_migrate_flag_is_rejected() {
-        let args = s(&["zeroship", "migrate", "--app=todos", "--contrl=http://x"]);
+        let args = s(&[
+            "zeroship",
+            "migrate",
+            "--database=main",
+            "--contrl=http://x",
+        ]);
         let err = check_unknown_migrate_flags(&args).expect_err("typo must be rejected");
         assert!(err.contains("--contrl"), "{err}");
 
@@ -755,11 +595,33 @@ mod tests {
             "zeroship",
             "migrate",
             "migrations",
-            "--app=todos",
+            "--database=main",
             "--control=http://localhost:9090",
             "--token=pat",
         ]);
         assert!(check_unknown_migrate_flags(&args).is_ok());
+    }
+
+    /// `--app` and `--app-name` are NOT flags of this command.
+    ///
+    /// They are refused by name rather than ignored, because ignoring them is
+    /// what turns "migrate the app I named" into "migrate whichever database
+    /// the file happens to declare first". The usage line in the refusal is
+    /// the same table, so a creator reading it sees the selector that replaced
+    /// them.
+    #[test]
+    fn the_app_flags_are_not_migrate_flags() {
+        for flag in ["--app=storefront", "--app-name=storefront"] {
+            let args = s(&["zeroship", "migrate", flag]);
+            let err = check_unknown_migrate_flags(&args)
+                .expect_err("an app selector must not be accepted by migrate");
+            assert!(err.contains("--app"), "{err}");
+            assert!(err.contains("--database=<label>"), "{err}");
+            assert!(
+                !err.contains("[--app="),
+                "the usage line must not still offer it: {err}"
+            );
+        }
     }
 
     /// The shared cross-tool fixture: two databases, two apps, and
@@ -770,6 +632,17 @@ mod tests {
             .expect("the committed fixture must parse")
             .resolve(None)
             .expect("the committed fixture must resolve")
+    }
+
+    /// The ONE-DATABASE workspace, read through the plugin-agnostic reader: a
+    /// committed example rather than a string written here, so the implicit
+    /// selection is measured against a file the toolchain really uses.
+    fn single_database_fixture() -> Resolved {
+        let path = repo_root().join("examples/db-todos/zeroship.jsonc");
+        ProjectConfig::load(&path)
+            .expect("the committed db-todos config must load")
+            .resolve(None)
+            .expect("the committed db-todos config must resolve")
     }
 
     /// A NON-PRIMARY label is a legal target, and it resolves to ITS OWN id and
@@ -783,14 +656,9 @@ mod tests {
     #[test]
     fn a_non_primary_database_label_resolves_to_its_own_id_and_migrations_path() {
         let cfg = fixture();
-        let args = s(&[
-            "zeroship",
-            "migrate",
-            "--app=storefront",
-            "--database=analytics",
-        ]);
+        let args = s(&["zeroship", "migrate", "--database=analytics"]);
 
-        let (label, id) = resolve_migrate_database(&args, Some(&cfg), Some("storefront"))
+        let (label, id) = resolve_migrate_database(&args, Some(&cfg))
             .expect("a non-primary label is a legal apply target");
         assert_eq!(label.as_deref(), Some("analytics"));
         assert_eq!(id.as_str(), "dbs_03evr3oqx1200qyvgmdnjrsla");
@@ -810,57 +678,97 @@ mod tests {
         );
     }
 
-    /// The control, differing in one variable: no `--database` at all resolves
-    /// the primary, and its `migrations` is a different directory.
+    /// The SELECTION IS NOT SCOPED TO AN APP.
+    ///
+    /// `analytics` is declared by the workspace and used by `storefront`, and
+    /// `admin` - the fixture's other app - does not use it. Under an app-scoped
+    /// selection that fact is what refused the target; the command no longer
+    /// asks any app, so the label resolves on the strength of the `databases`
+    /// map alone. The `app_databases` assertion is the nonempty control: it
+    /// fails if the fixture ever wires `analytics` into `admin`, which would
+    /// make this pass for the wrong reason.
     #[test]
-    fn no_database_flag_resolves_the_primary() {
+    fn a_database_no_app_in_the_file_has_to_use_is_still_a_target() {
         let cfg = fixture();
-        let args = s(&["zeroship", "migrate", "--app=storefront"]);
-
-        let (label, id) = resolve_migrate_database(&args, Some(&cfg), Some("storefront"))
-            .expect("the primary is the default target");
-        assert_eq!(label.as_deref(), Some("main"));
-        assert_eq!(id.as_str(), "dbs_03evr3oqx1200yyd6zj2cebfw");
-
-        let path = resolve_migrations_dir(&args, Path::new("/workspace"), Some(&cfg), label.as_deref())
-            .expect("the migrations dir");
-        assert!(path.ends_with("migrations"), "{}", path.display());
         assert!(
-            !path.ends_with("migrations/analytics"),
-            "the control: the primary's migrations are not the non-primary's: {}",
-            path.display()
+            !cfg.app_databases("admin").contains(&"analytics"),
+            "the fixture must keep an app that does NOT use analytics"
         );
+
+        let args = s(&["zeroship", "migrate", "--database=analytics"]);
+        let (label, id) = resolve_migrate_database(&args, Some(&cfg))
+            .expect("a database is addressable without an app that uses it");
+        assert_eq!(label.as_deref(), Some("analytics"));
+        assert_eq!(id.as_str(), "dbs_03evr3oqx1200qyvgmdnjrsla");
     }
 
-    /// A label the APP does not declare is refused before any request, naming
-    /// the labels that exist. `admin` declares only `main`.
+    /// SEVERAL DECLARED, NONE NAMED: refused, naming the flag.
+    ///
+    /// The same rule `select_app` applies to apps. Picking one would write a
+    /// schema into a database the creator never named, and that is the one
+    /// failure no message afterwards can undo.
     #[test]
-    fn a_database_the_app_does_not_use_is_refused() {
+    fn several_databases_and_no_flag_names_the_flag() {
         let cfg = fixture();
-        let args = s(&["zeroship", "migrate", "--app=admin", "--database=analytics"]);
-        let error = resolve_migrate_database(&args, Some(&cfg), Some("admin"))
-            .expect_err("an undeclared database must be refused");
+        let args = s(&["zeroship", "migrate"]);
+        let error = resolve_migrate_database(&args, Some(&cfg))
+            .expect_err("an ambiguous target must be refused");
+        assert!(error.contains("--database=<label>"), "{error}");
+        assert!(error.contains("main"), "{error}");
         assert!(error.contains("analytics"), "{error}");
-        assert!(error.contains("apps.admin"), "{error}");
+    }
+
+    /// The control, differing in one variable: a workspace declaring ONE
+    /// database implies it, and its `migrations` comes from that entry.
+    #[test]
+    fn one_declared_database_needs_no_flag() {
+        let cfg = single_database_fixture();
+        assert_eq!(
+            cfg.database_labels(),
+            vec!["main"],
+            "the control's precondition: exactly one database is declared"
+        );
+        let args = s(&["zeroship", "migrate"]);
+
+        let (label, id) = resolve_migrate_database(&args, Some(&cfg))
+            .expect("one declared database is the target");
+        assert_eq!(label.as_deref(), Some("main"));
+        assert_eq!(id.as_str(), "dbs_03evr3oqx1200cfkwyailh8l8");
+
+        let path =
+            resolve_migrations_dir(&args, Path::new("/workspace"), Some(&cfg), label.as_deref())
+                .expect("the migrations dir");
+        assert!(path.ends_with("migrations"), "{}", path.display());
+    }
+
+    /// A label the FILE does not declare is refused before any request, naming
+    /// the labels that exist.
+    #[test]
+    fn a_database_the_file_does_not_declare_is_refused() {
+        let cfg = fixture();
+        let args = s(&["zeroship", "migrate", "--database=events"]);
+        let error = resolve_migrate_database(&args, Some(&cfg))
+            .expect_err("an undeclared database must be refused");
+        assert!(error.contains("events"), "{error}");
+        assert!(error.contains("main"), "{error}");
+        assert!(error.contains("analytics"), "{error}");
     }
 
     /// With NO config file there is no label namespace, so `--database` is an
     /// id and a label-shaped value is refused rather than sent.
     #[test]
     fn without_a_config_the_database_flag_must_be_an_id() {
-        let args = s(&["zeroship", "migrate", "--app=app_x", "--database=main"]);
-        let error = resolve_migrate_database(&args, None, None)
+        let args = s(&["zeroship", "migrate", "--database=main"]);
+        let error = resolve_migrate_database(&args, None)
             .expect_err("a label must not travel as an identifier");
         assert!(error.contains("dbs_"), "{error}");
 
         let args = s(&[
             "zeroship",
             "migrate",
-            "--app=app_x",
             "--database=dbs_03cgepu94hyemwpcipafo7264",
         ]);
-        let (label, id) =
-            resolve_migrate_database(&args, None, None).expect("an id needs no namespace");
+        let (label, id) = resolve_migrate_database(&args, None).expect("an id needs no namespace");
         assert_eq!(label, None);
         assert_eq!(id.as_str(), "dbs_03cgepu94hyemwpcipafo7264");
     }
@@ -869,11 +777,11 @@ mod tests {
     #[test]
     fn positional_path_defaults_and_ignores_flags() {
         assert_eq!(
-            positional_path(&s(&["zeroship", "migrate", "--app=todos"])),
+            positional_path(&s(&["zeroship", "migrate", "--database=main"])),
             None
         );
         assert_eq!(
-            positional_path(&s(&["zeroship", "migrate", "db/migrations", "--app=todos"])),
+            positional_path(&s(&["zeroship", "migrate", "db/migrations", "--database=main"])),
             Some("db/migrations".to_string())
         );
         assert_eq!(positional_path(&s(&["zeroship", "migrate"])), None);
@@ -884,18 +792,18 @@ mod tests {
     /// The recorder runs with its working directory set to the migrations, so a
     /// relative path still spelled `migrations` when it reaches that child names
     /// `<migrations>/migrations` - a directory that does not exist, reported as
-    /// an app with no migrations to apply. An absolute positional is the control:
-    /// it must pass through untouched rather than be prefixed.
+    /// a database with no migrations to apply. An absolute positional is the
+    /// control: it must pass through untouched rather than be prefixed.
     #[test]
     fn a_relative_positional_is_anchored_to_the_working_directory() {
         let cwd = Path::new("/home/me/app");
-        let relative = s(&["zeroship", "migrate", "db/migrations", "--app=todos"]);
+        let relative = s(&["zeroship", "migrate", "db/migrations", "--database=main"]);
         assert_eq!(
             resolve_migrations_dir(&relative, cwd, None, None).expect("a positional needs no file"),
             PathBuf::from("/home/me/app/db/migrations"),
         );
 
-        let absolute = s(&["zeroship", "migrate", "/srv/app/migrations", "--app=todos"]);
+        let absolute = s(&["zeroship", "migrate", "/srv/app/migrations", "--database=main"]);
         assert_eq!(
             resolve_migrations_dir(&absolute, cwd, None, None).expect("a positional needs no file"),
             PathBuf::from("/srv/app/migrations"),
