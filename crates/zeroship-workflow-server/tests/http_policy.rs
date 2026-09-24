@@ -46,11 +46,13 @@ use zeroship_core::{
 use zeroship_workflow_manager::{
     coordinator::Placed,
     policy::{PolicyObservation, PolicySource},
+    recovery::Options as RecoveryOptions,
     Error as NativeError,
 };
 use zeroship_workflow_server::{
     auth::{PostgresWorkerRegistry, WorkflowAuth},
     coordinator::{connect_eligibility, Coordinator, Options},
+    runs::RunService,
     SharedState, WorkflowHttpState,
 };
 
@@ -217,8 +219,9 @@ impl Fixture {
             ))),
             replay,
         ));
+        let recovery = service.recovery(RecoveryOptions::default()).unwrap();
         let runs = Rc::new(
-            zeroship_workflow_server::runs::RunService::connect(&platform.runtime_url)
+            RunService::connect(&platform.runtime_url, recovery)
                 .await
                 .expect("open the journal this service serves"),
         );
