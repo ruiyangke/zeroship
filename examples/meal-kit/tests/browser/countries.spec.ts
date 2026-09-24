@@ -31,6 +31,11 @@ test("China orders use a local menu and district address without a postcode thro
       instructions: "",
     },
   });
+  // The same locator on the market that does ask for one, so the count of
+  // zero on the China step below is a replaced field rather than a locator
+  // that matches nothing anywhere.
+  await visit(page, "/m/us/en/plans");
+  await expect(page.getByLabel(/postal|postcode|ZIP/i)).toHaveCount(1);
   await visit(page, "/m/cn/en/plans");
   await expect(page.getByLabel(/postal|postcode|ZIP/i)).toHaveCount(0);
   await chooseOption(page.getByLabel("Province or municipality"), "Shanghai");
@@ -42,6 +47,14 @@ test("China orders use a local menu and district address without a postcode thro
   await page
     .getByRole("button", { name: "See available meals", exact: true })
     .click();
+  // China's own menu is on the page first: the absence of a US recipe below is
+  // then a different menu, not a menu that has not rendered.
+  await expect(
+    page.getByRole("button", {
+      name: `Add ${recipesForMarket("cn")[0].name}`,
+      exact: true,
+    }),
+  ).toBeVisible();
   await expect(
     page.getByRole("heading", { name: "Garden pesto rigatoni" }),
   ).toHaveCount(0);
@@ -65,10 +78,12 @@ test("China orders use a local menu and district address without a postcode thro
     .getByRole("link", { name: "Review your box", exact: true })
     .click();
   await page.getByRole("link", { name: "Continue to checkout" }).click();
-  await expect(page.getByLabel(/postal|postcode|ZIP/i)).toHaveCount(0);
+  // The delivery area this checkout did render is the control: the count of
+  // zero below is a form without a postcode, not a form that never loaded.
   await expect(
     page.getByRole("combobox", { name: "District", exact: true }),
   ).toContainText("Pudong");
+  await expect(page.getByLabel(/postal|postcode|ZIP/i)).toHaveCount(0);
   await page
     .getByLabel("Street, building and apartment")
     .fill("88 Garden Road, Building A, Apartment 501");

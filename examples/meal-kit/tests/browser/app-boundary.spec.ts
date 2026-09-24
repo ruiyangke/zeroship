@@ -1,5 +1,5 @@
 import { test, expect } from "./fixtures";
-import { signIn, rpc, raw, visit } from "./helpers";
+import { paymentReady, signIn, rpc, raw, visit } from "./helpers";
 import { testOrigin, backofficeOrigin } from "../fixture/settings";
 import { defaultCart, type Order, type Quote } from "@gather/meal-kit/domain";
 import { deliveryDates } from "@gather/meal-kit/catalog";
@@ -30,6 +30,11 @@ test("a box the storefront writes is on the back office board, through the share
     const operator = await rpc<{ user: { id: string } }>(ops, "session", {}, true);
     expect(customer.staff).toBeNull();
     expect(customer.user.id).not.toBe(operator.user.id);
+    // Both halves of this customer's checkout precondition are stated here
+    // rather than inherited: the demo scenario and any unfinished attempt both
+    // outlive the spec that made them, and this spec's order has to settle.
+    await rpc(ops, "paymentScenario", { customerId: customer.user.id, market: "us", outcome: "succeeded" });
+    await paymentReady(context, "us");
     const cart = { ...defaultCart("us"), deliveryDate: deliveryDates("us").at(-1)!, postal: "10001", recurring: false, mealCount: 2 as const, recipeIds: ["lemon-chicken", "pesto-pasta"] };
     const order = await rpc<Order>(context, "checkout", {
       cart, quote: await rpc<Quote>(context, "quote", cart), requestKey: crypto.randomUUID(), consent: true,
@@ -42,8 +47,13 @@ test("a box the storefront writes is on the back office board, through the share
     await visit(opsPage, "/m/us/en/operations");
     await expect(opsPage.getByText("Cross app customer", { exact: true })).toBeVisible();
     await page.getByRole("button", { name: "My account", exact: true }).click();
-    await expect(page.getByRole("menuitem", { name: "Operations", exact: true })).toHaveCount(0);
     await expect(page.getByRole("menuitem", { name: "My deliveries", exact: true })).toBeVisible();
+    await expect(page.getByRole("menuitem", { name: "Operations", exact: true })).toHaveCount(0);
+    // The one staff entry point the storefront can render is a footer link on
+    // a session with staff access; this customer's footer is the control that
+    // the link would have had somewhere to appear.
+    await expect(page.locator("footer").getByRole("link", { name: "Manage your plan" })).toBeVisible();
+    await expect(page.locator("footer").getByRole("link", { name: "Operations", exact: true })).toHaveCount(0);
     expect((await raw(context, "operations", { market: "us" }, true)).status()).toBe(404);
     const staffRead = await context.request.post(backofficeOrigin + "/__zeroship/v1/gather.operations", { data: { json: { market: "us" } }, headers: { "X-Method": "GET" } });
     expect(staffRead.status()).toBe(401);
