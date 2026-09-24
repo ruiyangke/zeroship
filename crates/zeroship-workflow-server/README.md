@@ -81,14 +81,13 @@ the queue receipt, command outcome and matching barrier change together. Exact
 settlement replay preserves that result after placement replacement while still
 checking the original worker's enrollment.
 
-Latest restart observes the ordinary app deployment pointer through the native
-`LatestDeploymentSource`, obtains queue retention, then freezes the selected
-identity in the accepted job. Exact command retry never resolves Latest again.
-The source selects only app identity and current hash plus deployment identity,
-app, hash and retention state; it supplies neither admission nor execution
-authority. Startup and readiness require those column grants. Creator-side
-management delivery remains pending; the server performs no customer lifecycle
-mutation or restart execution.
+Latest restart names its deployment in the command. Control is the authority for
+the app pointer and the deployment catalog and is the only caller this endpoint
+admits, so the server resolves nothing: it obtains queue retention for the named
+deployment and freezes that identity in the accepted job. The named pair is
+checked against the hold Control minted for it, and a hash that differs is a
+conflict. Creator-side management delivery remains pending; the server performs
+no customer lifecycle mutation or restart execution.
 
 `POST /v1/policy/lease` accepts only an `AssignedScope` from an enrolled worker.
 The response binds complete policy to that app, worker, signing-key thumbprint
