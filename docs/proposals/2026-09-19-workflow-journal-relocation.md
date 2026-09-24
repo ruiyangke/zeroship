@@ -809,6 +809,41 @@ part that dates, not the verdict.
    bracket a monotonic-read guarantee or a replacement for it** - which is a constraint on the
    answer rather than a detail of it, and it applies to every option, not to one.
 
+   **Two of those three now cross `svc/workflow` instead of a binding.** `CONTROL_APP_FACTS`
+   (`POST /v1/app-facts`, declared in `crates/zeroship-core/src/service_identity.rs`) answers
+   the policy inputs and the closing lane's deletion check for a page of apps, gated on the
+   `svc/workflow` issuer the way `DeploymentHoldApi` is.
+   `crates/zeroship-workflow-server/src/server.rs` binds no `zeroship` schema: neither
+   `connect_lifecycle` nor the policy inputs binding exists there, and the grant is narrower to
+   match:
+   `db/migrations-ts/20260911000050_workflow_platform_grants.ts` drops `zeroship.plans` entirely
+   and keeps only `(id, deploy_hash)` on `apps`. The operator writers moved to a separate
+   `PlanPolicyStore` with no production constructor, so the serving path carries no
+   administrative credential for an operation it never performs.
+
+   **Placement eligibility deliberately did NOT move, and the reason is a trap worth naming.**
+   Its two reads sit inside one transaction precisely so they can DISAGREE:
+   `crates/zeroship-workflow-manager/src/coordinator/placement.rs` reads again before commit
+   because "a revocation committed between the two reads refuses this placement". Serving both
+   from a cache makes the second read return the first one's value - the fence keeps compiling,
+   keeps passing its tests, and stops fencing. It moves only when that fence is replaced by
+   something cacheable, not when a cache is put behind it.
+
+   **The monotonic-read bracket is answered rather than assumed.** Control's response carries a
+   `SourceWatermark` taken in the SAME statement as the facts, so it is at least the position of
+   every change visible in that snapshot, and `publish` refuses an observation below the one the
+   ledger already holds. The refusal is the safe direction: the hazard is a stale PERMISSIVE
+   policy taking authority, so failing closed denies admission rather than granting it.
+   `a_regressed_watermark_refuses_and_publishes_nothing` binds it, and it is new coverage - no
+   test covered a stale input read before, because with one database it could not happen.
+
+   A fence built on `zeroship.apps.lifecycle_revision` looks like the obvious answer and does
+   not work: it is written only by `allocate_revision` in
+   `crates/zeroship-control/src/publication/catalog.rs`, from deploy accept, archive and
+   restore, and by none of the writers of the policy inputs. It would be constant across exactly
+   the changes it was meant to order.
+
+
    And one is authentication, which is different in kind from the rest and worth saying why.
    Services authenticate each other with one mechanism - a short-lived signed assertion naming
    issuer, audience and a single-use `jti` - but it draws its verifying key from two places, and
