@@ -50,6 +50,10 @@ fn config_check_validates_toml_and_flags_without_opening_dependencies() {
     let output = String::from_utf8(result.stdout).unwrap();
     assert!(!output.contains("private-workflow-password"));
     assert!(output.contains("database_configured"));
+    // The plaintext-peer posture is reported EMPTY here, not absent. A field
+    // that only appeared once the fence was relaxed could never be read as
+    // "the fence is intact".
+    assert!(output.contains(r#""plaintext_peers":"""#), "{output}");
 
     let overlay: toml::Value = toml::from_str(&std::fs::read_to_string(&config).unwrap()).unwrap();
     let settings = WorkflowSettings::resolve_config(

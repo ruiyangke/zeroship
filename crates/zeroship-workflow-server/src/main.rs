@@ -40,6 +40,13 @@ fn main() {
             "max_request_bytes",
             CheckValue::Count(options.max_request_bytes),
         );
+        // Reported whether or not it is set. A security posture that appears in
+        // the report only when relaxed cannot be read as "the fence is intact";
+        // an empty field says which of the two this deployment is.
+        report.field(
+            "plaintext_peers",
+            CheckValue::Plain(options.plaintext_peers.joined()),
+        );
         report.emit(*settings.check_config_format.get());
         return;
     }
