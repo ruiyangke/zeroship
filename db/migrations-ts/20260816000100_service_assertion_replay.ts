@@ -106,7 +106,7 @@ export default {
     // Granted here to every role that settles assertions against this shared
     // store: control, gateway, worker and auth. `zeroship_workflow` also
     // verifies them and receives the same grant in
-    // db/migrations-ts/20260911000000_workflow_coordination.ts. There is no
+    // db/migrations-ts/20260911000050_workflow_platform_grants.ts. There is no
     // `zeroship_migrated` role in db/migrations-ts/20260702000100_schema_
     // roles_extensions.ts, so migrated is absent here; it will need a grant when
     // it gets a role, and that is called out rather than pre-granted to a role

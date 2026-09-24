@@ -164,7 +164,7 @@ export default {
     // `gone`. Readers are column-scoped:
     // `zeroship_cdc` verifies enrolled worker identity (granted below), and
     // `zeroship_workflow` reads identity and placement facts (granted in
-    // 20260911000000_workflow_coordination.ts and
+    // 20260911000050_workflow_platform_grants.ts and
     // 20260914000600_placement_eligibility.ts). The gateway does not read this
     // table: the per-app eligible set it would consume is not built yet.
     //
