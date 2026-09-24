@@ -512,6 +512,22 @@ pub mod endpoints {
         ServiceEndpoint::new("workflow", "POST", "/v1/jobs/heartbeat");
     pub const WORKFLOW_JOB_SETTLE: ServiceEndpoint =
         ServiceEndpoint::new("workflow", "POST", "/v1/jobs/settle");
+    /// The creator-facing run calls, answered from the service own journal.
+    ///
+    /// Addressed by body, like every other endpoint on this service. The body
+    /// names the app and the placement revision the caller claims; it never
+    /// names the WORKER, because the credential that verified the call already
+    /// says which worker it is. Substituting that identity for anything a body
+    /// could claim is what makes the placement lookup an authorization rather
+    /// than a formality.
+    pub const WORKFLOW_RUN_STATUS: ServiceEndpoint =
+        ServiceEndpoint::new("workflow", "POST", "/v1/runs/status");
+    pub const WORKFLOW_RUN_SIGNAL: ServiceEndpoint =
+        ServiceEndpoint::new("workflow", "POST", "/v1/runs/signal");
+    pub const WORKFLOW_RUN_TRANSITION: ServiceEndpoint =
+        ServiceEndpoint::new("workflow", "POST", "/v1/runs/transition");
+    pub const WORKFLOW_RUN_RESTART: ServiceEndpoint =
+        ServiceEndpoint::new("workflow", "POST", "/v1/runs/restart");
     pub const WORKER_DISPATCH: ServiceEndpoint =
         ServiceEndpoint::new("worker", "POST", "/dispatch/{app_id}");
     pub const WORKER_APP_LOGS: ServiceEndpoint =
@@ -642,6 +658,13 @@ pub fn service_allowlist() -> &'static [ServiceAuthorization] {
                     endpoints::WORKFLOW_JOB_CLAIM,
                     endpoints::WORKFLOW_JOB_HEARTBEAT,
                     endpoints::WORKFLOW_JOB_SETTLE,
+                    // Creator calls the worker makes on behalf of app code.
+                    // The app they may act for is decided by the placement the
+                    // manager holds for THIS worker, never by the body.
+                    endpoints::WORKFLOW_RUN_STATUS,
+                    endpoints::WORKFLOW_RUN_SIGNAL,
+                    endpoints::WORKFLOW_RUN_TRANSITION,
+                    endpoints::WORKFLOW_RUN_RESTART,
                     endpoints::CDC_SUBSCRIBE,
                     // Host app reads are role-scoped: an authenticated worker
                     // may request any app's version, environment, and project
