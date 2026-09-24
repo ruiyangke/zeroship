@@ -552,18 +552,51 @@ stall the defect fixes that motivate the move.
    `crates/zeroship-workflow-server/src/coordinator.rs` refuses to start when its own login
    holds `CREATE` on `workflow_manager`.
 
-   The SCHEMA INSTALLATION is not. `workflow_manager` and its tables arrive from
+   The SCHEMA INSTALLATION is not, and it is not the whole of what stands in the way.
+   `workflow_manager` and its tables arrive from
    `db/migrations-ts/20260911000000_workflow_coordination.ts`, the journal joined them in
    `20260919000000_workflow_journal.ts`, and that corpus is applied as one job against one
-   database. Pointing `workflow.database_url` at another store finds no schema in it. So the
-   question to settle is what splits the corpus, which is migration tooling rather than workflow
-   work, and Open 4 waits on the same answer.
+   database. Pointing `workflow.database_url` at another store finds no schema in it.
+
+   **Splitting the corpus is a prerequisite rather than the substance, because the service
+   reads the control plane over the same DSN.** `workflow.database_url` names one store and
+   PostgreSQL does not query across databases, so every control read the service makes has to
+   be severed before that setting can point anywhere else. `Coordinator::verify` in
+   `crates/zeroship-workflow-server/src/coordinator.rs` refuses first, and refuses at startup
+   rather than at first use: its probe is a single statement whose `workflow_manager` tables
+   are followed by
+
+       SELECT id,deploy_hash,deleted_at FROM zeroship.apps LIMIT 0;
+       SELECT id,app_id,deploy_hash,retention_state FROM zeroship.app_deploys LIMIT 0;
+
+   The crossing recurs on the request path and inside the manager. `active_key` in
+   `crates/zeroship-workflow-server/src/auth.rs` answers every worker-authenticated call from
+   `SELECT public_key FROM zeroship.worker_instances WHERE id=$1 AND status='active'`, and
+   `crates/zeroship-workflow-manager/src/policy/control/models.rs` declares "Native
+   projections of Control-owned policy inputs and publication metadata" over `apps`, `plans`,
+   `workflow_rollout_config` and `workflow_policy_ledger`. Enumerate those reads from the tree
+   rather than from this paragraph before sizing the work.
+
+   **The split is not a partition of the corpus, because one migration has to become two.**
+   `20260911000000_workflow_coordination.ts` writes into `workflow_manager`, `zeroship` and
+   `service_authn` in one file: alongside the schema and its roles it grants the workflow
+   login `SELECT` on control tables including `zeroship.apps` and `zeroship.worker_instances`.
+   No routing rule sends one file to two databases. The dependency also runs the other way -
+   `20260914000600_placement_eligibility.ts` is a control migration that grants to
+   `zeroship_workflow` - so the control corpus needs the workflow role to exist, which holds
+   because both files sort into one corpus and stops holding when they do not.
+
+   **The third piece is that the service has nowhere to be deployed.** It has no service in
+   `deploy/compose/docker-compose.yml` and no chart template, and `workflow.database_url`,
+   which `crates/zeroship-workflow-server/src/server.rs` requires at startup, is set nowhere
+   outside test fixtures. That is where a second store would first be named.
 
 4. **DECIDED - the service is zone-local. One workflow store per zone, an app's runs in its own
    zone.** So Open 1's dispatch-crossing term stays the small one it was measured to be, and the
-   co-location rule the decoupling states holds here too. Open 3 and this one share a single
-   piece of work: the migration corpus is applied as one job against one database, so a store
-   per zone and a store of its own both wait on splitting it. Scope that split once.
+   co-location rule the decoupling states holds here too. Open 3 and this one wait on the same
+   work, and Open 3 names it as three pieces rather than one: splitting the corpus, severing
+   the service's control-plane reads, and giving the service a deployment site. A store per
+   zone and a store of its own both wait on all three. Scope them once, there.
 
    The reasoning that made it the right answer. Every number
    behind Open 1 was taken over loopback. A crossing per dispatch is free at that distance and
