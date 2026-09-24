@@ -574,6 +574,21 @@ stall the defect fixes that motivate the move.
 
 ## Open
 
+Every item below is answered or decided; what is still genuinely open lives INSIDE them, and
+this index is where to find it. Read an item in full before acting on it - the reasoning is the
+part that dates, not the verdict.
+
+| | verdict | what is still open in it |
+|---|---|---|
+| 1 | ANSWERED - payload is the gate, not latency | nothing; re-run the instrument rather than trusting the prose |
+| 2 | DECIDED - a ceiling governs both sides | nothing |
+| 3 | DECIDED - its own database | **what verifies a worker** once `active_key` goes; and whether the replay store moves |
+| 4 | DECIDED - zone-local | nothing; the work it waits on is Open 3's |
+| 5 | pre-launch, no in-flight runs | the answer expires at launch |
+| 6 | ANSWERED as a description | nothing; the credential question it raised moved to Open 3 |
+| 7 | ANSWERED - creator payload is not in the journal | nothing |
+| 8 | ANSWERED - a run input is an ordinary payload object | nothing |
+
 1. **ANSWERED - latency is not the gate; payload is.** Measured before anything was built, by
    `crates/zeroship-workflow-client/tests/round_trip_cost.rs`, which exercises the shipped
    transport with a real assertion minted per call and a peer that really verifies it. Re-run it
