@@ -81,6 +81,12 @@ directory, and applies the app's migrations. It owns a SQLite file for developme
 and a PostgreSQL testcontainer for the deployed app, plus the gateway, control
 plane, worker, migration service, and CDC relay. Chromium exercises both targets.
 
+The deployed tier is stood up the way a creator stands one up: a database is
+created through the control plane and converged by the cluster reconciler, its
+migrations are applied **with no app deployed and no binding in existence**, and
+only then is the app created, refused a deploy for want of a binding, bound, and
+deployed.
+
 The tests cover CRUD, constraints, relations, pagination, transaction isolation
 and overlapping requests, webhook composition, generated RPC calls, and live
 snapshots between browser tabs. The backend comparison retains the named

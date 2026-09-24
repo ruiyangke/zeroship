@@ -38,7 +38,11 @@ async function reservePort() {
   };
 }
 
-async function checkManifest(bundle: string) {
+// The bundle must name the database this fixture created, not the id the
+// committed `zeroship.jsonc` carries. That is what makes the deploy gate and
+// the runtime reach the schema `zeroship migrate` filled, so it is asserted on
+// the packed artifact rather than on the file the packer read.
+async function checkManifest(bundle: string, databaseId: string) {
   let first: string | undefined;
   const chunks: Buffer[] = [];
   const parser = new Parser({ onReadEntry(entry) {
@@ -52,6 +56,28 @@ async function checkManifest(bundle: string) {
   assert.equal(typeof manifest.runtime_descriptor?.[0]?.hash, "string");
   assert(manifest.runtime_descriptor[0].hash.length > 0, "Bundle must bind its runtime descriptor");
   assert(manifest.runtime_descriptor[0].primary, "the primary database is the one env.db reaches");
+  assert.equal(manifest.runtime_descriptor[0].database_id, databaseId,
+    "the bundle must declare the database this fixture created");
+}
+
+// One `psql` invocation's result, kept whole so a REFUSAL can be asserted on.
+//
+// `sql` below throws on a non-zero exit, which is right for every statement
+// this fixture expects to succeed. The tenant fence is asserted the other way
+// round: the shared worker login must be REFUSED, and a helper that threw
+// would make the refusal indistinguishable from a broken fixture.
+interface SqlResult { exitCode: number; stdout: string; output: string }
+
+// The LAST non-empty line psql wrote.
+//
+// A narrowed statement is a role change followed by the query, and psql prints
+// the command tag of each, so the value asked for is the last line rather than
+// the whole of stdout. Refusing on no line at all keeps an empty result from
+// comparing equal to an empty expectation.
+function lastLine(result: SqlResult): string {
+  const lines = result.stdout.split("\n").map((line) => line.trim()).filter((line) => line.length > 0);
+  assert(lines.length > 0, `psql produced no value: ${result.output}`);
+  return lines[lines.length - 1];
 }
 
 export class Platform {
@@ -62,13 +88,39 @@ export class Platform {
   controlUrl = "";
   bearer = "";
   readyRequests = 0;
+  // The database `zeroship db create` minted, and the schema derived from it.
+  // Both are read by the acceptance test: the app's tables live in the
+  // DATABASE's schema, which no app id names.
+  databaseId = "";
+  schema = "";
+  bindingId = "";
 
   async sql(query: string): Promise<string> {
-    assert(this.postgres, "PostgreSQL must be owned by this fixture");
-    const result = await this.postgres.exec(["psql", "-U", "postgres", "-d", "db_fixture", "-v", "ON_ERROR_STOP=1", "-tA", "-c", query]);
+    const result = await this.psql(["-U", "postgres", "-d", "db_fixture"], query);
     assert.equal(result.exitCode, 0, result.output);
     return result.stdout.trim();
   }
+
+  // One statement through the container's own `psql`, as whichever login the
+  // connection arguments name.
+  //
+  // `VERBOSITY=verbose` is what puts the server's SQLSTATE in the output, so a
+  // refusal can be asserted as `42501` rather than as message text.
+  private async psql(connection: string[], query: string): Promise<SqlResult> {
+    assert(this.postgres, "PostgreSQL must be owned by this fixture");
+    const result = await this.postgres.exec([
+      "psql", ...connection, "-v", "ON_ERROR_STOP=1", "-v", "VERBOSITY=verbose", "-tA", "-c", query,
+    ]);
+    return { exitCode: result.exitCode, stdout: result.stdout, output: result.output };
+  }
+
+  // A statement on the SHARED worker login, optionally narrowed the way the
+  // data plane narrows: `SET ROLE` to the binding role the reconciler minted.
+  private workerSql(query: string, role?: string): Promise<SqlResult> {
+    const statement = role === undefined ? query : `SET ROLE "${role}"; ${query}`;
+    return this.psql(["-d", "postgres://zeroship_worker:zeroship_worker@127.0.0.1:5432/db_fixture"], statement);
+  }
+
   private readonly containers: StartedTestContainer[] = [];
   private readonly ports: Awaited<ReturnType<typeof reservePort>>[] = [];
   private closing?: Promise<void>;
@@ -125,6 +177,19 @@ export class Platform {
     return response.ok;
   }
 
+  // One creator-facing control-plane call, as the fixture owner.
+  private async api(method: string, url: string, body?: unknown): Promise<any> {
+    const response = await fetch(url, {
+      method,
+      headers: { authorization: `Bearer ${this.bearer}`, ...(body === undefined ? {} : { "content-type": "application/json" }) },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal: AbortSignal.any([this.processes.signal, AbortSignal.timeout(15_000)]),
+    });
+    const text = await response.text();
+    assert(response.ok, `${method} ${url}: HTTP ${response.status}: ${text}`);
+    return text.length === 0 ? undefined : JSON.parse(text);
+  }
+
   async start(): Promise<void> {
     const { work, processes } = this;
     console.info("DB fixture: build platform binaries and database");
@@ -147,9 +212,9 @@ export class Platform {
     }
     await symlink(join(example, "node_modules"), join(app, "node_modules"), "dir");
     const vite = join(app, "node_modules/vite/bin/vite.js");
-    await processes.run("app-build", process.execPath, [vite, "build"], app);
-    const bundle = join(app, "dist/app.zship");
-    await checkManifest(bundle);
+    // THE APP IS PACKED LATER, after the database exists. `runtime_descriptor`
+    // carries the `dbs_` id, so a bundle built before the create would declare
+    // the committed placeholder and be refused for a database nobody owns.
 
     console.info("DB fixture: start backing containers and apply platform migrations");
     const postgres = await this.container(new GenericContainer("postgres:16")
@@ -277,8 +342,13 @@ export class Platform {
       ZEROSHIP_CONTROL_JOIN_TOKEN_ZONE: "default",
     });
     await this.waitFor("control", () => this.httpReady(`${control.url}/readyz`));
+    // THE RECONCILER IS IN THIS PROCESS. Control declares a database and stops;
+    // the cluster it names is made to match here, so the interval is what bounds
+    // how long `provisioning` lasts. A deployment's default is measured in tens
+    // of seconds, which is a wait this fixture has no reason to sit through.
     await service("migrate-server", "zeroship-migrate-server", migrationServer, [
       "--no-config", "--port", `${migrationServer.number}`, "--tmp-dir", join(work, "migrations"), "--mutation-rate-limit-burst", "3",
+      "--reconcile-interval-seconds", "1",
     ], {
       ZEROSHIP_MIGRATE_SERVER_DATABASE_URL: dsn, ZEROSHIP_MIGRATE_SERVER_PROVISION_DATABASE_URL: dsn,
       ZEROSHIP_MIGRATE_SERVER_POLICY_SEAL_KEY: randomBytes(32).toString("hex"),
@@ -295,39 +365,168 @@ export class Platform {
       ZEROSHIP_GATEWAY_STASH_SIGNING_KEY: masterKey, ZEROSHIP_GATEWAY_SERVICE_KEY_FILE: keys.gateway, ZEROSHIP_GATEWAY_SERVICE_PEERS_FILE: peers,
     });
     await this.waitFor("gateway", () => this.httpReady(`${gateway.url}/readyz`));
+    this.controlUrl = control.url;
 
-    console.info("DB fixture: create and deploy the app");
-    const created = await fetch(`${control.url}/api/apps`, {
-      method: "POST", headers: { authorization: `Bearer ${bearer}`, "content-type": "application/json" },
-      body: JSON.stringify({ name: "db-hitcounter", plan_id: "pln_db_acceptance" }), signal: AbortSignal.any([processes.signal, AbortSignal.timeout(10_000)]),
-    });
-    assert(created.ok, `Create app: HTTP ${created.status}: ${created.ok ? "" : await created.text()}`);
-    const { id } = await created.json();
+    console.info("DB fixture: create the database, through the control plane");
+    const organization = await this.api("POST", `${control.url}/api/organizations`, { name: "DB hitcounter fixture", slug: `db-hitcounter-${randomBytes(6).toString("hex")}` });
+    assert.match(organization.id, /^org_/, `Create organization: ${JSON.stringify(organization)}`);
+    const project = await this.api("POST", `${control.url}/api/organizations/${organization.id}/projects`, { name: "acceptance", slug: `acceptance-${randomBytes(6).toString("hex")}` });
+    assert.match(project.id, /^prj_/, `Create project: ${JSON.stringify(project)}`);
+    // PLACEMENT ADMITS ACTIVE DATASTORES ONLY, so the create below has nowhere
+    // to put a database until the reconciler has registered this cluster and
+    // bootstrapped it. Waiting on the row it writes is what tells a slow
+    // registration apart from a create that would be refused outright.
+    const zone = await this.sql(`SELECT execution_zone_id FROM zeroship.projects WHERE id='${project.id}'`);
+    assert.match(zone, /^ezn_/, "the project must sit in an execution zone a cluster can serve");
+    await this.waitFor("datastore registration", async () =>
+      await this.sql(`SELECT count(*) FROM zeroship.datastores WHERE status='active' AND execution_zone_id='${zone}'`) === "1");
+
+    const creatorArgs = [`--control=${control.url}`, `--token=${bearer}`];
+    const createdDatabase = await processes.run("db-create", binary("zeroship"), [
+      "db", "create", "main", `--project=${project.id}`, ...creatorArgs,
+    ], work);
+    const databaseRecord = JSON.parse(this.jsonLine("db create", createdDatabase));
+    const databaseId = this.databaseId = databaseRecord.id;
+    assert.match(databaseId, /^dbs_/, `Create database: ${JSON.stringify(databaseRecord)}`);
+    assert.equal(databaseRecord.project_id, project.id, "the database belongs to the project it was created in");
+    // CONTROL FOR THE WAIT BELOW. Control declares and stops, so a database is
+    // `provisioning` until a cluster has been made to match. A fixture that
+    // never saw this value would be waiting for a status that was already there.
+    assert.equal(databaseRecord.status, "provisioning", "control declares a database; it does not provision one");
+    const schema = this.schema = `db_${databaseId}`;
+    const roles = {
+      migrator: `zs_db_${databaseId}_mig`,
+      readwrite: `zs_db_${databaseId}_rw`,
+      readonly: `zs_db_${databaseId}_ro`,
+    };
+
+    // THE WAIT READS THE ROW, THE ASSERTION READS THE CREATOR SURFACE. Control's
+    // admin quota is per minute and a convergence wait polls far faster than
+    // that, so a loop over the HTTP surface would be answered 429 and report a
+    // database that never converged.
+    await this.waitFor("database convergence", async () =>
+      await this.sql(`SELECT status FROM zeroship.databases WHERE id='${databaseId}'`) === "active");
+    const listedDatabases = await this.api("GET", `${control.url}/api/projects/${project.id}/databases`);
+    const converged = listedDatabases.databases.find((record: { id: string }) => record.id === databaseId);
+    assert(converged, `the created database must be listed: ${JSON.stringify(listedDatabases)}`);
+    assert.equal(converged.status, "active", "the creator's own view must show the converged database");
+    // WHAT `active` MEANS, read off the cluster rather than off the row that
+    // claims it: the schema exists, it is owned by the migrator role, and both
+    // capability roles are there for a binding to inherit.
+    assert.equal(await this.sql(
+      `SELECT count(*) FROM pg_namespace n JOIN pg_roles o ON o.oid = n.nspowner
+        WHERE n.nspname='${schema}' AND o.rolname='${roles.migrator}'`,
+    ), "1", "the reconciler must create the schema and hand it to the migrator role");
+    for (const role of Object.values(roles)) {
+      assert.equal(await this.sql(`SELECT count(*) FROM pg_roles WHERE rolname='${role}'`), "1",
+        `the reconciler must mint ${role}`);
+    }
+
+    console.info("DB fixture: migrate with no app and no binding");
+    // THE DECOUPLING, ASSERTED. A migration is authorized at the database's own
+    // project by a qualifying seat, so nothing below needs an app to exist or a
+    // binding to have been granted. Both absences are stated here and both are
+    // contradicted later in this same fixture, which is what keeps them from
+    // passing over a world where an app or a binding could not have existed.
+    assert.equal(await this.sql(`SELECT count(*) FROM zeroship.apps WHERE project_id='${project.id}'`), "0",
+      "no app exists when this database is migrated");
+    assert.equal(await this.sql(`SELECT count(*) FROM zeroship.database_bindings WHERE database_id='${databaseId}'`), "0",
+      "no binding exists when this database is migrated");
+    assert.equal(await this.sql(`SELECT count(*) FROM pg_roles WHERE left(rolname,8)='zs_bind_'`), "0",
+      "no binding role exists when this database is migrated");
+    const creatorTables = () => this.sql(
+      `SELECT count(*) FROM pg_tables WHERE schemaname='${schema}' AND left(tablename,10) <> '__zeroship'`);
+    assert.equal(await creatorTables(), "0", "the converged schema carries no creator table before the apply");
+
+    const migrations = join(app, "migrations");
+    // The DIRECTORY: `zeroship migrate` records the `.ts` itself and posts the
+    // result, so there is no recorded-migration file to hand it. `--database`
+    // is the `dbs_` id because this working directory holds no zeroship.jsonc,
+    // so there are no labels to dereference here.
+    const migrateArgs = ["migrate", migrations, `--database=${databaseId}`, `--control=${migrationServer.url}`, `--token=${bearer}`];
+    const applied = await processes.run("app-migrate", binary("zeroship"), migrateArgs, work);
+    assert.match(applied, /Applied [1-9][0-9]* migration op/);
+    assert.equal(await this.sql(
+      `SELECT count(*) FROM pg_tables WHERE schemaname='${schema}' AND tablename='hits'`), "1",
+      "the apply must land the creator's table in the database's own schema");
+    assert.notEqual(await creatorTables(), "0", "the apply must leave creator tables behind");
+    const reapplied = await processes.run("app-migrate-again", binary("zeroship"), migrateArgs, work);
+    assert.match(reapplied, /Applied 0 migration op/);
+    // The apply mints no binding role, so the absence above is still true after
+    // it: what an app may touch comes from the capability roles, not from here.
+    assert.equal(await this.sql(`SELECT count(*) FROM pg_roles WHERE left(rolname,8)='zs_bind_'`), "0",
+      "an apply mints no binding role");
+
+    console.info("DB fixture: pack the app against the database it will bind");
+    const configPath = join(app, "zeroship.jsonc");
+    const declared = await readFile(configPath, "utf8");
+    const placeholders = declared.match(/"id":\s*"dbs_[0-9a-z]+"/g) ?? [];
+    assert.equal(placeholders.length, 1, "this app declares exactly one database id to point at the created one");
+    await writeFile(configPath, declared.replace(placeholders[0], `"id": "${databaseId}"`));
+    await processes.run("app-build", process.execPath, [vite, "build"], app);
+    const bundle = join(app, "dist/app.zship");
+    await checkManifest(bundle, databaseId);
+
+    console.info("DB fixture: create the app, refuse the unbound deploy, bind, deploy");
+    const created = await this.api("POST", `${control.url}/api/apps`, { name: "db-hitcounter", plan_id: "pln_db_acceptance", project_id: project.id });
+    const id = created.id;
     assert.equal(typeof id, "string", "Created app must have an id");
     assert.match(id, /^[a-zA-Z0-9_-]+$/, "Fixture app id must be safe in SQL identifiers and literals");
     this.appId = id;
-    this.controlUrl = control.url;
     this.apiUrl = `http://db-hitcounter.localhost:${gateway.number}`;
+    // The nonempty control for "no app existed at migrate time": the same query
+    // over the same project now answers one.
+    assert.equal(await this.sql(`SELECT count(*) FROM zeroship.apps WHERE project_id='${project.id}'`), "1",
+      "the app this fixture created lands in the database's project");
+
     const deployArgs = ["deploy", bundle, `--app=${id}`, `--control=${control.url}`, `--token=${bearer}`];
-    await assert.rejects(processes.run("deploy-before-migrate", binary("zeroship"), deployArgs, work), /HTTP 409.*schema_not_applied/);
-    const role = `app_${id}_role`;
-    assert.equal(await this.sql(`SELECT count(*) FROM pg_roles WHERE rolname='${role}'`), "0", "Deployment must not provision an app role");
-    const database = await fetch(`${migrationServer.url}/v1/databases/${id}`, {
-      method: "POST", headers: { authorization: `Bearer ${bearer}` }, signal: AbortSignal.timeout(30_000),
-    });
-    assert(database.ok, `Create database: ${database.status}: ${await database.text()}`);
-    // The DIRECTORY: `zeroship migrate` records the `.ts` itself and posts the
-    // result, so there is no recorded-migration file to hand it.
-    const migrations = join(app, "migrations");
-    const applied = await processes.run("app-migrate", binary("zeroship"), [
-      "migrate", migrations, `--app=${id}`, `--control=${migrationServer.url}`, `--token=${bearer}`,
+    // DECLARING A DATABASE GRANTS NOTHING. The bundle names the database, the
+    // schema is already migrated, and the deploy is still refused: a grant is an
+    // explicit act, and this is the refusal that says so.
+    await assert.rejects(processes.run("deploy-before-bind", binary("zeroship"), deployArgs, work), /HTTP 409.*database_not_bound/);
+    assert.equal(await this.sql(`SELECT count(*) FROM zeroship.apps WHERE id='${id}' AND deploy_hash IS NOT NULL`), "0",
+      "a refused deploy makes nothing live");
+
+    await processes.run("db-bind", binary("zeroship"), [
+      "db", "bind", databaseId, `--app=${id}`, "--capability=readwrite", ...creatorArgs,
     ], work);
-    assert.match(applied, /Applied [1-9][0-9]* migration op/);
-    const reapplied = await processes.run("app-migrate-again", binary("zeroship"), [
-      "migrate", migrations, `--app=${id}`, `--control=${migrationServer.url}`, `--token=${bearer}`,
-    ], work);
-    assert.match(reapplied, /Applied 0 migration op/);
-    assert.equal(await this.sql(`SELECT count(*) FROM pg_roles WHERE rolname='${role}'`), "1", "Migration must provision the app role");
+    // Same split as the database wait: the row is polled, the creator surface is
+    // read once. `observed_generation` catching up to `generation` is the cluster
+    // saying the two role edges below exist; a deploy is refused until it does.
+    await this.waitFor("binding convergence", async () =>
+      await this.sql(
+        `SELECT count(*) FROM zeroship.database_bindings
+          WHERE database_id='${databaseId}' AND app_id='${id}'
+            AND status='active' AND observed_generation = generation`) === "1");
+    const listedBindings = await this.api("GET", `${control.url}/api/databases/${databaseId}/bindings`);
+    const binding = listedBindings.bindings.find((record: { app_id: string }) => record.app_id === id);
+    assert(binding, `the declared binding must be listed: ${JSON.stringify(listedBindings)}`);
+    const bindingId = this.bindingId = binding.id;
+    assert.equal(binding.capability, "readwrite");
+    assert.equal(binding.status, "active");
+    assert.equal(binding.observed_generation, binding.generation);
+    const bindingRole = `zs_bind_${bindingId}`;
+    // THE TWO EDGES, each with the grant option that makes it a fence. The
+    // binding role INHERITS one capability role and cannot assume it; the shared
+    // worker login may ASSUME the binding role and inherits nothing from it.
+    assert.equal(await this.sql(
+      `SELECT count(*) FROM pg_auth_members m
+         JOIN pg_roles granted ON granted.oid = m.roleid
+         JOIN pg_roles member ON member.oid = m.member
+        WHERE granted.rolname='${roles.readwrite}' AND member.rolname='${bindingRole}'
+          AND m.inherit_option AND NOT m.set_option`,
+    ), "1", "the binding role must inherit the readwrite capability without being able to assume it");
+    assert.equal(await this.sql(
+      `SELECT count(*) FROM pg_auth_members m
+         JOIN pg_roles granted ON granted.oid = m.roleid
+         JOIN pg_roles member ON member.oid = m.member
+        WHERE granted.rolname='${bindingRole}' AND member.rolname='zeroship_worker'
+          AND m.set_option AND NOT m.inherit_option`,
+    ), "1", "the worker login must be able to assume the binding role and inherit nothing from it");
+    // The nonempty control for "no binding existed at migrate time".
+    assert.equal(await this.sql(`SELECT count(*) FROM zeroship.database_bindings WHERE database_id='${databaseId}'`), "1",
+      "the binding this fixture granted is the one the deploy verifies");
+
     await processes.run("deploy", binary("zeroship"), deployArgs, work);
     for (const name of ["worker", "gateway"]) {
       const log = await readFile(join(this.logs, `${name}.log`), "utf8");
@@ -347,6 +546,43 @@ export class Platform {
       assert(response.ok && value.wrote === true && value.readBack > 0, `Database readiness: HTTP ${response.status}: ${JSON.stringify(value)}`);
       return true;
     });
+
+    // THE APP REACHES ITS DATA THROUGH THE BINDING, and only through it. Both
+    // arms run on the SAME login the worker connects as and differ in one
+    // statement: the `SET ROLE` the data plane issues per transaction. Without
+    // it PostgreSQL refuses `42501`; with it the rows the deployed app just
+    // wrote are there to count.
+    const written = Number(await this.sql(`SELECT count(*) FROM "${schema}".hits`));
+    assert(written > 0, "the deployed app must have written rows for this fence to be measured over");
+    const unnarrowed = await this.workerSql(`SELECT count(*) FROM "${schema}".hits`);
+    assert.notEqual(unnarrowed.exitCode, 0, `the shared worker login must not reach a tenant schema: ${unnarrowed.output}`);
+    assert.match(unnarrowed.output, /42501/, `PostgreSQL must be what refuses it: ${unnarrowed.output}`);
+    const narrowed = await this.workerSql(`SELECT count(*) FROM "${schema}".hits`, bindingRole);
+    assert.equal(narrowed.exitCode, 0, `the binding role must reach this database: ${narrowed.output}`);
+    assert.equal(lastLine(narrowed), String(written),
+      "the rows the deployed app wrote are the rows the binding role reads");
+    // WHICH capability the binding carries, as PostgreSQL answers it. The grants
+    // an apply emits are column-listed, which is what makes column-level GRANT the
+    // masking authority; a readonly binding answers `false` to the second.
+    const capability = await this.workerSql(
+      `SELECT has_column_privilege('${schema}.hits', 'path', 'SELECT')::text,
+              has_column_privilege('${schema}.hits', 'path', 'INSERT')::text`,
+      bindingRole);
+    assert.equal(capability.exitCode, 0, capability.output);
+    assert.equal(lastLine(capability), "true|true",
+      "a readwrite binding must carry the column-listed read AND write grants");
+  }
+
+  // The one JSON line a `zeroship` subcommand prints on stdout.
+  //
+  // The command's provenance and advice go to stderr and share this log, so the
+  // body is selected rather than the whole output parsed. Refusing on anything
+  // but exactly one candidate keeps a changed output shape from being read as
+  // an empty result.
+  private jsonLine(what: string, output: string): string {
+    const lines = output.split("\n").filter((line) => line.startsWith("{"));
+    assert.equal(lines.length, 1, `${what} must print exactly one JSON body:\n${output}`);
+    return lines[0];
   }
 
   close(): Promise<void> {

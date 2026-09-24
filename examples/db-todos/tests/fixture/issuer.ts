@@ -19,7 +19,13 @@ export function issuer() {
         iss: url, aud: "control.zeroship.ai", sub: owner,
         iat: now, nbf: now - 1, exp: now + 3600,
         client_id: "zeroship-console", jti: randomUUID(),
-        scope: "organization:create apps:read apps:write apps:deploy deployments:read secrets:read",
+        // The scope claim narrows the ACTIONS this bearer may take, and nothing
+        // else: the rank comparison in the static policy bands is what fences it
+        // to this owner's own organization. The project and database scopes are
+        // here because the fixture creates a project, creates and binds a
+        // database, and applies its migrations, each of which is a separate
+        // action in the closed vocabulary (`crates/zeroship-authz/src/scope.rs`).
+        scope: "organization:create project:create database:read database:write database:migrate apps:read apps:write apps:deploy deployments:read secrets:read",
       })}`;
       return `${body}.${sign(null, Buffer.from(body), privateKey).toString("base64url")}`;
     },
