@@ -5,6 +5,10 @@
 // workspace root would write a schema into a file no app opens. Naming both
 // here makes the apply and the two dev servers agree by construction rather
 // than by the operator happening to be in the right directory.
+//
+// THE TARGET IS THE DATABASE. `main` is the one this workspace declares, and
+// both apps make it their `env.db`; naming either app here would have been a
+// coin toss that said nothing about which schema is written.
 
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -14,7 +18,7 @@ useWorkspaceEnvironment();
 const cli = fileURLToPath(
   new URL("../node_modules/@zeroship/vite-plugin/dist/cli/migrate-dev.js", import.meta.url),
 );
-const child = spawn(process.execPath, [cli, "--app=storefront", ...process.argv.slice(2)], {
+const child = spawn(process.execPath, [cli, "--database=main", ...process.argv.slice(2)], {
   cwd: workspaceRoot,
   stdio: "inherit",
   env: process.env,

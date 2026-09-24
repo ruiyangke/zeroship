@@ -196,25 +196,50 @@ export function databaseForOutDir(
 }
 
 /**
- * Which database a single-database tool addresses: the one named, or the app's
- * primary. `undefined` when the app declares none, which is a schema-less app
- * rather than an error.
+ * Which database a single-database tool addresses: the one named, or the one a
+ * workspace declaring exactly one implies. `undefined` when the workspace
+ * declares none, which is a schema-less project rather than an error.
+ *
+ * NO APP NARROWS THE CANDIDATES, the same rule the `zeroship migrate` selection
+ * follows: a database belongs to its project, several apps may bind one, and a
+ * legitimate database has no app bound at all. `primary` is read the workspace
+ * way (`databaseForOutDir` reads it identically) because one database has one
+ * generated `env.db.ts` and `checkPrimacyIsUniform` refuses a workspace whose
+ * apps disagree about it.
+ *
+ * SEVERAL DECLARED AND NONE NAMED IS A REFUSAL, not a pick. Applying a schema
+ * into a database the creator did not name is not something a later message can
+ * undo, and the same refusal is what `selectBuildTarget` gives a workspace with
+ * several apps.
  */
 export function selectDatabase(
   config: ResolvedProjectConfig,
-  opts: { app?: string; database?: string } = {},
+  opts: { database?: string } = {},
 ): TargetDatabase | undefined {
-  const target = selectBuildTarget(config, opts.app);
-  if (opts.database == null) return target.databases.find((d) => d.primary);
-  const found = target.databases.find((d) => d.label === opts.database);
-  if (found == null) {
+  const known = declaredDatabases(config);
+  const declared = Object.keys(known);
+  const primaryOf = (label: string) =>
+    Object.values(declaredApps(config)).some((app) => app.primary === label);
+
+  if (opts.database != null) {
+    const found = known[opts.database];
+    if (found == null) {
+      throw new Error(
+        `zeroship: database "${opts.database}" is not declared in ${CONFIG_FILENAME} ` +
+          `(declared: ${joinOrNone(declared)})`,
+      );
+    }
+    return { ...found, label: opts.database, primary: primaryOf(opts.database) };
+  }
+  if (declared.length === 0) return undefined;
+  if (declared.length > 1) {
     throw new Error(
-      `zeroship: database "${opts.database}" is not one of the databases ` +
-        `\`apps.${target.label}\` uses ` +
-        `(${joinOrNone(target.databases.map((d) => d.label))})`,
+      `zeroship: ${CONFIG_FILENAME} declares more than one database (${declared.join(", ")}). ` +
+        `Pass \`--database=<label>\` to say which one to apply.`,
     );
   }
-  return found;
+  const label = declared[0]!;
+  return { ...known[label]!, label, primary: primaryOf(label) };
 }
 
 type Json = Record<string, unknown>;

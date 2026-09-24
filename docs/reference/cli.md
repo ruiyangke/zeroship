@@ -97,7 +97,7 @@ Two commands, from the project directory, once `login` is done:
 ```
 pnpm build          # @zeroship/vite-plugin writes the .zship and generated/
 zeroship deploy     # create the app (first run) and upload the artifact
-zeroship migrate    # apply the app's migrations to its deployed database
+zeroship migrate    # apply the database's migrations to it
 ```
 
 The `.zship` is the build's deploy artifact: a content-addressed archive of the
@@ -122,20 +122,21 @@ an app, `dbs_` a database, `dep_` a deployment, `dcm_` a deploy command,
 `org_` an organization, `prj_` a project, `ivt_` an organization invitation,
 `usr_` a user. Each is an opaque value; pass it back unchanged.
 
-Only `deploy` takes the `name` fallback. `migrate`, `secret` and `var` require
-an app id, which is why `deploy` runs first. The writeback and its limits — an
-entry that already carries an id, an `--app-name`, or an `--env=` deploy is
-never written — are in [`project-config.md`](project-config.md).
+Only `deploy` takes the `name` fallback. `secret` and `var` require an app id,
+which is why `deploy` runs before them. `migrate` does not: it addresses a
+database, so it needs no app and may run before any deploy at all. The writeback
+and its limits — an entry that already carries an id, an `--app-name`, or an
+`--env=` deploy is never written — are in
+[`project-config.md`](project-config.md).
 
-**Order matters for an app with a database.** `deploy` ships code and never
-touches the database; `migrate` creates the schema, its tables, and the runtime
-database access that `env.db` depends on. For a brand-new database app the first
-`deploy` ships the code and `migrate` applies the schema; deploy does not
-check that you ran it, so a build reaching a column the database lacks fails at
-query time naming that column. What deploy DOES refuse is a database the app
-holds no live binding to: create the database with
-[`zeroship db`](#zeroship-db) and bind the app to it before the first deploy
-(see also [`db.md`](db.md)).
+**The two commands are independent for an app with a database.** `deploy` ships
+code and never touches the database; `migrate` creates the schema and its
+tables in the database you name, whether or not an app has been deployed. Run
+them in either order — deploy does not check that you migrated, so a build
+reaching a column the database lacks fails at query time naming that column.
+What deploy DOES refuse is a database the app holds no live binding to: create
+the database with [`zeroship db`](#zeroship-db) and bind the app to it before
+the first deploy (see also [`db.md`](db.md)).
 
 ## `zeroship deploy`
 
@@ -174,9 +175,12 @@ declared name that is missing. It never reads a secret value. The check is
 advisory: a failure to run or parse it prints `zeroship deploy: warning: could
 not check declared secrets for app <id>: <reason>` and the upload continues.
 
-A deploy whose generated schema descriptor (the schema the build recorded for
-`env.db`) disagrees with the app's newest applied migration is refused with
-`409 database_not_bound`, and nothing goes live. When a migration set exists
+A deploy whose artifact declares a database the app holds no live binding to is
+refused with `409 database_not_bound`, and nothing goes live; the body names
+the call that grants one. Deploy compares no schema — an equality test would
+make one app's migration invalidate the build of every other app on the same
+database. So a deploy whose migrations are unapplied is accepted, and the first
+query against a missing column fails at query time. When a migration set exists
 beside the project config, deploy prints a reminder naming `zeroship migrate`
 before uploading. That reminder is a hint, not a verdict: it fires on the
 presence of the migration set, not on whether the migrations are already applied.
@@ -195,30 +199,32 @@ the app is restored.
 
 ## `zeroship migrate`
 
-Applies a database's committed migrations to the deployed database that app is
-bound to.
+Applies a database's committed migrations to that deployed database.
 
 ```
-zeroship migrate [<path-to-migrations-dir>] [--app=<label>] [--database=<label>]
-                 [--app-name=<name>]
+zeroship migrate [<path-to-migrations-dir>] [--database=<label>]
                  [--control=URL] [--token=<token>] [--config=PATH] [--env=NAME] [--yes]
 ```
+
+**A migration is not an app operation.** The target is the DATABASE, and it is
+authorized at the project that owns it — a qualifying project seat at developer
+rank, the same authority that created the database. No app is named, no app is
+needed, and there is no ordering constraint against `zeroship deploy`: a
+database `zeroship db create` left `active` with no app bound to it is a legal
+target, and this is the command that fills it.
 
 - **The path** is optional, and it names the DIRECTORY holding your
   `migrations/*.ts`. With no positional it is the `migrations` of the selected
   database, from `zeroship.jsonc`. A path to a file is refused: there is no
   pre-built migration file to pass, and nothing writes one.
-- **`--database`** names one of the app's own database labels; with none
-  passed it is the app's primary. Any of the app's databases may be migrated -
-  `primary` decides which handle is `env.db`, not which schema a migration set
-  can reach. The label is dereferenced to its `dbs_` id before the request, so
-  the word never travels. With no config file in the directory there are no
-  labels and `--database` is the id itself.
-- **`--app`** names one of the file's `apps` labels (an app id when there is
-  no file); **`--app-name`** its routing label. Unlike
-  deploy, migrate never creates an app: a name that matches nothing fails with
-  `app <name> not found; zeroship migrate never creates an app - deploy it
-  first, or pass its id with --app=`.
+- **`--database`** names one of the labels `zeroship.jsonc` declares under
+  `databases`. A workspace declaring exactly one implies it; a workspace
+  declaring several is asked which rather than guessed at, the same rule
+  `--app` follows for apps. Any declared database may be migrated — `primary`
+  decides which handle is `env.db`, not which schema a migration set can reach,
+  and a database no app uses is addressable too. The label is dereferenced to
+  its `dbs_` id before the request, so the word never travels. With no config
+  file in the directory there are no labels and `--database` is the id itself.
 - **`--yes`** is required to migrate an environment marked `"protected": true`
   (an `environments.<name>` member).
 
@@ -237,9 +243,9 @@ operations, not migration files — and the migration id.
 A migration that fails to record stops the command before anything is applied,
 and the message names the file and what the DSL refused.
 
-An apply naming a database this app holds no live binding to is refused with
-`database_not_bound`, naming the database and the call that grants one. Bind it
-with `zeroship db bind` and re-run.
+An apply your seat on the database's project does not cover is refused by the
+migration service with `403 forbidden`, before any document is read.
+`zeroship db list --project=prj_...` shows the databases a project holds.
 
 ## `zeroship db`
 

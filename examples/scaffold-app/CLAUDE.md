@@ -100,22 +100,22 @@ still overrides the file.
 
 The `apps` entry ships with no `app` id: on the first push `deploy` falls back
 to the workspace `name`, creates that app, and writes its id into that entry.
-`migrate`, `secret` and `var` do NOT take that fallback, but can read the id
-after that first deploy.
+`secret` and `var` do NOT take that fallback, but can read the id after that
+first deploy. `migrate` never needed it: it addresses a database.
 
-**Both steps, in that order, every time the migrations change.** The `.zship`
+**Both steps, every time the migrations change — in either order.** The `.zship`
 carries the app's *code* and the generated schema *typing*; it does not carry
 the migrations, and deploying does not run them. `zeroship migrate` reads this
-app's `migrations/*.ts`, records them, and posts the result to the platform's
-migration service, which creates the app's database schema, its tables, and the
-per-app database role the runtime uses for every `env.db` call. Run it from this
-directory with `node_modules` installed — the recording is the same one the
-build does.
+database's `migrations/*.ts`, records them, and posts the result to the
+platform's migration service, which creates the schema and its tables. A
+migration is authorized at the database's own project rather than through an
+app, so it needs no prior deploy. Run it from this directory with
+`node_modules` installed — the recording is the same one the build does.
 
 Skip it on an app that uses `env.db` and the app deploys clean, serves its
-static assets, and then fails on the FIRST database call — the role it needs
-does not exist yet, and the end user sees only `{"message":"internal error"}`.
-Re-running `zeroship migrate` with nothing new to apply is a no-op, so running
-it after every deploy is safe.
+static assets, and then fails on the FIRST database call — the table or column
+is not there. The runtime classifies that as `schema_not_migrated` and the
+response names `zeroship migrate`. Re-running `zeroship migrate` with nothing
+new to apply is a no-op, so running it after every deploy is safe.
 
 Keep changes local, rebuild to produce a new `dist/app.zship`, then deploy that.

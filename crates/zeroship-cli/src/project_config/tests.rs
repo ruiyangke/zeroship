@@ -1074,23 +1074,66 @@ fn the_app_flag_is_a_label_with_a_file_and_an_id_without_one() {
     );
 }
 
-/// `--database` names one of the app's own labels; without it the primary is
-/// the database addressed, because that is the one `env.db` reaches.
+/// `--database` names one of the FILE's labels, and a workspace declaring one
+/// implies it - the same rule `--app` follows, one section over.
 #[test]
-fn the_database_flag_names_one_of_the_apps_own_labels() {
+fn the_database_flag_names_one_of_the_files_labels() {
     let resolved = cfg(FULL).resolve(None).unwrap();
     assert_eq!(
-        select_database(&argv(&[]), &resolved, "storefront").expect("primary"),
+        resolved.database_labels(),
+        vec!["main"],
+        "the precondition for the implied arm below"
+    );
+    assert_eq!(
+        select_database(&argv(&[]), &resolved).expect("one declared database is implied"),
         "main"
     );
     assert_eq!(
-        select_database(&argv(&["--database=main"]), &resolved, "storefront").expect("named"),
+        select_database(&argv(&["--database=main"]), &resolved).expect("named"),
         "main"
     );
-    let err = select_database(&argv(&["--database=events"]), &resolved, "storefront")
-        .expect_err("a database the app does not use is not addressable");
-    assert!(err.contains("not one of the databases"), "{err}");
+    let err = select_database(&argv(&["--database=events"]), &resolved)
+        .expect_err("a database this file does not declare is not addressable");
+    assert!(err.contains("names no database"), "{err}");
     assert!(err.contains("main"), "{err}");
+}
+
+/// SEVERAL DECLARED: the flag is demanded rather than one of them guessed.
+///
+/// Read off the committed cross-tool fixture, which declares two. A caller that
+/// picked the first would write a schema into a database nobody named, and
+/// `apps.admin` not using `analytics` no longer narrows anything: the selection
+/// is workspace-wide because a database belongs to its project, not to an app.
+#[test]
+fn several_declared_databases_demand_the_flag_and_none_is_app_scoped() {
+    let text = include_str!("../../../../tests/fixtures/project-config/zeroship.jsonc");
+    let resolved = cfg(text).resolve(None).unwrap();
+    assert_eq!(resolved.database_labels(), vec!["main", "analytics"]);
+
+    let err = select_database(&argv(&[]), &resolved).expect_err("an ambiguous target is refused");
+    assert!(err.contains("more than one database"), "{err}");
+    assert!(err.contains("--database=<label>"), "{err}");
+    assert!(err.contains("analytics"), "{err}");
+
+    // The app-scoped rule this replaces refused `analytics` whenever the
+    // selected app did not use it. The fixture still carries such an app, so
+    // the assertion below is a measurement rather than a restatement.
+    assert!(!resolved.app_databases("admin").contains(&"analytics"));
+    assert_eq!(
+        select_database(&argv(&["--database=analytics"]), &resolved)
+            .expect("a database is addressable without an app that uses it"),
+        "analytics"
+    );
+}
+
+/// NO DATABASES AT ALL: the refusal names the section to add one to, rather
+/// than reporting an ambiguity that does not exist.
+#[test]
+fn a_file_declaring_no_databases_says_so() {
+    let resolved = cfg(BARE).resolve(None).unwrap();
+    assert!(resolved.database_labels().is_empty());
+    let err = select_database(&argv(&[]), &resolved).expect_err("there is nothing to select");
+    assert!(err.contains("declares no databases"), "{err}");
 }
 
 // ---------------------------------------------------------------------------

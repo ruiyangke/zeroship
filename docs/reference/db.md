@@ -84,14 +84,16 @@ export const listAdmins = query(async () => {
 ## Migrate before you deploy
 
 `zeroship deploy` ships code; it does not touch the database. `zeroship migrate`
-applies the migration set. **For an app with migrations, run the migrate first** —
+applies the migration set to the database you name, and it needs no app: it is
+authorized at the database's own project, so it runs before the first deploy as
+happily as after it. **For an app with migrations, run the migrate first** —
 but nothing checks that you did, and that is deliberate.
 
 ```
 $ zeroship deploy
 
 This app has committed migrations. Deploy does NOT apply them:
-  zeroship migrate --app=<label> --database=main --control=<url>
+  zeroship migrate --database=main --control=<url>
 Deploy does not check this: an unmigrated column fails at query time.
 ```
 

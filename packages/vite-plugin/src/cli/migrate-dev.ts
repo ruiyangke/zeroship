@@ -39,7 +39,7 @@ interface Argv {
   root: string;
   migrationsDir: string;
   outDir: string;
-  /** The database's LOCAL label, and whether it is the app's `env.db`. Both
+  /** The database's LOCAL label, and whether any app makes it `env.db`. Both
    *  come from the file; `env.db.ts` keys `EnvDatabases` on the label. */
   label: string;
   primary: boolean;
@@ -55,7 +55,6 @@ function parseArgv(argv: string[]): Argv {
   let root = process.cwd();
   let dir: string | undefined;
   let out: string | undefined;
-  let app: string | undefined;
   let database: string | undefined;
 
   for (let i = 0; i < argv.length; i++) {
@@ -74,9 +73,6 @@ function parseArgv(argv: string[]): Argv {
       case "--out":
         out = value();
         break;
-      case "--app":
-        app = value();
-        break;
       case "--database":
         database = value();
         break;
@@ -84,10 +80,11 @@ function parseArgv(argv: string[]): Argv {
       case "--help":
         console.log(
           "zeroship-dev-migrate - apply committed migrations to the dev database\n\n" +
-            "Usage: zeroship-dev-migrate [--root <dir>] [--app <label>] [--database <label>]\n" +
+            "Usage: zeroship-dev-migrate [--root <dir>] [--database <label>]\n" +
             "                            [--migrations <dir>] [--out <dir>]\n\n" +
-            "The paths default to the selected database in the app's zeroship.jsonc -\n" +
-            "its primary unless --database names another; the dir flags are overrides.\n\n" +
+            "--database names a `databases` label in zeroship.jsonc; a workspace declaring\n" +
+            "one implies it. The target is the DATABASE, never an app: the paths come from\n" +
+            "that entry, and the dir flags are overrides.\n\n" +
             "Run this BEFORE `pnpm dev`. The dev server reports schema state but never applies it."
         );
         process.exit(0);
@@ -100,18 +97,17 @@ function parseArgv(argv: string[]): Argv {
   // the Rust CLI had one, and this had a fourth pair hand-typed into
   // `parseArgv`. The flags survive as overrides; only the fallback moved.
   const { config, path: configPath } = readProjectConfig(root);
-  const selected = selectDatabase(config, { app, database });
+  const selected = selectDatabase(config, { database });
   // THE DIR FLAGS OVERRIDE PATHS, NOT IDENTITY. This command regenerates
   // `env.db.ts`, which declares the database's entry on `EnvDatabases` under
-  // its LABEL and declares `Env.db` only when it is the app's PRIMARY. Neither
-  // fact is recoverable from a pair of directories, so an invocation with
-  // nothing declaring the database says so rather than inventing a label.
+  // its LABEL and declares `Env.db` only when it is a primary. Neither fact is
+  // recoverable from a pair of directories, so an invocation with nothing
+  // declaring the database says so rather than inventing a label.
   if (selected == null || configPath == null) {
     throw new Error(
       "[zeroship] no database to migrate. --migrations/--out override where the schema is " +
         "read and written, not WHICH database it is: the regenerated env.db.ts names the " +
-        "database's label and whether it is the app's primary. Declare it under " +
-        "`databases` and name that label in the app's `databases`.",
+        "database's label and whether it is a primary. Declare it under `databases`.",
     );
   }
   const resolveMember = (override: string | undefined, member: "migrations" | "out") =>

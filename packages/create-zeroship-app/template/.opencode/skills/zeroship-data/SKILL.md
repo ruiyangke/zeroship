@@ -101,8 +101,9 @@ if (result.error) throw result.error;
 the soft-delete role, in which case reads filter it out automatically. `purge`
 always removes the row regardless.
 
-## Schema changes need a deploy and a migrate
+## Schema changes need a migrate as well as a deploy
 
 The built artifact carries the generated typing, not the migrations, and
-deploying does not apply them. Run `zeroship migrate` after `zeroship deploy`
-every time the schema changes. See `zeroship-deploy`.
+deploying does not apply them. Run `zeroship migrate` every time the schema
+changes. It targets the DATABASE, not an app, so it needs no prior deploy and
+the two commands run in either order. See `zeroship-deploy`.
