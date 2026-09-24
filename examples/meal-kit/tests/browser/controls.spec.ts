@@ -62,9 +62,20 @@ test("box controls support keyboard sizing and aligned, available delivery days 
   await expect(
     grid.getByRole("button", { name: /unavailable$/ }).first(),
   ).toBeDisabled();
-  const nextDay = grid
-    .getByRole("button", { name: /available for delivery$/ })
-    .first();
+  // The calendar opens on the SELECTED day's month, and a selected day is
+  // labelled "selected" rather than "available for delivery". Near the end of a
+  // month the only remaining delivery day can be that one, leaving the opening
+  // month with nothing this locator matches - which is what a shopper would
+  // answer by paging forward, so the test does too. `deliveryDates` runs 28 days
+  // out, so the following month always carries one.
+  const available = grid.getByRole("button", {
+    name: /available for delivery$/,
+  });
+  if ((await available.count()) === 0) {
+    await page.getByRole("button", { name: "Next month", exact: true }).click();
+    await expect(available.first()).toBeVisible();
+  }
+  const nextDay = available.first();
   const day = (await nextDay.getAttribute("aria-label"))!.replace(
     ", available for delivery",
     "",
