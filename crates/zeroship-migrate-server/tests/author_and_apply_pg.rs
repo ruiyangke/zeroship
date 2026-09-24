@@ -126,7 +126,10 @@ fn author_v1_envelope(migration_source: &str, name: &str) -> String {
             source: STAGE2_RECORDER_JS.to_string(),
         },
         ModuleEntry {
-            specifier: "./__migration__.js".to_string(),
+            // The registry is keyed on NORMALISED specifiers: `resolve_specifier`
+            // strips the leading `./` off the glue's import before looking it
+            // up, so a key carrying one matches nothing.
+            specifier: "__migration__.js".to_string(),
             source: migration_source.to_string(),
         },
         ModuleEntry {
