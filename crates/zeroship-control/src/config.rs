@@ -9,8 +9,8 @@
 use std::path::{Path, PathBuf};
 
 use zeroship_core::config::{
-    zeroship_config, AuthProviderKind, BootstrapControl, CheckFormat, CommandControl,
-    ObservabilityControls, Operational, OriginScheme, OverlaySelector, Secret,
+    default_http_threads, zeroship_config, AuthProviderKind, BootstrapControl, CheckFormat,
+    CommandControl, ObservabilityControls, Operational, OriginScheme, OverlaySelector, Secret,
 };
 use zeroship_core::observability::LogFormat;
 
@@ -57,6 +57,15 @@ pub struct ControlSettings {
     /// Address to bind. Defaults to loopback; pass 0.0.0.0 to expose across a network.
     #[config(name = "control.bind", default = "127.0.0.1".to_owned())]
     pub bind: Operational<String>,
+
+    /// Number of ntex serving threads. Defaults to one per available core.
+    ///
+    /// EACH THREAD IS AN io_uring RING, charged to the per-user locked-memory
+    /// budget before this process answers anything. A host running control
+    /// beside the gateway and the migration service multiplies that by three,
+    /// and the service that exhausts `ulimit -l` is whichever starts last.
+    #[config(name = "control.threads", default = default_http_threads())]
+    pub threads: Operational<usize>,
 
     /// Root directory or `s3://` URL for bundles and content-addressed deploy blobs.
     #[config(shared = BLOB_STORE, default = "./bundles".to_owned())]

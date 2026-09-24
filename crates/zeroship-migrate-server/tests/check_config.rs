@@ -258,3 +258,123 @@ fn a_placeholder_policy_seal_key_is_refused() {
         );
     }
 }
+
+/// The one-per-core count `migrate_server.threads` resolves to when nothing
+/// supplies it.
+///
+/// Recomputed here rather than written down: the compiled default is
+/// `zeroship_core::config::default_http_threads`, and a literal would pin this
+/// test to the machine that wrote it.
+fn cores() -> usize {
+    std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
+}
+
+/// Read one numeric field out of the JSON report.
+fn count(report: &serde_json::Map<String, serde_json::Value>, key: &str) -> u64 {
+    report
+        .get(key)
+        .unwrap_or_else(|| panic!("the report carries no {key} field: {report:?}"))
+        .as_u64()
+        .unwrap_or_else(|| panic!("{key} is not a count: {report:?}"))
+}
+
+#[test]
+fn the_unset_thread_count_still_resolves_to_one_per_core() {
+    // THE ARM THAT MATTERS MOST. `migrate_server.threads` exists so an operator
+    // can spend fewer io_uring rings on a host with a small `ulimit -l`; the
+    // price of getting its default wrong is a silent concurrency change on
+    // every deployment that never sets it. Asserting only the explicit arm
+    // below would pass over a default that had quietly become 1.
+    let output = run(&[
+        "--check-config",
+        "--check-config-format",
+        "json",
+        "--no-config",
+    ]);
+
+    assert_success(&output);
+    assert_eq!(
+        count(&report(&output.stdout), "threads"),
+        u64::try_from(cores()).expect("core count fits u64")
+    );
+}
+
+#[test]
+fn an_explicit_thread_count_reaches_the_report_from_flag_and_environment() {
+    let flagged = run(&[
+        "--check-config",
+        "--check-config-format",
+        "json",
+        "--no-config",
+        "--threads",
+        "2",
+    ]);
+    assert_success(&flagged);
+    assert_eq!(count(&report(&flagged.stdout), "threads"), 2);
+
+    let from_env = Command::new(env!("CARGO_BIN_EXE_zeroship-migrate-server"))
+        .env_clear()
+        .env("ZEROSHIP_CONTROL_KEY", STRONG_HEX)
+        .env("ZEROSHIP_MIGRATE_SERVER_POLICY_SEAL_KEY", STRONG_HEX)
+        .env(
+            "ZEROSHIP_MIGRATE_SERVER_DATABASE_URL",
+            "postgresql://unused:unused@127.0.0.1:1/unused",
+        )
+        .env(
+            "ZEROSHIP_MIGRATE_SERVER_PROVISION_DATABASE_URL",
+            "postgresql://unused:unused@127.0.0.1:1/unused",
+        )
+        .env("ZEROSHIP_MIGRATE_SERVER_THREADS", "3")
+        .args([
+            "--check-config",
+            "--check-config-format",
+            "json",
+            "--no-config",
+        ])
+        .output()
+        .expect("spawn zeroship-migrate-server");
+    assert_success(&from_env);
+    assert_eq!(count(&report(&from_env.stdout), "threads"), 3);
+
+    // The one-variable control: the same helper, the same arguments, minus the
+    // flag. Without it, "2" and "3" are equally satisfied by a report that
+    // echoes whatever number it last saw anywhere.
+    let bare = run(&[
+        "--check-config",
+        "--check-config-format",
+        "json",
+        "--no-config",
+    ]);
+    assert_success(&bare);
+    assert_eq!(
+        count(&report(&bare.stdout), "threads"),
+        u64::try_from(cores()).expect("core count fits u64")
+    );
+}
+
+#[test]
+fn a_zero_thread_count_is_refused_by_the_dry_run() {
+    // ntex does not clamp: zero arbiters means the process binds its port,
+    // passes a TCP liveness probe and answers nothing. The dry run has to
+    // refuse it, because the dry run is where an operator finds out.
+    let output = run(&[
+        "--check-config",
+        "--check-config-format",
+        "json",
+        "--no-config",
+        "--threads",
+        "0",
+    ]);
+
+    assert!(
+        !output.status.success(),
+        "zero serving threads must refuse; the run exited {:?}\nstdout: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("migrate_server.threads"),
+        "the refusal must name the setting an operator can change; got:\n{stderr}"
+    );
+}

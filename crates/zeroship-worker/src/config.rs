@@ -11,23 +11,13 @@
 use std::path::{Path, PathBuf};
 
 use zeroship_core::config::{
-    zeroship_config, CheckFormat, CommandControl, ObservabilityControls,
+    default_http_threads, zeroship_config, CheckFormat, CommandControl, ObservabilityControls,
     Operational, OverlaySelector, Secret,
 };
 use zeroship_core::observability::LogFormat;
 
 /// Tracing directive applied when nothing supplies `observability.log_filter`.
 pub const DEFAULT_LOG_FILTER: &str = "info,zeroship_worker=debug";
-
-/// ntex worker threads when nothing supplies `worker.threads`.
-///
-/// A function, not a constant: the compiled default is "one per core", which is
-/// only knowable at run time. The generated resolver calls this exactly when no
-/// flag, environment value or overlay entry supplied one.
-#[must_use]
-pub fn default_worker_threads() -> usize {
-    std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
-}
 
 /// Resolve the worker's KV configuration, requiring shared storage when enabled.
 pub fn open_kv_store(input: &str) -> Result<Option<zeroship_kv::KvStore>, zeroship_kv::KvError> {
@@ -136,7 +126,7 @@ pub struct WorkerSettings {
     pub socket: Operational<String>,
 
     /// Number of ntex worker threads. Defaults to one per available core.
-    #[config(name = "worker.threads", default = default_worker_threads())]
+    #[config(name = "worker.threads", default = default_http_threads())]
     pub threads: Operational<usize>,
 
     /// Control-plane API base URL.
@@ -275,7 +265,7 @@ mod tests {
     use clap::{CommandFactory, Parser};
     use zeroship_core::config::{GeneratedConfig, OverlaySelector};
 
-    use super::{default_worker_threads, WorkerSettings, WorkerSettingsSources};
+    use super::{WorkerSettings, WorkerSettingsSources};
 
     #[test]
     fn kv_configuration_accepts_shared_topologies_and_rejects_local_storage() {
@@ -324,7 +314,7 @@ mod tests {
         .expect("settings resolve");
         assert_eq!(*defaults.port.get(), 8080);
         assert_eq!(*defaults.max_isolates.get(), 200);
-        assert_eq!(*defaults.threads.get(), default_worker_threads());
+        assert_eq!(*defaults.threads.get(), super::default_http_threads());
 
         let overlaid = WorkerSettings::resolve_config(
             WorkerSettingsSources::try_parse_from(["zeroship-worker"]).expect("bare parse"),

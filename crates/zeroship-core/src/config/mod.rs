@@ -51,8 +51,8 @@ pub use credential_gate::{
 pub use diagnostics::env_like_tokens;
 
 pub use bootstrap::{
-    bootstrap, bootstrap_or_exit, Bootstrap, CheckConfigReport, CheckFormat, CheckValue,
-    ObservabilityControls, OverlaySelector,
+    bootstrap, bootstrap_or_exit, default_http_threads, require_http_threads, Bootstrap,
+    CheckConfigReport, CheckFormat, CheckValue, ObservabilityControls, OverlaySelector,
 };
 pub use env::{env_is_exact, env_is_truthy, parse_bool_flag};
 pub use file::{

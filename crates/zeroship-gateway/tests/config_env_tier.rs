@@ -74,7 +74,12 @@ impl Drop for Scratch {
 /// ADDED variables would be asserting about the developer's shell whenever one
 /// happened to be exported. Clearing makes the environment of the process
 /// under test exactly the list at each call site and nothing else.
-fn check_config(broker_secret: &Path, overlay: &Path, extra_env: &[(&str, &str)], args: &[&str]) -> String {
+fn attempt(
+    broker_secret: &Path,
+    overlay: &Path,
+    extra_env: &[(&str, &str)],
+    args: &[&str],
+) -> std::process::Output {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_zeroship-gate"));
     cmd.env_clear()
         .env("ZEROSHIP_CONTROL_KEY", STRONG_HEX)
@@ -83,8 +88,7 @@ fn check_config(broker_secret: &Path, overlay: &Path, extra_env: &[(&str, &str)]
     for (key, value) in extra_env {
         cmd.env(key, value);
     }
-    let output = cmd
-        .arg("--check-config")
+    cmd.arg("--check-config")
         .arg("--check-config-format")
         .arg("json")
         .arg("--config")
@@ -93,7 +97,11 @@ fn check_config(broker_secret: &Path, overlay: &Path, extra_env: &[(&str, &str)]
         .arg(broker_secret)
         .args(args)
         .output()
-        .expect("spawn zeroship-gate");
+        .expect("spawn zeroship-gate")
+}
+
+fn check_config(broker_secret: &Path, overlay: &Path, extra_env: &[(&str, &str)], args: &[&str]) -> String {
+    let output = attempt(broker_secret, overlay, extra_env, args);
 
     assert!(
         output.status.success(),
@@ -230,4 +238,94 @@ fn the_obsolete_security_relaxation_variable_reaches_no_carrier() {
     // nothing.
     assert_eq!(field(&report, "origin_scheme"), "https");
     assert_eq!(field(&report, "trust_proxy"), "false");
+}
+
+/// The one-per-core count `gateway.threads` resolves to when nothing supplies it.
+///
+/// Recomputed here rather than written down: the compiled default is
+/// `zeroship_core::config::default_http_threads`, and a literal would pin this
+/// test to the machine that wrote it.
+fn cores() -> usize {
+    std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
+}
+
+#[test]
+fn the_unset_thread_count_still_resolves_to_one_per_core() {
+    // THE ARM THAT MATTERS MOST. `gateway.threads` exists so an operator can
+    // spend fewer io_uring rings on a host with a small `ulimit -l`; the price
+    // of getting its default wrong is a silent concurrency change on every
+    // deployment that never sets it. Asserting only the explicit arm below
+    // would pass over a default that had quietly become 1.
+    let scratch = Scratch::new("threads_default");
+    let secret = scratch.write_secret("broker", "gateway-broker-secret-32-bytes-minimum-ok");
+    let overlay = scratch.write("gateway.toml", OVERLAY);
+
+    let report = check_config(&secret, &overlay, &[], &[]);
+
+    assert_eq!(field(&report, "threads"), cores().to_string());
+}
+
+#[test]
+fn an_explicit_thread_count_reaches_the_report_from_every_tier() {
+    let scratch = Scratch::new("threads_explicit");
+    let secret = scratch.write_secret("broker", "gateway-broker-secret-32-bytes-minimum-ok");
+    let overlay = scratch.write(
+        "gateway-threads.toml",
+        &format!("{OVERLAY}\n[gateway]\nthreads = 5\n"),
+    );
+
+    // Overlay alone. A value no other tier supplies, so a resolver that read
+    // the file for nothing but its presence would fail here.
+    let from_file = check_config(&secret, &overlay, &[], &[]);
+    assert_eq!(field(&from_file, "threads"), "5");
+
+    // Environment outranks the file.
+    let from_env = check_config(
+        &secret,
+        &overlay,
+        &[("ZEROSHIP_GATEWAY_THREADS", "3")],
+        &[],
+    );
+    assert_eq!(field(&from_env, "threads"), "3");
+
+    // Flag outranks both.
+    let from_flag = check_config(
+        &secret,
+        &overlay,
+        &[("ZEROSHIP_GATEWAY_THREADS", "3")],
+        &["--threads", "2"],
+    );
+    assert_eq!(field(&from_flag, "threads"), "2");
+
+    // The one-variable control: with every tier that could have supplied 2, 3
+    // or 5 removed, the same helper resolves the compiled default. Without it
+    // the three assertions above are equally satisfied by a resolver that
+    // always answers whatever the last tier it looked at said.
+    let bare_overlay = scratch.write("gateway-bare.toml", OVERLAY);
+    let bare = check_config(&secret, &bare_overlay, &[], &[]);
+    assert_eq!(field(&bare, "threads"), cores().to_string());
+}
+
+#[test]
+fn a_zero_thread_count_is_refused_by_the_dry_run() {
+    // ntex does not clamp: zero arbiters means the process binds its port,
+    // passes a TCP liveness probe and answers nothing. The dry run has to
+    // refuse it, because the dry run is where an operator finds out.
+    let scratch = Scratch::new("threads_zero");
+    let secret = scratch.write_secret("broker", "gateway-broker-secret-32-bytes-minimum-ok");
+    let overlay = scratch.write("gateway.toml", OVERLAY);
+
+    let output = attempt(&secret, &overlay, &[], &["--threads", "0"]);
+
+    assert!(
+        !output.status.success(),
+        "zero serving threads must refuse; the run exited {:?}\nstdout: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("gateway.threads"),
+        "the refusal must name the setting an operator can change; got:\n{stderr}"
+    );
 }

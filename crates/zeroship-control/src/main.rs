@@ -16,9 +16,9 @@ use zeroship_core::auth_provider::{
     SupabaseProvider,
 };
 use zeroship_core::config::{
-    audit_credentials, bootstrap_or_exit, mark_dev_escape_active, require_nonempty,
-    validate_master_key_material, AuthProviderKind, BuildProfile, CheckConfigReport, CheckValue,
-    CredentialPosture, CredentialVerdict, SubsystemCredential,
+    audit_credentials, bootstrap_or_exit, mark_dev_escape_active, require_http_threads,
+    require_nonempty, validate_master_key_material, AuthProviderKind, BuildProfile,
+    CheckConfigReport, CheckValue, CredentialPosture, CredentialVerdict, SubsystemCredential,
 };
 use zeroship_bundle::{
     build_blob_store, BlobStore, StoreUrl,
@@ -490,6 +490,16 @@ fn main() -> std::io::Result<()> {
     let configured_oauth_clients = file.auth.oauth_clients.clone();
     let port = *settings.port.get();
     let bind_host = settings.bind.get().clone();
+    // Resolved BEFORE the `--check-config` return below, so a dry run refuses a
+    // zero the boot would otherwise turn into a bound port answering nothing.
+    let http_threads = match require_http_threads("control.threads", *settings.threads.get()) {
+        Ok(threads) => threads,
+        Err(message) => {
+            eprintln!("control: {message}");
+            tracing::error!(error = %message, "control: refusing to start");
+            std::process::exit(1);
+        }
+    };
     // Every secret is already resolved by the generated declaration, in one
     // place, with one precedence: the `-file` path flag, then the canonical
     // environment name, then the canonical overlay path. The material is
@@ -631,6 +641,7 @@ fn main() -> std::io::Result<()> {
         let mut report = CheckConfigReport::new();
         report.field("port", CheckValue::Count(usize::from(port)));
         report.field("bind", CheckValue::Plain(bind_host.clone()));
+        report.field("threads", CheckValue::Count(http_threads));
         report.field(
             "config_source",
             CheckValue::Plain(boot.overlay.source.to_string()),
@@ -1550,6 +1561,7 @@ fn main() -> std::io::Result<()> {
             )
             .configure(health::configure)
     })
+    .workers(http_threads)
     .bind(&bind_addr)?
     .run()
     .await

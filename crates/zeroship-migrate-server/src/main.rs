@@ -7,8 +7,9 @@ use compio_postgres::NoTls;
 use ntex::web;
 use zeroship_core::auth_provider::{AuthProvider, PlatformConfig, PlatformProvider};
 use zeroship_core::config::{
-    audit_credentials, bootstrap_or_exit, mark_dev_escape_active, require_nonempty, BuildProfile,
-    CheckConfigReport, CheckValue, CredentialPosture, CredentialVerdict, SubsystemCredential,
+    audit_credentials, bootstrap_or_exit, mark_dev_escape_active, require_http_threads,
+    require_nonempty, BuildProfile, CheckConfigReport, CheckValue, CredentialPosture,
+    CredentialVerdict, SubsystemCredential,
 };
 use zeroship_migrate_server::auth::ControlPlaneAuthenticator;
 use zeroship_migrate_server::config::{
@@ -96,6 +97,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let check_config = *settings.check_config.get();
     let tmp_dir = settings.tmp_dir.get().clone();
+    // Resolved BEFORE the dry-run return, so `--check-config` refuses a zero
+    // the boot would otherwise turn into a silent non-serving process.
+    let http_threads =
+        match require_http_threads("migrate_server.threads", *settings.threads.get()) {
+            Ok(threads) => threads,
+            Err(message) => {
+                eprintln!("migrated: {message}");
+                std::process::exit(1);
+            }
+        };
     let mutation_rate_limit = match build_mutation_rate_limit(
         *settings.mutation_rate_limit_burst.get(),
         *settings.mutation_rate_limit_per_minute.get(),
@@ -124,6 +135,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut report = CheckConfigReport::new();
         report.field("bind", CheckValue::Plain(settings.bind.get().clone()));
         report.field("port", CheckValue::Count(usize::from(*settings.port.get())));
+        report.field("threads", CheckValue::Count(http_threads));
         report.field(
             "config_source",
             CheckValue::Plain(boot.overlay.source.to_string()),
@@ -364,6 +376,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .state(state.clone())
                     .configure(zeroship_migrate_server::configure)
             })
+            .workers(http_threads)
             .bind(&bind_addr)?
             .run()
             .await

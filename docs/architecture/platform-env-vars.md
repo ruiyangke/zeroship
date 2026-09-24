@@ -176,6 +176,7 @@ Every environment name below is `ZEROSHIP_<CANONICAL>` and every overlay path is
 | `auth.supabase_jwt_secret` | secret | `ZEROSHIP_AUTH_SUPABASE_JWT_SECRET` | `auth.supabase_jwt_secret` | zeroship-control `--auth-supabase-jwt-secret-file` | - |
 | `auth.supabase_service_role_key` | secret | `ZEROSHIP_AUTH_SUPABASE_SERVICE_ROLE_KEY` | `auth.supabase_service_role_key` | zeroship-control `--auth-supabase-service-role-key-file` | - |
 | `auth.supabase_url` | operational | `ZEROSHIP_AUTH_SUPABASE_URL` | `auth.supabase_url` | zeroship-auth `--supabase-url`<br>zeroship-control `--auth-supabase-url` | empty |
+| `auth.threads` | operational | `ZEROSHIP_AUTH_THREADS` | `auth.threads` | zeroship-auth `--threads` | `default_http_threads()` |
 | `auth.totp_enc_key` | secret | `ZEROSHIP_AUTH_TOTP_ENC_KEY` | `auth.totp_enc_key` | zeroship-auth `--totp-enc-key-file` | - |
 
 ### control
@@ -219,6 +220,7 @@ Every environment name below is `ZEROSHIP_<CANONICAL>` and every overlay path is
 | `control.supabase_jwks_url` | operational | `ZEROSHIP_CONTROL_SUPABASE_JWKS_URL` | `control.supabase_jwks_url` | zeroship-control `--supabase-jwks-url` | empty |
 | `control.supabase_jwt_issuer` | operational | `ZEROSHIP_CONTROL_SUPABASE_JWT_ISSUER` | `control.supabase_jwt_issuer` | zeroship-control `--supabase-jwt-issuer` | empty |
 | `control.tax_provider` | operational | `ZEROSHIP_CONTROL_TAX_PROVIDER` | `control.tax_provider` | zeroship-control `--tax-provider` | `native` |
+| `control.threads` | operational | `ZEROSHIP_CONTROL_THREADS` | `control.threads` | zeroship-control `--threads` | `default_http_threads()` |
 | `control.worker_enrolment_networks` | operational | `ZEROSHIP_CONTROL_WORKER_ENROLMENT_NETWORKS` | `control.worker_enrolment_networks` | zeroship-control `--worker-enrolment-networks` | empty |
 | `control.worker_enrolment_ports` | operational | `ZEROSHIP_CONTROL_WORKER_ENROLMENT_PORTS` | `control.worker_enrolment_ports` | zeroship-control `--worker-enrolment-ports` | empty |
 | `control.workflow_coordinator_url` | operational | `ZEROSHIP_CONTROL_WORKFLOW_COORDINATOR_URL` | `control.workflow_coordinator_url` | zeroship-control `--workflow-coordinator-url` | `http://127.0.0.1:9093` |
@@ -258,6 +260,7 @@ Every environment name below is `ZEROSHIP_<CANONICAL>` and every overlay path is
 | `gateway.service_peers_file` | operational | `ZEROSHIP_GATEWAY_SERVICE_PEERS_FILE` | `gateway.service_peers_file` | zeroship-gate `--service-peers-file` | empty |
 | `gateway.signing_key_file` | operational | `ZEROSHIP_GATEWAY_SIGNING_KEY_FILE` | `gateway.signing_key_file` | zeroship-gate `--signing-key-file` | empty |
 | `gateway.stash_signing_key` | secret | `ZEROSHIP_GATEWAY_STASH_SIGNING_KEY` | `gateway.stash_signing_key` | zeroship-gate `--stash-signing-key-file` | - |
+| `gateway.threads` | operational | `ZEROSHIP_GATEWAY_THREADS` | `gateway.threads` | zeroship-gate `--threads` | `default_http_threads()` |
 
 ### metering
 
@@ -283,6 +286,7 @@ Every environment name below is `ZEROSHIP_<CANONICAL>` and every overlay path is
 | `migrate_server.provision_database_url` | secret | `ZEROSHIP_MIGRATE_SERVER_PROVISION_DATABASE_URL` | `migrate_server.provision_database_url` | zeroship-migrate-server `--provision-database-url-file` | - |
 | `migrate_server.reconcile_interval_seconds` | operational | `ZEROSHIP_MIGRATE_SERVER_RECONCILE_INTERVAL_SECONDS` | `migrate_server.reconcile_interval_seconds` | zeroship-migrate-server `--reconcile-interval-seconds` | `30` |
 | `migrate_server.service_peers_file` | operational | `ZEROSHIP_MIGRATE_SERVER_SERVICE_PEERS_FILE` | `migrate_server.service_peers_file` | zeroship-migrate-server `--service-peers-file` | empty |
+| `migrate_server.threads` | operational | `ZEROSHIP_MIGRATE_SERVER_THREADS` | `migrate_server.threads` | zeroship-migrate-server `--threads` | `default_http_threads()` |
 | `migrate_server.tmp_dir` | operational | `ZEROSHIP_MIGRATE_SERVER_TMP_DIR` | `migrate_server.tmp_dir` | zeroship-migrate-server `--tmp-dir` | `std::env::temp_dir().join("zeroship-migrate-server")` |
 
 ### observability
@@ -308,7 +312,7 @@ Every environment name below is `ZEROSHIP_<CANONICAL>` and every overlay path is
 | `worker.shutdown_timeout` | operational | `ZEROSHIP_WORKER_SHUTDOWN_TIMEOUT` | `worker.shutdown_timeout` | zeroship-worker `--shutdown-timeout` | `30` |
 | `worker.socket` | operational | `ZEROSHIP_WORKER_SOCKET` | `worker.socket` | zeroship-worker `--socket` | empty |
 | `worker.storage_url` | operational | `ZEROSHIP_WORKER_STORAGE_URL` | `worker.storage_url` | zeroship-worker `--storage-url` | empty |
-| `worker.threads` | operational | `ZEROSHIP_WORKER_THREADS` | `worker.threads` | zeroship-worker `--threads` | `default_worker_threads()` |
+| `worker.threads` | operational | `ZEROSHIP_WORKER_THREADS` | `worker.threads` | zeroship-worker `--threads` | `default_http_threads()` |
 | `worker.workflow_capacity` | operational | `ZEROSHIP_WORKER_WORKFLOW_CAPACITY` | `worker.workflow_capacity` | zeroship-worker `--workflow-capacity` | `64` |
 | `worker.workflow_manager_url` | operational | `ZEROSHIP_WORKER_WORKFLOW_MANAGER_URL` | `worker.workflow_manager_url` | zeroship-worker `--workflow-manager-url` | empty |
 | `worker.workflow_slots` | operational | `ZEROSHIP_WORKER_WORKFLOW_SLOTS` | `worker.workflow_slots` | zeroship-worker `--workflow-slots` | `4` |

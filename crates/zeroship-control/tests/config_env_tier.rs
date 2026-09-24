@@ -301,3 +301,80 @@ fn a_valid_overlay_provider_still_resolves() {
         "supabase"
     );
 }
+
+/// The one-per-core count `control.threads` resolves to when nothing supplies
+/// it.
+///
+/// Recomputed here rather than written down: the compiled default is
+/// `zeroship_core::config::default_http_threads`, and a literal would pin this
+/// test to the machine that wrote it.
+fn cores() -> usize {
+    std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
+}
+
+#[test]
+fn the_unset_thread_count_still_resolves_to_one_per_core() {
+    // THE ARM THAT MATTERS MOST. `control.threads` exists so an operator can
+    // spend fewer io_uring rings on a host with a small `ulimit -l`; the price
+    // of getting its default wrong is a silent concurrency change on every
+    // deployment that never sets it. Asserting only the explicit arm below
+    // would pass over a default that had quietly become 1.
+    assert_eq!(
+        field(&report(None, &[], &["--no-config"]), "threads"),
+        cores().to_string()
+    );
+}
+
+#[test]
+fn an_explicit_thread_count_reaches_the_report_from_every_tier() {
+    let scratch = Scratch::new("threads");
+    let overlay = scratch.write("control.toml", "[control]\nthreads = 5\n");
+
+    // Overlay alone: a value no other tier supplies here.
+    assert_eq!(field(&report(Some(&overlay), &[], &[]), "threads"), "5");
+
+    // Environment outranks the file.
+    let from_env = report(
+        Some(&overlay),
+        &[("ZEROSHIP_CONTROL_THREADS", "3")],
+        &[],
+    );
+    assert_eq!(field(&from_env, "threads"), "3");
+
+    // Flag outranks both.
+    let from_flag = report(
+        Some(&overlay),
+        &[("ZEROSHIP_CONTROL_THREADS", "3")],
+        &["--threads", "2"],
+    );
+    assert_eq!(field(&from_flag, "threads"), "2");
+
+    // The one-variable control: with every tier that could have supplied 2, 3
+    // or 5 removed, the same helper resolves the compiled default. Without it
+    // the three assertions above are equally satisfied by a resolver that
+    // always answers whatever the last tier it looked at said.
+    assert_eq!(
+        field(&report(None, &[], &["--no-config"]), "threads"),
+        cores().to_string()
+    );
+}
+
+#[test]
+fn a_zero_thread_count_is_refused_by_the_dry_run() {
+    // ntex does not clamp: zero arbiters means the process binds its port,
+    // passes a TCP liveness probe and answers nothing. The dry run has to
+    // refuse it, because the dry run is where an operator finds out.
+    let output = run(None, &[], &["--no-config", "--threads", "0"]);
+
+    assert!(
+        !output.status.success(),
+        "zero serving threads must refuse; the run exited {:?}\nstdout: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("control.threads"),
+        "the refusal must name the setting an operator can change; got:\n{stderr}"
+    );
+}

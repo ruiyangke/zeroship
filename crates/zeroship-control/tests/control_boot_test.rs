@@ -88,6 +88,30 @@ fn get(port: u16, path: &str) -> Option<(u16, String)> {
     Some((status, response))
 }
 
+/// Every ntex arbiter id the child announced, read out of its own log.
+///
+/// ntex names each serving thread `{system name}:worker:{id}` and logs it as
+/// the arbiter starts, so the SET of ids is the number of threads the pool was
+/// built with - and therefore the number of compio io_uring rings this process
+/// charges to the per-user locked-memory budget. That is the quantity
+/// `control.threads` exists to bound, and reading it back from a live process
+/// is the only thing that binds the setting to `HttpServer::workers`: a
+/// `--check-config` row is satisfied by a resolver alone.
+fn arbiter_ids(log: &str) -> std::collections::BTreeSet<u32> {
+    const MARKER: &str = "zeroship-control:worker:";
+    let mut ids = std::collections::BTreeSet::new();
+    for (offset, _) in log.match_indices(MARKER) {
+        let digits: String = log[offset + MARKER.len()..]
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect();
+        if let Ok(id) = digits.parse::<u32>() {
+            ids.insert(id);
+        }
+    }
+    ids
+}
+
 /// A free loopback port for the child to bind.
 ///
 /// Control logs the address it was CONFIGURED with rather than the one it
@@ -155,6 +179,14 @@ fn control_serves_readyz_on_an_owned_database() {
         // without an explicit opt-in. This suite exercises serving, not billing,
         // so it takes the documented escape rather than standing up a provider.
         .arg("--allow-unsupported-billing")
+        // ONE SERVING THREAD, and the assertion below reads back how many the
+        // process actually built. Each ntex arbiter creates its own compio
+        // io_uring runtime, so an unbounded default makes this fixture claim
+        // one ring per core from a budget (`ulimit -l`) the whole host shares -
+        // which is how a boot on an idle machine fails with
+        // `Cannot allocate memory (os error 12)`.
+        .arg("--threads")
+        .arg("1")
         .arg("--port")
         .arg(port.to_string())
         .arg("--blob-store")
@@ -183,6 +215,8 @@ fn control_serves_readyz_on_an_owned_database() {
     let unknown = get(port, "/no-such-route").expect("control answers an unknown path");
     let v1 = get(port, "/v1/apps").expect("control answers a /v1 path");
 
+    let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+
     let _ = child.kill();
     let _ = child.wait();
     let (status, body) = last.unwrap_or((0, "no response".to_owned()));
@@ -202,5 +236,28 @@ fn control_serves_readyz_on_an_owned_database() {
         "control must declare no /v1 route: the edge sends the whole /v1/* namespace to the \
          migration service, so one here would be shadowed and unreachable.\n  \
          /v1/apps -> {v1:?}\n  /no-such-route -> {unknown:?}"
+    );
+
+    // `--threads 1` above, so the pool must hold arbiter 0 and nothing else.
+    // Before `control.threads` reached `HttpServer::workers`, ntex sized the
+    // pool from the affinity mask and this set was every core on the machine.
+    //
+    // WHAT THIS DOES NOT CATCH: an unplumbed setting on a single-core host,
+    // where the framework default and the requested count coincide. The
+    // instrument below - the set is non-empty, so the process really did
+    // announce its arbiters - is what separates that from a log this fixture
+    // failed to capture at all.
+    let ids = arbiter_ids(&log);
+    assert!(
+        !ids.is_empty(),
+        "control announced no ntex arbiter at all, so the count below would be \
+         vacuous. Log:\n{log}"
+    );
+    assert_eq!(
+        ids,
+        std::collections::BTreeSet::from([0]),
+        "control was launched with --threads 1 and built {} serving threads; each is an \
+         io_uring ring charged to `ulimit -l`. Log:\n{log}",
+        ids.len()
     );
 }

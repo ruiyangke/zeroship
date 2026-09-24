@@ -43,7 +43,7 @@ fn worker_env_has_no_security_relaxation_binding() {
 
 #[test]
 fn worker_threads_default_resolves_to_positive_count() {
-    assert!(zeroship_worker::config::default_worker_threads() > 0);
+    assert!(zeroship_core::config::default_http_threads() > 0);
 
     let flagged = WorkerSettingsSources::try_parse_from(["zeroship-worker", "--threads", "3"])
         .expect("--threads parses");
