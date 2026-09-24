@@ -1,5 +1,5 @@
 use super::*;
-use crate::service::{models, TaskAssignment, WorkerIdentity};
+use crate::service::{models, tasks::ReadyClaim, TaskAssignment, WorkerIdentity};
 use std::collections::BTreeSet;
 use zeroship_data_orm::{
     orm::{Entity, FindOptions, FromRow},
@@ -264,4 +264,100 @@ async fn foreign_reference(store: Rc<OrmStore>) {
     assert_eq!(run.text("task_id").unwrap(), other.id);
     assert_eq!(run.integer("due_at").unwrap(), 0);
     tx.commit().await.unwrap();
+}
+
+#[compio::test]
+async fn sqlite_a_run_holding_a_dispatch_is_not_assigned_another() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = sqlite_store(&directory.path().join("zs-workflow.sqlite")).await;
+    single_assignment(Rc::new(store)).await;
+}
+
+#[compio::test]
+async fn postgres_a_run_holding_a_dispatch_is_not_assigned_another() {
+    let fixture = PostgresFixture::start().await;
+    single_assignment(Rc::new(fixture.store.clone())).await;
+}
+
+/// A run holds one dispatch at a time, and `tasks::assign` is where that is
+/// decided: its closing update claims the run only while `task_id` is still
+/// null, and refuses the claim when it is not.
+///
+/// Neither production caller can reach that refusal. `delivery::reclaim`
+/// defers the whole delivery unless it can expire the held task and null the
+/// column first, and `tasks::poll` expires it in place; `assign` is the only
+/// writer that ever stores a non-null `task_id`. So inside one transaction
+/// under the app lock the update cannot find the run already taken, and what
+/// the filter stands against is a claimant on another connection that the app
+/// lock failed to order: the loser of that race re-evaluates the filter after
+/// the winner commits and finds the run claimed.
+///
+/// This drives the update with the run genuinely holding the live dispatch
+/// its own `poll` just handed out, rather than writing that state by hand.
+/// Every other term of the filter is read back from the run inside the same
+/// call, so the held `task_id` is the only one that can miss.
+///
+/// The second arm is the control: the same call, against the same run, once
+/// the dispatch has been released, must be granted. Without it the refusal
+/// could be coming from anything else about driving `assign` this way.
+///
+/// What this does NOT catch: the serialization that keeps two claimants from
+/// reaching the update at all. Both arms run in one transaction holding the
+/// app lock, so this says what the filter decides once the run is claimed and
+/// nothing about whether `lock_app_state` orders the claimants, nothing about
+/// a second connection re-evaluating the filter after the winner commits, and
+/// nothing about the `reclaim` and expiry gates ahead of it.
+async fn single_assignment(store: Rc<OrmStore>) {
+    let (service, app, _foreign, _deployments) = registered_service(store).await;
+    let worker = WorkerIdentity::new("single-assignment-worker".into()).unwrap();
+    let started = service
+        .fixture_app(app.clone())
+        .start(&RequestId::mint(), "Example", StartOptions::default())
+        .await
+        .unwrap();
+    let held = service
+        .poll(&worker)
+        .await
+        .unwrap()
+        .expect("a started run must be dispatchable");
+
+    match claim_again(&service, &app, &started.id, &worker).await {
+        Err(WorkflowServiceError::Conflict(_)) => {}
+        Err(error) => panic!("a held run must be refused as a stale claim: {error:?}"),
+        Ok(_) => panic!("a run holding a live dispatch was assigned a second one"),
+    }
+
+    service
+        .release(&worker, &held.id, &held.token)
+        .await
+        .unwrap();
+    match claim_again(&service, &app, &started.id, &worker).await {
+        Ok(ReadyClaim::Task(task)) => assert_ne!(
+            task.id, held.id,
+            "the released run must be claimed by a fresh dispatch"
+        ),
+        Ok(_) => panic!("a released run must be claimable rather than withheld"),
+        Err(error) => panic!("a released run must be claimable: {error:?}"),
+    }
+}
+
+/// Reach `tasks::assign` the way a claimant that is not serialized behind the
+/// run's current holder reaches it, and roll back whatever the attempt wrote.
+async fn claim_again(
+    service: &WorkflowService,
+    app: &AppId,
+    run_id: &str,
+    worker: &WorkerIdentity,
+) -> Result<ReadyClaim, WorkflowServiceError> {
+    let mut tx = service.begin().await.unwrap();
+    let (_app_lock, policy) = super::super::app::lock_app(&mut tx, app).await.unwrap();
+    let run = super::super::app::lock_run(&mut tx, app, run_id)
+        .await
+        .unwrap();
+    let now = tx.now().await.unwrap();
+    let claim =
+        super::super::tasks::assign(&mut tx, app, &run, &policy, worker, now, policy.lease_ms)
+            .await;
+    drop(tx);
+    claim
 }
