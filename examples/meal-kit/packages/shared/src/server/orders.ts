@@ -38,8 +38,19 @@ export function wire(row: NonNullable<OrderRow>): Order {
     timeline: row.timeline as TimelineEvent[],
   };
 }
-export async function owned(id: string) {
-  const row = must(await env.db.meal_orders.get({ id, owner_id: user().id }));
+/**
+ * The caller's own order, read through `tx` when one is open.
+ *
+ * A procedure that goes on to WRITE must pass its transaction. The dev tier
+ * feeds every connection from one actor thread with a blocking busy handler, so
+ * an autocommit statement issued beside an open transaction parks that thread
+ * against a lock the transaction itself holds, and the wait can only end when
+ * the budget does. Reading here and writing there is exactly that shape.
+ */
+export async function owned(id: string, tx?: Tx) {
+  const row = tx
+    ? await tx.meal_orders.get({ id, owner_id: user().id })
+    : must(await env.db.meal_orders.get({ id, owner_id: user().id }));
   if (!row) fail(/* i18n */ "Order not found.", "NOT_FOUND", 404);
   return row;
 }

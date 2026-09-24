@@ -273,17 +273,20 @@ export const joinWaitlist = mutation(
     consent: true;
   }) => {
     const contact_key = `${market}:${email.toLowerCase()}`;
-    const existing = must(await env.db.meal_waitlist.get({ contact_key }));
-    if (!existing)
-      must(
-        await env.db.meal_waitlist.insert({
-          contact_key,
-          email,
-          market,
-          postal,
-          area,
-        }),
-      );
+    // The get and the insert are one decision: two callers racing the same
+    // contact key would both read nothing and both insert. The transaction also
+    // keeps the write off the autocommit path, which the dev tier serialises
+    // against any transaction already open on its one actor thread.
+    await transact(async (tx) => {
+      if (await tx.meal_waitlist.get({ contact_key })) return;
+      await tx.meal_waitlist.insert({
+        contact_key,
+        email,
+        market,
+        postal,
+        area,
+      });
+    });
     return { saved: true };
   },
   {
@@ -796,16 +799,22 @@ export const reportIssue = mutation(
     category: string;
     message: string;
   }) => {
-    const row = await owned(orderId);
-    return must(
-      await env.db.meal_cases.insert({
-        owner_id: row.owner_id,
-        order_id: row.id as Id<"meal_orders">,
-        category,
-        message,
-        status: "open",
-      }),
-    );
+    // One transaction for the read and the write. An autocommit write beside an
+    // open transaction parks the dev tier's single actor thread against a lock
+    // that transaction holds, and it also leaves the ownership check and the
+    // insert open to a change between them.
+    return transact(async (tx) => {
+      const row = await owned(orderId, tx);
+      return changed(
+        await tx.meal_cases.insert({
+          owner_id: row.owner_id,
+          order_id: row.id as Id<"meal_orders">,
+          category,
+          message,
+          status: "open",
+        }),
+      );
+    });
   },
   {
     id: "gather.issue",
