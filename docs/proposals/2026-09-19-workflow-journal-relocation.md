@@ -673,11 +673,10 @@ stall the defect fixes that motivate the move.
 
    The crossing recurs on the request path and inside the manager. `active_key` in
    `crates/zeroship-workflow-server/src/auth.rs` answers every worker-authenticated call from
-   `SELECT public_key FROM zeroship.worker_instances WHERE id=$1 AND status='active'`, and
-   `crates/zeroship-workflow-manager/src/policy/control/models.rs` declares "Native
-   projections of Control-owned policy inputs and publication metadata" over `apps`, `plans`,
-   `workflow_rollout_config` and `workflow_policy_ledger`, and it WRITES the ledger as well as
-   reading it, so a cache cannot answer the whole of it. The highest-frequency crossing is in
+   `SELECT public_key FROM zeroship.worker_instances WHERE id=$1 AND status='active' AND
+   expires_at > now()`, and `crates/zeroship-workflow-manager/src/policy/control/models.rs`
+   projects Control-owned policy inputs - `apps` and `plans` - which the manager reads to
+   compute an app's authority. The highest-frequency crossing is in
    another schema entirely and a search for `zeroship.` cannot find it:
    `SharedClientReplayStore` (`crates/zeroship-authn/src/service_replay.rs`), constructed in
    `crates/zeroship-workflow-server/src/server.rs`, upserts
@@ -687,14 +686,15 @@ stall the defect fixes that motivate the move.
 
    **These crossings are three problems, not one, and only one of them is transport.**
 
-   Some of what crosses is the service's OWN data, sitting in the wrong database.
-   `workflow_policy_ledger` is read and written only by
-   `crates/zeroship-workflow-manager/src/policy/control/store.rs`, carries no foreign key, and
-   its revision has to be monotonic per app - which one store satisfies, since an app belongs to
-   one zone and the service is zone-local. `service_authn.service_assertion_replay` is the same
-   shape: the audience is checked before the store is consulted, so a per-service table keeps
-   single use. **For both, the answer is to move the table, not to transport the access,** and
-   the write that a cache could never have answered disappears with it.
+   **DONE for the tables the service owns.** `workflow_policy_ledger` and
+   `workflow_rollout_config` now live in `workflow_manager`, created by
+   `db/migrations-ts/20260911000060_workflow_policy_tables.ts`, so the write a cache could never
+   have answered is local rather than transported. `ControlPolicyStore` in
+   `crates/zeroship-workflow-manager/src/policy/control/store.rs` holds a handle each and keeps
+   the bracket: the ledger row's lock is taken before the inputs are read, on the other handle,
+   with the transaction still open. `service_authn.service_assertion_replay` is the same shape -
+   the audience is checked before the store is consulted, so a per-service table keeps single
+   use - but whether it should move is the live disagreement recorded below.
 
    **`docs/proposals/2026-09-20-platform-service-database-split.md` already assigns an owner to
    every table in this set, and this document should not re-derive one.** Its table gives
