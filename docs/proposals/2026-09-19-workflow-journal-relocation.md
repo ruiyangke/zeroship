@@ -8,10 +8,17 @@
 the engine and answers `status`, `signal` and `transition` over its own journal, establishing
 its own ingress epoch; `restart` refuses, naming the prerequisite it still needs. Nothing in
 production writes this journal yet - there is no `start` endpoint - so step 5 is what gives the
-endpoints rows to operate on. The journal is
-installed into the creator's own schema today and written by the worker over the creator's own
-connection; this moves storage and the durable fold into the workflow service, leaving execution
-where it is.
+endpoints rows to operate on.
+
+Open 3 names three pieces behind a store of its own, and two have landed: no migration in the
+corpus writes into two databases' worth of schemas, and the two tables the service
+owns have moved into `workflow_manager`, which deletes a cross-database write rather than
+transporting it. What remains is severing the reads that stay - and the one of those that is
+authentication is a trust-model decision rather than plumbing.
+
+The journal is installed into the creator's own schema today and written by the worker over the
+creator's own connection; this moves storage and the durable fold into the workflow service,
+leaving execution where it is.
 
 This is a sibling of `docs/proposals/2026-08-28-app-database-decoupling.md` and should land
 BEFORE it. See Sequencing: that design breaks journal appends if the journal is still where it
