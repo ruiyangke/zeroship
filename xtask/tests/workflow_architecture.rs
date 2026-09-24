@@ -5,10 +5,13 @@ use std::process::Command;
 /// The journal's schema crate must reach NOTHING else in the workspace.
 ///
 /// That is the whole reason it exists. The migration service and the workflow
-/// manager both depend on it; if it could reach the creator workflow engine,
-/// depending on the artifacts would drag the engine into a platform service -
-/// which is the coupling the schema-bundle path removed, and which
-/// `workflow_process_dependencies_follow_crate_ownership` above forbids.
+/// manager both depend on it, and a leaf lets them hold the journal's artifacts
+/// while inheriting nothing else - which is what the schema-bundle path bought.
+///
+/// What a service may link BESIDE the artifacts is a separate question with its
+/// own answer: `workflow_process_dependencies_follow_crate_ownership` above
+/// names `zeroship-workflow-runner` and `zeroship-storage` as the edges the
+/// manager and the server may not have, and says nothing about the engine.
 ///
 /// An `include_str!` reaching out of the crate directory is what this replaced,
 /// and Cargo could not see that. It can see this.
