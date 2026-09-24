@@ -39,10 +39,10 @@ Worker publication cannot mint manager-owned activation, cron or management comm
 Job outcomes use closed tagged objects. Management results cannot settle ordinary
 jobs, and generic completion cannot stand in for a management lifecycle result.
 Control management acceptance persists the raw request, frozen job and run order
-in the same transaction. Latest selection observes the ordinary app pointer outside
-queue locks, then confirms the selected deployment's exact hold hash. Exact raw
-retries resolve from independent request indexes before any source or hold I/O.
-Transitions and Started restarts need no deployment selection or queue hold.
+in the same transaction. A Latest restart names its deployment in the request,
+and acceptance confirms that deployment's exact hold hash. Exact raw retries
+resolve from independent request indexes before any hold I/O.
+Transitions and Started restarts carry no deployment and need no queue hold.
 Management deliveries follow accepted run revisions. Unsettled pause, cancel and
 restart commands suppress Advances for their run before candidate limiting;
 resumes and work for other runs continue through ordinary eligibility checks.
@@ -150,12 +150,15 @@ DDL differs from that combined compiler output, including a deployment-only
 catalog. The catalog and the queue use separate ORM bindings to the file; the
 queue acquires its deployment holds through that catalog.
 
-`deployments::latest::LatestDeploymentSource` observes the ordinary app deployment
-pointer through a native ORM join to the same app's catalog row. It selects only
-identity, hash and retention state; missing or unavailable targets refuse without
-falling back to activation history. The returned value is an observation, with no
-admission authority or deployment hold. Ordered management acceptance receives this
-source explicitly; platform grants and readiness belong to the host.
+A Latest restart carries the deployment it replays against, as
+`ManagementOperation::Restart { deployment }`. The manager reads no app pointer
+of its own: the only caller of ordered management acceptance is the authority
+for that pointer. What acceptance does enforce is the hold. An unheld deployment
+takes the acquisition path, whose row lock on Control's catalog denies another
+app's deployment and refuses one that has left `available`; a held one must
+carry the hash Control minted with the hold, and a request naming a different
+hash is a conflict. Acceptance does not check that the named deployment is the
+app's current one, because the caller decided that.
 
 `retention::HoldClient` supplies the queue's Control capability. Activation,
 execution, cron and resolved Latest restart jobs require a confirmed deployment hold.
