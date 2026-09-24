@@ -451,13 +451,15 @@ arguments are visible in the process list to every user on the machine.
 
 With `--dir`, the script also runs `zeroship migrate` after the deploy when the
 app has a `migrations/` directory. That step is not cosmetic: deploy does not
-apply migrations, the per-app database role is created only by the migration
-service's apply path, and an app that uses `env.db` without it serves its assets
-and then fails every database call with an opaque `internal error`. `migrate`
-records the app's `migrations/*.ts` itself, so it needs Node and the app's
-installed dependencies -- the same checkout that built the `.zship`. With
-`--zship` and no `--dir` there is no app directory to find the migrations in, so
-the script prints the command to run by hand instead.
+apply migrations, so an app that uses `env.db` without it serves its assets and
+then fails every database call with `schema_not_migrated`, the relation or the
+column never having been created. The order is convenience, not a requirement:
+`migrate` addresses the database and is authorized at its project, so it runs
+just as well before the deploy. `migrate` records the database's
+`migrations/*.ts` itself, so it needs Node and the app's installed dependencies
+-- the same checkout that built the `.zship`. With `--zship` and no `--dir`
+there is no app directory to find the migrations in, so the script prints the
+command to run by hand instead.
 
 `migrate` runs first as a gated one-shot; control, gateway, worker and auth all
 wait on `service_completed_successfully`. If migrate fails, they stay `Created`

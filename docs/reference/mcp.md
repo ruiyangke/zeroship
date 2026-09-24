@@ -276,7 +276,7 @@ tools:
 | `409` | prose naming the reserved label, or the `app_` prefix | `create_app` name is well-formed but unavailable. |
 | `409` | `resource already exists` | `create_app` name is already taken. |
 | `409` | `idempotency_key_conflict` | A `commandId` was reused with different bytes, app or caller. |
-| `409` | `schema_not_applied` | The artifact's migrations have not been applied to the app's database. |
+| `409` | `database_not_bound` | The artifact declares a database the app holds no live binding to; the body names the call that grants one. |
 | `413` | `deploy too large` | The `.zship` exceeds the size cap. |
 | `500` | `internal error` | Other infrastructure failure. |
 | `502` | `internal error` | `app_logs` could not reach any worker. |

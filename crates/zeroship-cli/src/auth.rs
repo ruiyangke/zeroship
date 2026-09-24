@@ -747,9 +747,15 @@ mod tests {
         // `zeroship var` and `zeroship secret` ship too, and with only
         // `secrets:read` in the ceiling `var` was unusable outright and
         // `secret` was reduced to its two listing verbs.
+        //
+        // `database:migrate` is the verb `zeroship migrate` spends, and it is
+        // the ONLY one that command asks for: applying schema is authorized at
+        // the DATABASE, by a seat on the project that owns it. Its absence here
+        // is a CLI that can build, deploy and read, and cannot put a table in a
+        // database.
         assert_eq!(
             requested_scope(),
-            "apps:archive apps:deploy apps:read apps:write env:read env:write \
+            "apps:archive apps:deploy apps:read apps:write database:migrate env:read env:write \
              organization:admin organization:create organization:members:leave \
              organization:members:read organization:members:write organization:read \
              project:create project:members:read project:members:write project:read \

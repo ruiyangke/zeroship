@@ -1,6 +1,6 @@
 ---
 name: zeroship-deploy
-description: Use when building, deploying, or migrating a zeroship app, when choosing between pnpm dev and a real deploy, or when a deployed app serves its pages but fails on its first database call. Covers the build artifact, zeroship.jsonc, and the deploy-then-migrate sequence.
+description: Use when building, deploying, or migrating a zeroship app, when choosing between pnpm dev and a real deploy, or when a deployed app serves its pages but fails on its first database call. Covers the build artifact, zeroship.jsonc, and the two independent commands that ship code and apply schema.
 ---
 
 # Build, deploy, migrate
@@ -32,7 +32,7 @@ the deploy artifact. A production build refuses to continue when a procedure has
 no explicit id, or when the committed artifacts under `generated/zeroship/`
 drift from the migration source.
 
-## Deploy, then migrate
+## Deploy and migrate
 
 ```bash
 zeroship login      # once, device flow
@@ -40,29 +40,37 @@ zeroship deploy     # upload dist/app.zship
 zeroship migrate    # apply the schema
 ```
 
-Neither command needs a target. The artifact path, the app and the control
-plane come from `zeroship.jsonc`, and each command prints what it resolved and
-from where before acting. With one app declared `--app` is optional; with
-several it names which label to act on. `--control=<url>` still overrides the
-file, and `zeroship config show` prints the resolved configuration.
+Neither command needs a target. The artifact path, the app, the database and
+the control plane come from `zeroship.jsonc`, and each command prints what it
+resolved and from where before acting. `deploy` addresses an APP: with one
+declared `--app` is optional, with several it names which label. `migrate`
+addresses a DATABASE: with one declared `--database` is optional, with several
+it names which label. `--control=<url>` still overrides the file, and
+`zeroship config show` prints the resolved configuration.
 
 On the first deploy the `apps` entry has no `app` id: deploy falls back to the
 workspace `name`, creates that app, and writes its id back into that entry.
-`migrate`, `secret` and `var` do not take that fallback, so run `deploy` first.
+`secret` and `var` do not take that fallback, so run `deploy` before them.
 
-### Run both, in that order, whenever the schema changes
+### The two are independent; run migrate whenever the schema changes
 
 This is the single most common deployment failure. The artifact carries the
 app's code and the generated schema typing. It does **not** carry the
-migrations, and deploying does not apply them. `zeroship migrate` reads this
-app's `migrations/*.ts`, records them, and posts the result to the migration
-service, which creates the app's schema, its tables, and the per-app database
-role the runtime assumes on every `env.db` call. Run it from the app directory
-with `node_modules` installed: the recording is the same one the build does.
+migrations, and deploying does not apply them. `zeroship migrate` reads the
+database's `migrations/*.ts`, records them, and posts the result to the
+migration service, which creates the schema and its tables. Run it from the app
+directory with `node_modules` installed: the recording is the same one the
+build does.
+
+**There is no ordering constraint.** A migration is authorized at the
+database's own project, not through an app, so `migrate` needs no prior deploy
+and reaches a database no app is bound to.
 
 Skip it and the app deploys clean, serves its static assets, dispatches its
-RPCs, and then fails the first database call because that role does not exist.
-The end user sees `{"message":"internal error"}`.
+RPCs, and then fails the first database call because the table or column is not
+there. The runtime classifies that as `schema_not_migrated` and the response
+names `zeroship migrate`, so the end user sees the remedy rather than
+`{"message":"internal error"}`.
 
 Re-running `zeroship migrate` with nothing new to apply is a no-op, so running
 it after every deploy is safe.
