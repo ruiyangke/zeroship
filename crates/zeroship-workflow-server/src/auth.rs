@@ -40,21 +40,36 @@ impl PostgresWorkerRegistry {
 }
 #[async_trait(?Send)]
 impl WorkerRegistry for PostgresWorkerRegistry {
+    /// Prove the registry is reachable and readable for EXACTLY the columns
+    /// [`Self::active_key`] projects and filters on. A probe narrower than the
+    /// authentication query reports ready while every worker call fails.
     async fn ready(&self) -> Result<(), Error> {
         self.client
             .query(
-                "SELECT id,status,public_key FROM zeroship.worker_instances LIMIT 0",
+                "SELECT id,status,public_key,expires_at FROM zeroship.worker_instances LIMIT 0",
                 &[],
             )
             .await
             .map(|_| ())
             .map_err(|_| Error::Unavailable)
     }
+    /// The key a LIVE instance's assertions verify under, or nothing.
+    ///
+    /// TWO FILTERS, AND EACH IS A DIFFERENT WAY A CREDENTIAL STOPS WORKING.
+    /// `status` is retirement and purge. `expires_at` is the LEASE Control
+    /// renews, and it is what makes an instance nobody retired - crashed,
+    /// killed or forgotten - stop authenticating with nobody acting; nothing
+    /// reaps the row, so without this comparison that key never dies. The
+    /// comparison is against the DATABASE's clock, so replicas whose clocks
+    /// differ answer the same. This is the predicate
+    /// `zeroship_control::worker_join::active_instance_public_key` resolves
+    /// the same table with: one identity is live for both hosts or neither.
     async fn active_key(&self, instance: &str) -> Result<Option<[u8; 32]>, Error> {
         let rows = self
             .client
             .query(
-                "SELECT public_key FROM zeroship.worker_instances WHERE id=$1 AND status='active'",
+                "SELECT public_key FROM zeroship.worker_instances \
+                   WHERE id=$1 AND status='active' AND expires_at > now()",
                 &[&instance],
             )
             .await
@@ -101,7 +116,7 @@ impl WorkflowAuth {
     /// Recheck enrollment without reusing or verifying the request assertion again.
     ///
     /// # Errors
-    /// Refuses revocation, key replacement and unavailable registry storage.
+    /// Refuses revocation, lapse, key replacement and unavailable registry storage.
     pub async fn revalidate_worker(&self, worker: &VerifiedWorker) -> Result<WorkerId, Error> {
         match self.workers.active_key(worker.id.as_str()).await? {
             Some(public_key) if public_key == worker.public_key => Ok(worker.id.clone()),
@@ -109,10 +124,11 @@ impl WorkflowAuth {
         }
     }
 
-    /// Control may verify placement only for an instance still enrolled as active.
+    /// Control may verify placement only for an instance still live: enrolled
+    /// as active and inside its lease.
     ///
     /// # Errors
-    /// Refuses revoked or missing workers and unavailable registry storage.
+    /// Refuses revoked, lapsed or missing workers and unavailable registry storage.
     pub async fn active_worker(&self, worker: &WorkerId) -> Result<(), Error> {
         self.workers
             .active_key(worker.as_str())
