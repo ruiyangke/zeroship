@@ -696,6 +696,15 @@ stall the defect fixes that motivate the move.
    single use. **For both, the answer is to move the table, not to transport the access,** and
    the write that a cache could never have answered disappears with it.
 
+   **`docs/proposals/2026-09-20-platform-service-database-split.md` already assigns an owner to
+   every table in this set, and this document should not re-derive one.** Its table gives
+   `workflow_policy_ledger` and `workflow_rollout_config` to workflow, which agrees with the
+   paragraph above. It **disagrees** about the replay store, which it lists under "Shared by
+   design, owned by nobody" - so whether a per-service instance is correct is a live
+   disagreement between two proposals rather than a settled question, and it should be settled
+   in that one. It also marks `app_deploys` CONTESTED, "workflow's DDL, control writes", which
+   is the same table Plan step 3 records `restart` as unable to resolve.
+
    Some is Control's authority read on a path that is ALREADY eventual.
    `crates/zeroship-workflow-manager/src/eligibility.rs` says so itself - "THIS IS A LIVENESS
    HINT, NOT AN AUTHORIZATION FENCE" - and policy already runs through a cache with a
