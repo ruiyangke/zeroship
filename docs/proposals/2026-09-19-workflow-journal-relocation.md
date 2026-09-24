@@ -713,6 +713,25 @@ stall the defect fixes that motivate the move.
    INSIDE open queue transactions, so turning them into network calls would hold locks across a
    round trip, which Open 4's zone-local decision makes worse rather than better.
 
+   **Whatever answers those reads owes a monotonic-read guarantee, and one database currently
+   gives it away.** `publish` in `crates/zeroship-workflow-manager/src/policy/control/store.rs`
+   upserts the ledger row before reading its inputs, and the comment at that line says inputs
+   are read only after the wait completes. The ordering is not decorative: `observe` pins
+   read-committed, so every statement takes a fresh snapshot and the inputs were never in the
+   ledger's snapshot anyway. What the row lock buys is that a publisher waiting on it reads its
+   inputs only after the previous publisher committed, so a higher revision was computed from
+   inputs at least as new. `PolicyRefresh::install`
+   (`crates/zeroship-workflow/src/service/policy.rs`) refuses a lower revision but accepts
+   whatever policy a HIGHER one carries, so losing that order lets a stale policy take authority
+   and keep it.
+
+   The argument rests on one fact about the input source: a read issued after a commit cannot
+   return state older than that commit saw. A single PostgreSQL instance gives that for free,
+   whichever schema each side sits in. An API call, a replicated projection and a lagging
+   replica do not. **So any shape that puts Control's inputs behind one of those owes this
+   bracket a monotonic-read guarantee or a replacement for it** - which is a constraint on the
+   answer rather than a detail of it, and it applies to every option, not to one.
+
    And one is authentication. `active_key` is what verifies a worker, so severing it is a
    trust-model decision rather than a plumbing one, and it is the piece to decide before the
    rest. `crates/zeroship-workflow/src/service/capability.rs` already mints and verifies
