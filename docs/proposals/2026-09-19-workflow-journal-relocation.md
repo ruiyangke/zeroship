@@ -345,10 +345,12 @@ protocol. This extends a working client rather than inventing one.
    policy generation, so both services must share the host's `HostPolicies`; that holds for any
    store, since `WorkflowService` keeps store and registry as separate fields. And the worker has
    no database handle to the service's schema at all - it reaches the manager over HTTP - so this
-   step is demonstrable where a service store exists, the workflow server and the fixtures in
-   `crates/zeroship-workflow-runner/src/assignments/tests/fixture.rs`, and the worker itself
-   waits for step 5. Still nothing remote. Verify the existing suites pass with the service store
-   behind it.
+   step is demonstrable only where a service store and the engine meet, which today is the test
+   fixtures - `crates/zeroship-workflow/src/service/tests/backend_journal.rs` builds two stores
+   and reads through a handle bound to the second. The workflow server is not such a place:
+   `crates/zeroship-workflow-server` declares no dependency on `zeroship-workflow` and names
+   none of `WorkflowService`, `AppBackend` or `AppWorkflows`, so it holds no handle to bind.
+   Step 3 is what gives it the engine, and the worker waits for step 5.
 
 3. **Serve the creator methods, and add a client for them** in `zeroship-workflow-client`.
    Not yet wired into the worker. Verify each method round-trips against the service store.
