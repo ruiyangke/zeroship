@@ -849,6 +849,17 @@ stall the defect fixes that motivate the move.
    bridge until this is settled, which makes the transport decision a prerequisite rather than
    an ergonomics question.
 
+   **And it is stated design rather than an oversight, which narrows the decision.**
+   `worker.workflow_manager_url` in `crates/zeroship-worker/src/config.rs` carries the rule in
+   its own doc: "Remote managers must use HTTPS; plain HTTP is accepted only for literal
+   loopback addresses." So relaxing the transport contradicts an invariant written at the
+   configuration surface, and internal TLS is the direction the tree already anticipates.
+
+   That setting is also empty in compose, and nothing sets it, so the worker reaches no manager
+   in the dev stack at all: the service added for the deployment piece is unreachable from the
+   only thing that would call it. The fence blocks both directions, which is why wiring the
+   worker to it is part of settling this rather than a follow-up to it.
+
 4. **DECIDED - the service is zone-local. One workflow store per zone, an app's runs in its own
    zone.** So Open 1's dispatch-crossing term stays the small one it was measured to be, and the
    co-location rule the decoupling states holds here too. Open 3 and this one wait on the same
