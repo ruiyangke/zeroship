@@ -601,23 +601,24 @@ stall the defect fixes that motivate the move.
    resolves the owning row with `owned_reference`, and attaches it through `payload_refs`. The
    only promotion of an inline value anywhere is `PreparedExecution::from_runtime_json` in
    `crates/zeroship-workflow-runner/src/outputs.rs`, which runs in the worker and covers
-   `RunCompleted`, `ContinueAsNew` and a `step.run` completion, and nothing else. A
-   `RunCompleted` value is referenced whatever it weighs, and a run that returns nothing
-   references nothing; `ContinueAsNew` and a `step.run` completion are referenced only when the
-   creator asked for it or the value exceeds `TaskPayloadLimits::max_inline_bytes`.
+   `RunCompleted`, `ContinueAsNew`, `Child` and a `step.run` completion, and nothing else. The
+   first three are referenced whatever they weigh, and an arm carrying nothing references
+   nothing; a `step.run` completion is referenced when the creator asked for it or the value
+   exceeds `TaskPayloadLimits::max_inline_bytes`.
 
-   `generations.input` is written by `insert_run`, which four production callers reach
-   (`crates/zeroship-workflow/src/service/app.rs`), and by `RestartPlan::apply` in
-   `crates/zeroship-workflow/src/service/control/restart.rs`, which inserts a generation of its
-   own carrying the previous one's input and input reference. `AppWorkflows::start` is outside
-   any fold.
-   The other three `insert_run` callers are inside one: `journal.rs` starts a child run from
-   `StepCheckpoint.child_input`, `cron.rs` starts a scheduled run from the `ScheduleRegistration`
-   carried on the deploy registration that `__zeroship_workflow_deploys.manifest` stores, and
-   `frontier.rs` starts the successor of a continuation. Promoting there means object I/O under
-   the app and run locks `lock_app` and `lock_run` already hold, and neither `child_input` nor a
-   schedule's input has a reference form to arrive in. Making those two referenceable is a
-   change to `StepOutcome` and to the deploy manifest, not a mechanism added beside them.
+   A generation row keeps no inline slot for a run's input. `insert_run`
+   (`crates/zeroship-workflow/src/service/app.rs`) writes `input_ref` and refuses a descriptor
+   over `AppPolicy::max_input_bytes`, which is the one check every start answers to; and
+   `RestartPlan::apply` in `crates/zeroship-workflow/src/service/control/restart.rs` carries the
+   previous generation's reference forward.
+
+   Staging happens in two places, both ahead of the transaction that takes `lock_app` and
+   `lock_run`: `AppBackend::start` in `crates/zeroship-workflow/src/service/backend.rs` and the
+   activation in `crates/zeroship-workflow/src/service/cron.rs`, each through
+   `stage_start_input`. The child and the continuation stage nothing, because the runner staged
+   what they carry, so `journal.rs` and `frontier.rs` pass a descriptor and reach no object at
+   all. A schedule's input rides inline on `__zeroship_workflow_deploys.manifest`, and the
+   activation is what turns it into an object.
 
    A run's result on the generation is `output_ref` alone, a payload reference the
    `RunUpdate::Completed` arm of `apply` in `crates/zeroship-workflow/src/service/frontier.rs`
@@ -631,17 +632,22 @@ stall the defect fixes that motivate the move.
    **An empty list is not a payload-free journal.** The assertion matches a column's type or its
    name, so creator payload held in a text column under another name passes it.
    `__zeroship_workflow_steps.record` is a serialized `StoredCheckpoint` wrapping the
-   `StepCheckpoint` declared in `crates/zeroship-workflow/src/engine.rs`, whose `output`, `error`
-   and `child_input` are creator values. `finish_run` writes a creator error into
-   `__zeroship_workflow_generations.error`, the column beside the one this entry is about.
+   `StepCheckpoint` declared in `crates/zeroship-workflow/src/engine.rs`, whose `output` and
+   `error` are creator values while `child_input_ref` is a descriptor. `finish_run` writes a
+   creator error into `__zeroship_workflow_generations.error`, a column the assertion's predicate
+   does not reach.
    `publish` in `crates/zeroship-workflow/src/service/signals.rs` and `crates/zeroship-workflow/src/service/fanout.rs`
    store `options.payload` into `__zeroship_workflow_signals.payload` and
    `__zeroship_workflow_broadcasts.payload`, and `__zeroship_workflow_deploys.manifest` carries
    every `ScheduleRegistration` input a deployment declared. Emptying that set alone turns the
    assertion green and leaves the property false, which is the failure this entry was written to
-   prevent. A payload-free journal is the whole set becoming references, and
-   `__zeroship_workflow_generations.input`, the column that set holds, is where it starts, not
-   where it ends.
+   prevent. A payload-free journal is the whole set becoming references, and that set is empty:
+   the predicate was not widened to reach `__zeroship_workflow_steps.record`,
+   `__zeroship_workflow_generations.error`, `__zeroship_workflow_signals.payload`,
+   `__zeroship_workflow_broadcasts.payload` or `__zeroship_workflow_deploys.manifest`, which
+   carry creator values under names and types it does not match, so the test names all five
+   under its own `WHAT THIS DOES NOT SEE` heading. An empty result marks where this ends, not
+   where the journal stops holding creator bytes.
 
    **Where the property is checked.** The coordinator fixture builds `workflow_manager` from
    `zeroship_workflow_server::coordinator::SCHEMA_SQL` and
@@ -701,8 +707,8 @@ stall the defect fixes that motivate the move.
    `WorkflowBackend::read_output` in `crates/zeroship-workflow/src/backend.rs`, surfaced to
    creators as `readOutput` on `WorkflowRun` in `crates/zeroship-workflow-v8/src/v8_class.rs`.
 
-   **Staging has a task-less path, and reaching it is the constraint on emptying
-   `generations.input`.** `stage_payload` requires a worker identity, a task id and a task token,
+   **Staging has a task-less path, and both task-less callers reach it.** `stage_payload`
+   requires a worker identity, a task id and a task token,
    and its only non-test caller is `HostPayloads::stage` in
    `crates/zeroship-workflow-runner/src/payloads/objects.rs`, reached from a worker that is
    executing a task. `stage_app_payload` beside it takes an `AppId` and proves only that the
@@ -714,9 +720,9 @@ stall the defect fixes that motivate the move.
    holding a task and could stage on the same path, while `AppWorkflows::start` called from a
    request handler has no task at all and `AppWorkflows::cron_job` in
    `crates/zeroship-workflow/src/service/cron.rs` starts its scheduled run under a `JobLease`
-   rather than a task token. Neither of those reaches `stage_app_payload`: both hand their input
-   inline to `insert_root_run`. Emptying the run-input column is therefore a matter of routing
-   them through it, not of adding a mechanism.
+   rather than a task token. Both route through `stage_app_payload` by way of
+   `stage_start_input`, which is what leaves the generation row holding a descriptor and no
+   value.
 
    The `insert_run` callers also differ in how far a reference form is from them.
    `AppWorkflows::start` is additive: `StartOptions` in `crates/zeroship-workflow/src/operations.rs`
