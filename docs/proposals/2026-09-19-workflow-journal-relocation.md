@@ -515,7 +515,10 @@ stall the defect fixes that motivate the move.
 
    It was one decision, not two, and it closes this item and Open 1 together.
 
-3. **Does `workflow_manager` become its own database?** NEEDS-DECISION, deferrable. It is a
+3. **DECIDED - `workflow_manager` is its own database, and every design here assumes it.** A
+   production deployment gives it one, so the journal's creator-volume rows never share a store
+   with the control plane. Build against that assumption rather than the arrangement below; what
+   follows records why the question was open and what the promotion costs. It is a
    schema in the control database today with its own migrator, login and search path. Moving
    the journal into it puts creator-volume rows - runs, pages, receipts, payloads - in the
    control plane, which is the coupling `docs/proposals/2026-09-05-gateway-central-database-decoupling.md`
@@ -537,7 +540,13 @@ stall the defect fixes that motivate the move.
    question to settle is what splits the corpus, which is migration tooling rather than workflow
    work, and Open 4 waits on the same answer.
 
-4. **Is the service zone-local? This is half of Open 1's answer, not a footnote.** Every number
+4. **DECIDED - the service is zone-local. One workflow store per zone, an app's runs in its own
+   zone.** So Open 1's dispatch-crossing term stays the small one it was measured to be, and the
+   co-location rule the decoupling states holds here too. Open 3 and this one share a single
+   piece of work: the migration corpus is applied as one job against one database, so a store
+   per zone and a store of its own both wait on splitting it. Scope that split once.
+
+   The reasoning that made it the right answer. Every number
    behind Open 1 was taken over loopback. A crossing per dispatch is free at that distance and
    is not free across a wide area, so if the service is global the term Open 1 dismisses becomes
    the dominant one. It should be zone-local - one workflow store per zone, an app's runs living
