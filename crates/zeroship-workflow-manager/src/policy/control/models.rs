@@ -1,7 +1,12 @@
-//! Native projections of Control-owned policy inputs and publication metadata.
+//! Native projections of Control-owned policy inputs, and the native models of
+//! this service's own publication storage.
+//!
+//! Two declarations rather than one, because they are bound to two different
+//! schemas: the inputs are Control's and are read under column grants, and the
+//! publication tables are the workflow service's own.
 
 zeroship_data_orm::orm::schema! {
-    pub schema {
+    pub source {
         apps {
             #[orm(primary_key)]
             id: Text,
@@ -16,6 +21,11 @@ zeroship_data_orm::orm::schema! {
             archived: Boolean,
             workflow_policy_json: Nullable<Json>,
         }
+    }
+}
+
+zeroship_data_orm::orm::schema! {
+    pub publication {
         workflow_rollout_config {
             #[orm(primary_key)]
             id: Text,

@@ -1,8 +1,12 @@
 //! Serialize authoritative observations before reading their contributing inputs.
 
-use super::{models::schema, PolicyObservation};
+use super::{
+    models::{publication, source},
+    PolicyObservation,
+};
 use crate::Error;
-use schema::{apps, plans, workflow_policy_ledger as ledger, workflow_rollout_config as rollout};
+use publication::{workflow_policy_ledger as ledger, workflow_rollout_config as rollout};
+use source::{apps, plans};
 use std::time::{Duration, Instant};
 use zeroship_core::{app_id::AppId, workflow_coordination::Revision, workflow_policy::AppPolicy};
 use zeroship_data_orm::{
@@ -22,39 +26,84 @@ pub struct RolloutPolicy {
     pub source_validity_ms: i64,
 }
 
-/// Control-schema storage only. It does not open or inspect creator databases.
+/// Platform storage only. It does not open or inspect creator databases.
+///
+/// # The publication bracket spans two bindings
+///
+/// The ledger and the operator switches are this service's own, and their
+/// contributing inputs are Control's, so the two live in different schemas and
+/// need a handle each. [`publish`] holds a transaction on the publication
+/// binding and reads the inputs on the other one while that transaction is
+/// still open.
+///
+/// **What orders publications is the ledger row's write lock, not a shared
+/// snapshot.** Observations run read-committed, so every statement takes a
+/// fresh snapshot and the inputs were never read in the ledger's snapshot even
+/// when one transaction covered both. What the lock buys is that a publisher
+/// waiting on it reads its inputs only after the previous publisher committed,
+/// so a higher revision was computed from inputs at least as new as the
+/// revision below it. That is load-bearing rather than decorative:
+/// `PolicyRefresh::install` in `zeroship_workflow::service::policy` refuses a
+/// lower revision but accepts whatever policy a HIGHER one carries, so losing
+/// the order lets a stale policy take authority and keep it.
+///
+/// **The argument uses one fact about the input source: a read issued after a
+/// commit cannot return state older than that commit saw.** One `PostgreSQL`
+/// instance gives that for free, whichever schema each side sits in. An API
+/// call, a replicated projection and a lagging replica do not, so moving the
+/// inputs behind any of them owes this bracket a monotonic-read guarantee or a
+/// replacement for it.
 #[derive(Clone, Debug)]
 pub struct ControlPolicyStore {
-    database: Database,
+    inputs: Database,
+    publication: Database,
 }
 
 impl ControlPolicyStore {
-    /// Bind the host's provisioned Control schema. Observations require explicit
-    /// read-committed isolation; an unsupported backend refuses the operation.
+    /// Bind the host's provisioned Control schema and this service's own
+    /// publication schema. Observations require explicit read-committed
+    /// isolation; an unsupported backend refuses the operation.
     ///
     /// # Errors
     /// Rejects missing or incompatible native metadata.
-    pub fn new(database: Database) -> Result<Self, Error> {
-        database.entity::<apps::Entity>()?;
-        database.entity::<plans::Entity>()?;
-        database.entity::<rollout::Entity>()?;
-        database.entity::<ledger::Entity>()?;
-        Ok(Self { database })
+    pub fn new(inputs: Database, publication: Database) -> Result<Self, Error> {
+        inputs.entity::<apps::Entity>()?;
+        inputs.entity::<plans::Entity>()?;
+        publication.entity::<rollout::Entity>()?;
+        publication.entity::<ledger::Entity>()?;
+        Ok(Self {
+            inputs,
+            publication,
+        })
     }
 
-    /// Verify the provisioned columns and service read permissions. An empty
-    /// operator catalog is allowed; individual unconfigured apps remain unavailable.
+    /// Verify the provisioned columns and service read permissions on both
+    /// bindings. An empty operator catalog is allowed; individual unconfigured
+    /// apps remain unavailable.
     ///
     /// # Errors
     /// Refuses unavailable or incompatible source storage.
     pub async fn ready(&self) -> Result<(), Error> {
         async {
-            read_source(&self.database, None).await?;
+            read_source(&self.inputs, None).await?;
+            let switches = self
+                .publication
+                .entity::<rollout::Entity>()?
+                .alias("switches")?;
+            self.publication
+                .from(&switches)
+                .select((
+                    switches.column(rollout::id).select::<String>(),
+                    switches.row::<RolloutRecord>(),
+                ))?
+                .limit(1)?
+                .all()
+                .await?;
             let publication = self
-                .database
+                .publication
                 .entity::<ledger::Entity>()?
                 .alias("publication")?;
-            self.database
+            self.publication
                 .from(&publication)
                 .select((
                     publication.column(ledger::id).select::<String>(),
@@ -69,18 +118,19 @@ impl ControlPolicyStore {
         .map_err(|_| Error::Unavailable)
     }
 
-    /// Read every contributor in a statement snapshot after acquiring the
-    /// publication row. Only committed observations may become source authority.
+    /// Read every contributor after acquiring the publication row. Only
+    /// committed observations may become source authority.
     ///
     /// # Errors
     /// Missing, malformed, expired or unavailable source state returns Unavailable.
     pub async fn observe(&self, app: &AppId) -> Result<PolicyObservation, Error> {
         let started = Instant::now();
+        let inputs = &self.inputs;
         let (revision, policy, expires_at) = self
-            .database
+            .publication
             .transaction_with_options(
                 TransactionOptions::default().isolation_level(IsolationLevel::ReadCommitted),
-                |tx| async move { publish(&tx, app, started).await },
+                |tx| async move { publish(&tx, inputs, app, started).await },
             )
             .await
             .map_err(|_| Error::Unavailable)?;
@@ -96,7 +146,7 @@ impl ControlPolicyStore {
         policy.validate().map_err(|_| Error::Invalid)?;
         let json = encode(policy).map_err(|_| Error::Invalid)?;
         let changed = self
-            .database
+            .inputs
             .entity::<plans::Entity>()?
             .update_many(
                 plans::id.eq(plan)?,
@@ -118,7 +168,7 @@ impl ControlPolicyStore {
     pub async fn set_rollout(&self, settings: RolloutPolicy) -> Result<(), Error> {
         validity(settings.source_validity_ms).map_err(|_| Error::Invalid)?;
         let _: RolloutRecord = self
-            .database
+            .publication
             .entity::<rollout::Entity>()?
             .upsert(
                 NewRollout {
@@ -148,7 +198,7 @@ struct PlanRecord {
     archived: bool,
     workflow_policy_json: Option<Value>,
 }
-#[derive(FromRow)]
+#[derive(Clone, Copy, FromRow)]
 #[orm(entity = rollout)]
 struct RolloutRecord {
     dispatch_paused: bool,
@@ -177,18 +227,17 @@ struct NewLedger {
 }
 
 async fn read_source(
-    tx: &Database,
+    inputs: &Database,
     app: Option<&AppId>,
-) -> Result<Vec<(AppRecord, PlanRecord, RolloutRecord)>, DbError> {
-    let app_source = tx.entity::<apps::Entity>()?.alias("app")?;
-    let plan_source = tx.entity::<plans::Entity>()?.alias("plan")?;
-    let switches = tx.entity::<rollout::Entity>()?.alias("switches")?;
+) -> Result<Vec<(AppRecord, PlanRecord)>, DbError> {
+    let app_source = inputs.entity::<apps::Entity>()?.alias("app")?;
+    let plan_source = inputs.entity::<plans::Entity>()?.alias("plan")?;
     let filter = match app {
         Some(app) => app_source.column(apps::id).eq(app.as_str())?,
         // Readiness must check the selector's grant even without a requested app.
         None => app_source.column(apps::id).is_not_null(),
     };
-    let query = tx
+    let query = inputs
         .from(&app_source)
         .inner_join(
             &plan_source,
@@ -196,12 +245,10 @@ async fn read_source(
                 .column(apps::plan_id)
                 .eq(plan_source.column(plans::id))?,
         )?
-        .inner_join(&switches, switches.column(rollout::id).eq("global")?)?
         .filter(filter)
         .select((
             app_source.row::<AppRecord>(),
             plan_source.row::<PlanRecord>(),
-            switches.row::<RolloutRecord>(),
         ))?;
     let query = if app.is_none() {
         query.limit(1)?
@@ -211,14 +258,37 @@ async fn read_source(
     query.all().await
 }
 
+/// The single operator row. A deployment that never published one has no
+/// switches and no validity bound, which is refused rather than defaulted.
+async fn read_rollout(publication: &Database) -> Result<RolloutRecord, DbError> {
+    let switches = publication
+        .entity::<rollout::Entity>()?
+        .alias("switches")?;
+    let rows = publication
+        .from(&switches)
+        .filter(switches.column(rollout::id).eq("global")?)
+        .select(switches.row::<RolloutRecord>())?
+        .all()
+        .await?;
+    let [switches] = rows.as_slice() else {
+        return Err(unavailable());
+    };
+    Ok(*switches)
+}
+
 async fn publish(
-    tx: &Database,
+    publication: &Database,
+    inputs: &Database,
     app: &AppId,
     started: Instant,
 ) -> Result<(Revision, AppPolicy, Instant), DbError> {
     // An ID-only upsert leaves existing publication fields unchanged while
-    // holding its write lock. Inputs are read only after that wait completes.
-    let previous: LedgerRecord = tx
+    // holding its write lock. Every contributor is read only after that wait
+    // completes, including the ones on the other binding: the order of these
+    // statements is the whole of what makes a revision mean "computed from
+    // inputs at least as new as the revision below it". See the note on
+    // `ControlPolicyStore` for what that ordering depends on.
+    let previous: LedgerRecord = publication
         .entity::<ledger::Entity>()?
         .upsert(
             NewLedger {
@@ -227,8 +297,9 @@ async fn publish(
             ConflictTarget::new(ledger::id),
         )
         .await?;
-    let rows = read_source(tx, Some(app)).await?;
-    let [(app_record, plan, switches)] = rows.as_slice() else {
+    let switches = read_rollout(publication).await?;
+    let rows = read_source(inputs, Some(app)).await?;
+    let [(app_record, plan)] = rows.as_slice() else {
         return Err(unavailable());
     };
     let mut policy = decode(plan.workflow_policy_json.as_ref().ok_or_else(unavailable)?)?;
@@ -263,7 +334,7 @@ async fn publish(
             .set(next)?
             .and(ledger::policy_json.set(Some(encode(&policy)?))?)?
             .and(ledger::source_validity_ms.set(Some(switches.source_validity_ms))?)?;
-        if tx
+        if publication
             .entity::<ledger::Entity>()?
             .update_many(ledger::id.eq(app.as_str())?, changes)
             .await?

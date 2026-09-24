@@ -247,10 +247,17 @@ async fn journal_is_installed_and_served_by_one_role(fixture: &platform::Platfor
 /// inline run input or result fails here rather than passing unnoticed: both
 /// are payload objects now, and the journal holds only their descriptors.
 ///
-/// The expected set is EMPTY, so the control above it is what keeps this from
-/// passing over a schema the query never reached. It runs the same predicate
-/// with the payload names dropped, and the journal's own columns are what it
-/// must find.
+/// The expected set holds ONE column, and it is not creator payload.
+/// `workflow_policy_ledger.policy_json` is the `AppPolicy` the manager computes
+/// from Control's `plans.workflow_policy_json` and its own operator switches,
+/// validated on the way in and on the way out by
+/// `zeroship_core::workflow_policy::AppPolicy::validate`. No creator value
+/// reaches it. It is named here rather than excluded by predicate, so a SECOND
+/// json column anywhere in the schema still fails this assertion.
+///
+/// The control above it is what keeps the name-matching half from passing over
+/// a schema the query never reached. It runs the same predicate with the
+/// payload names dropped, and the journal's own columns are what it must find.
 ///
 /// WHAT THIS DOES NOT SEE. The predicate matches a column's TYPE or its NAME, so
 /// creator payload carried in a text column under another name passes it. The
@@ -290,7 +297,10 @@ async fn journal_payload_columns_are_a_closed_set(fixture: &platform::Platform) 
             ],
         )
         .await,
-        Vec::new(),
+        vec![(
+            "workflow_policy_ledger".to_owned(),
+            "policy_json".to_owned()
+        )],
     );
 }
 
@@ -749,18 +759,28 @@ async fn manager_queue_authority(fixture: &platform::Platform, runtime: &compio_
         "SELECT c.relname, pg_get_userbyid(c.relowner) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='workflow_manager' AND c.relkind='r' ORDER BY c.relname",
         &[],
     ).await.unwrap();
-    // The schema holds two platform artifacts with different authors: the
-    // manager's own coordination tables, declared in the op DSL, and the
-    // workflow journal, which is generated SQL behind the reserved
-    // `__zeroship_` prefix. Partition rather than merge, so neither list can
-    // absorb a stray table belonging to the other.
-    let (mut journal, mut manager): (Vec<String>, Vec<String>) = tables
+    // The schema holds three platform artifacts with different authors: the
+    // manager's own coordination tables, generated from the manager schema and
+    // granted full DML; the policy tables, hand-declared in their own migration
+    // because their grants are deliberately narrower than the probe
+    // `Coordinator::verify` runs; and the workflow journal, which is generated
+    // SQL behind the reserved `__zeroship_` prefix. Partition rather than
+    // merge, so no list can absorb a stray table belonging to another.
+    let (mut journal, rest): (Vec<String>, Vec<String>) = tables
         .iter()
         .map(|row| row.get::<_, String>(0))
         .partition(|name| name.starts_with(JOURNAL_PREFIX));
+    let (mut policy, mut manager): (Vec<String>, Vec<String>) = rest
+        .into_iter()
+        .partition(|name| name.starts_with("workflow_"));
     journal.sort();
+    policy.sort();
     manager.sort();
     assert_eq!(journal, journal_tables());
+    assert_eq!(
+        policy,
+        ["workflow_policy_ledger", "workflow_rollout_config"]
+    );
     assert_eq!(
         manager,
         [

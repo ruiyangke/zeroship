@@ -21,13 +21,25 @@ mod store;
 pub use cache::PolicyObservations;
 pub use store::{ControlPolicyStore, RolloutPolicy};
 
-/// Native metadata for the Control binding. Source projections contain only
-/// policy contributors; the publication ledger contains no creator payloads.
+/// Native metadata for the Control binding. These projections contain only the
+/// policy contributors the manager's column grants name.
 ///
 /// # Errors
 /// Refuses invalid native model declarations.
 pub fn collections() -> Result<zeroship_data_orm::schema::Schema, Error> {
-    let schema = models::schema::schema();
+    let schema = models::source::schema();
+    schema.validate()?;
+    Ok(schema)
+}
+
+/// Native metadata for this service's own publication binding: the operator
+/// switches it reads and the ledger it writes. The ledger contains no creator
+/// payloads.
+///
+/// # Errors
+/// Refuses invalid native model declarations.
+pub fn publication_collections() -> Result<zeroship_data_orm::schema::Schema, Error> {
+    let schema = models::publication::schema();
     schema.validate()?;
     Ok(schema)
 }
