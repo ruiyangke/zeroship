@@ -6,8 +6,9 @@ cluster match, the data path that narrows to what the reconciler granted, the cr
 manifest made plural, `env.databases` reaching every bound database and typed under its label,
 the `zeroship db` commands, deploy verifying a live binding rather than comparing schemas,
 at-rest column encryption keyed on the database, and the migration service applying into the
-schema of the database the request names. What remains is the subscribe request naming a database
-and capacity-aware placement.
+schema of the database the request names. What remains is capacity-aware placement (Open 4), the
+worker-side compatibility check (Open 11), the relay slot name (below), and decoupling a migration
+from an app deploy (Open 13).
 
 Built:
 
@@ -148,11 +149,8 @@ Not built: capacity-aware placement.
 Open 11's subset test at isolate build does not exist, so a build reaching a column the database
 lacks fails at query time with `42703 undefined_column`.
 
-Two things are narrower than "built" and are recorded here rather than discovered later. The CDC
-relay DOES filter on the bound database's schema
-(`zeroship_data_cdc_server::source::bound_database_schema`) and refuses a second live binding
-rather than picking one, but the subscribe request still names only the app, so carrying a database
-on that wire is the routing key's remaining half. And `ThreadDbContext` holds one
+One thing is narrower than "built" and is recorded here rather than discovered later.
+`ThreadDbContext` holds one
 connection plus a per-app binding map rather than a connection map keyed `(app_id, database_id)`,
 because keying it that way needs per-database datastore coordinates that arrive with
 `env.databases`.
@@ -1113,12 +1111,13 @@ journal's frontier as the control that each delta actually committed.
   first stream is undamaged - both drop paths are scoped `AND NOT active` - but it is a real gap
   that belongs to this bullet rather than to the one below it, and no test covers it, because
   writing one means changing slot naming.
-- **The broker's routing key gains the database.** `crates/zeroship-data-orm/src/cdc/broker.rs`
-  routes on `(app_id, collection)`, and the hub in `crates/zeroship-data-cdc-server/src/hub.rs`
-  keys subscribers under an app. With one app reaching two databases that key is ambiguous: two
-  databases can each declare `users`, and an event from one would land on a subscription to the
-  other with nothing raising. It becomes `(app_id, database_id, collection)`. **This is the one
-  re-key in the design whose omission is silent rather than loud.**
+- **The broker's routing key carries the database.** BUILT. `DbRoute` pairs the app with the
+  database and the broker buckets on `(route, collection)`; `StreamKey` in
+  `crates/zeroship-data-cdc-server/src/hub.rs` keys subscribers on both, the subscribe request
+  names a `database_id`, and `bound_database_schema` refuses one the app holds no live binding
+  to. Two databases can each declare `users`, and the hub's own case asserts a change on one does
+  not reach the other's subscriber. This was the one re-key whose omission would have been silent
+  rather than loud.
 - **Fan-out authority is control's binding topology**, never `pg_auth_members` or a worker refresh
   map. Binding changes are revision barriers that purge old relay and worker queues before control
   exposes them.
@@ -1968,15 +1967,24 @@ app's requests and cannot protect a shared cluster from an app under its limit. 
     ACL today by absence rather than by rule. It becomes load-bearing the moment any `access.*` key
     is granted to a creator draft.
 
-11. **Worker-side schema compatibility check.** DEFERRED, named. Deleting the deploy gate's
-    descriptor comparison leaves a build expecting a column the database lacks to fail at query time
-    with `42703 undefined_column`. The check that moves it earlier must be a SUBSET test, never
-    equality: refuse when the database lacks something the app requires, say nothing when it has
-    grown things the app does not use. Equality is what coupled every app on a database to every
-    other, and reintroducing it anywhere reintroduces that. Only a process holding both the
-    descriptor and a connection can evaluate a subset, so this belongs at isolate build in the
-    worker, as one catalog read producing a typed refusal that names the missing collection or
-    column. It is a better error than the gate ever produced and it costs nothing at deploy.
+11. **Worker-side schema compatibility check.** DECIDED: no. The query-time refusal IS the
+    behaviour. A build expecting a relation the database lacks meets `42P01`/`42703`, which the
+    ORM classifies as `schema_not_migrated` and which `is_public_error_code`
+    (`crates/zeroship-runtime/src/core/dispatch.rs`) carries across the server-error rail WITH its
+    message, so the response names `zeroship migrate` rather than flattening to an opaque 500.
+    `schema_not_migrated_survives_the_5xx_rail_in_both_spellings` holds that, and the code's own
+    comment already anticipates this exact case: "A creator whose deploy outran their migration
+    meets this and nothing earlier."
+
+    **Why no earlier check.** Sequencing a creator's own migrations against their own deploys is
+    the creator's responsibility, and the platform absorbing it is the same move the schema epoch
+    fence was retired for. A subset test at isolate build would be a second, weaker copy of a
+    promise the platform deliberately stopped making - and it would add a catalog read to every
+    isolate build to anticipate a condition that already fails closed and names its own fix. The
+    platform's obligation here is a good error, not a gate, and it discharges that today.
+
+    This also settles the linkage Open 13 raises: decoupling migration from deploy widens the skew
+    window, and the answer to a wider window is the same typed refusal, not a new gate.
 
 12. **Where are zones beyond the default declared?** NEEDS-DECISION, and it is the one piece of
     deployment data with no home. Datastores register themselves because reaching a cluster proves
@@ -1998,6 +2006,65 @@ app's requests and cannot protect a shared cluster from an app under its limit. 
     refuses because it is absent from the block, and nothing new is introduced: the file is already
     control config (`control.join_signers_file`), which is deployment data rather than source. The
     corpus keeps seeding `default`, so a single-host deployment still declares nothing.
+
+13. **A migration is not an app operation.** DECIDED by operator: applying schema to a database is
+    a SEPARATE process from deploying an app and does not travel with one. The design already says
+    so - "schema content is then managed entirely by migrate-server, addressed by database id and
+    authorized by the creator's own bearer" - and the built surface does not honour it.
+
+    **What couples them today**, all of it downstream of one fact: the app is the only creator
+    credential the migration service can check.
+
+    - the route is `POST /v1/apps/{app_id}/databases/{database_id}/migrations/apply`, and
+      `authorize_mutation` (`crates/zeroship-migrate-server/src/api.rs`) spends the app on
+      `verify_action(token, app_id, Action::AppsDeploy, ..)`, which constructs `Resource::App`
+    - admission is `holds_live_binding(app, database)`, so a database with no bound app is
+      unreachable even though it is `active` with its schema, its three roles and its column grants
+      already minted
+    - `zeroship migrate` refuses when no app id resolves, naming `zeroship deploy` as the fix
+    - the shipped `zeroship-deploy` skill instructs "run both, in that order, whenever the schema
+      changes"
+
+    **The state this forbids is legitimate and reachable.** `zeroship db create` ends at
+    `status = active` with no binding, and binding is a separate explicit act - which this design
+    insists on so a revoked binding is not silently restored by the next deploy. So there is a
+    database every other command can address and only this one cannot fill.
+
+    **The evidence that the app carries no information.** `examples/meal-kit` declares two apps
+    over one database, and its `scripts/migrate.mjs` passes `--app=storefront` - arbitrary, since
+    `backoffice` would serve identically. The app in that command satisfies the route and says
+    nothing about what is migrated.
+
+    **The authority is the PROJECT SEAT.** DECIDED by operator: a migration is authorized the way
+    the database's own creation is, by a qualifying seat on the project that owns it - not by an app
+    and not by a machine credential scoped to a database. `zeroship.databases` carries
+    `project_id` as a required column, so the target resolves to its project in one lookup, and
+    migrate-server already holds a control-database client and already calls `authz::enforce`
+    against it.
+
+    **The predicate may not be spelled a second time.** `project_seat_joins` and
+    `project_seat_rank` in `crates/zeroship-control/src/databases.rs` are private to that crate
+    and compose `effective_project_rank_sql` from `crates/zeroship-control/src/organizations.rs`.
+    Their own comment states the rule this change has to honour: "Written once because four
+    mutations and two reads need it and two spellings would be two answers." A copy inside
+    migrate-server would be the third spelling. The predicate moves to a crate both services read,
+    or migrate-server asks Control; it is not reimplemented.
+
+    **The live-binding admission is REMOVED, not replaced.** A binding governs whether an APP may
+    read and write a database at RUNTIME; that is what the two membership edges grant and what
+    `SET LOCAL ROLE` spends per statement. Schema change is not that question. `holds_live_binding`
+    ended up on this route because the app was in the path, and the app was in the path because
+    authorization had nowhere else to land - so the check is an artifact of the coupling rather than
+    a gate the design chose. Reading it as a tenant boundary the seat predicate has to reproduce
+    would carry the coupling forward under a new name. The binding stays exactly as it is for what
+    it is for: app-to-database access.
+
+    **A stale claim to retire with it.** That same skill says `migrate` creates "the per-app
+    database role the runtime assumes on every `env.db` call", and that skipping it fails the first
+    database call "because that role does not exist". The creator apply establishes no such role:
+    `provision_runtime_app_role`'s only production caller is the schema-bundle applier in
+    `crates/zeroship-migrate-server/src/bundle.rs`, for platform schemas. What an app may touch is
+    carried by the two capability roles the reconciler mints.
 ---
 
 ## Do-not notes
