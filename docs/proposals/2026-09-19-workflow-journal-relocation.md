@@ -784,13 +784,28 @@ stall the defect fixes that motivate the move.
    bracket a monotonic-read guarantee or a replacement for it** - which is a constraint on the
    answer rather than a detail of it, and it applies to every option, not to one.
 
-   And one is authentication. `active_key` is what verifies a worker, so severing it is a
-   trust-model decision rather than a plumbing one, and it is the piece to decide before the
-   rest. `crates/zeroship-workflow/src/service/capability.rs` already mints and verifies
-   control-signed, audience-bound, short-lived capabilities and nothing in production calls it;
-   `crates/zeroship-workflow-server/src/server.rs` already refuses to start without Control's
-   verification key. The machinery for a control-signed enrolment attestation exists and is
-   unwired.
+   And one is authentication, which is different in kind from the rest and worth saying why.
+   Services authenticate each other with one mechanism - a short-lived signed assertion naming
+   issuer, audience and a single-use `jti` - but it draws its verifying key from two places, and
+   `ensure_journal` in `crates/zeroship-workflow-server/src/api.rs` states the split at the door:
+   "Control presents a ROLE assertion verified against the peer bundle; a worker presents an
+   INSTANCE assertion verified against the enrolment registry." A role is long-lived and there
+   are a handful, so a static `service-peers.json` carries its key. A worker instance mints its
+   own keypair at startup and there are as many as you run, so a static file cannot: the
+   registry is the dynamic half of the same scheme, and `active_key` is the read into it. That
+   one query also answers liveness, since `status` and `expires_at` decide whether the instance
+   is still enrolled, which is why it does not unpick into a pure identity lookup.
+
+   Severing it is therefore a trust-model decision rather than a plumbing one, and it is the
+   piece to decide before the rest. The shape that reuses what exists rather than adding a
+   mechanism is a control-signed attestation: Control already knows the key because it enrolled
+   it, so it can sign a short-lived statement binding instance, key thumbprint and zone, and the
+   service verifies that against Control's ROLE key - which
+   `crates/zeroship-workflow-server/src/server.rs` already refuses to start without.
+   `crates/zeroship-workflow/src/service/capability.rs` already mints and verifies
+   control-signed, audience-bound, short-lived capabilities with no production caller. What it
+   costs is that revocation stops being immediate and becomes bounded by the attestation's
+   lifetime, because Control cannot un-say what it has signed. That is the decision.
 
    **A gap this uncovered, unrelated to the move.** `workflow_rollout_config` has no production
    writer: every caller of `set_rollout` and `set_plan_policy` in
