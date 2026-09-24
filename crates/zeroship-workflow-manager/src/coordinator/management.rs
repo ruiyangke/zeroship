@@ -36,12 +36,11 @@ impl Coordinator {
     ///
     /// What the manager still enforces about the named deployment:
     ///
-    /// - The queue must hold it. An unheld deployment goes through
-    ///   [`Acceptance::Retain`] into `ensure_deployment_for`, whose acquisition
-    ///   runs inside Control's row lock on `zeroship.app_deploys`: a deployment
-    ///   belonging to another app finds no row and is denied, and one whose
-    ///   retention state has left `available` -- reclaiming or deleted -- is a
-    ///   conflict.
+    /// - The queue must hold it. An unheld deployment leaves acceptance for
+    ///   `ensure_deployment_for`, whose acquisition runs inside Control's row
+    ///   lock on `zeroship.app_deploys`: a deployment belonging to another app
+    ///   finds no row and is denied, and one whose retention state has left
+    ///   `available` -- reclaiming or deleted -- is a conflict.
     /// - The hash must match the hold. `require_held` returns the hash Control
     ///   minted when it granted the hold, and a request naming a different one
     ///   is a conflict rather than a restart onto code the caller did not name.
