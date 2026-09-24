@@ -219,6 +219,14 @@ pub async fn run(settings: WorkflowSettings, options: ServerOptions) -> Result<(
                         )?)
                     };
                     let eligibility = Rc::new(connect_eligibility(&url, coordinator).await?);
+                    // The journal shares the service own database and login;
+                    // it is the same url the coordinator opened, narrowed to a
+                    // different schema by its binding.
+                    let runs = Rc::new(
+                        crate::runs::RunService::connect(&url)
+                            .await
+                            .map_err(|_| crate::coordinator::Error::Unavailable)?,
+                    );
                     Ok::<_, crate::coordinator::Error>(Rc::new(WorkflowHttpState {
                         service: Coordinator::connect(
                             &url,
@@ -231,6 +239,7 @@ pub async fn run(settings: WorkflowSettings, options: ServerOptions) -> Result<(
                         policy_source: Some(Rc::new(
                             connect_policies(&url, coordinator, observations).await?,
                         )),
+                        runs,
                         journal,
                     }))
                 })

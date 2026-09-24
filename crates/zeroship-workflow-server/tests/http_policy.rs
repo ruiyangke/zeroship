@@ -217,10 +217,16 @@ impl Fixture {
             ))),
             replay,
         ));
+        let runs = Rc::new(
+            zeroship_workflow_server::runs::RunService::connect(&platform.runtime_url)
+                .await
+                .expect("open the journal this service serves"),
+        );
         let state = Rc::new(WorkflowHttpState {
             service,
             auth,
             policy_source: configured.then(|| source.clone() as Rc<dyn PolicySource>),
+            runs,
             journal: None,
         });
         Self {
