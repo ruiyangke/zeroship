@@ -18,6 +18,7 @@ pub mod api;
 pub mod apply;
 pub mod auth;
 pub mod bundle;
+pub mod capability_grants;
 pub mod config;
 pub mod control_plane;
 pub mod datastore;

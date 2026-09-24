@@ -494,9 +494,7 @@ async fn an_apply_that_commits_a_schema_delta_mints_no_binding_role_and_retires_
     let minted = binding_roles(&cluster).await;
     assert_eq!(
         minted,
-        vec![
-            database_derivation::binding_role_name(&binding).expect("the role name fits")
-        ],
+        vec![database_derivation::binding_role_name(&binding).expect("the role name fits")],
         "the pass mints one role per binding and nothing else"
     );
 
@@ -677,4 +675,269 @@ async fn apply_through(
     .unwrap_or_else(|error| panic!("apply into {}: {error}", database.as_str()));
     let _ = std::fs::remove_dir_all(tmp);
     report
+}
+
+// ---------------------------------------------------------------------------
+// The capability grants an apply emits
+// ---------------------------------------------------------------------------
+
+/// Run one statement narrowed to `role`, the way the data plane narrows: a
+/// `SET LOCAL ROLE` as the first statement of an explicit transaction.
+///
+/// Returns the server's own error on a refusal. A transport failure carries no
+/// SQLSTATE, and treating one as "some error" is how a denial arm stops
+/// measuring the denial. The transaction is always rolled back, because a
+/// failed statement leaves the session in an aborted transaction and the next
+/// arm's refusal would then be `25P02` rather than the one being measured.
+async fn under_role(
+    client: &mut Client,
+    role: &str,
+    sql: &str,
+) -> Result<(), compio_postgres::Error> {
+    let transaction = client.transaction().await?;
+    let narrowed = async {
+        transaction
+            .simple_query(&format!("SET LOCAL ROLE \"{role}\""))
+            .await?;
+        transaction.simple_query(sql).await
+    }
+    .await;
+    let rolled_back = transaction.rollback().await;
+    narrowed?;
+    rolled_back?;
+    Ok(())
+}
+
+fn refused_for_privilege(error: &compio_postgres::Error) -> bool {
+    error.code() == Some(&compio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE)
+}
+
+/// Whether a role holds one privilege on a whole table, as `PostgreSQL` says.
+///
+/// Asked beside `has_column_privilege` because the two answer different
+/// questions: a table-level grant beside a column list does not narrow it, it
+/// widens it, so "the column is reachable" is only half of what the emission
+/// has to satisfy.
+async fn holds_table_privilege(
+    cluster: &Client,
+    role: &str,
+    database: &DatabaseId,
+    table: &str,
+    privilege: &str,
+) -> bool {
+    let qualified = format!("{}.{table}", database_derivation::schema_name(database));
+    cluster
+        .query_one(
+            "SELECT has_table_privilege($1, $2, $3) AS granted",
+            &[&role, &qualified, &privilege],
+        )
+        .await
+        .expect("ask PostgreSQL for the table privilege")
+        .get("granted")
+}
+
+async fn holds_column_privilege(
+    cluster: &Client,
+    role: &str,
+    database: &DatabaseId,
+    table: &str,
+    column: &str,
+    privilege: &str,
+) -> bool {
+    let qualified = format!("{}.{table}", database_derivation::schema_name(database));
+    cluster
+        .query_one(
+            "SELECT has_column_privilege($1, $2, $3, $4) AS granted",
+            &[&role, &qualified, &column, &privilege],
+        )
+        .await
+        .expect("ask PostgreSQL for the column privilege")
+        .get("granted")
+}
+
+/// An apply leaves the table it created reachable through the BINDING role, and
+/// the fence around it exactly as wide as the binding's capability.
+///
+/// # This is the seam the decoupling left open
+///
+/// The reconciler grants the two capability roles `USAGE` on the schema and
+/// nothing else, by design: which COLUMNS each may touch is a fact about the
+/// tables an apply creates. Until `apply::run_apply` emitted them, a creator app
+/// correctly bound to a correctly migrated database was refused `42501` on its
+/// own table by its own binding.
+///
+/// # Every claim is paired with the control that gives it meaning
+///
+/// - **The table might have been reachable anyway.** Foreclosed by the co-tenant
+///   arm: a LIVE binding role on another database, converged by the same pass,
+///   is refused on this one. A grant that had widened to `PUBLIC` would fail it.
+/// - **The grant might be table-wide**, which would return the plaintext of a
+///   classified column the column list withheld. Foreclosed by asserting
+///   `has_table_privilege` is FALSE for `SELECT` while `has_column_privilege` is
+///   true for `title` - the two differ only if the emission is column-listed.
+/// - **The apply might have granted nothing and the statements run as the
+///   superuser fixture.** Foreclosed by taking the readwrite arm's refusal
+///   BEFORE the apply, on a converged and bound database, so the permitted case
+///   after it differs in exactly one variable.
+/// - **A re-apply might accumulate or drop grants.** Foreclosed by applying the
+///   same document set twice and re-measuring both the permitted and the refused
+///   arm afterwards.
+#[ntex::test]
+async fn an_apply_leaves_its_table_reachable_through_the_binding_and_no_wider() {
+    let cluster_fixture = tenant::Cluster::start();
+    let mut cluster = connect(cluster_fixture.url()).await;
+    let pg = connect(&fixture::migrated_url()).await;
+    let world = World::new(&pg, "apply-grants").await;
+    let reconciler = Reconciler::new(
+        ControlStore::new(control_as_service().await),
+        cluster_fixture.url(),
+        Some(world.zone.clone()),
+    );
+
+    let datastore = pass(&reconciler).await;
+    let subject = world.declare_database(&pg, &datastore, "subject").await;
+    let neighbour = world.declare_database(&pg, &datastore, "neighbour").await;
+
+    // One app per binding: `database_bindings_natural_key` is unique on
+    // (app_id, database_id), so one app cannot hold both capabilities on one
+    // database and the two arms would otherwise be one row.
+    let writer_app = world.app(&pg, "writer").await;
+    let reader_app = world.app(&pg, "reader").await;
+    let outsider_app = world.app(&pg, "outsider").await;
+    let writer = world
+        .declare_binding(&pg, &writer_app, &subject, DatabaseCapability::ReadWrite)
+        .await;
+    let reader = world
+        .declare_binding(&pg, &reader_app, &subject, DatabaseCapability::ReadOnly)
+        .await;
+    let outsider = world
+        .declare_binding(
+            &pg,
+            &outsider_app,
+            &neighbour,
+            DatabaseCapability::ReadWrite,
+        )
+        .await;
+    pass(&reconciler).await;
+
+    let writer_role = database_derivation::binding_role_name(&writer).expect("the name fits");
+    let reader_role = database_derivation::binding_role_name(&reader).expect("the name fits");
+    let outsider_role = database_derivation::binding_role_name(&outsider).expect("the name fits");
+    let schema = database_derivation::schema_name(&subject);
+    let read_notes = format!("SELECT count(*) FROM \"{schema}\".\"notes\"");
+    let write_notes =
+        format!("INSERT INTO \"{schema}\".\"notes\" (id, title) VALUES ('nte_seed', 'hello')");
+
+    // THE CONTROL, taken before the apply: the database is converged, all three
+    // bindings are live, and the table does not exist yet.
+    assert_eq!(
+        tables_in(&cluster, &subject).await,
+        Vec::<String>::new(),
+        "the database must be converged and empty before the apply"
+    );
+    let before = under_role(&mut cluster, &writer_role, &read_notes)
+        .await
+        .expect_err("there is no table to read before the apply");
+
+    apply_through(
+        cluster_fixture.url(),
+        &subject,
+        &seed_user(&pg).await,
+        &[NOTES],
+    )
+    .await;
+    assert!(
+        tables_in(&cluster, &subject)
+            .await
+            .contains(&"notes".to_owned()),
+        "the apply must have created the table these arms are about"
+    );
+    // The pre-apply refusal was about the missing table (`42P01`), not about a
+    // privilege, so it is named rather than lumped in with the arms below.
+    assert_eq!(
+        before.code(),
+        Some(&compio_postgres::error::SqlState::UNDEFINED_TABLE),
+        "before the apply the table is absent, not merely unreachable: {before}"
+    );
+
+    // THE PERMITTED CASE. A readwrite binding writes and reads its own table.
+    under_role(&mut cluster, &writer_role, &write_notes)
+        .await
+        .expect("a readwrite binding must reach the table its apply created");
+    under_role(&mut cluster, &writer_role, &read_notes)
+        .await
+        .expect("a readwrite binding must read the table its apply created");
+
+    // THE EMISSION IS COLUMN-LISTED. A table-level SELECT beside a column list
+    // widens rather than narrows, so the two answers must disagree.
+    let readwrite_capability =
+        database_derivation::capability_role_name(&subject, DatabaseCapability::ReadWrite)
+            .expect("the capability role name fits");
+    assert!(
+        holds_column_privilege(
+            &cluster,
+            &readwrite_capability,
+            &subject,
+            "notes",
+            "title",
+            "SELECT"
+        )
+        .await,
+        "the apply must leave the readwrite capability able to read the column"
+    );
+    assert!(
+        !holds_table_privilege(&cluster, &readwrite_capability, &subject, "notes", "SELECT").await,
+        "the apply must not grant SELECT at the table: a table-level grant beside \
+         a column list returns every column the list withheld"
+    );
+    assert!(
+        holds_table_privilege(&cluster, &readwrite_capability, &subject, "notes", "DELETE").await,
+        "DELETE has no column form, so it is the one verb granted at the table"
+    );
+
+    // NEGATIVE ARM 1: the readonly binding, differing in one variable.
+    under_role(&mut cluster, &reader_role, &read_notes)
+        .await
+        .expect("a readonly binding must read");
+    let readonly_write = under_role(&mut cluster, &reader_role, &write_notes)
+        .await
+        .expect_err("a readonly binding must not write");
+    assert!(
+        refused_for_privilege(&readonly_write),
+        "expected 42501 on a readonly write, got {readonly_write}"
+    );
+
+    // NEGATIVE ARM 2: a LIVE binding that names the other database holds
+    // nothing here. The emission must not have widened past its own schema.
+    let crossed = under_role(&mut cluster, &outsider_role, &read_notes)
+        .await
+        .expect_err("a binding on another database must not reach this one");
+    assert!(
+        refused_for_privilege(&crossed),
+        "expected 42501 across databases, got {crossed}"
+    );
+
+    // A SECOND APPLY CONVERGES. The same document set applies nothing new, and
+    // every arm above still answers the same way.
+    apply_through(
+        cluster_fixture.url(),
+        &subject,
+        &seed_user(&pg).await,
+        &[NOTES],
+    )
+    .await;
+    under_role(&mut cluster, &writer_role, &read_notes)
+        .await
+        .expect("a re-apply must not withdraw the readwrite binding's access");
+    let readonly_write_again = under_role(&mut cluster, &reader_role, &write_notes)
+        .await
+        .expect_err("a re-apply must not widen the readonly binding");
+    assert!(
+        refused_for_privilege(&readonly_write_again),
+        "expected 42501 after the re-apply, got {readonly_write_again}"
+    );
+    assert!(
+        !holds_table_privilege(&cluster, &readwrite_capability, &subject, "notes", "SELECT").await,
+        "a re-apply must not promote the column list to a table-level grant"
+    );
 }

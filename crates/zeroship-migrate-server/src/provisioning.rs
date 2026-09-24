@@ -357,9 +357,11 @@ pub fn audit_unmask_table_sql(app_schema: &str) -> String {
 /// This table is PLATFORM DDL inside a creator schema: its shape is fixed, it
 /// carries no classified column, and the data plane writes it through the same
 /// narrowed session that read the row being unmasked. Which COLUMNS of a
-/// CREATOR table each capability may touch is derived from the owner's own
-/// migration IR, so those grants are per column and belong with the DDL that
-/// creates them. This one is per table and belongs with the DDL above.
+/// CREATOR table each capability may touch is a fact about that table, so those
+/// grants are per column and are emitted over the live catalog by
+/// [`crate::capability_grants::grant_capability_columns`], which leaves this
+/// table alone by its `__zeroship_` prefix. This one is per table and belongs
+/// with the DDL above.
 ///
 /// **Both capabilities, including read-only.** An unmask is a READ that
 /// produced plaintext, so a read-only binding performs them and its audit row
