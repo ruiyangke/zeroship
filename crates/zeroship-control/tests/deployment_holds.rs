@@ -81,6 +81,7 @@ use zeroship_workflow_server::{
     WorkflowHttpState,
     auth::{PostgresWorkerRegistry, WorkflowAuth},
     coordinator::{Coordinator, Options as CoordinatorOptions},
+    runs::RunService,
 };
 
 fn signer(issuer: ServiceIssuer, key: ServiceSigningKey) -> Arc<ServiceAuth> {
@@ -339,31 +340,46 @@ impl Fixture {
                 let (issuer, key) = control.signing_identity().unwrap();
                 let mut peers = ServiceTrustBundle::new();
                 peers.trust_signing_key(issuer, key.key_id(), key).unwrap();
+                let service = Coordinator::connect(
+                    &url,
+                    CoordinatorOptions {
+                        worker_ttl: Duration::from_secs(120),
+                        assignment_ttl: Duration::from_secs(120),
+                        ..CoordinatorOptions::default()
+                    },
+                    Rc::new(zeroship_workflow_manager::retention::CatalogClient::new(
+                        zeroship_workflow_manager::deployments::DeploymentHolds::new(
+                            database(&catalog_url).await,
+                        )
+                        .unwrap(),
+                    )),
+                    Rc::new(zeroship_workflow_manager::eligibility::LocalEligibility::new(
+                        zeroship_workflow_manager::eligibility::ZoneId::default_zone(),
+                    )),
+                )
+                .await
+                .unwrap();
+                // The journal shares the coordinator's database and login, and
+                // the platform migrations this fixture runs already install its
+                // schema; opening it provisions nothing.
+                let runs = Rc::new(
+                    RunService::connect(
+                        &url,
+                        service
+                            .recovery(zeroship_workflow_manager::recovery::Options::default())
+                            .unwrap(),
+                    )
+                    .await
+                    .expect("open the journal this service serves"),
+                );
                 let state = Rc::new(WorkflowHttpState {
                     policy_source: None,
                     // This fixture drives deployment holds, not journal
                     // provisioning; a manager without a journal client simply
                     // does not ensure schemas.
                     journal: None,
-                    service: Coordinator::connect(
-                        &url,
-                        CoordinatorOptions {
-                            worker_ttl: Duration::from_secs(120),
-                            assignment_ttl: Duration::from_secs(120),
-                            ..CoordinatorOptions::default()
-                        },
-                        Rc::new(zeroship_workflow_manager::retention::CatalogClient::new(
-                            zeroship_workflow_manager::deployments::DeploymentHolds::new(
-                                database(&catalog_url).await,
-                            )
-                            .unwrap(),
-                        )),
-                        Rc::new(zeroship_workflow_manager::eligibility::LocalEligibility::new(
-                            zeroship_workflow_manager::eligibility::ZoneId::default_zone(),
-                        )),
-                    )
-                    .await
-                    .unwrap(),
+                    service,
+                    runs,
                     auth: Arc::new(WorkflowAuth::new(
                         Arc::new(ServiceAssertionVerifier::new(peers, replay.clone())),
                         Arc::new(PostgresWorkerRegistry::new(registry)),
