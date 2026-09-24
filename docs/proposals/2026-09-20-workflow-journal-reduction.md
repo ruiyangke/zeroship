@@ -198,8 +198,9 @@ counterpart there. Cascade cancellation exists but runs inside the history servi
 durable obligation row, so it does not survive that service dying mid-cascade. Any claim that
 this system spends more state for less capability has to account for those first.
 
-**Resonate keeps no outbox.** The header of its only migration, in
-`crates/resonate-server-postgres/migrations/0001_initial.sql`, states the principle:
+**Resonate keeps no outbox.** The header of its only migration -
+`crates/resonate-server-postgres/migrations/0001_initial.sql` in THAT project, not in this
+tree - states the principle:
 
 > There is no outbox either. A message is returned by the transition that emitted it and
 > delivered by the caller, so there is nothing to store and nothing to drain.
@@ -1039,7 +1040,7 @@ removes neither.** A release that must happen later still has to be recorded
 now and executed then, and that is what a state column is for.
 
 **And the hop is inside one service, not across two.** `ReleaseHold` is refused
-to workers at both boundaries, in `coordinator/jobs.rs` and in
+to workers at both boundaries, in `crates/zeroship-workflow-manager/src/coordinator/jobs.rs` and in
 `crates/zeroship-workflow-client/src/jobs.rs`, each saying why:
 
     // A worker that could publish a release would be asking itself to give

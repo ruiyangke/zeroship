@@ -119,6 +119,10 @@ test("shadcn selects preserve accessible names, keyboard choices, and dependent 
   page,
 }) => {
   await visit(page, "/m/us/en/plans");
+  // The same locator on the market this step does ask for a postcode, so the
+  // count of zero below says China replaced the field rather than that the
+  // locator never matched anything.
+  await expect(page.getByLabel(/ZIP code|Postal code/i)).toHaveCount(1);
   const country = page.getByRole("combobox", { name: "Delivery country" });
   await country.focus();
   await country.press("Enter");
@@ -142,6 +146,7 @@ test("shadcn selects preserve accessible names, keyboard choices, and dependent 
   await expect(district).toContainText("Pudong");
   await province.click();
   await expect(page.getByRole("listbox")).toBeVisible();
+  await expect(page.getByRole("option")).not.toHaveCount(0);
   await page.keyboard.press("Escape");
   await expect(province).toBeFocused();
   await expect(page.getByRole("option")).toHaveCount(0);
