@@ -106,11 +106,18 @@ pub const PLATFORM_CLI_CLIENT_ID: &str = "zeroship-cli";
 /// they had no effect. The reasoning for leaving that alone rather than
 /// reconciling - reconciling cannot distinguish "revoked" from "not yet
 /// seeded" - is on `materialize_default_grants` itself.
-pub const PLATFORM_CLI_ISSUABLE_SCOPES: [&str; 19] = [
+pub const PLATFORM_CLI_ISSUABLE_SCOPES: [&str; 20] = [
     "apps:archive",
     "apps:deploy",
     "apps:read",
     "apps:write",
+    // `zeroship migrate` is the verb this one carries, and the migration
+    // service asks for exactly it: applying schema is authorized at the
+    // DATABASE, by a qualifying seat on the project that owns it. Without this
+    // entry the one credential that tool holds is refused at the only action
+    // that route checks, so the route is unreachable rather than a verb
+    // failing later.
+    "database:migrate",
     // `env:*` and `secrets:write` are here for the same reason the organization
     // verbs are: the CLI SHIPS `zeroship var` and `zeroship secret`, and without
     // these every verb but `secret ls` answers 403 for any credential the same
@@ -189,11 +196,12 @@ pub const OFFLINE_ACCESS_SCOPE: &str = "offline_access";
 /// `zeroship login` that fails outright, not a verb that fails later.
 /// `the_registration_is_the_issuable_ceiling_plus_offline_access` holds them
 /// to that.
-pub const PLATFORM_CLI_REGISTERED_SCOPES: [&str; 20] = [
+pub const PLATFORM_CLI_REGISTERED_SCOPES: [&str; 21] = [
     "apps:archive",
     "apps:deploy",
     "apps:read",
     "apps:write",
+    "database:migrate",
     "env:read",
     "env:write",
     "organization:admin",

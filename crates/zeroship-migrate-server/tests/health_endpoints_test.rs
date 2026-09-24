@@ -18,7 +18,7 @@ use ntex::http::StatusCode;
 use ntex::web::{self, test};
 use uuid::Uuid;
 use zeroship_authz::Action;
-use zeroship_id::AppId;
+use zeroship_id::DatabaseId;
 use zeroship_migrate_server::auth::{AuthError, Authenticator, VerifiedCaller};
 use zeroship_migrate_server::policy::ManagedPolicyConfig;
 use zeroship_migrate_server::rate_limit::MutationRateLimiter;
@@ -53,7 +53,7 @@ impl Authenticator for RefusingAuthenticator {
     async fn verify_action(
         &self,
         _token: &str,
-        _app_id: &AppId,
+        _database_id: &DatabaseId,
         _required_action: Action,
         _request_ip: Option<IpAddr>,
         _request_id: &str,
