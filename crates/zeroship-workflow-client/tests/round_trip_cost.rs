@@ -21,10 +21,11 @@
 //!   is transport.
 //!
 //! WHAT IT OMITS, and a reader must not forget
-//! - TLS. The peer is loopback HTTP. `Transport` admits plaintext only for a
-//!   literal loopback address; a remote peer is HTTPS, and a handshake plus
-//!   record layer is not in these numbers. Connection reuse decides how much
-//!   that matters, which is why the keep-alive column exists.
+//! - TLS. The peer is loopback HTTP, which `Transport` admits without an
+//!   operator naming it. A remote peer is HTTPS unless the operator named it in
+//!   `plaintext_peers`, and a handshake plus record layer is not in these
+//!   numbers. Connection reuse decides how much that matters, which is why the
+//!   keep-alive column exists.
 //! - Network. Loopback has no propagation delay. A zone-local peer adds its
 //!   own; a cross-zone peer adds much more.
 //! - The peer's own work. This peer verifies and replies from memory. A real
