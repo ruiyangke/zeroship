@@ -326,6 +326,10 @@ pub async fn run(
     service_keyring: Arc<zeroship_core::service_peers::ServiceKeyring>,
 ) -> std::io::Result<()> {
     let addr = cfg.settings.addr.get().clone();
+    // Each serving thread builds its own compio io_uring runtime, so this is
+    // also the ring count this process charges to `ulimit -l`. `main` is the
+    // gate that refuses zero; this is the consumer.
+    let http_threads = *cfg.settings.threads.get();
     let google_enabled = google_jwks.is_some();
     let github_enabled = cfg.github_client_id().is_some();
     // Console origin(s) the framed login routes admit via `frame-ancestors`
@@ -360,6 +364,7 @@ pub async fn run(
         }
         app.configure(configure(google_enabled, github_enabled))
     })
+    .workers(http_threads)
     .bind(&addr)?
     .run()
     .await

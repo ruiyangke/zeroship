@@ -10,9 +10,9 @@ use std::sync::Arc;
 use clap::Parser;
 use ntex::web;
 use zeroship_core::config::{
-    audit_credentials, bootstrap_or_exit, mark_dev_escape_active, require_nonempty,
-    validate_pairwise_salt, validate_stash_key, BuildProfile, CheckConfigReport, CheckValue,
-    CredentialPosture, CredentialVerdict, SubsystemCredential,
+    audit_credentials, bootstrap_or_exit, mark_dev_escape_active, require_http_threads,
+    require_nonempty, validate_pairwise_salt, validate_stash_key, BuildProfile, CheckConfigReport,
+    CheckValue, CredentialPosture, CredentialVerdict, SubsystemCredential,
 };
 use zeroship_bundle::{build_blob_store, BlobStore, StoreUrl};
 use zeroship_gateway::config::{GateSettings, GateSettingsSources};
@@ -250,6 +250,16 @@ fn main() -> std::io::Result<()> {
     let trust_proxy = *settings.trust_proxy.get();
     let port = *settings.port.get();
     let bind_host = settings.bind.get().clone();
+    // Resolved BEFORE the `--check-config` return below, so a dry run refuses a
+    // zero the boot would otherwise turn into a bound port answering nothing.
+    let http_threads = match require_http_threads("gateway.threads", *settings.threads.get()) {
+        Ok(threads) => threads,
+        Err(message) => {
+            eprintln!("gateway: {message}");
+            tracing::error!(error = %message, "gateway: refusing to start");
+            std::process::exit(1);
+        }
+    };
     let control_url = settings.control_url.get().clone();
     // Refuse a scheme this transport cannot honour, the same way `--blob-store`
     // below refuses a store URL it cannot parse. Without this an `https://`
@@ -385,6 +395,7 @@ fn main() -> std::io::Result<()> {
         let mut report = CheckConfigReport::new();
         report.field("port", CheckValue::Count(usize::from(port)));
         report.field("bind", CheckValue::Plain(bind_host.clone()));
+        report.field("threads", CheckValue::Count(http_threads));
         report.field(
             "config_source",
             CheckValue::Plain(boot.overlay.source.to_string()),
@@ -799,6 +810,7 @@ fn main() -> std::io::Result<()> {
                     .route(web::route().to(router::handle_subdomain)),
             )
     })
+    .workers(http_threads)
     .bind(&bind_addr)?
     .run()
     .await

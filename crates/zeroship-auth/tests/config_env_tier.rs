@@ -126,3 +126,118 @@ fn the_shared_auth_provider_variable_reaches_auth() {
         combined(&output)
     );
 }
+
+/// Run the real `zeroship-auth` under `--check-config` with extra ARGUMENTS as
+/// well as extra variables, so the flag tier can be driven too.
+fn run_with_args(extra_env: &[(&str, &str)], args: &[&str]) -> Output {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_zeroship-auth"));
+    cmd.env_clear()
+        .env("ZEROSHIP_AUTH_DATABASE_URL", "postgres://check-config");
+    for (key, value) in extra_env {
+        cmd.env(key, value);
+    }
+    cmd.arg("--check-config")
+        .args(args)
+        .output()
+        .expect("spawn zeroship-auth")
+}
+
+/// The keys every dry run below needs before it reaches a report at all.
+const KEYS: [(&str, &str); 2] = [
+    ("ZEROSHIP_AUTH_STASH_SIGNING_KEY", STRONG_HEX),
+    ("ZEROSHIP_AUTH_TOTP_ENC_KEY", STRONG_HEX),
+];
+
+/// The one-per-core count `auth.threads` resolves to when nothing supplies it.
+///
+/// Recomputed here rather than written down: the compiled default is
+/// `zeroship_core::config::default_http_threads`, and a literal would pin this
+/// test to the machine that wrote it.
+fn cores() -> usize {
+    std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
+}
+
+#[test]
+fn the_unset_thread_count_still_resolves_to_one_per_core() {
+    // THE ARM THAT MATTERS MOST. `auth.threads` exists so an operator can spend
+    // fewer io_uring rings on a host with a small `ulimit -l`; the price of
+    // getting its default wrong is a silent concurrency change on every
+    // deployment that never sets it. Asserting only the explicit arm below
+    // would pass over a default that had quietly become 1.
+    let output = run_with_args(&KEYS, &["--no-config"]);
+    assert!(
+        output.status.success(),
+        "auth --check-config exited {:?}: {}",
+        output.status.code(),
+        combined(&output)
+    );
+    let expected = format!("threads = {}", cores());
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains(&expected),
+        "the report must carry {expected:?}: {}",
+        combined(&output)
+    );
+}
+
+#[test]
+fn an_explicit_thread_count_reaches_the_report_from_flag_and_environment() {
+    let mut env = KEYS.to_vec();
+    env.push(("ZEROSHIP_AUTH_THREADS", "3"));
+
+    let from_env = run_with_args(&env, &["--no-config"]);
+    assert!(
+        from_env.status.success(),
+        "auth --check-config exited {:?}: {}",
+        from_env.status.code(),
+        combined(&from_env)
+    );
+    assert!(
+        String::from_utf8_lossy(&from_env.stdout).contains("threads = 3"),
+        "the environment tier did not reach the report: {}",
+        combined(&from_env)
+    );
+
+    // The flag outranks the environment.
+    let from_flag = run_with_args(&env, &["--no-config", "--threads", "2"]);
+    assert!(
+        from_flag.status.success(),
+        "auth --check-config exited {:?}: {}",
+        from_flag.status.code(),
+        combined(&from_flag)
+    );
+    assert!(
+        String::from_utf8_lossy(&from_flag.stdout).contains("threads = 2"),
+        "the flag tier did not outrank the environment: {}",
+        combined(&from_flag)
+    );
+
+    // The one-variable control: the same keys, neither tier supplying a count,
+    // resolves the compiled default instead of echoing 2 or 3.
+    let bare = run_with_args(&KEYS, &["--no-config"]);
+    let expected = format!("threads = {}", cores());
+    assert!(
+        String::from_utf8_lossy(&bare.stdout).contains(&expected),
+        "the control run must carry {expected:?}: {}",
+        combined(&bare)
+    );
+}
+
+#[test]
+fn a_zero_thread_count_is_refused_by_the_dry_run() {
+    // ntex does not clamp: zero arbiters means the process binds its port,
+    // passes a TCP liveness probe and answers nothing. The dry run has to
+    // refuse it, because the dry run is where an operator finds out.
+    let output = run_with_args(&KEYS, &["--no-config", "--threads", "0"]);
+
+    assert!(
+        !output.status.success(),
+        "zero serving threads must refuse; the run exited {:?}: {}",
+        output.status.code(),
+        combined(&output)
+    );
+    assert!(
+        combined(&output).contains("auth.threads"),
+        "the refusal must name the setting an operator can change: {}",
+        combined(&output)
+    );
+}

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use clap::Parser;
 use compio_postgres::{connect, NoTls};
 use zeroship_core::config::{
-    bootstrap_or_exit, validate_master_key_material,
+    bootstrap_or_exit, require_http_threads, validate_master_key_material,
     validate_secret_material, validate_stash_key, CheckConfigReport, CheckValue,
 };
 use zeroship_core::oidc_verify::JwksCache;
@@ -57,6 +57,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::error!("{message}");
         std::process::exit(1);
     }
+    // Resolved BEFORE the dry-run return below, so `--check-config` refuses a
+    // zero the boot would otherwise turn into a bound port answering nothing.
+    let http_threads = match require_http_threads("auth.threads", *cfg.settings.threads.get()) {
+        Ok(threads) => threads,
+        Err(message) => {
+            eprintln!("auth: {message}");
+            tracing::error!(error = %message, "auth: refusing to start");
+            std::process::exit(1);
+        }
+    };
     // --check-config is a read-only DRY-RUN: resolve + report the config and
     // exit BEFORE any runtime-only validation (mailer/SMTP construction), exactly
     // like control / gateway / worker. Building the mailers enforces the
@@ -67,6 +77,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if check_config {
         let mut report = CheckConfigReport::new();
         report.field("addr", CheckValue::Plain(cfg.settings.addr.get().clone()));
+        report.field("threads", CheckValue::Count(http_threads));
         report.field(
             "config_source",
             CheckValue::Plain(boot.overlay.source.to_string()),

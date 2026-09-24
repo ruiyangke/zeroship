@@ -19,9 +19,9 @@ use std::path::{Path, PathBuf};
 
 use clap::Parser;
 use zeroship_core::config::{
-    zeroship_config, AuthProviderKind, BootstrapControl, CheckFormat, CommandControl,
-    ConfigResolveError, GeneratedConfig, ObservabilityControls, Operational, OverlaySelector,
-    Secret,
+    default_http_threads, zeroship_config, AuthProviderKind, BootstrapControl, CheckFormat,
+    CommandControl, ConfigResolveError, GeneratedConfig, ObservabilityControls, Operational,
+    OverlaySelector, Secret,
 };
 use zeroship_core::observability::LogFormat;
 use zeroship_mailer::SmtpTls;
@@ -62,6 +62,15 @@ pub struct AuthSettings {
     /// Listen address. Defaults to loopback; compose passes `0.0.0.0:9092`.
     #[config(name = "auth.addr", default = "127.0.0.1:9092".to_owned())]
     pub addr: Operational<String>,
+
+    /// Number of ntex serving threads. Defaults to one per available core.
+    ///
+    /// EACH THREAD IS AN io_uring RING, charged to the per-user locked-memory
+    /// budget before this process answers anything. A host running auth beside
+    /// control, the gateway and the migration service multiplies that by four,
+    /// and the service that exhausts `ulimit -l` is whichever starts last.
+    #[config(name = "auth.threads", default = default_http_threads())]
+    pub threads: Operational<usize>,
 
     /// `PostgreSQL` DSN for the auth service.
     ///

@@ -10,6 +10,46 @@ use crate::config::names::GeneratedConfig;
 use crate::config::source::{load_overlay, log_overlay_source, LoadedOverlay};
 use crate::observability::{init_tracing_with, resolve_log_filter, LogFormat};
 
+/// ntex serving threads when nothing supplies a binary's `<scope>.threads`.
+///
+/// A function, not a constant: the compiled default is "one per core", which is
+/// only knowable at run time. Each generated resolver calls this exactly when no
+/// flag, environment value or overlay entry supplied one.
+///
+/// EVERY SERVING THREAD IS A RING. Each ntex arbiter builds its own compio
+/// io_uring runtime, so a process that takes one per core claims that many
+/// entries from the per-user locked-memory budget (`ulimit -l`) before it serves
+/// a request. A host running several platform services therefore multiplies the
+/// core count by the service count, and the process that exhausts the budget is
+/// the one that fails - not the one that spent it. That is the reason every
+/// service declares this setting rather than accepting a framework default it
+/// cannot name.
+#[must_use]
+pub fn default_http_threads() -> usize {
+    std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
+}
+
+/// Refuse a zero serving-thread count, naming the setting that supplied it.
+///
+/// ntex does not clamp: `WorkerPool::workers(0)` makes its manager start no
+/// arbiter, log `No workers`, and hold every accepted connection in a backlog
+/// nothing drains. The process binds its port, passes a TCP liveness probe and
+/// answers nothing - a configuration typo that looks like a hang. Refusing at
+/// boot turns that into a diagnostic naming the key.
+///
+/// # Errors
+///
+/// Returns the operator-facing refusal when `threads` is zero.
+pub fn require_http_threads(setting: &str, threads: usize) -> Result<usize, String> {
+    if threads == 0 {
+        return Err(format!(
+            "{setting} must be greater than zero; at zero ntex starts no serving thread, so \
+             this process would bind its port and answer nothing"
+        ));
+    }
+    Ok(threads)
+}
+
 /// Everything a binary needs after the shared boot dance has run.
 #[derive(Debug)]
 pub struct Bootstrap {

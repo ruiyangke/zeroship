@@ -11,8 +11,8 @@
 use std::path::{Path, PathBuf};
 
 use zeroship_core::config::{
-    zeroship_config, BootstrapControl, CheckFormat, CommandControl, ObservabilityControls,
-    Operational, OriginScheme, OverlaySelector, Secret, TrustedOrigin,
+    default_http_threads, zeroship_config, BootstrapControl, CheckFormat, CommandControl,
+    ObservabilityControls, Operational, OriginScheme, OverlaySelector, Secret, TrustedOrigin,
 };
 use zeroship_core::observability::LogFormat;
 
@@ -147,6 +147,15 @@ pub struct GateSettings {
     /// Address to bind. Defaults to loopback; pass 0.0.0.0 to expose across a network.
     #[config(name = "gateway.bind", default = "127.0.0.1".to_owned())]
     pub bind: Operational<String>,
+
+    /// Number of ntex serving threads. Defaults to one per available core.
+    ///
+    /// EACH THREAD IS AN io_uring RING, charged to the per-user locked-memory
+    /// budget before this process answers anything. A host running the gateway
+    /// beside control and the migration service multiplies that by three, and
+    /// the service that exhausts `ulimit -l` is whichever starts last.
+    #[config(name = "gateway.threads", default = default_http_threads())]
+    pub threads: Operational<usize>,
 
     /// Control-plane API base URL.
     #[config(shared = CONTROL_URL, default = "http://localhost:9090".to_owned())]

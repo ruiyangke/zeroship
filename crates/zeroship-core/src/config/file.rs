@@ -117,6 +117,8 @@ pub struct FileConfig {
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct ControlSection {
+    /// ntex serving threads, each holding its own io_uring ring.
+    pub threads: Option<usize>,
     /// Workflow coordinator origin used by Control's metadata client.
     pub workflow_coordinator_url: Option<String>,
     /// Catalog sessions the Control process may hold at once.
@@ -208,6 +210,8 @@ pub struct ControlSection {
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct GatewaySection {
+    /// ntex serving threads, each holding its own io_uring ring.
+    pub threads: Option<usize>,
     /// `PostgreSQL` DSN for gateway session validation.
     pub database_url: Option<String>,
     /// HMAC key for short-lived OIDC stash cookies.
@@ -301,6 +305,8 @@ pub struct WorkerSection {
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct MigrateServerSection {
+    /// ntex serving threads, each holding its own io_uring ring.
+    pub threads: Option<usize>,
     /// `PostgreSQL` DSN for the migration service.
     pub database_url: Option<String>,
     /// Privileged provisioning DSN (CREATEROLE + CREATE on the database).
@@ -495,6 +501,8 @@ pub struct OauthClientRegistration {
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct AuthSection {
+    /// ntex serving threads, each holding its own io_uring ring.
+    pub threads: Option<usize>,
     /// `PostgreSQL` DSN for the auth service.
     pub database_url: Option<String>,
     /// HMAC key for short-lived stash cookies.
