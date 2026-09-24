@@ -316,8 +316,10 @@ the decoupling needs nothing from the journal except that it not be in the way.
 
 ## Plan
 
-Each step below lands on its own and is verifiable on its own. Nothing here is a flag day except
-step 5, and that one is a switch rather than a migration only because of Open 5.
+Steps 1 to 3 each landed on their own and are verifiable on their own. Step 4 does not: its
+wire and client halves land green and unwired, but its server half shares step 5's flag day,
+because the job endpoints it changes are the live claim path rather than a new one nobody
+calls.
 
 **What is easy, and what is not.** The creator seam is the easy half: `WorkflowBackend` is
 narrow, with two implementations already behind a factory in `crates/zeroship-workflow-v8/src/lib.rs`,
@@ -408,15 +410,81 @@ protocol. This extends a working client rather than inventing one.
    the production job path is `DeliverySlot` over `JobTransport`
    (`crates/zeroship-workflow-runner/src/delivery.rs`). Building against `TaskTransport` would
    ship a remote implementation of something the worker never calls.
-   What crosses is `accept_job`, `heartbeat_job` and `complete_job`, and
-   each already sits immediately beside a call that is remote today: the manager claim, the
-   manager heartbeat, the manager settlement. Merge them - the assignment rides the claim reply,
-   one renewal carries both leases, the frontier rides the settlement - and the relocation adds
-   no round trip. Bolted on as separate endpoints it doubles them, which is a capacity cost
-   rather than a latency one. `heartbeat_job` must still advance the manager's evidence that an
-   execution began, `complete_job` must still carry the outcome batch the fold consumes, and a
-   reported execution of a run body must still be counted once. Verify by mutation rather than
-   by suite: break each property in turn and require a test to fail on it.
+
+   What crosses is `AppWorkflows::accept_job`, `AppWorkflows::heartbeat_job` and
+   `AppWorkflows::complete_job`, all in `crates/zeroship-workflow/src/service/delivery.rs`, each
+   with exactly one production call site in `crates/zeroship-workflow-runner/src/delivery.rs`.
+   Merge them into the manager calls beside them - the assignment rides the claim reply, one
+   renewal carries both leases, the frontier rides the settlement. **No new endpoint is needed:**
+   `WORKFLOW_JOB_CLAIM`, `WORKFLOW_JOB_HEARTBEAT` and `WORKFLOW_JOB_SETTLE` already exist in
+   `crates/zeroship-core/src/service_identity.rs` with their `svc/worker` grants, `DeliveryGrant`
+   in `crates/zeroship-workflow-manager/src/queue.rs` already implements `JobLease`, and
+   `WorkflowHttpState` already holds both the coordinator and `RunService`. That, rather than the
+   round-trip count, is why merging beats bolting on separate endpoints: the merged handler is
+   the smaller one.
+
+   **Only the heartbeat sits immediately beside its neighbour.** `renew` calls
+   `JobTransport::heartbeat` and `AppWorkflows::heartbeat_job` in one bounded block. The claim
+   does not: `DeliverySlot::run` dispatches `Activate`, `Reconcile`, `Cron`, `Management`,
+   `ReleaseHold`, `Collect`, `Close`, `Fanout` and `Propagate` before `accept_job`, which is the
+   fall-through for `Advance` alone, so a merged claim reply carries an assignment for one
+   operation kind among ten. `Queue::claim_authorized` does not filter by operation - the
+   restriction is on the publish side, in `worker_operation`
+   (`crates/zeroship-workflow-manager/src/coordinator/jobs.rs`) - so all ten really are
+   deliverable. And completion is a pipeline rather than a pair: `complete_job` runs in
+   `execute`, and `acknowledge` settles the receipt it returned.
+
+   **What must survive, and where each is enforced.** The manager's evidence that an execution
+   began is `renewal` in `crates/zeroship-workflow-manager/src/queue.rs`, NOT any method named
+   `heartbeat_job` - that name resolves to three different methods in three crates, and a
+   mutation applied to the wrong one proves nothing. `renewal` counts on the first renewal of an
+   attempt, so a deferred claim spends no budget; it also means the manager half must keep
+   counting before the journal half runs, or an attempt that reached creator code goes uncounted
+   and redelivery unbounded. The outcome batch the fold consumes reaches `fold_outcomes`
+   (`crates/zeroship-workflow/src/engine.rs`) through `tasks::complete_in` and `frontier::apply`;
+   note that `crates/zeroship-workflow/tests/execution.rs` calls `fold_outcomes` directly and
+   bypasses `complete_job`, so that target alone is a false green for this step. Counting a
+   reported execution once is `settle_attempt` in
+   `crates/zeroship-workflow/src/service/journal.rs`, which reads the held count inside the same
+   transaction and so survives relocation unchanged. Verify by mutation rather than by suite.
+
+   **An assignment does not always arrive with a claim, and the reply must say so.**
+   `tasks::assign` answers `Busy` at `max_running` or with admission or dispatch off, and
+   `Unavailable` with no available deploy; `accept_captured` answers `Deferred` when the run is
+   not due and `Settled` on a stale frontier or a replayed receipt. The merged reply carries all
+   three `JobAcceptance` arms or it is lossy.
+
+   **Three things no step owns yet, and this one cannot land without the first.** `RunService`
+   installs no deployments source - `crates/zeroship-workflow-server/src/runs.rs` opens the
+   journal without the `.with_deployments(...)` that `crates/zeroship-worker/src/workflow_creator.rs`
+   and `crates/zeroship-cli/src/workflow/host.rs` both pass - and `tasks::assign` opens with a
+   `deploys` lookup, so a merged claim on today's server can never return a task. The other two
+   belong to step 5: an HTTP `WorkflowBackend`, and the `TaskPayloads` seam that
+   `crates/zeroship-worker/src/workflow_creator.rs` constructs on `WorkerTasks`, whose `stage`
+   opens journal transactions mid-execution with no manager call to merge into.
+
+   **The dependency gate decides where the client lives.**
+   `workflow_process_dependencies_follow_crate_ownership` in `xtask/tests/workflow_architecture.rs`
+   forbids `zeroship-workflow-client` any edge to `zeroship-workflow`, so the merged client
+   methods cannot live there unless `TaskAssignment`, `WorkflowExecution`, `JobReceipt` and their
+   neighbours move to `zeroship-core`. Putting the merged client in `zeroship-workflow-runner`,
+   which may depend on both, is the alternative. That fork is the largest decision in this step.
+
+   **One bound is already wrong for the merged settle.** `Options::default` in
+   `crates/zeroship-workflow-client/src/lib.rs` takes `max_request_bytes` from
+   `MAX_INPUT_BYTES_CEILING` while a settle body carrying the outcome batch answers to
+   `max_journal_bytes`, which `append` in `crates/zeroship-workflow/src/service/journal.rs`
+   enforces against the journal ceiling. Open 1 counts three numbers on the request path and
+   does not notice that the first derives from the wrong one for this endpoint.
+
+   **The concurrency the merge introduces.** Today every accept for an app runs in the one worker
+   process holding that app's binding. Served, accepts run in `RunService`, which is one per HTTP
+   worker thread because its store is `!Send`, across every replica. `lock_app_state`
+   (`crates/zeroship-workflow/src/service/app.rs`) is a filtered row update and does serialize
+   across connections, so the single-assignment invariant holds - but the compare-and-swap in
+   `tasks::assign` stops being unreachable by construction and becomes what stands between a lock
+   bug and two live tasks on one run. Nothing exercises its failing branch today, because
+   `reclaim` refuses first. Close that here rather than after.
 
    Collection does not widen this step. Open 6 records why: the journal and the object store
    are already decoupled by a commit on that path, and the manager already owns when it runs.
