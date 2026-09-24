@@ -17,9 +17,9 @@
 pub mod api;
 pub mod apply;
 pub mod auth;
-pub mod bindings;
 pub mod bundle;
 pub mod config;
+pub mod control_plane;
 pub mod datastore;
 pub mod policy;
 pub mod provisioning;
@@ -34,7 +34,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use auth::Authenticator;
-use bindings::BindingStore;
+use control_plane::ControlPlaneStore;
 use policy::ManagedPolicyConfig;
 use rate_limit::MutationRateLimiter;
 use zeroship_core::readiness::ReadinessGate;
@@ -55,11 +55,10 @@ pub struct MigrationServiceState {
     pub mutation_rate_limiter: Arc<dyn MutationRateLimiter>,
     pub trust_proxy: bool,
     pub policy_config: ManagedPolicyConfig,
-    /// Whether the app a request authorizes as still reaches the database it
-    /// named. Opened per request; this service holds no shared client.
-    pub bindings: BindingStore,
+    /// The control plane's DSN, for the readiness probe.
+    pub control_plane: ControlPlaneStore,
     /// Bounds `/readyz`. The probe opens a connection (this service has no
-    /// shared client to reuse - see `BindingStore::probe`), so the gate's
+    /// shared client to reuse - see `ControlPlaneStore::probe`), so the gate's
     /// TTL is what keeps an unauthenticated probe flood from becoming a
     /// connection flood.
     pub readiness: ReadinessGate,
@@ -84,7 +83,7 @@ impl MigrationServiceState {
             mutation_rate_limiter,
             trust_proxy,
             policy_config,
-            bindings: BindingStore::new(control_dsn),
+            control_plane: ControlPlaneStore::new(control_dsn),
             readiness: ReadinessGate::with_defaults(),
         }
     }

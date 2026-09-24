@@ -323,9 +323,11 @@ mismatch a reader must not smooth over: the variant is named for apps, the wire 
 `database:migrate`, which *is* delegatable and *is* banded.
 
 **A second authorization front door exists.** `crates/zeroship-migrate-server/src/auth.rs` builds
-its own context and calls the same `enforce`, and adds a fence Cedar does not express: an
-organization-owner rank check with no per-project narrowing, on the reasoning that a migration
-rewrites the app's schema, which is the least reversible thing the platform lets a creator do.
+its own context and calls the same `enforce`. It adds no fence of its own: the resource it names is
+`Resource::Database`, so `authority::resolve` reaches `zeroship.databases.project_id` and narrows
+the caller's organization seat by their project seat, and the band that admits `database:migrate` is
+`deploy/policies/creator/organization_develop.cedar` like every other creator authority. A second
+rank comparison in that service would be a second spelling of an answer this crate already owns.
 
 ### 1.4 Consent bounds a token, in three stacked narrowings
 

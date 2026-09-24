@@ -52,7 +52,10 @@ fn tmpdir(label: &str) -> PathBuf {
 struct TestCaller {
     principal_id: UserId,
     actions: HashSet<Action>,
-    owned_apps: HashSet<AppId>,
+    /// The databases this bearer is allowed to reach. The handler authorizes
+    /// against a DATABASE, so a double keyed on anything else would answer a
+    /// question the service does not ask.
+    reachable_databases: HashSet<DatabaseId>,
 }
 
 #[derive(Debug, Default)]
@@ -103,13 +106,13 @@ impl StaticAuthenticator {
         token: impl Into<String>,
         principal_id: &UserId,
         scopes: impl IntoIterator<Item = Scope>,
-        owned_apps: impl IntoIterator<Item = AppId>,
+        reachable_databases: impl IntoIterator<Item = DatabaseId>,
     ) {
         self.insert_actions(
             token,
             principal_id,
             scopes.into_iter().map(|scope| scope.action()),
-            owned_apps,
+            reachable_databases,
         );
     }
 
@@ -118,12 +121,12 @@ impl StaticAuthenticator {
         token: impl Into<String>,
         principal_id: &UserId,
         actions: impl IntoIterator<Item = Action>,
-        owned_apps: impl IntoIterator<Item = AppId>,
+        reachable_databases: impl IntoIterator<Item = DatabaseId>,
     ) {
         let caller = TestCaller {
             principal_id: principal_id.clone(),
             actions: actions.into_iter().collect(),
-            owned_apps: owned_apps.into_iter().collect(),
+            reachable_databases: reachable_databases.into_iter().collect(),
         };
         self.callers
             .lock()
@@ -137,7 +140,7 @@ impl Authenticator for StaticAuthenticator {
     async fn verify_action(
         &self,
         token: &str,
-        app_id: &AppId,
+        database_id: &DatabaseId,
         required_action: Action,
         _request_ip: Option<IpAddr>,
         request_id: &str,
@@ -148,7 +151,9 @@ impl Authenticator for StaticAuthenticator {
             .push(request_id.to_owned());
         let callers = self.callers.lock().expect("static auth lock");
         let caller = callers.get(token).ok_or(AuthError::Unauthorized)?;
-        if !caller.actions.contains(&required_action) || !caller.owned_apps.contains(app_id) {
+        if !caller.actions.contains(&required_action)
+            || !caller.reachable_databases.contains(database_id)
+        {
             return Err(AuthError::Forbidden);
         }
         Ok(VerifiedCaller {
@@ -339,17 +344,13 @@ async fn cleanup_user(conn: &Client, user_id: &UserId) {
         .await;
 }
 
-/// The apply route: the APP that authorizes the call and the DATABASE whose
-/// schema the DDL lands in.
+/// The apply route: the DATABASE whose schema the DDL lands in, which is also
+/// the resource the bearer is authorized against.
 ///
-/// Composed from two parsed typed ids, never from raw text, so a case cannot
+/// Composed from a parsed typed id, never from raw text, so a case cannot
 /// address a database by a spelling the extractor would refuse.
-fn apply_uri(app_id: &AppId, database_id: &DatabaseId) -> String {
-    format!(
-        "/v1/apps/{}/databases/{}/migrations/apply",
-        app_id.as_str(),
-        database_id.as_str()
-    )
+fn apply_uri(database_id: &DatabaseId) -> String {
+    format!("/v1/databases/{}/migrations/apply", database_id.as_str())
 }
 
 /// The datastore every database in this target is placed on.
@@ -584,7 +585,7 @@ fn assert_policy_fixtures_are_current(policy_config: &ManagedPolicyConfig) {
             )
         });
         policy_config
-            .compose_effective_for_schema(&app_id, app_id.as_str(), None, Some(&draft))
+            .compose_effective_for_schema(app_id.as_str(), None, Some(&draft))
             .unwrap_or_else(|err| {
                 panic!(
                     "policy fixture {name} parses but no longer admits against the \
@@ -597,7 +598,7 @@ fn assert_policy_fixtures_are_current(policy_config: &ManagedPolicyConfig) {
         .expect("escalating_policy must PARSE; it is refused at admit, not at load");
     assert!(
         policy_config
-            .compose_effective_for_schema(&app_id, app_id.as_str(), None, Some(&escalating))
+            .compose_effective_for_schema(app_id.as_str(), None, Some(&escalating))
             .is_err(),
         "escalating_policy must be refused by admit; a fixture the ceiling now grants \
          would turn policy_api_rejects_escalating_draft_at_submit_pg into a no-op"
@@ -1090,8 +1091,8 @@ async fn apply_refuses_an_uncreated_database_before_provisioning_or_ledger_pg() 
     auth.insert(
         "good-token",
         &owner_id,
-        [Scope::AppsDeploy],
-        [app_id.clone()],
+        [Scope::DatabaseMigrate],
+        [database.clone()],
     );
     let (state, tmp) = state_for(auth);
     let svc = test::init_service(
@@ -1104,7 +1105,7 @@ async fn apply_refuses_an_uncreated_database_before_provisioning_or_ledger_pg() 
     let response = test::call_service(
         &svc,
         test::TestRequest::post()
-            .uri(&apply_uri(&app_id, &database))
+            .uri(&apply_uri(&database))
             .header("authorization", "Bearer good-token")
             .set_json(&create_notes_request())
             .to_request(),
@@ -1214,8 +1215,8 @@ async fn an_apply_keeps_the_reconcilers_migrator_as_the_schema_owner_pg() {
     auth.insert(
         "good-token",
         &owner_id,
-        [Scope::AppsDeploy],
-        [app_id.clone()],
+        [Scope::DatabaseMigrate],
+        [database.clone()],
     );
     let (state, tmp) = state_for(auth);
     let svc = test::init_service(
@@ -1245,7 +1246,7 @@ async fn an_apply_keeps_the_reconcilers_migrator_as_the_schema_owner_pg() {
     let resp = test::call_service(
         &svc,
         test::TestRequest::post()
-            .uri(&apply_uri(&app_id, &database))
+            .uri(&apply_uri(&database))
             .header("authorization", "Bearer good-token")
             .set_json(&create_notes_request())
             .to_request(),
@@ -1345,8 +1346,8 @@ async fn an_apply_leaves_the_audit_table_writable_by_its_own_capability_roles_pg
     auth.insert(
         "good-token",
         &owner_id,
-        [Scope::AppsDeploy],
-        [app_id.clone()],
+        [Scope::DatabaseMigrate],
+        [database.clone()],
     );
     let (state, tmp) = state_for(auth);
     let svc = test::init_service(
@@ -1361,7 +1362,7 @@ async fn an_apply_leaves_the_audit_table_writable_by_its_own_capability_roles_pg
     let resp = test::call_service(
         &svc,
         test::TestRequest::post()
-            .uri(&apply_uri(&app_id, &database))
+            .uri(&apply_uri(&database))
             .header("authorization", "Bearer good-token")
             .set_json(&create_notes_request())
             .to_request(),
@@ -1470,7 +1471,7 @@ async fn an_apply_leaves_the_audit_table_writable_by_its_own_capability_roles_pg
 }
 
 #[ntex::test]
-async fn apply_api_accepts_apps_migrate_owner_and_applies_ir_pg() {
+async fn apply_api_applies_ir_into_the_named_databases_schema_pg() {
     let conn = admin_conn().await;
     let app_id = AppId::mint();
     let owner_id = UserId::mint();
@@ -1480,8 +1481,8 @@ async fn apply_api_accepts_apps_migrate_owner_and_applies_ir_pg() {
     auth.insert(
         "good-token",
         &owner_id,
-        [Scope::AppsDeploy],
-        [app_id.clone()],
+        [Scope::DatabaseMigrate],
+        [database.clone()],
     );
     let (state, tmp) = state_for(auth);
     let svc = test::init_service(
@@ -1493,7 +1494,7 @@ async fn apply_api_accepts_apps_migrate_owner_and_applies_ir_pg() {
     converge_database_schema(&database).await;
 
     let req = test::TestRequest::post()
-        .uri(&apply_uri(&app_id, &database))
+        .uri(&apply_uri(&database))
         .header("authorization", "Bearer good-token")
         .set_json(&create_notes_request())
         .to_request();
@@ -1551,6 +1552,302 @@ async fn apply_api_accepts_apps_migrate_owner_and_applies_ir_pg() {
     let _ = std::fs::remove_dir_all(tmp);
     cleanup_app(&conn, &app_id).await;
     cleanup_user(&conn, &owner_id).await;
+}
+
+// ---------------------------------------------------------------------------
+// The authority: a qualifying seat on the PROJECT that owns the database
+// ---------------------------------------------------------------------------
+
+/// A project-owned database with NO APP and NO BINDING, plus a principal seated
+/// in its organization BELOW the project-wide threshold.
+///
+/// `developer` is rank 20 and `admin` - the rank from which an organization
+/// seat reaches every project in the organization - is 30. So this seat alone
+/// narrows to nothing at any project: the caller's effective rank at this
+/// database is whatever `zeroship.project_members` gives them, and with no row
+/// there it is zero. That is what lets the two arms below differ in exactly one
+/// row.
+///
+/// No app is written at all, so there is nothing a binding could name even by
+/// accident: what these arms authorize is a database the old route could not
+/// address.
+async fn seed_unbound_database(conn: &Client, principal: &UserId, label: &str) -> SeatWorld {
+    let plan_id = "pln_migrated_phase1";
+    conn.execute(
+        "INSERT INTO zeroship.plans \
+            (id, name, base_fee_cents, included_units, spend_limit_default_cents, runtime_limits_json) \
+         VALUES ($1, 'Migrated Phase 1 Test', 0, 0, 0, '{}'::jsonb) \
+         ON CONFLICT (id) DO NOTHING",
+        &[&plan_id],
+    )
+    .await
+    .expect("seed plan");
+    conn.execute(
+        "INSERT INTO zeroship.users (id, email, name, email_verified_at) \
+         VALUES ($1, $2::citext, 'Seat Test User', NOW())",
+        &[
+            &principal.as_str(),
+            &format!("seat-{}@zeroship.test", principal.as_str()),
+        ],
+    )
+    .await
+    .expect("seed the principal the bearer names");
+
+    let organization_id = OrganizationId::mint();
+    let project_id = ProjectId::mint();
+    conn.execute(
+        "INSERT INTO zeroship.organizations (id, slug, name, billing_email) \
+         VALUES ($1, $2, 'Seat Fixture', 'fixture@zeroship.test')",
+        &[
+            &organization_id.as_str(),
+            &format!("{label}-{}", Uuid::new_v4().simple()),
+        ],
+    )
+    .await
+    .expect("seed organization");
+    conn.execute(
+        "INSERT INTO zeroship.projects (id, organization_id, slug, name) \
+         VALUES ($1, $2, $3, 'Seat Project')",
+        &[
+            &project_id.as_str(),
+            &organization_id.as_str(),
+            &format!("{label}-{}", Uuid::new_v4().simple()),
+        ],
+    )
+    .await
+    .expect("seed project");
+    // BELOW the project-wide threshold, deliberately. See the doc above.
+    conn.execute(
+        "INSERT INTO zeroship.organization_members (organization_id, user_id, role) \
+         VALUES ($1, $2, 'developer')",
+        &[&organization_id.as_str(), &principal.as_str()],
+    )
+    .await
+    .expect("seat the principal in the organization");
+
+    let datastore = fixture_datastore();
+    conn.execute(
+        "INSERT INTO zeroship.datastores (id, system_identifier, execution_zone_id, status) \
+         VALUES ($1, 7788990011223344, $2, 'active') ON CONFLICT (id) DO NOTHING",
+        &[&datastore, &DEFAULT_ZONE],
+    )
+    .await
+    .expect("declare the fixture datastore");
+    let database = DatabaseId::mint();
+    conn.execute(
+        "INSERT INTO zeroship.databases \
+             (id, project_id, execution_zone_id, datastore_id, name, status) \
+         VALUES ($1, $2, $3, $4, $5, 'active')",
+        &[
+            &database.as_str(),
+            &project_id.as_str(),
+            &DEFAULT_ZONE,
+            &datastore,
+            &format!("seat-{}", Uuid::new_v4().simple()),
+        ],
+    )
+    .await
+    .expect("declare the project's database");
+
+    let bindings: i64 = conn
+        .query_one(
+            "SELECT count(*)::int8 AS n FROM zeroship.database_bindings \
+              WHERE database_id = $1",
+            &[&database.as_str()],
+        )
+        .await
+        .expect("count the database's bindings")
+        .get("n");
+    assert_eq!(
+        bindings, 0,
+        "this world declares no app and no binding, or the arms below measure the \
+         bound case"
+    );
+
+    SeatWorld {
+        organization_id: organization_id.as_str().to_owned(),
+        project_id: project_id.as_str().to_owned(),
+        database,
+    }
+}
+
+struct SeatWorld {
+    organization_id: String,
+    project_id: String,
+    database: DatabaseId,
+}
+
+/// THE ONE VARIABLE between the two arms: a `project_members` row.
+async fn seat_on_project(conn: &Client, world: &SeatWorld, principal: &UserId, role: &str) {
+    conn.execute(
+        "INSERT INTO zeroship.project_members \
+             (project_id, organization_id, user_id, role) \
+         VALUES ($1, $2, $3, $4)",
+        &[
+            &world.project_id,
+            &world.organization_id,
+            &principal.as_str(),
+            &role,
+        ],
+    )
+    .await
+    .expect("seat the principal on the project");
+}
+
+async fn cleanup_seat_world(conn: &Client, world: &SeatWorld, principal: &UserId) {
+    cleanup_database(conn, &world.database).await;
+    let _ = conn
+        .execute(
+            "DELETE FROM zeroship.authz_decisions WHERE resource_id = $1",
+            &[&world.database.as_str()],
+        )
+        .await;
+    let _ = conn
+        .execute(
+            "DELETE FROM zeroship.project_members WHERE project_id = $1",
+            &[&world.project_id],
+        )
+        .await;
+    cleanup_user(conn, principal).await;
+    let _ = conn
+        .execute(
+            "DELETE FROM zeroship.projects WHERE id = $1",
+            &[&world.project_id],
+        )
+        .await;
+    let _ = conn
+        .execute(
+            "DELETE FROM zeroship.organizations WHERE id = $1",
+            &[&world.organization_id],
+        )
+        .await;
+}
+
+/// A QUALIFYING PROJECT SEAT MIGRATES A DATABASE NO APP IS BOUND TO.
+///
+/// This is the decision in one case: a migration is authorized by a seat on the
+/// project that owns the database - the same authority that created it - and
+/// not by an app. The old route could not express this request at all: it
+/// required an app id in the path and admitted on that app's live binding, and
+/// this world has neither.
+///
+/// # The real authorizer, not a double
+///
+/// `ControlPlaneAuthenticator` is what runs: a signed platform bearer, the live
+/// `zeroship.users` row, `zeroship_authz::authority::resolve` narrowing the
+/// organization seat by the project seat, and the Cedar band that puts
+/// `database:migrate` at developer. A stub here would assert the handler calls
+/// something, not that the platform answers this question this way.
+///
+/// # The success is read off the catalog
+///
+/// A 200 says the handler returned; `notes` in `db_<dbs>` says the DDL landed
+/// in the database the path named.
+#[ntex::test]
+async fn a_project_seat_migrates_a_database_with_no_bound_app_pg() {
+    let conn = admin_conn().await;
+    let principal = UserId::mint();
+    let world = seed_unbound_database(&conn, &principal, "seat-allow").await;
+    seat_on_project(&conn, &world, &principal, "developer").await;
+    converge_database_schema(&world.database).await;
+
+    let token = platform_token(&principal, "database:migrate");
+    let (state, tmp) = state_for_with_policy_config(
+        Arc::new(real_authenticator(admin_conn().await)),
+        dsn(),
+        dsn(),
+        ManagedPolicyConfig::default_confined(TEST_POLICY_SEAL_KEY.to_vec(), 1)
+            .expect("test policy config"),
+    );
+    let svc = test::init_service(
+        web::App::new()
+            .state(state)
+            .configure(zeroship_migrate_server::configure),
+    )
+    .await;
+
+    let request = test::TestRequest::post()
+        .uri(&apply_uri(&world.database))
+        .header("authorization", format!("Bearer {token}"))
+        .set_json(&create_notes_request())
+        .to_request();
+    let response = test::call_service(&svc, request).await;
+    let status = response.status();
+    let body: Value = serde_json::from_slice(&test::read_body(response).await).expect("json body");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a developer seat on the owning project must be able to migrate: {body}"
+    );
+    assert!(
+        table_exists(
+            &conn,
+            &database_derivation::schema_name(&world.database),
+            "notes"
+        )
+        .await,
+        "the DDL must have landed in the named database's schema"
+    );
+
+    let _ = std::fs::remove_dir_all(tmp);
+    cleanup_seat_world(&conn, &world, &principal).await;
+}
+
+/// THE CONTROL. The same world, the same bearer, the same body, the same
+/// converged schema - and NO `project_members` row.
+///
+/// The caller still holds a live `developer` seat in the owning organization,
+/// which is what makes this arm about the PROJECT narrowing rather than about
+/// membership in general: the organization seat is below `admin`, so it reaches
+/// no project on its own, and the refusal is the absence of the one row the arm
+/// above adds.
+#[ntex::test]
+async fn an_apply_is_refused_without_a_qualifying_project_seat_pg() {
+    let conn = admin_conn().await;
+    let principal = UserId::mint();
+    let world = seed_unbound_database(&conn, &principal, "seat-deny").await;
+    converge_database_schema(&world.database).await;
+
+    let token = platform_token(&principal, "database:migrate");
+    let (state, tmp) = state_for_with_policy_config(
+        Arc::new(real_authenticator(admin_conn().await)),
+        dsn(),
+        dsn(),
+        ManagedPolicyConfig::default_confined(TEST_POLICY_SEAL_KEY.to_vec(), 1)
+            .expect("test policy config"),
+    );
+    let svc = test::init_service(
+        web::App::new()
+            .state(state)
+            .configure(zeroship_migrate_server::configure),
+    )
+    .await;
+
+    let request = test::TestRequest::post()
+        .uri(&apply_uri(&world.database))
+        .header("authorization", format!("Bearer {token}"))
+        .set_json(&create_notes_request())
+        .to_request();
+    let response = test::call_service(&svc, request).await;
+    let status = response.status();
+    let body: Value = serde_json::from_slice(&test::read_body(response).await).expect("json body");
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "an organization seat below admin with no project row reaches no project: {body}"
+    );
+    assert!(
+        !table_exists(
+            &conn,
+            &database_derivation::schema_name(&world.database),
+            "notes"
+        )
+        .await,
+        "a refused apply must leave no DDL behind"
+    );
+
+    let _ = std::fs::remove_dir_all(tmp);
+    cleanup_seat_world(&conn, &world, &principal).await;
 }
 
 /// Two project ids that collide in PostgreSQL's 32-bit `hashtext` space still
@@ -1676,8 +1973,8 @@ async fn a_destructive_migration_is_not_parked_for_operator_approval_pg() {
     auth.insert(
         "good-token",
         &owner_id,
-        [Scope::AppsDeploy],
-        [app_id.clone()],
+        [Scope::DatabaseMigrate],
+        [database.clone()],
     );
     let (state, tmp) = state_for(auth);
     let svc = test::init_service(
@@ -1690,7 +1987,7 @@ async fn a_destructive_migration_is_not_parked_for_operator_approval_pg() {
 
     let post = |body: Value| {
         test::TestRequest::post()
-            .uri(&apply_uri(&app_id, &database))
+            .uri(&apply_uri(&database))
             .header("authorization", "Bearer good-token")
             .set_json(&body)
             .to_request()
@@ -1748,8 +2045,8 @@ async fn what_refuses_a_creator_migration_that_names_the_platform_journal_pg() {
     auth.insert(
         "good-token",
         &owner_id,
-        [Scope::AppsDeploy],
-        [app_id.clone()],
+        [Scope::DatabaseMigrate],
+        [database.clone()],
     );
     let (state, tmp) = state_for(auth);
     let svc = test::init_service(
@@ -1762,7 +2059,7 @@ async fn what_refuses_a_creator_migration_that_names_the_platform_journal_pg() {
 
     let post = |body: Value| {
         test::TestRequest::post()
-            .uri(&apply_uri(&app_id, &database))
+            .uri(&apply_uri(&database))
             .header("authorization", "Bearer good-token")
             .set_json(&body)
             .to_request()
@@ -1839,8 +2136,8 @@ async fn what_refuses_a_creator_migration_that_names_the_platform_journal_pg() {
     fresh_auth.insert(
         "good-token",
         &fresh_owner,
-        [Scope::AppsDeploy],
-        [fresh_id.clone()],
+        [Scope::DatabaseMigrate],
+        [fresh_database.clone()],
     );
     let (fresh_state, fresh_tmp) = state_for(fresh_auth);
     let fresh_svc = test::init_service(
@@ -1864,7 +2161,7 @@ async fn what_refuses_a_creator_migration_that_names_the_platform_journal_pg() {
     let resp = test::call_service(
         &fresh_svc,
         test::TestRequest::post()
-            .uri(&apply_uri(&fresh_id, &fresh_database))
+            .uri(&apply_uri(&fresh_database))
             .header("authorization", "Bearer good-token")
             .set_json(&create_platform_journal_table_request())
             .to_request(),
@@ -1903,8 +2200,8 @@ async fn apply_api_5xx_detail_is_generic_and_does_not_leak_internals() {
     auth.insert(
         "good-token",
         &owner_id,
-        [Scope::AppsDeploy],
-        [app_id.clone()],
+        [Scope::DatabaseMigrate],
+        [database.clone()],
     );
     let bad_provision_dsn =
         "host=127.0.0.1 port=1 user=postgres password=zeroship dbname=zeroship_control_test"
@@ -1918,7 +2215,7 @@ async fn apply_api_5xx_detail_is_generic_and_does_not_leak_internals() {
     .await;
 
     let req = test::TestRequest::post()
-        .uri(&apply_uri(&app_id, &database))
+        .uri(&apply_uri(&database))
         .header("authorization", "Bearer good-token")
         .set_json(&with_policy(create_notes_request(), tighter_policy()))
         .to_request();
@@ -1939,18 +2236,17 @@ async fn apply_api_5xx_detail_is_generic_and_does_not_leak_internals() {
 }
 
 #[ntex::test]
-async fn apply_api_rejects_bearer_without_apps_migrate_scope() {
-    let app_id = AppId::mint();
-    // An UNBOUND database, deliberately: authorization is decided before the
-    // binding is consulted, so this refusal must not depend on one existing.
+async fn apply_api_rejects_bearer_without_database_migrate_scope() {
+    // A database with NO control-plane row, deliberately: the refusal is the
+    // token's, so it must not depend on any row existing.
     let database = DatabaseId::mint();
     let owner_id = UserId::mint();
     let auth = Arc::new(StaticAuthenticator::new());
     auth.insert(
         "no-scope-token",
         &owner_id,
-        [Scope::AppsRead],
-        [app_id.clone()],
+        [Scope::DatabaseRead],
+        [database.clone()],
     );
     let (state, tmp) = state_for(auth);
     let svc = test::init_service(
@@ -1961,7 +2257,7 @@ async fn apply_api_rejects_bearer_without_apps_migrate_scope() {
     .await;
 
     let req = test::TestRequest::post()
-        .uri(&apply_uri(&app_id, &database))
+        .uri(&apply_uri(&database))
         .header("authorization", "Bearer no-scope-token")
         .set_json(&create_notes_request())
         .to_request();
@@ -1972,19 +2268,18 @@ async fn apply_api_rejects_bearer_without_apps_migrate_scope() {
 }
 
 #[ntex::test]
-async fn apply_api_rejects_bearer_for_different_app() {
-    let app_id = AppId::mint();
-    // An UNBOUND database, deliberately: authorization is decided before the
-    // binding is consulted, so this refusal must not depend on one existing.
+async fn apply_api_rejects_bearer_for_a_different_database() {
+    // Two databases with no control-plane rows: the refusal is that the
+    // authorization subject in the path is not the one this bearer reaches.
     let database = DatabaseId::mint();
-    let other_app = AppId::mint();
+    let other_database = DatabaseId::mint();
     let owner_id = UserId::mint();
     let auth = Arc::new(StaticAuthenticator::new());
     auth.insert(
-        "wrong-app-token",
+        "wrong-database-token",
         &owner_id,
-        [Scope::AppsDeploy],
-        [other_app.clone()],
+        [Scope::DatabaseMigrate],
+        [other_database.clone()],
     );
     let (state, tmp) = state_for(auth);
     let svc = test::init_service(
@@ -1995,8 +2290,8 @@ async fn apply_api_rejects_bearer_for_different_app() {
     .await;
 
     let req = test::TestRequest::post()
-        .uri(&apply_uri(&app_id, &database))
-        .header("authorization", "Bearer wrong-app-token")
+        .uri(&apply_uri(&database))
+        .header("authorization", "Bearer wrong-database-token")
         .set_json(&create_notes_request())
         .to_request();
     let resp = test::call_service(&svc, req).await;
@@ -2016,8 +2311,8 @@ async fn apply_api_rejects_confined_denied_vendor_op_pg() {
     auth.insert(
         "good-token",
         &owner_id,
-        [Scope::AppsDeploy],
-        [app_id.clone()],
+        [Scope::DatabaseMigrate],
+        [database.clone()],
     );
     let (state, tmp) = state_for(auth);
     let svc = test::init_service(
@@ -2029,7 +2324,7 @@ async fn apply_api_rejects_confined_denied_vendor_op_pg() {
     converge_database_schema(&database).await;
 
     let req = test::TestRequest::post()
-        .uri(&apply_uri(&app_id, &database))
+        .uri(&apply_uri(&database))
         .header("authorization", "Bearer good-token")
         .set_json(&denied_vendor_request())
         .to_request();
@@ -2082,8 +2377,8 @@ async fn apply_api_reports_malformed_ir_as_creator_fault_pg() {
     auth.insert(
         "good-token",
         &owner_id,
-        [Scope::AppsDeploy],
-        [app_id.clone()],
+        [Scope::DatabaseMigrate],
+        [database.clone()],
     );
     let (state, tmp) = state_for(auth);
     let svc = test::init_service(
@@ -2105,7 +2400,7 @@ async fn apply_api_reports_malformed_ir_as_creator_fault_pg() {
     });
 
     let req = test::TestRequest::post()
-        .uri(&apply_uri(&app_id, &database))
+        .uri(&apply_uri(&database))
         .header("authorization", "Bearer good-token")
         .set_json(&malformed)
         .to_request();
@@ -2126,7 +2421,7 @@ async fn apply_api_reports_malformed_ir_as_creator_fault_pg() {
     // request against this same fixture succeeds. Without it, "422" is also what a
     // service that rejected everything would return.
     let req = test::TestRequest::post()
-        .uri(&apply_uri(&app_id, &database))
+        .uri(&apply_uri(&database))
         .header("authorization", "Bearer good-token")
         .set_json(&create_notes_request())
         .to_request();
@@ -2152,8 +2447,8 @@ async fn apply_api_rejects_policy_draft_escalation_without_clamping() {
     auth.insert(
         "good-token",
         &owner_id,
-        [Scope::AppsDeploy],
-        [app_id.clone()],
+        [Scope::DatabaseMigrate],
+        [database.clone()],
     );
     let (state, tmp) = state_for(auth);
     let svc = test::init_service(
@@ -2164,7 +2459,7 @@ async fn apply_api_rejects_policy_draft_escalation_without_clamping() {
     .await;
 
     let req = test::TestRequest::post()
-        .uri(&apply_uri(&app_id, &database))
+        .uri(&apply_uri(&database))
         .header("authorization", "Bearer good-token")
         .set_json(&with_policy(create_notes_request(), escalating_policy()))
         .to_request();
@@ -2191,8 +2486,8 @@ async fn apply_api_rejects_malformed_policy_draft_fail_closed() {
     auth.insert(
         "good-token",
         &owner_id,
-        [Scope::AppsDeploy],
-        [app_id.clone()],
+        [Scope::DatabaseMigrate],
+        [database.clone()],
     );
     let (state, tmp) = state_for(auth);
     let svc = test::init_service(
@@ -2203,7 +2498,7 @@ async fn apply_api_rejects_malformed_policy_draft_fail_closed() {
     .await;
 
     let req = test::TestRequest::post()
-        .uri(&apply_uri(&app_id, &database))
+        .uri(&apply_uri(&database))
         .header("authorization", "Bearer good-token")
         .set_json(&with_policy(create_notes_request(), malformed_policy()))
         .to_request();
@@ -2248,8 +2543,8 @@ async fn apply_api_rate_limits_each_source_ip_across_the_shared_store_pg() {
     auth.insert(
         "good-token",
         &owner_id,
-        [Scope::AppsDeploy],
-        [app_id.clone()],
+        [Scope::DatabaseMigrate],
+        [database.clone()],
     );
     let (first_state, first_tmp) = state_for_trusted_proxy(auth.clone()).await;
     let (second_state, second_tmp) = state_for_trusted_proxy(auth).await;
@@ -2269,7 +2564,7 @@ async fn apply_api_rate_limits_each_source_ip_across_the_shared_store_pg() {
     let invalid_body = with_policy(create_notes_request(), malformed_policy());
     let post = |source_ip: &str| {
         test::TestRequest::post()
-            .uri(&apply_uri(&app_id, &database))
+            .uri(&apply_uri(&database))
             .header("authorization", "Bearer good-token")
             .header("x-forwarded-for", format!("198.51.100.1, {source_ip}"))
             .set_json(&invalid_body)
@@ -2326,20 +2621,24 @@ async fn apply_api_rate_limits_each_source_ip_across_the_shared_store_pg() {
     let _ = std::fs::remove_dir_all(second_tmp);
 }
 
-/// The throttle sits in `authorize_mutation`, ahead of the binding admission
-/// and every side effect, so a caller over the limit is refused before an
-/// apply can reach a schema. Asserting it on the apply route is asserting it
-/// on the one mutating route there is.
+/// The throttle sits in `authorize_mutation`, behind authorization and ahead of
+/// every side effect, so a caller over the limit is refused before an apply can
+/// reach a schema. Asserting it on the apply route is asserting it on the one
+/// mutating route there is.
+///
+/// The bearer is AUTHORIZED for this database, which is what makes the 429
+/// evidence about the throttle: a caller the authenticator refused would answer
+/// 403 from the line above and never reach it.
 #[ntex::test]
 async fn the_apply_route_passes_through_the_mutation_rate_limiter() {
-    let app_id = AppId::mint();
+    let database = DatabaseId::mint();
     let owner_id = UserId::mint();
     let auth = Arc::new(StaticAuthenticator::new());
     auth.insert(
         "good-token",
         &owner_id,
-        [Scope::AppsDeploy],
-        [app_id.clone()],
+        [Scope::DatabaseMigrate],
+        [database.clone()],
     );
     let (state, tmp) = state_for_with_policy_config_and_edge(
         auth,
@@ -2361,7 +2660,7 @@ async fn the_apply_route_passes_through_the_mutation_rate_limiter() {
     // the handler, so a request the throttle should refuse must still be one
     // the route would otherwise accept.
     let request = test::TestRequest::post()
-        .uri(&apply_uri(&app_id, &DatabaseId::mint()))
+        .uri(&apply_uri(&database))
         .header("authorization", "Bearer good-token")
         .set_json(&create_notes_request())
         .to_request();
@@ -2383,17 +2682,16 @@ async fn the_apply_route_passes_through_the_mutation_rate_limiter() {
 /// before authentication and throttling run.
 #[ntex::test]
 async fn apply_route_accepts_a_body_larger_than_ntexs_default_limit() {
-    let app_id = AppId::mint();
-    // An UNBOUND database, deliberately: authorization is decided before the
-    // binding is consulted, so this refusal must not depend on one existing.
+    // A database with NO control-plane row: the 429 below proves the body
+    // reached the handler, and nothing about this case needs a declared one.
     let database = DatabaseId::mint();
     let owner_id = UserId::mint();
     let auth = Arc::new(StaticAuthenticator::new());
     auth.insert(
         "good-token",
         &owner_id,
-        [Scope::AppsDeploy],
-        [app_id.clone()],
+        [Scope::DatabaseMigrate],
+        [database.clone()],
     );
     let (state, tmp) = state_for_with_policy_config_and_edge(
         auth,
@@ -2417,7 +2715,7 @@ async fn apply_route_accepts_a_body_larger_than_ntexs_default_limit() {
     });
 
     let request = test::TestRequest::post()
-        .uri(&apply_uri(&app_id, &database))
+        .uri(&apply_uri(&database))
         .header("authorization", "Bearer good-token")
         .set_json(&body)
         .to_request();
@@ -2432,20 +2730,20 @@ async fn apply_route_accepts_a_body_larger_than_ntexs_default_limit() {
 }
 
 #[ntex::test]
-async fn real_delegating_authenticator_accepts_apps_deploy_owner_bearer() {
+async fn real_delegating_authenticator_accepts_a_database_migrate_bearer() {
     let conn = admin_conn().await;
     let app_id = AppId::mint();
     let owner_id = UserId::mint();
-    let _database = seed_app(&conn, &app_id, &owner_id).await;
+    let database = seed_app(&conn, &app_id, &owner_id).await;
 
-    let token = platform_token(&owner_id, "apps:deploy");
+    let token = platform_token(&owner_id, "database:migrate");
 
     let auth_conn = admin_conn().await;
     let authenticator = real_authenticator(auth_conn);
     let caller = authenticator
-        .verify_bearer(&token, &app_id, Scope::AppsDeploy, "test-request-id")
+        .verify_bearer(&token, &database, Scope::DatabaseMigrate, "test-request-id")
         .await
-        .expect("app owner holding apps:deploy verifies");
+        .expect("a seat on the database's project holding database:migrate verifies");
     assert_eq!(caller.principal_id, owner_id);
 
     cleanup_app(&conn, &app_id).await;
@@ -2460,7 +2758,7 @@ async fn first_cli_apply_auth_materializes_defaults_and_honors_later_narrowing_p
     let conn = admin_conn().await;
     let app_id = AppId::mint();
     let owner_id = UserId::mint();
-    let _database = seed_app(&conn, &app_id, &owner_id).await;
+    let database = seed_app(&conn, &app_id, &owner_id).await;
 
     let scope = PLATFORM_CLI_ISSUABLE_SCOPES.join(" ");
     let token = platform_token_for_client(&owner_id, PLATFORM_CLI_CLIENT_ID, &scope);
@@ -2468,7 +2766,7 @@ async fn first_cli_apply_auth_materializes_defaults_and_honors_later_narrowing_p
     let authenticator = real_authenticator(auth_conn);
 
     authenticator
-        .verify_bearer(&token, &app_id, Scope::AppsDeploy, "first-cli-apply")
+        .verify_bearer(&token, &database, Scope::DatabaseMigrate, "first-cli-apply")
         .await
         .expect("the unseeded CLI fallback authorizes its first apply");
 
@@ -2504,27 +2802,32 @@ async fn first_cli_apply_auth_materializes_defaults_and_honors_later_narrowing_p
 
     conn.execute(
         "DELETE FROM zeroship.principal_grants \
-         WHERE principal_id = $1 AND grant_name = 'apps:deploy'",
+         WHERE principal_id = $1 AND grant_name = 'database:migrate'",
         &[&owner_id.as_str()],
     )
     .await
-    .expect("operator narrows apps:deploy");
+    .expect("operator narrows database:migrate");
     let error = authenticator
-        .verify_bearer(&token, &app_id, Scope::AppsDeploy, "narrowed-cli-apply")
+        .verify_bearer(
+            &token,
+            &database,
+            Scope::DatabaseMigrate,
+            "narrowed-cli-apply",
+        )
         .await
         .expect_err("the already-issued bearer must observe live narrowing");
     assert!(matches!(error, AuthError::Forbidden));
-    let deploy_grants: i64 = conn
+    let migrate_grants: i64 = conn
         .query_one(
             "SELECT COUNT(*) FROM zeroship.principal_grants \
-             WHERE principal_id = $1 AND grant_name = 'apps:deploy'",
+             WHERE principal_id = $1 AND grant_name = 'database:migrate'",
             &[&owner_id.as_str()],
         )
         .await
         .expect("query narrowed grant")
         .get(0);
     assert_eq!(
-        deploy_grants, 0,
+        migrate_grants, 0,
         "a later request re-seeded an operator revocation"
     );
 
@@ -2533,57 +2836,63 @@ async fn first_cli_apply_auth_materializes_defaults_and_honors_later_narrowing_p
 }
 
 #[ntex::test]
-async fn real_delegating_authenticator_rejects_bearer_without_apps_deploy_scope() {
+async fn real_delegating_authenticator_rejects_bearer_without_database_migrate_scope() {
     let conn = admin_conn().await;
     let app_id = AppId::mint();
     let owner_id = UserId::mint();
-    let _database = seed_app(&conn, &app_id, &owner_id).await;
+    let database = seed_app(&conn, &app_id, &owner_id).await;
 
-    // The principal OWNS the app; only the scope is short. Cedar would allow an
-    // owner `apps:deploy`, so the denial can only come from the token's own
-    // scope-derived policy.
-    let token = platform_token(&owner_id, "apps:read");
+    // The principal holds an OWNER seat on the database's organization; only
+    // the scope is short. Cedar would allow that seat `database:migrate`, so
+    // the denial can only come from the token's own scope-derived policy.
+    let token = platform_token(&owner_id, "database:read");
 
     let auth_conn = admin_conn().await;
     let authenticator = real_authenticator(auth_conn);
     let err = authenticator
-        .verify_bearer(&token, &app_id, Scope::AppsDeploy, "test-request-id")
+        .verify_bearer(&token, &database, Scope::DatabaseMigrate, "test-request-id")
         .await
-        .expect_err("bearer without apps:deploy must be denied");
+        .expect_err("bearer without database:migrate must be denied");
     assert!(matches!(err, AuthError::Forbidden));
 
     cleanup_app(&conn, &app_id).await;
     cleanup_user(&conn, &owner_id).await;
 }
 
-/// A scope lowers to `Resource::Any`, so the token itself names no app: the
-/// per-app narrowing is entirely Cedar app membership. This is the test that
-/// proves that membership actually bites - the same bearer that verifies for
-/// the app its subject owns must be refused for an app it does not.
+/// A scope lowers to `Resource::Any`, so the token itself names no database:
+/// the per-database narrowing is entirely the seat `authority::resolve` finds
+/// through `zeroship.databases.project_id`. This is the test that proves that
+/// seat actually bites - the same bearer that verifies for a database in its
+/// subject's own project must be refused for one in a stranger's.
 #[ntex::test]
-async fn real_delegating_authenticator_rejects_bearer_for_different_app_owner() {
+async fn real_delegating_authenticator_rejects_bearer_for_a_different_projects_database() {
     let conn = admin_conn().await;
     let app_id = AppId::mint();
     let owner_id = UserId::mint();
     let other_app_id = AppId::mint();
     let other_owner_id = UserId::mint();
-    let _database = seed_app(&conn, &app_id, &owner_id).await;
-    seed_app(&conn, &other_app_id, &other_owner_id).await;
+    let database = seed_app(&conn, &app_id, &owner_id).await;
+    let other_database = seed_app(&conn, &other_app_id, &other_owner_id).await;
 
-    let token = platform_token(&owner_id, "apps:deploy");
+    let token = platform_token(&owner_id, "database:migrate");
 
     let auth_conn = admin_conn().await;
     let authenticator = real_authenticator(auth_conn);
     let caller = authenticator
-        .verify_bearer(&token, &app_id, Scope::AppsDeploy, "test-request-id")
+        .verify_bearer(&token, &database, Scope::DatabaseMigrate, "test-request-id")
         .await
-        .expect("the same bearer verifies for the app its subject owns");
+        .expect("the same bearer verifies for a database its subject holds a seat on");
     assert_eq!(caller.principal_id, owner_id);
 
     let err = authenticator
-        .verify_bearer(&token, &other_app_id, Scope::AppsDeploy, "test-request-id")
+        .verify_bearer(
+            &token,
+            &other_database,
+            Scope::DatabaseMigrate,
+            "test-request-id",
+        )
         .await
-        .expect_err("a bearer for one owner must not authorize a different owner's app");
+        .expect_err("a bearer for one seat must not authorize another project's database");
     assert!(matches!(err, AuthError::Forbidden));
 
     cleanup_app(&conn, &app_id).await;
@@ -2599,8 +2908,8 @@ async fn real_delegating_authenticator_rejects_malformed_bearer() {
     let err = authenticator
         .verify_bearer(
             "not-a-jwt",
-            &AppId::mint(),
-            Scope::AppsDeploy,
+            &DatabaseId::mint(),
+            Scope::DatabaseMigrate,
             "test-request-id",
         )
         .await
@@ -2629,8 +2938,8 @@ async fn authz_receives_the_callers_request_id_pg() {
     auth.insert(
         "good-token",
         &owner_id,
-        [Scope::AppsDeploy],
-        [app_id.clone()],
+        [Scope::DatabaseMigrate],
+        [database.clone()],
     );
     let (state, tmp) = state_for(auth.clone());
     let svc = test::init_service(
@@ -2646,7 +2955,7 @@ async fn authz_receives_the_callers_request_id_pg() {
     // of the header plumbing rather than of the fixture.
     let caller_request_id = "req-from-the-caller-0001";
     let req = test::TestRequest::post()
-        .uri(&apply_uri(&app_id, &database))
+        .uri(&apply_uri(&database))
         .header("authorization", "Bearer good-token")
         .header("x-request-id", caller_request_id)
         .set_json(&create_notes_request())
@@ -2686,7 +2995,7 @@ async fn trusted_source_ip_reaches_the_authz_context_and_audit_row_pg() {
     let owner_id = UserId::mint();
     let database = seed_app(&conn, &app_id, &owner_id).await;
 
-    let token = platform_token(&owner_id, "apps:deploy");
+    let token = platform_token(&owner_id, "database:migrate");
     let authenticator = Arc::new(real_authenticator(admin_conn().await));
     let (state, tmp) = state_for_trusted_proxy(authenticator).await;
     let svc = test::init_service(
@@ -2698,7 +3007,7 @@ async fn trusted_source_ip_reaches_the_authz_context_and_audit_row_pg() {
 
     let request_id = format!("migrated-source-ip-{}", Uuid::new_v4().simple());
     let req = test::TestRequest::post()
-        .uri(&apply_uri(&app_id, &database))
+        .uri(&apply_uri(&database))
         .header("authorization", format!("Bearer {token}"))
         .header("x-request-id", request_id.as_str())
         .header("x-forwarded-for", "198.51.100.9, 203.0.113.77")

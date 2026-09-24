@@ -114,21 +114,24 @@ Built:
 Not built: capacity-aware placement. Open 11's subset test at isolate build does not exist, so a
 build reaching a column the database lacks fails at query time with `42703 undefined_column`.
 - the migration service's re-key onto the database. The apply route is
-  `POST /v1/apps/{app_id}/databases/{database_id}/migrations/apply`: the DATABASE is the target
-  and the APP is the authorization subject, and both are in the path because the CLI posts the
-  build's `migrations.ir.json` VERBATIM and must not splice a target into a body it does not
-  parse. `zeroship_migrate_server::api::apply` admits on
-  `zeroship_core::live_binding::LIVE_BINDINGS_FROM_WHERE` - the one predicate Control serves
-  bindings from and the CDC relay resolves a schema with - before any side effect, and refuses
-  `database_not_bound` naming the binding call. `apply_ir_documents` derives its schema from
+  `POST /v1/databases/{database_id}/migrations/apply`: the DATABASE is both the target and the
+  authorization subject, and it is in the path because the CLI posts the build's
+  `migrations.ir.json` VERBATIM and must not splice a target into a body it does not parse.
+  `zeroship_migrate_server::api::apply` authorizes `Action::DatabaseMigrate` at
+  `Resource::Database`, which `zeroship_authz::authority::resolve` answers from
+  `zeroship.databases.project_id` - a qualifying seat on the owning project, the same authority
+  that created the database - and there is no second rank comparison inside the service.
+  `apply_ir_documents` takes the database alone, derives its schema from
   `database_derivation::schema_name` and runs as `zs_db_<dbs>_mig`, the owner the reconciler
   minted, so the project advisory lock and the engine journal are per database too. The ceiling
-  is bound to that schema rather than to the app's, because a charter bound to the wrong name
-  grants nothing and refuses every creator statement as out-of-scope.
-  `crates/zeroship-migrate-server/tests/apply_database_target_pg.rs` drives both halves against
-  a converged cluster: a table lands in the named database and not in the other live-bound one,
-  and an apply naming an unbound database is refused with the identical request succeeding once
-  the binding converges.
+  is bound to that schema, because a charter bound to the wrong name grants nothing and refuses
+  every creator statement as out-of-scope.
+  `crates/zeroship-migrate-server/tests/apply_database_target_pg.rs` drives it against a
+  converged cluster: a table lands in the named database and not in the other one this app
+  holds, and a database NO app is bound to is migratable - measured, with the binding count read
+  either side so an apply that minted an edge to make itself legal would fail too.
+  `apply_api_test.rs` pairs the seat arms through the real `ControlPlaneAuthenticator`, differing
+  in one `zeroship.project_members` row.
 
   **The apply establishes no per-app runtime role.** A role carrying
   `SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA` and granted to the ONE shared worker
@@ -952,29 +955,31 @@ and the migrator role `zs_db_<dbs>_mig` is named by no app. There is no `owner` 
 can hold, so there is no ownership transfer, no ping-pong between apps, and nothing for an app
 deletion to cascade into.
 
-**One route, and the control plane is not on the apply.** The CLI addresses the database by id
-and the app by id:
+**One route, and the control plane is not on the apply.** The CLI addresses the database by id,
+and nothing else:
 
 ```
-creator -> POST /v1/apps/{app_id}/databases/{database_id}/migrations/apply
+creator -> POST /v1/databases/{database_id}/migrations/apply
 ```
 
 `crates/zeroship-migrate-server/src/api.rs` registers it, and its `ControlPlaneAuthenticator`
-(`crates/zeroship-migrate-server/src/auth.rs`) authorizes `Action::AppsDeploy` against the
-creator's own bearer rather than the platform control key. Both ids are in the PATH because the
-CLI posts the build's `migrations.ir.json` verbatim: it parses and rewrites nothing, so a target
-it had to splice into that body is a target it could get wrong.
+(`crates/zeroship-migrate-server/src/auth.rs`) authorizes `Action::DatabaseMigrate` at
+`Resource::Database` against the creator's own bearer rather than the platform control key. The
+id is in the PATH because the CLI posts the build's `migrations.ir.json` verbatim: it parses and
+rewrites nothing, so a target it had to splice into that body is a target it could get wrong.
 
-**Authority is the app's live binding, and it is a different question from authorization.** The
-bearer decides whether this principal may deploy this app;
-`zeroship_core::live_binding::LIVE_BINDINGS_FROM_WHERE` decides whether that app reaches this
-database. Neither implies the other and the remedies differ, so the refusals are distinct:
-`database_not_bound` names the database and the call that grants a binding.
+**Authority is the PROJECT SEAT, and it is spelled once.** `zeroship_authz::authority::resolve`
+reaches `zeroship.databases.project_id` directly and narrows the caller's organization seat by
+their project seat; `deploy/policies/creator/organization_develop.cedar` puts `database:migrate`
+at developer, beside `database:write`, so a migration is authorized the way the database's own
+creation is. The migration service adds no rank comparison of its own - one would be a second
+spelling of an answer `zeroship-authz` already owns.
 
-A project-seat policy on `Resource::Database` - "principal may migrate N iff principal holds a
-qualifying seat on N's project" - would let the app leave the route entirely. It is not built:
-the binding predicate already answers who may write which schema, and the Cedar band is a
-separate change with its own schema edit.
+The app's live binding is a DIFFERENT question and is not on this route: it governs whether an
+app may read and write a database at RUNTIME, which is what the two membership edges grant and
+what `SET LOCAL ROLE` spends per statement. Deploy still admits on it
+(`zeroship_core::live_binding::LIVE_BINDINGS_FROM_WHERE`), and a database with no app bound to it
+is migratable.
 
 **With many zones the migration service is zone-local.** A single global instance would hold a
 session advisory lock across a whole multi-file apply over a wide-area link. So `migrate-server`
@@ -2049,6 +2054,17 @@ app's requests and cannot protect a shared cluster from an app under its limit. 
     mutations and two reads need it and two spellings would be two answers." A copy inside
     migrate-server would be the third spelling. The predicate moves to a crate both services read,
     or migrate-server asks Control; it is not reimplemented.
+
+    **The organization-owner fence is REMOVED too, and that is a loosening.** DECIDED by
+    operator. The route's real gate was never the binding: `requires_organization_owner` returned
+    true for every action but `AppsApproveMigration`, so a creator migration required OWNER rank
+    in the ORGANIZATION, and its doc rejected exactly the narrowing adopted here - "requiring the
+    ORGANIZATION rank means only somebody who answers for the whole organization can. Read this as
+    the ceiling being organization-level on purpose". It could not survive the re-addressing in any
+    case, because its query joined `zeroship.apps` and there is no app in the path; but deleting
+    it rather than re-expressing it at the organization on `databases.project_id` is a decision,
+    and the decision is to delete. The bar moves from organization owner to project developer,
+    which is where the `database:migrate` band already sat.
 
     **The live-binding admission is REMOVED, not replaced.** A binding governs whether an APP may
     read and write a database at RUNTIME; that is what the two membership edges grant and what

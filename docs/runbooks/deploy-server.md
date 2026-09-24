@@ -273,7 +273,7 @@ control: `zeroship migrate` reuses the control URL, but the edge selects
 migrate-server directly.
 
 The complete namespace matcher includes the
-`/v1/apps/{app_id}/databases/{database_id}/migrations/apply` route. Control must
+`/v1/databases/{database_id}/migrations/apply` route. Control must
 not declare a `/v1` route.
 
 Verify a migration through the public ingress by reading the apply response

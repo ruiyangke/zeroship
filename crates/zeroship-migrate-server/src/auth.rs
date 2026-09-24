@@ -7,7 +7,7 @@ use compio_postgres::Client;
 use ntex::http::StatusCode;
 use zeroship_authn::BearerVerifier;
 use zeroship_authz::{self as authz, Action, AuthzContext, AuthzDecision, Resource, Scope};
-use zeroship_id::{AppId, UserId};
+use zeroship_id::{DatabaseId, UserId};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedCaller {
@@ -24,6 +24,13 @@ pub enum AuthError {
     Infrastructure(String),
 }
 
+/// Whether a bearer may perform an action against ONE DATABASE.
+///
+/// The subject is the database because applying schema is not an app
+/// operation: it is authorized by a qualifying seat on the project that owns
+/// the database, which is the same authority that created it. A trait taking
+/// an app id could not express that question, and an implementation handed one
+/// could only answer a different one.
 #[async_trait(?Send)]
 pub trait Authenticator: Send + Sync {
     /// `request_id` is the caller-visible correlation id for this HTTP
@@ -33,7 +40,7 @@ pub trait Authenticator: Send + Sync {
     async fn verify_action(
         &self,
         token: &str,
-        app_id: &AppId,
+        database_id: &DatabaseId,
         required_action: Action,
         request_ip: Option<IpAddr>,
         request_id: &str,
@@ -64,21 +71,43 @@ impl ControlPlaneAuthenticator {
     pub async fn verify_bearer(
         &self,
         token: &str,
-        app_id: &AppId,
+        database_id: &DatabaseId,
         required_scope: Scope,
         request_id: &str,
     ) -> Result<VerifiedCaller, AuthError> {
-        self.verify_action(token, app_id, required_scope.action(), None, request_id)
-            .await
+        self.verify_action(
+            token,
+            database_id,
+            required_scope.action(),
+            None,
+            request_id,
+        )
+        .await
     }
 
+    /// The whole fence, and there is exactly one.
+    ///
+    /// [`Resource::Database`] makes `zeroship_authz::authority::resolve` reach
+    /// `zeroship.databases.project_id` directly and narrow the caller's
+    /// organization seat by their project seat - the same
+    /// `effective_project_rank` the control plane compares when it creates the
+    /// database in the first place. The band that admits the action lives in
+    /// `deploy/policies/creator/organization_develop.cedar`, so where the seat
+    /// ladder puts `database:migrate` is a policy fact this service reads
+    /// rather than a rank it names.
+    ///
+    /// There is no second, service-local rank comparison beside it. One would
+    /// be a second spelling of an answer `zeroship-authz` already owns, and the
+    /// two would drift the moment the ladder moved.
     async fn authorize(
         &self,
         seed: VerifiedSeed,
-        app_id: &AppId,
+        database_id: &DatabaseId,
         required_action: Action,
     ) -> Result<VerifiedCaller, AuthError> {
-        let resource = Resource::App { id: app_id.clone() };
+        let resource = Resource::Database {
+            id: database_id.clone(),
+        };
         resource
             .validate_ids()
             .map_err(|message| AuthError::Infrastructure(message.to_owned()))?;
@@ -100,13 +129,6 @@ impl ControlPlaneAuthenticator {
             Err(err) => return Err(AuthError::Infrastructure(err.to_string())),
         }
 
-        if requires_organization_owner(required_action)
-            && !caller_holds_organization_ownership(&self.control_pg, &seed.principal_id, app_id)
-                .await?
-        {
-            return Err(AuthError::Forbidden);
-        }
-
         Ok(VerifiedCaller {
             principal_id: seed.principal_id,
         })
@@ -118,7 +140,7 @@ impl Authenticator for ControlPlaneAuthenticator {
     async fn verify_action(
         &self,
         token: &str,
-        app_id: &AppId,
+        database_id: &DatabaseId,
         required_action: Action,
         request_ip: Option<IpAddr>,
         request_id: &str,
@@ -159,7 +181,7 @@ impl Authenticator for ControlPlaneAuthenticator {
             request_id: verified.request_id,
             request_ip: verified.request_ip,
         };
-        self.authorize(seed, app_id, required_action).await
+        self.authorize(seed, database_id, required_action).await
     }
 }
 
@@ -169,61 +191,6 @@ struct VerifiedSeed {
     token_policy: Option<authz::Policy>,
     request_id: String,
     request_ip: Option<IpAddr>,
-}
-
-/// The second fence, beside Cedar: applying a migration needs OWNER authority
-/// in the organization that owns the app's project.
-///
-/// # It reads the ladder rather than the word "owner"
-///
-/// Organization authority is two integers on a closed ladder, so the question
-/// is "does the caller's rank reach the owner rank" - which stays true if a
-/// migration ever moves `owner` up or down, and which a hardcoded number would
-/// not.
-///
-/// # There is no per-project narrowing here, and that is deliberate
-///
-/// A migration rewrites the app's schema, which is the least reversible thing
-/// the platform lets a creator do. Narrowing would let a project seat reach it;
-/// requiring the ORGANIZATION rank means only somebody who answers for the whole
-/// organization can. Read this as the ceiling being organization-level on
-/// purpose, not as an oversight about `project_members`.
-///
-/// # The app id is bound as `text`, and that is a requirement on the column
-///
-/// [`AppId`] exposes no route to any embedded bits, so text against text is the
-/// only comparison this join can make. A database whose `zeroship.apps.id` is
-/// still `uuid` fails this query outright with a type error rather than matching
-/// no row - which matters, because no row here is indistinguishable from a
-/// caller who holds no organization seat, and this function's `false` denies the
-/// apply. `zeroship_authz::authority` binds the same column the same way and
-/// spells out the same requirement.
-async fn caller_holds_organization_ownership(
-    pg: &Client,
-    principal_id: &UserId,
-    app_id: &AppId,
-) -> Result<bool, AuthError> {
-    let rows = pg
-        .query(
-            "SELECT 1 \
-               FROM zeroship.apps a \
-               JOIN zeroship.projects p ON p.id = a.project_id \
-               JOIN zeroship.organization_members m \
-                    ON m.organization_id = p.organization_id AND m.user_id = $2 \
-               JOIN zeroship.organization_roles r ON r.role = m.role \
-              WHERE a.id = $1::text \
-                AND r.rank >= (SELECT rank FROM zeroship.organization_roles WHERE role = 'owner')",
-            &[&app_id.as_str(), &principal_id.as_str()],
-        )
-        .await
-        .map_err(|err| {
-            AuthError::Infrastructure(format!("organization ownership lookup failed: {err}"))
-        })?;
-    Ok(!rows.is_empty())
-}
-
-fn requires_organization_owner(action: Action) -> bool {
-    !matches!(action, Action::AppsApproveMigration)
 }
 
 /// Classify a rejection from [`BearerVerifier`] by the status it reports.

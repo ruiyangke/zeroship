@@ -78,7 +78,7 @@ use zeroship_data_orm::encryption::SuppliedProjectKeys;
 use zeroship_data_orm::resolved_bindings::{ResolvedBinding, SuppliedAppBindings};
 use zeroship_data_v8::service::{DbService, DbServiceConfig};
 use zeroship_migrate_server::apply::{
-    apply_ir_documents, ApplyMigrationsRequest, ApplyMigrationsResponse, ApplyTarget, WORKER_ROLE,
+    apply_ir_documents, ApplyMigrationsRequest, ApplyMigrationsResponse, WORKER_ROLE,
 };
 use zeroship_migrate_server::datastore::control::ControlStore;
 use zeroship_migrate_server::datastore::{PassReport, Reconciler};
@@ -513,7 +513,7 @@ fn private_migration() -> Json {
 /// does not promise the order the earlier apply reported.
 async fn apply_into(
     tenant_url: &str,
-    target: ApplyTarget<'_>,
+    database: &DatabaseId,
     principal: &UserId,
     request: Json,
     label: &str,
@@ -525,7 +525,7 @@ async fn apply_into(
     let report = apply_ir_documents(
         tenant_url,
         &tmp,
-        target,
+        database,
         &request,
         &policy_config(),
         principal,
@@ -1269,10 +1269,7 @@ async fn the_whole_decoupled_path_runs_in_one_exercise() {
 
     let shared_first_apply = apply_into(
         cluster_fixture.url(),
-        ApplyTarget {
-            app_id: &app_a,
-            database_id: &shared_id,
-        },
+        &shared_id,
         &principal,
         shared_migration(),
         "shared",
@@ -1281,10 +1278,7 @@ async fn the_whole_decoupled_path_runs_in_one_exercise() {
     .await;
     apply_into(
         cluster_fixture.url(),
-        ApplyTarget {
-            app_id: &app_a,
-            database_id: &private_id,
-        },
+        &private_id,
         &principal,
         private_migration(),
         "private",
@@ -1988,10 +1982,7 @@ async fn a_migration_one_app_applies_to_a_shared_database_does_not_fail_the_othe
     );
     let report = apply_into(
         tenant_url,
-        ApplyTarget {
-            app_id: applying,
-            database_id: shared,
-        },
+        shared,
         principal,
         co_tenant_migration(),
         "shared-co-tenant",
