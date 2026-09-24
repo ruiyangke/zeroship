@@ -2,9 +2,9 @@
 
 use crate::engine::WorkflowOutputRef;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 pub use zeroship_core::workflow_coordination::{
-    RestartDeploy, RestartOptions, RestartTarget, RunOperation, RunState,
+    DeliveredSignal, RestartDeploy, RestartOptions, RestartTarget, RunOperation, RunState,
+    RunStatus, SignalOptions,
 };
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -45,41 +45,9 @@ pub struct StartOptions {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SignalOptions {
-    #[serde(rename = "type")]
-    pub signal_type: String,
-    #[serde(default)]
-    pub payload: Value,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StartedRun {
     pub id: String,
     pub state: RunState,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RunStatus {
-    pub state: RunState,
-    pub output: Option<Value>,
-    pub error: Option<Value>,
-    /// The run a `continuedAsNew` close handed this run's work to.
-    ///
-    /// Typed and platform-minted, so it is not confusable with whatever JSON a
-    /// creator returned in `output`. Absent from the response unless the run
-    /// actually produced a successor.
-    #[serde(
-        default,
-        rename = "continuedAsNew",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub continued_as_new_run_id: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DeliveredSignal {
-    pub id: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

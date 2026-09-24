@@ -26,10 +26,17 @@ zeroship-data-orm = { workspace = true }
 zeroship-workflow-manager = { workspace = true }
 # The journal artifacts, as a LEAF crate: it carries the generated SQL, the
 # version series and the stamp descriptor, and depends on nothing else in the
-# workspace, so the manager can send a journal bundle without reaching the
-# creator workflow engine.
+# workspace. That is what lets the migration service install a journal from the
+# same artifacts without linking anything else, and it is asserted by
+# `the_workflow_schema_crate_reaches_nothing_else_in_the_workspace`.
 zeroship-workflow-schema = { workspace = true }
 zeroship-workflow-client = { workspace = true }
+# The engine, for the creator-facing calls this service answers over its own
+# journal. It reaches no payload storage: `PayloadObjects` and
+# `ObjectStepOutputs` live in `zeroship-workflow-runner`, which
+# `workflow_process_dependencies_follow_crate_ownership` forbids this crate from
+# reaching, so the methods that move payload bytes are not served here.
+zeroship-workflow = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
