@@ -1135,7 +1135,7 @@ probe keeps passing while saying nothing about the tables it now depends on.
 
 **Step 1 was right not to.** It installed the journal and granted nothing;
 `MANAGER_TABLES` names no journal table and neither does the census, and
-`platform_role_can_coordinate_without_customer_or_journal_privileges` in
+`platform_role_serves_the_journal_without_customer_or_ddl_privileges` in
 `crates/zeroship-workflow-server/tests/platform_schema.rs` binds that absence.
 At step 1 the correct state is no privileges and no entries. This proposal
 first assigned the obligation to step 1; that was wrong, and the check is what

@@ -1,9 +1,12 @@
 # Moving the workflow journal out of creator databases
 
-**Status.** PROPOSED, with Plan step 1 in place:
+**Status.** PROPOSED, with Plan steps 1 and 2 in place and step 3 landed for `status` alone.
 `db/migrations-ts/20260919000000_workflow_journal.ts` installs the journal into
-`workflow_manager`, and `journal_is_installed_and_unread` in
-`crates/zeroship-workflow-server/tests/platform_schema.rs` holds it there unread. The journal is
+`workflow_manager` and grants it to the role already serving that schema, and
+`journal_is_installed_and_served_by_one_role` in
+`crates/zeroship-workflow-server/tests/platform_schema.rs` holds that posture. The service links
+the engine and answers `status` over its own journal; `signal`, `transition` and `restart` are
+built and refuse, each naming the prerequisite it still needs. The journal is
 installed into the creator's own schema today and written by the worker over the creator's own
 connection; this moves storage and the durable fold into the workflow service, leaving execution
 where it is.
@@ -352,8 +355,24 @@ protocol. This extends a working client rather than inventing one.
    none of `WorkflowService`, `AppBackend` or `AppWorkflows`, so it holds no handle to bind.
    Step 3 is what gives it the engine, and the worker waits for step 5.
 
-3. **Serve the creator methods, and add a client for them** in `zeroship-workflow-client`.
-   Not yet wired into the worker. Verify each method round-trips against the service store.
+3. **PARTLY DONE - `status` is served; the mutating three are built and refuse.** The endpoints,
+   their `svc/worker` grants, the request envelopes, the `RunFailure` refusal envelope and the
+   client methods are in; `RunService` in `crates/zeroship-workflow-server/src/runs.rs` binds an
+   app per request from the server's own policy registry, and `bind` in `api/runs.rs` takes the
+   worker from the credential that verified the call rather than from the body, so a request
+   cannot name a placement its caller does not hold.
+   `status_answers_from_the_service_journal` in `tests/http_runs.rs` reads a run's state back
+   through the endpoint and compares it against the row.
+
+   Two prerequisites keep the rest fenced, and `http_runs.rs` pins each by name rather than
+   describing it. `signal` and `transition` reach `require_open_epoch` and refuse as
+   `IngressFenced`, because the service installs no ingress epoch;
+   `Recovery::establish` in `crates/zeroship-workflow-manager/src/recovery.rs` is the capability
+   and `LocalIngress` in `crates/zeroship-cli/src/workflow/host.rs` the worked consumer, but
+   `RunService` reinstalls its snapshot on every call, so establishment and install have to be
+   designed together. `restart` never reaches the epoch: it resolves a run's retained deployment
+   source first and this service creates no hold, so it refuses as `Unavailable`. Those two
+   prerequisites are the next step, and that test is what flips when they land.
 
 4. **Carry the three direct calls across, merged into the claims that already cross.** This is
    the step that earns its own review, and it is not "add a remote `TaskTransport`" - that trait
