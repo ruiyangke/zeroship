@@ -362,10 +362,12 @@ protocol. This extends a working client rather than inventing one.
    endpoints, their `svc/worker` grants, the request envelopes, the `RunFailure` refusal
    envelope and the client methods are in; `RunService` in
    `crates/zeroship-workflow-server/src/runs.rs` binds an app per request from the server's own
-   policy registry, and `bind` in `api/runs.rs` takes the worker from the credential that
-   verified the call rather than from the body, so a request cannot name a placement its caller
-   does not hold. `status_answers_from_the_service_journal` in `tests/http_runs.rs` reads a
-   run's state back through the endpoint and compares it against the row, and
+   policy registry, and `bind` in `crates/zeroship-workflow-server/src/api/runs.rs` takes the
+   worker from the credential that verified the call rather than from the body, so a request
+   cannot name a placement its caller does not hold.
+   `status_answers_from_the_service_journal` in
+   `crates/zeroship-workflow-server/tests/http_runs.rs` reads a run's state back through the
+   endpoint and compares it against the row, and
    `a_signal_served_over_the_wire_is_in_the_journal` does the same for a write.
 
    **The ingress epoch is established, and survives the reinstall.** `RunService::app`
@@ -400,8 +402,9 @@ protocol. This extends a working client rather than inventing one.
    `crates/zeroship-core/src/service_identity.rs`. `record_verified` in
    `crates/zeroship-workflow/src/service/deploys.rs` is the only writer of the deploys table and
    every path to it needs an `AppDeployments` this service never installs. So the endpoints
-   above operate on rows nothing here produces, which is why `tests/http_runs.rs` seeds by raw
-   SQL. That is a sequencing constraint on steps 4 and 5 rather than a gap in this step.
+   above operate on rows nothing here produces, which is why
+   `crates/zeroship-workflow-server/tests/http_runs.rs` seeds by raw SQL. That is a sequencing
+   constraint on steps 4 and 5 rather than a gap in this step.
 
 4. **Carry the three direct calls across, merged into the claims that already cross.** This is
    the step that earns its own review, and it is not "add a remote `TaskTransport`".
