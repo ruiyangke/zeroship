@@ -676,16 +676,27 @@ stall the defect fixes that motivate the move.
    `SELECT public_key FROM zeroship.worker_instances WHERE id=$1 AND status='active'`, and
    `crates/zeroship-workflow-manager/src/policy/control/models.rs` declares "Native
    projections of Control-owned policy inputs and publication metadata" over `apps`, `plans`,
-   `workflow_rollout_config` and `workflow_policy_ledger`. Enumerate those reads from the tree
-   rather than from this paragraph before sizing the work.
+   `workflow_rollout_config` and `workflow_policy_ledger`, and it WRITES the ledger as well as
+   reading it, so a cache cannot answer the whole of it. The highest-frequency crossing is in
+   another schema entirely and a search for `zeroship.` cannot find it:
+   `SharedClientReplayStore` (`crates/zeroship-authn/src/service_replay.rs`), constructed in
+   `crates/zeroship-workflow-server/src/server.rs`, upserts
+   `service_authn.service_assertion_replay` once per authenticated inbound call. Enumerate
+   these from the tree rather than from this paragraph before sizing the work, and enumerate
+   by the grants rather than by the SQL: the grant files have to name every schema they reach.
 
    **The corpus is partitionable; role identity is what still binds it.** No migration writes
    into two databases' worth of schemas any more:
-   `db/migrations-ts/20260911000050_workflow_platform_grants.ts` holds the workflow login's
-   reach outside its own schema - USAGE on `zeroship` and `service_authn`, column-scoped
+   `db/migrations-ts/20260911000050_workflow_platform_grants.ts` carries most of the workflow
+   login's reach outside its own schema - USAGE on `zeroship` and `service_authn`, column-scoped
    `SELECT` on the Control tables its coordinator and policy reads project, and DML on the
    shared assertion replay store - and `20260911000000_workflow_coordination.ts` keeps the
-   schema, its roles and its own grants.
+   schema, its roles and its own grants. **Two files grant that reach, not one:**
+   `db/migrations-ts/20260914000600_placement_eligibility.ts` also grants
+   `SELECT (execution_zone_id,deleted_at)` on `zeroship.apps` and
+   `SELECT (execution_zone_id,expires_at)` on `zeroship.worker_instances`. Editing only the
+   first leaves the eligibility reads working and nothing fails, so a change meant to remove a
+   crossing would leave it in place.
 
    What still crosses is the roles, which are cluster-scoped rather than
    database-scoped. `20260914000600_placement_eligibility.ts` is a control migration granting
