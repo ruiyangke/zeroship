@@ -250,3 +250,30 @@ pub struct RunStatus {
     )]
     pub continued_as_new_run_id: Option<String>,
 }
+
+/// The state a lifecycle transition settled the run in.
+///
+/// The whole result of a transition is the state, which is decided inside the
+/// creator transaction and cannot be recovered from the command that asked for
+/// it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransitionedRun {
+    pub state: RunState,
+}
+
+/// What a restart decided: how much journal the new generation kept, and where
+/// it replays.
+///
+/// `run_id` is the run that was restarted. A restart advances a run's
+/// generation, never its identity, so this is always the run the command named.
+/// `restarted_from_ordinal` is the retained journal prefix, absent when the run
+/// restarted whole, and `pinned_to` is the deployment the new generation
+/// replays against, which a latest restart moves.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestartedRun {
+    pub run_id: String,
+    pub state: RunState,
+    pub restarted_from_ordinal: Option<u32>,
+    pub pinned_to: zeroship_id::workflow::DeploymentId,
+}

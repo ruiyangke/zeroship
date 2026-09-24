@@ -3,8 +3,8 @@
 use crate::engine::WorkflowOutputRef;
 use serde::{Deserialize, Serialize};
 pub use zeroship_core::workflow_coordination::{
-    DeliveredSignal, RestartDeploy, RestartOptions, RestartTarget, RunOperation, RunState,
-    RunStatus, SignalOptions,
+    DeliveredSignal, RestartDeploy, RestartOptions, RestartTarget, RestartedRun, RunOperation,
+    RunState, RunStatus, SignalOptions, TransitionedRun,
 };
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -50,16 +50,3 @@ pub struct StartedRun {
     pub state: RunState,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TransitionedRun {
-    pub state: RunState,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RestartedRun {
-    pub run_id: String,
-    pub state: RunState,
-    pub restarted_from_ordinal: Option<u32>,
-    pub pinned_to: String,
-}
