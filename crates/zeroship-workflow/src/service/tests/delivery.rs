@@ -1519,6 +1519,12 @@ async fn steps_by_ordinal(
 /// were substituted for one another would keep its width, keep its run state
 /// and keep its receipt, and fail only here.
 ///
+/// Attempt accounting is part of that identity: a reported execution of a `run`
+/// body is counted against its ordinal and an effect is not, so the two
+/// completions in this batch differ in what they spent as well as in what they
+/// produced. Nothing else asserts the count an effect carries, and the run step
+/// beside it is what says the count is being taken at all.
+///
 /// What this does NOT catch: a permutation of the batch. `journal::append`
 /// refuses a new checkpoint that is not the next journal operation, so a
 /// reordered batch is rejected before a row is written and this case would see
@@ -1571,6 +1577,11 @@ async fn outcome_identity(store: Rc<OrmStore>) {
         json!("pending"),
         "the compensable step's own obligation was not registered at its ordinal"
     );
+    assert_eq!(
+        record["step"]["attempts"],
+        json!(1),
+        "the run body executed once and the row must say what it cost"
+    );
 
     let (kind, state, record) = &stored[&1];
     assert_eq!((kind.as_str(), state.as_str()), ("sideEffect", "completed"));
@@ -1580,6 +1591,13 @@ async fn outcome_identity(store: Rc<OrmStore>) {
         record["step"]["compensationState"],
         serde_json::Value::Null,
         "an effect that declared no undo was given the neighbouring step's obligation"
+    );
+    assert_eq!(
+        record["step"]["attempts"],
+        json!(0),
+        "an effect has no re-execution to budget, so nothing is counted against \
+         its ordinal; the neighbouring run step above is the control that says \
+         this batch counts anything at all"
     );
 
     let (kind, state, record) = &stored[&2];
