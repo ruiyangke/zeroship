@@ -6,7 +6,7 @@ export default {
   name: "workflow_coordination",
   schema() {
     role("zeroship_workflow_migrator").create({ login: false });
-    role("zeroship_workflow").create({ login: true, setSearchPath: ["workflow_manager", "pg_catalog"] });
+    role("zeroship_workflow").create({ login: true, password: "zeroship_workflow", setSearchPath: ["workflow_manager", "pg_catalog"] });
     schema("workflow_manager").create({ authorization: "zeroship_workflow_migrator" });
     const managerTables = workflowManagerSchema("workflow_manager");
     if (!managerTables.length) throw new Error("workflow manager schema is empty");
