@@ -82,7 +82,6 @@ async fn relay_process_authenticates_workers_and_streams_commits_without_worker_
     let db = Pool::connect(admin_url.as_str(), 2).await.unwrap();
     let app = zeroship_core::typed_id::generate(zeroship_core::typed_id::APP_PREFIX);
     let publication = zeroship_core::replication_names::DATASTORE_PUBLICATION;
-    let slot = zeroship_core::replication_names::relay_slot_name(&app).unwrap();
     // The app's ONE database. The relay reads these ids back out of Control's
     // rows to learn which schema this subscriber is entitled to, so the fixture
     // declares them rather than letting anything derive a schema from the app
@@ -98,6 +97,8 @@ async fn relay_process_authenticates_workers_and_streams_commits_without_worker_
     let schema = binding.schema().as_str().to_owned();
     let database = binding.database().unwrap().as_str().to_owned();
     let binding_role = binding.session_role().unwrap().to_owned();
+    // The capture this subscription starts, named for the pair it captures.
+    let slot = zeroship_core::replication_names::relay_slot_name(&app, &database).unwrap();
     db.batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS zeroship; CREATE TABLE IF NOT EXISTS zeroship.worker_instances (id text PRIMARY KEY, ring_key bytea NOT NULL, public_key bytea NOT NULL, advertise_host inet NOT NULL, advertise_port int NOT NULL, registered_at timestamptz NOT NULL DEFAULT now(), status text NOT NULL CHECK (status IN ('active', 'draining', 'gone'))); GRANT USAGE ON SCHEMA zeroship TO \"{relay_role}\"; GRANT SELECT (id, status, public_key) ON zeroship.worker_instances TO \"{relay_role}\"")).await.unwrap();
     // Stand-ins for the two Control tables the relay's schema lookup reads
     // (`db/migrations-ts/20260919000200_database_entities.ts`), carrying only

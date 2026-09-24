@@ -57,8 +57,19 @@ async fn bound_database_schema(pool: &Pool, app: &str, database: &str) -> Result
     Ok(zeroship_core::database_derivation::schema_name(&database))
 }
 
-pub(crate) fn slot_name(app: &str) -> Result<String, Error> {
-    Ok(zeroship_core::replication_names::relay_slot_name(app)?)
+/// The slot THIS capture owns.
+///
+/// It takes the whole [`StreamKey`] because a capture is per (app, database):
+/// naming the slot from the app alone gave one app's two databases one name,
+/// and a logical slot admits exactly one consumer, so the second capture's
+/// `pg_create_logical_replication_slot` came back `42710` and its subscribers
+/// disconnected. Threading the key rather than a field is what keeps the slot
+/// keyed on the same pair the capture is.
+pub(crate) fn slot_name(key: &StreamKey) -> Result<String, Error> {
+    Ok(zeroship_core::replication_names::relay_slot_name(
+        &key.app,
+        &key.database,
+    )?)
 }
 
 /// The caller holds the relay's database advisory lock for this task's life.
@@ -71,7 +82,7 @@ pub(crate) async fn run(
     url: String,
     limits: Limits,
 ) {
-    let slot = match slot_name(&key.app) {
+    let slot = match slot_name(&key) {
         Ok(slot) => slot,
         Err(_) => {
             hub.end(&key, start.generation);
@@ -87,10 +98,13 @@ pub(crate) async fn run(
     if result.is_err() {
         tracing::warn!(app_id = %key.app, database_id = %key.database, "CDC capture stopped; subscribers must reconnect and resnapshot");
     }
-    // Only our prefix and this app's exact name are ever deleted. An active
-    // slot is never terminated; a failed cleanup is retried at relay startup.
+    // Only this capture's exact name is ever deleted, and it carries the
+    // database as well as the app, so a sibling capture of the same app is out
+    // of reach here. An active slot is never terminated; a failed cleanup is
+    // retried at relay startup, where the prefix scan reclaims every inactive
+    // relay slot whatever pair composed it.
     if pool.query("SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = $1 AND NOT active AND database = current_database()", &[&slot]).await.is_err() {
-        tracing::warn!(app_id = %key.app, "CDC slot cleanup failed");
+        tracing::warn!(app_id = %key.app, database_id = %key.database, "CDC slot cleanup failed");
     }
     hub.end(&key, start.generation);
 }
@@ -427,6 +441,312 @@ mod tests {
         pool.close().await;
     }
 
+    /// **One app's two databases of ONE datastore capture through two slots.**
+    ///
+    /// A capture runs per (app, database) and a datastore is reached through a
+    /// single `PostgreSQL` database, so both of this app's captures create
+    /// their slot in the same place. A slot name composed from the app alone is
+    /// therefore one name asked for twice: the server answers the second
+    /// `pg_create_logical_replication_slot` with `42710`,
+    /// `replication slot "..." already exists`, that capture returns the error,
+    /// and the hub tears its stream down under subscribers who then reconnect.
+    ///
+    /// The arm is behavioural on both sides. Both captures have to reach
+    /// `Ready`, which is what a shared name denies, and then each database's
+    /// commit has to reach its own subscriber and only its own. The two
+    /// databases declare DIFFERENTLY NAMED collections so that half is
+    /// race-free: a capture publishes in WAL order, so a capture that leaked
+    /// its neighbour's commit delivers the wrong collection here rather than
+    /// delivering nothing yet.
+    ///
+    /// The slot rows are read back as the mechanism check - two rows, both
+    /// active, both under the prefix the relay's startup scan reclaims by.
+    #[compio::test]
+    async fn one_app_s_two_databases_capture_through_two_slots() {
+        let postgres = crate::postgres_fixture::Postgres::start();
+        let url = postgres.url();
+        let pool = Pool::connect(&url, 8).await.expect("required PostgreSQL");
+        let app = zeroship_core::typed_id::generate(zeroship_core::typed_id::APP_PREFIX);
+        let mine = zeroship_core::DatabaseId::mint();
+        let theirs = zeroship_core::DatabaseId::mint();
+        assert_ne!(mine, theirs, "the control: two mints are two databases");
+        let my_schema = zeroship_core::database_derivation::schema_name(&mine);
+        let their_schema = zeroship_core::database_derivation::schema_name(&theirs);
+        let publication = zeroship_core::replication_names::DATASTORE_PUBLICATION;
+        pool.batch_execute(&format!(
+            "CREATE SCHEMA \"{my_schema}\";
+             CREATE SCHEMA \"{their_schema}\";
+             CREATE TABLE \"{my_schema}\".orders (id int PRIMARY KEY);
+             CREATE TABLE \"{their_schema}\".invoices (id int PRIMARY KEY);
+             CREATE PUBLICATION \"{publication}\" FOR TABLES IN SCHEMA \"{my_schema}\", \"{their_schema}\";"
+        ))
+        .await
+        .expect("logical WAL and publication required");
+        declare_binding_to(&pool, &app, &mine, "active").await;
+        declare_binding_to(&pool, &app, &theirs, "active").await;
+
+        let hub = Rc::new(Hub::default());
+        let my_key = StreamKey::new(&app, mine.as_str());
+        let their_key = StreamKey::new(&app, theirs.as_str());
+        let (first, my_start) = hub.subscribe(&my_key, 2, 4, 32).unwrap();
+        let (second, their_start) = hub.subscribe(&their_key, 2, 4, 32).unwrap();
+        let limits = Limits {
+            max_bytes: 1024 * 1024,
+            max_changes: 100,
+            max_relations: 8,
+        };
+        let my_task = compio::runtime::spawn(run(
+            hub.clone(),
+            my_key.clone(),
+            my_start.unwrap(),
+            pool.clone(),
+            url.clone(),
+            limits,
+        ));
+        let their_task = compio::runtime::spawn(run(
+            hub.clone(),
+            their_key.clone(),
+            their_start.expect("the app's second database starts a capture of its own"),
+            pool.clone(),
+            url.clone(),
+            limits,
+        ));
+        assert_eq!(event(&first).await, Event::Ready);
+        assert_eq!(
+            event(&second).await,
+            Event::Ready,
+            "the app's second capture must get a slot of its own"
+        );
+
+        let my_slot = slot_name(&my_key).unwrap();
+        let their_slot = slot_name(&their_key).unwrap();
+        assert_ne!(
+            my_slot, their_slot,
+            "one app's two captures must not request one slot"
+        );
+        let rows = pool
+            .query(
+                "SELECT slot_name, active FROM pg_replication_slots \
+                 WHERE database = current_database() AND (slot_name = $1 OR slot_name = $2) \
+                 ORDER BY slot_name",
+                &[&my_slot, &their_slot],
+            )
+            .await
+            .expect("read the relay's slots back");
+        assert_eq!(rows.len(), 2, "one capture per database is one slot each");
+        for row in &rows {
+            let name: String = row.try_get(0).expect("the slot name decodes");
+            let active: bool = row.try_get(1).expect("the active flag decodes");
+            assert!(active, "{name} must be held by the capture that made it");
+            assert!(
+                name.starts_with(SLOT_PREFIX),
+                "{name} must be reclaimable by the relay's startup prefix scan"
+            );
+        }
+        // The relay's startup scan is over the prefix and not over an app, so
+        // it has to see BOTH of this app's slots and nothing else.
+        let reclaimable: i64 = pool
+            .query(
+                "SELECT count(*) FROM pg_replication_slots WHERE database = current_database() \
+                 AND left(slot_name, length($1)) = $1",
+                &[&SLOT_PREFIX],
+            )
+            .await
+            .expect("count the relay's slots")[0]
+            .try_get(0)
+            .expect("the count decodes");
+        assert_eq!(
+            reclaimable, 2,
+            "the prefix scan must reach every capture's slot"
+        );
+
+        let writer = pool.acquire().await.unwrap();
+        let insert = |schema: &str, table: &str, id: i32| {
+            format!("INSERT INTO \"{schema}\".{table} VALUES ({id})")
+        };
+        writer
+            .batch_execute(&insert(&my_schema, "orders", 1))
+            .await
+            .unwrap();
+        assert_eq!(
+            event(&first).await,
+            Event::Change {
+                collection: "orders".into(),
+                operation: Operation::Insert,
+            }
+        );
+        writer
+            .batch_execute(&insert(&their_schema, "invoices", 1))
+            .await
+            .unwrap();
+        assert_eq!(
+            event(&second).await,
+            Event::Change {
+                collection: "invoices".into(),
+                operation: Operation::Insert,
+            },
+            "the second database's own capture delivers its commit"
+        );
+        // Both captures decode the same publication, so this is where a leak
+        // would show: the next event on each stream is the next thing ITS
+        // capture published, and a capture that had published its neighbour's
+        // commit would deliver that collection here instead.
+        writer
+            .batch_execute(&insert(&my_schema, "orders", 2))
+            .await
+            .unwrap();
+        writer
+            .batch_execute(&insert(&their_schema, "invoices", 2))
+            .await
+            .unwrap();
+        assert_eq!(
+            event(&first).await,
+            Event::Change {
+                collection: "orders".into(),
+                operation: Operation::Insert,
+            },
+            "the other database's commit must not reach this subscriber"
+        );
+        assert_eq!(
+            event(&second).await,
+            Event::Change {
+                collection: "invoices".into(),
+                operation: Operation::Insert,
+            },
+            "the other database's commit must not reach this subscriber"
+        );
+
+        drop(writer);
+        drop(first);
+        drop(second);
+        for task in [my_task, their_task] {
+            compio::time::timeout(Duration::from_secs(10), task)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        let left: i64 = pool
+            .query(
+                "SELECT count(*) FROM pg_replication_slots WHERE database = current_database() \
+                 AND left(slot_name, length($1)) = $1",
+                &[&SLOT_PREFIX],
+            )
+            .await
+            .expect("count the relay's slots")[0]
+            .try_get(0)
+            .expect("the count decodes");
+        assert_eq!(left, 0, "each capture reclaims its own slot on exit");
+
+        pool.batch_execute(&format!(
+            "DROP PUBLICATION \"{publication}\"; \
+             DROP SCHEMA \"{my_schema}\" CASCADE; DROP SCHEMA \"{their_schema}\" CASCADE"
+        ))
+        .await
+        .unwrap();
+        pool.close().await;
+    }
+
+    /// `PostgreSQL` bounds a slot name, and bounds the characters it may carry.
+    ///
+    /// This is what
+    /// [`zeroship_core::replication_names::POSTGRES_SLOT_NAME_MAX_BYTES`]
+    /// claims, asked of a running server rather than of a document. Both
+    /// failure shapes are here because they are different shapes: a name bound
+    /// as the `name` argument - the relay's own path - is REFUSED with
+    /// `42622`, while the same width reaching that argument through a
+    /// server-side text conversion is CLIPPED with nothing said, and the
+    /// database half is last, so what a clip drops is what tells one app's two
+    /// captures apart. Neither is left to the server: the const assertion
+    /// beside the constant settles the width before anything runs.
+    ///
+    /// The controls are beside each arm - a composed name that survives the
+    /// same round trip whole, and one that the character rule admits - so an
+    /// arm cannot pass because the server had begun refusing everything.
+    #[compio::test]
+    async fn postgresql_bounds_a_slot_name_and_the_characters_it_may_carry() {
+        use compio_postgres::error::SqlState;
+        use zeroship_core::replication_names::POSTGRES_SLOT_NAME_MAX_BYTES as MAX;
+        let postgres = crate::postgres_fixture::Postgres::start();
+        let pool = Pool::connect(&postgres.url(), 2)
+            .await
+            .expect("required PostgreSQL");
+        let create = "SELECT slot_name::text FROM \
+                      pg_create_logical_replication_slot($1, 'pgoutput', false, false)";
+
+        // THE RELAY'S PATH: the name is a bound `name` parameter, and the
+        // server refuses one past the bound instead of shortening it.
+        let over_long = format!("{SLOT_PREFIX}{}", "a".repeat(MAX));
+        assert!(over_long.len() > MAX, "the input must exceed the bound");
+        let refusal = pool
+            .query(create, &[&over_long])
+            .await
+            .expect_err("an over-long slot name must not be accepted");
+        assert_eq!(
+            refusal.code(),
+            Some(&SqlState::NAME_TOO_LONG),
+            "the bound is the server's; it answered {refusal:?}"
+        );
+
+        // THE QUIET PATH: the same text converted to `name` by the server
+        // keeps the head and drops the tail, with neither error nor notice.
+        let clipped: String = pool
+            .query("SELECT (($1::text)::name)::text", &[&over_long])
+            .await
+            .expect("a text-to-name conversion does not refuse")[0]
+            .try_get(0)
+            .expect("the converted name decodes");
+        assert_eq!(
+            clipped.len(),
+            MAX,
+            "`{over_long}` came back as `{clipped}` with nothing said"
+        );
+        assert_eq!(
+            clipped,
+            over_long[..MAX],
+            "the head survives, so the tail is what a clip costs"
+        );
+
+        // THE CHARACTER RULE, which is why the halves are hashed rather than
+        // spelled: a slot name carries lower-case letters, digits and the
+        // underscore and nothing else.
+        let refusal = pool
+            .query(create, &[&format!("{SLOT_PREFIX}Upper")])
+            .await
+            .expect_err("an upper-case slot name must not be accepted");
+        assert_eq!(
+            refusal.code(),
+            Some(&SqlState::INVALID_NAME),
+            "the character rule is the server's; it answered {refusal:?}"
+        );
+
+        // THE CONTROL FOR BOTH: a name this tree composes is accepted and
+        // stored exactly as composed.
+        let key = StreamKey::new(
+            &zeroship_core::typed_id::generate(zeroship_core::typed_id::APP_PREFIX),
+            zeroship_core::DatabaseId::mint().as_str(),
+        );
+        let composed = slot_name(&key).unwrap();
+        assert!(
+            !composed.is_empty() && composed.len() <= MAX,
+            "`{composed}` must be a name the server can hold"
+        );
+        let stored: String = pool
+            .query(create, &[&composed])
+            .await
+            .expect("a composed relay slot name is accepted")[0]
+            .try_get(0)
+            .expect("the created name decodes");
+        assert_eq!(
+            stored, composed,
+            "a relay slot name must reach the server whole"
+        );
+
+        pool.query("SELECT pg_drop_replication_slot($1)", &[&stored])
+            .await
+            .expect("drop the probe slot");
+        pool.close().await;
+    }
+
     #[compio::test]
     async fn committed_changes_fan_out_without_values_and_rollback_stays_silent() {
         let postgres = crate::postgres_fixture::Postgres::start();
@@ -545,7 +865,7 @@ mod tests {
         assert!(pool
             .query(
                 "SELECT 1 FROM pg_replication_slots WHERE slot_name = $1",
-                &[&slot_name(&app).unwrap()]
+                &[&slot_name(&stream).unwrap()]
             )
             .await
             .unwrap()

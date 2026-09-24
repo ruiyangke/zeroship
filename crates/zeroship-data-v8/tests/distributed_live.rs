@@ -887,7 +887,14 @@ fn db_live_stream_crosses_relay_and_v8_isolates_without_worker_replication() {
         )
         .expect("a fresh store accepts its first binding");
     let publication = zeroship_core::replication_names::DATASTORE_PUBLICATION;
-    let slot = zeroship_core::replication_names::relay_slot_name(&app_id).unwrap();
+    let slot = zeroship_core::replication_names::relay_slot_name(
+        &app_id,
+        binding
+            .database()
+            .expect("the binding addresses a database")
+            .as_str(),
+    )
+    .unwrap();
 
     let io = compio::runtime::Runtime::new().expect("control compio runtime");
     let pool = io.block_on(async {

@@ -204,6 +204,10 @@ mod tests {
     /// rendering of the uuid `0191e7a2-b3c4-4d5e-8f90-123456789abc`.
     const FIXTURE: &str = "app_03cgepu94hyemwpcipafo7264";
 
+    /// The database half of the relay slot name below: the same uuid under the
+    /// database prefix, so this file carries one uuid and not two.
+    const DATABASE_FIXTURE: &str = "dbs_03cgepu94hyemwpcipafo7264";
+
     fn fixture() -> AppId {
         AppId::parse(FIXTURE).expect("the fixture is a canonical app id")
     }
@@ -235,9 +239,11 @@ mod tests {
         );
 
         assert_eq!(
-            crate::replication_names::relay_slot_name(FIXTURE).expect("untyped relay slot name"),
-            "__zs_relay_2b19d2d9cc47ffdd41163308916b",
-            "the relay's per-app slot shares this app's stable token"
+            crate::replication_names::relay_slot_name(FIXTURE, DATABASE_FIXTURE)
+                .expect("untyped relay slot name"),
+            "__zs_relay_2b19d2d9cc47ffdd41163308916b__dc53bf112289c81e4eea",
+            "the relay's slot for one capture shares this app's stable token \
+             and carries the database it captures"
         );
 
         // -- Derivations the site inlines. The literal is the only oracle. ----
