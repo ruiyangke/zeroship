@@ -5,6 +5,7 @@
 )]
 
 mod jobs;
+mod runs;
 mod policy;
 mod schedules;
 
@@ -33,6 +34,7 @@ pub fn configure(config: &mut web::ServiceConfig) {
 }
 pub fn configure_with_limit(config: &mut web::ServiceConfig, limit: usize) {
     jobs::configure(config);
+    runs::configure(config);
     policy::configure(config);
     schedules::configure(config);
     config
