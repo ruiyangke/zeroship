@@ -265,8 +265,9 @@ impl Fixture {
             keyring,
             Arc::new(TransportAssertionVerifier::new(ServiceTrustBundle::new())),
         ));
-        // A loopback port nothing binds. The client accepts plain HTTP only for
-        // loopback, so this is the one shape that constructs and never connects.
+        // A loopback port nothing binds. These options name no plaintext peer,
+        // so loopback is the one plain-HTTP shape that constructs here and
+        // never connects.
         let client = WorkerCoordinator::new(
             "http://127.0.0.1:1",
             auth,
