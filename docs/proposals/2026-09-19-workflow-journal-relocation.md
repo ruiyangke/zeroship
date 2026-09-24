@@ -749,6 +749,15 @@ stall the defect fixes that motivate the move.
    the audience is checked before the store is consulted, so a per-service table keeps single
    use - but whether it should move is the live disagreement recorded below.
 
+   **The move made one thing depend on topology that nothing enforces.** The ledger's revision
+   has to be monotonic PER APP, and it now lives in a store the deployment chooses, so the
+   property holds only while an app is served by exactly one workflow store. Zone-local
+   topology plus the zone match in `crates/zeroship-workflow-manager/src/coordinator/placement.rs`
+   - `current.active && current.zone == facts.zone` - makes that true today, but neither states
+   it as an invariant about STORES, and nothing refuses a second store for one app. Two stores
+   serving one app would not error; the revisions would simply stop ordering the inputs they
+   were computed from.
+
    **`docs/proposals/2026-09-20-platform-service-database-split.md` already assigns an owner to
    every table in this set, and this document should not re-derive one.** Its table gives
    `workflow_policy_ledger` and `workflow_rollout_config` to workflow, which agrees with the
