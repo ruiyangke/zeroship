@@ -194,7 +194,7 @@ impl Fixture {
     async fn seed_run(&self) -> RunId {
         let run = RunId::mint();
         let app = self.app.as_str().to_owned();
-        let deploy = "dep_seed0000000000000000000000";
+        let deploy = "dep_0seed00000000000000000000";
         // The manifest a `DeployRegistration` decodes from. `restart` reads the
         // active deployment before it reaches the fence, so a stub here would
         // refuse as an invalid record rather than as fenced.
