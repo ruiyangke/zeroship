@@ -839,6 +839,16 @@ stall the defect fixes that motivate the move.
    the transport relaxes for a private network or the platform grows internal TLS, and that is
    the same class of decision as the authentication one above.
 
+   **That fence gates the severing work, not only the deployment.** `ControlHolds` in
+   `crates/zeroship-workflow-server/src/server.rs` wraps `QueueDeploymentHolds`, which holds a
+   `Transport` (`crates/zeroship-workflow-client/src/queue_holds.rs`), and `server.rs` validates
+   `control_url` through `Transport::validate_config` at startup. So the one working
+   `svc/workflow` to Control client already answers to this rule, and any NEW control endpoint -
+   the app-row read the three eventual crossings would share, for instance - inherits it too. A
+   design that moves those reads behind Control's API is not buildable against a plaintext
+   bridge until this is settled, which makes the transport decision a prerequisite rather than
+   an ergonomics question.
+
 4. **DECIDED - the service is zone-local. One workflow store per zone, an app's runs in its own
    zone.** So Open 1's dispatch-crossing term stays the small one it was measured to be, and the
    co-location rule the decoupling states holds here too. Open 3 and this one wait on the same
