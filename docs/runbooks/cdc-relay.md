@@ -53,13 +53,16 @@ in a rolling cutover. No worker fallback to direct replication exists.
 
 The relay holds a database advisory lock through a dedicated connection and
 exits if that connection is lost. A supervisor restarts it; this is a singleton
-deployment without automatic active/standby failover. Capture is shared by app,
-so worker scaling adds transport connections rather than duplicate app slots.
-The final subscriber releases capture. Startup reclaims inactive relay slots
-in the connected database and does not terminate active slots.
+deployment without automatic active/standby failover. Capture is shared by
+subscription target, which is an app and the database it named, so worker
+scaling adds transport connections rather than duplicate slots, while an app
+subscribing to two of its databases runs two captures and holds two slots. The
+final subscriber releases capture. Startup reclaims inactive relay slots in the
+connected database and does not terminate active slots.
 
 Configure finite PostgreSQL `max_slot_wal_keep_size`. Size the cluster slot and
-WAL-sender budgets for active app captures plus other replication consumers.
+WAL-sender budgets for active captures plus other replication consumers; a
+capture is one (app, database) pair, not one app.
 Relay `max_apps`, `max_connections`, and `clients_per_app` bound admission;
 `queue_capacity` bounds each receiver independently. Transaction and relation
 limits bound retained decoding state. Overflow or reconnect causes a fresh
