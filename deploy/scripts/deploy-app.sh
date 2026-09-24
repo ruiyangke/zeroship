@@ -7,6 +7,9 @@
 #   deploy/scripts/deploy-app.sh --host root@1.2.3.4 --app <app-id> --zship dist/app.zship
 #                                --probe-script examples/db-todos/scripts/probe-live.mjs
 #
+# --database <label> names which of the app workspace's databases to migrate,
+# and is needed only when its zeroship.jsonc declares more than one.
+#
 # WHY THIS EXISTS, 2026-08-12. The public control hostname is the normal
 # creator path. This helper is the operator's SSH fallback when that edge is
 # unavailable. It reaches the two loopback publications separately: control
@@ -36,6 +39,7 @@ set -euo pipefail
 HOST=""
 APP_ID=""
 APP_DIR=""
+DATABASE=""
 ZSHIP=""
 PROBE_URL=""
 TOKEN_FILE=""
@@ -51,6 +55,7 @@ while [ $# -gt 0 ]; do
     --host)       HOST="$2"; shift 2 ;;
     --app)        APP_ID="$2"; shift 2 ;;
     --dir)        APP_DIR="$2"; shift 2 ;;
+    --database)   DATABASE="$2"; shift 2 ;;
     --zship)      ZSHIP="$2"; shift 2 ;;
     --probe)      PROBE_URL="$2"; shift 2 ;;
     --probe-script) PROBE_SCRIPT="$2"; shift 2 ;;
@@ -178,16 +183,23 @@ echo "ok  deploy accepted"
 # ------------------------------------------------------------------ migrate
 #
 # Deploy does NOT apply migrations, and an app that uses `env.db` is broken
-# until something does: the per-app database role is created by the migration
+# until something does: the schema and its tables are created by the migration
 # service's apply path and by nothing else, so the first `env.db` call on an
-# unmigrated app fails with `role "app_..._role" does not exist` and the end
-# user sees an opaque `internal error`. That is a live-site failure a green
-# deploy here used to hide, which is why this step is not optional when the
-# app authors migrations.
+# unmigrated app fails with `schema_not_migrated` naming `zeroship migrate`.
+# That is a live-site failure a green deploy here used to hide, which is why
+# this step is not optional when the app authors migrations.
 #
 # Presence of the migrations directory IS the condition: an app without
 # `env.db` authors none and skips. Do not turn this into a flag - a step you
 # have to remember is the thing that failed.
+#
+# THE TARGET IS THE DATABASE, NOT THE APP. A migration is authorized at the
+# database's own project, so `--app` is not a selector here and the app id
+# above says nothing about which schema is written. `--config` points the CLI
+# at the app workspace's own `zeroship.jsonc` - this script runs from the repo
+# root, so there is no file in the working directory - and a workspace
+# declaring one database implies it. `--database` is needed only when it
+# declares several, and the CLI refuses rather than picking one.
 #
 # `zeroship migrate` RECORDS those `.ts` itself, which needs Node and the app's
 # installed dependencies. That is the same requirement the `.zship` this script
@@ -195,8 +207,10 @@ echo "ok  deploy accepted"
 MIGRATIONS_DIR=""
 [ -n "$APP_DIR" ] && MIGRATIONS_DIR="$APP_DIR/migrations"
 if [ -n "$MIGRATIONS_DIR" ] && [ -d "$MIGRATIONS_DIR" ]; then
-  say "applying migrations for app $APP_ID"
-  "$CLI" migrate "$MIGRATIONS_DIR" --app="$APP_ID" --control="$MIGRATE" \
+  say "applying migrations from $MIGRATIONS_DIR"
+  MIGRATE_ARGS=(migrate "$MIGRATIONS_DIR" --config="$APP_DIR/zeroship.jsonc" --control="$MIGRATE")
+  [ -n "$DATABASE" ] && MIGRATE_ARGS+=(--database="$DATABASE")
+  "$CLI" "${MIGRATE_ARGS[@]}" \
     || fail "zeroship migrate failed - the app is deployed but its schema is not applied, so every env.db call will fail"
   echo "ok  migrations applied"
 elif [ -n "$APP_DIR" ]; then
@@ -206,7 +220,7 @@ else
   # Say so rather than printing nothing, or a db-backed app deployed this way
   # goes out unmigrated and silent.
   echo "note: --zship was used without --dir, so migrations were NOT applied."
-  echo "      If this app uses env.db, run:  $CLI migrate <path-to-migrations-dir> --app=$APP_ID --control=$MIGRATE"
+  echo "      If this app uses env.db, run:  $CLI migrate <path-to-migrations-dir> --database=<dbs_...> --control=$MIGRATE"
 fi
 
 # ------------------------------------------------------------------- verify

@@ -208,8 +208,10 @@ resend under the same `Idempotency-Key` repeats the whole path.
 
 Any refusal or failure in step 7 rolls back every write in it. Deploy never
 applies migrations: `zeroship migrate` applies them through the migration
-service, and a deploy whose runtime descriptor differs from the app's newest
-applied migration is refused with 409 `schema_not_applied`.
+service, against the database rather than the app. Deploy compares no schema -
+an equality test would make one app's migration invalidate every other app on
+the same database - so what it refuses is an artifact declaring a database the
+app holds no live binding to, with 409 `database_not_bound`.
 
 Deploy, archive and restore run their catalog transactions on the catalog the
 whole process shares (`publication::Catalog`) instead of opening a connection

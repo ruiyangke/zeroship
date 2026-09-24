@@ -1372,34 +1372,46 @@ pub fn select_app(args: &[String], cfg: Option<&Resolved>) -> Result<AppSelectio
     })
 }
 
-/// Choose which of an app's databases a command addresses.
+/// Choose which declared database a command addresses.
 ///
-/// `--database=<label>` names one of the labels the app declares; with none
-/// passed it is the app's primary, which is the database `env.db` reaches.
-pub fn select_database(
-    args: &[String],
-    cfg: &Resolved,
-    app_label: &str,
-) -> Result<String, String> {
-    let used = cfg.app_databases(app_label);
+/// **The same rule as [`select_app`], one section over**: `--database=<label>`
+/// names one of the file's `databases` entries, a workspace declaring exactly
+/// one implies it, and a workspace declaring several is asked which rather than
+/// guessed at. A command that picked one of several would write a schema into a
+/// database the creator did not name, which no message afterwards can undo.
+///
+/// **No app narrows the candidates.** A database belongs to its project, not to
+/// an app: several apps may bind one and a legitimate database has none bound
+/// at all. Scoping the labels to `apps.<app>.databases` would hide exactly
+/// those, and `primary` decides only which handle is `env.db` - never which
+/// schema is addressable.
+pub fn select_database(args: &[String], cfg: &Resolved) -> Result<String, String> {
+    let declared = cfg.database_labels();
     match crate::parse_flag(args, "--database") {
         Some(named) => {
-            if !used.contains(&named.as_str()) {
+            if !declared.contains(&named.as_str()) {
                 return Err(format!(
-                    "--database={named} is not one of the databases `apps.{app_label}` uses \
-                     ({}) in {}.",
-                    join_or_none(&used),
-                    cfg.path.display()
+                    "--database={named} names no database in {} (declared: {}).\n\
+                     With a {CONFIG_FILENAME} present `--database` names one of its labels: \
+                     the id comes from the file, so a label never travels as an identifier.",
+                    cfg.path.display(),
+                    join_or_none(&declared)
                 ));
             }
             Ok(named)
         }
-        None => cfg.app_primary(app_label).map(str::to_string).ok_or_else(|| {
-            format!(
-                "`apps.{app_label}` uses no database, so there is nothing to address in {}.",
+        None => match declared.as_slice() {
+            [only] => Ok((*only).to_string()),
+            [] => Err(format!(
+                "{} declares no databases. Add one under `databases`.",
                 cfg.path.display()
-            )
-        }),
+            )),
+            many => Err(format!(
+                "{} declares more than one database ({}). Pass --database=<label> to say which.",
+                cfg.path.display(),
+                many.join(", ")
+            )),
+        },
     }
 }
 

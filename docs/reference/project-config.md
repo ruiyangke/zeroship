@@ -86,7 +86,7 @@ operationally identical, so both tools apply its empty default.
 | `databases.<label>.migrations` | string | required | build (production and dev) and CLI `migrate`, which records the `.ts` here into the request it posts. This database's migration sources. |
 | `databases.<label>.out` | string | required | build (writes this database's generated artifacts). It cannot resolve to the project root or an ancestor, generation overwrites only the artifacts it recognizes, and two databases may not share one — the two filenames in it are fixed. |
 | `apps.<label>` | object | — | see [Labels](#labels). One entry per app this workspace deploys. |
-| `apps.<label>.app` | string | none | CLI: `deploy`, `migrate`, `secret`, `var`. The app's id. Absent on a fresh project; see [The writeback](#the-writeback-and-starting-a-project-with-no-app-yet). |
+| `apps.<label>.app` | string | none | CLI: `deploy`, `secret`, `var`. The app's id. `migrate` does not read it: a migration addresses a database. Absent on a fresh project; see [The writeback](#the-writeback-and-starting-a-project-with-no-app-yet). |
 | `apps.<label>.databases` | string[] | required | build and CLI. The database LABELS this app uses. Each becomes a member of `env.databases`. |
 | `apps.<label>.primary` | string | required when `databases` is non-empty | build and CLI. Which of them is `env.db`. `env.db === env.databases[primary]` holds by object identity, so it cannot be inferred. A database is the primary of every app that uses it or of none: one database has one generated `env.db.ts`, and that file declares `Env.db` only for a primary. |
 | `control` | string | required | CLI: `deploy`, `migrate`, `secret`, `var`, and `login`. Control-plane base URL. |
@@ -219,8 +219,10 @@ file — so a label never travels as an identifier, and a typo lists the labels
 that exist. With no file there are no labels, so `--app` is an app id exactly
 as before; which case you are in is decided by whether there is a file, never
 by inspecting the value. A workspace declaring one app implies it and the flag
-is optional; one declaring several requires it. `--database=<label>` selects
-among the app's own databases the same way, defaulting to its primary.
+is optional; one declaring several requires it. `--database=<label>` follows the
+same rule over the file's `databases` labels: it is workspace-wide rather than
+scoped to an app, because a database belongs to its project and a legitimate one
+has no app bound to it at all.
 
 `--control` reads `ZEROSHIP_CONTROL_URL` and falls back to
 `http://localhost:9090` when there is no file. Your platform credential is not
@@ -242,7 +244,6 @@ it resolved and where it came from, on stderr, before it acts:
 
 ```
 $ zeroship migrate --env=prod
-zeroship migrate: app = app_034klb07lrb9jgma6imvmx000 (from zeroship.jsonc environments.prod apps.storefront)
 zeroship migrate: control = https://control.example (from zeroship.jsonc environments.prod)
 zeroship migrate: migrations = /home/me/app/migrations
 zeroship migrate: database = main (dbs_03evr3oqx1200yyd6zj2cebfw)
@@ -311,7 +312,6 @@ require `--yes`:
 
 ```
 $ zeroship migrate --env=prod
-zeroship migrate: app = prod-app (from zeroship.jsonc environments.prod)
 zeroship migrate: control = https://control.example (from zeroship.jsonc environments.prod)
 zeroship migrate: the selected environment is marked "protected": true and this would
 apply migrations to https://control.example. Re-run with --yes if that is what you meant.
@@ -564,7 +564,7 @@ The whole flow, with no target flags anywhere:
 ```bash
 pnpm build                       # writes build.output and each database's out
 zeroship deploy                  # reads the app entry, control, build.output
-zeroship migrate                 # records the primary's migrations/*.ts and applies them
+zeroship migrate                 # records the declared database's migrations/*.ts and applies them
 
 zeroship deploy --env=staging    # the staging app and control
 zeroship migrate --env=prod --yes   # protected: --yes is required
@@ -586,7 +586,7 @@ and the build throws an `Error` with the same `<path>: <message>` shape (or
 `zeroship.jsonc`; a `<...>` placeholder below is the value from your file or
 command line. These are the failures the file itself produces, before a deploy
 or migrate ever reaches the control plane — that service's codes (such as the
-`409 schema_not_applied` a deploy returns when migrations have not been applied)
+`409 database_not_bound` a deploy returns for an unbound database)
 belong to the API and deploy references, not here.
 
 The single-line refusals. The CLI prints each offending key in backticks;

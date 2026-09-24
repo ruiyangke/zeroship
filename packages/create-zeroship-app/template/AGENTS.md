@@ -34,10 +34,11 @@ your agent does not load skills automatically, read the file directly.
    procedure with no policy works locally and returns 401 for everyone once
    deployed. Public endpoints need both `auth: "anonymous"` and
    `publiclyAccessible: true`.
-5. **Deploy does not run migrations.** Run `zeroship deploy` then
-   `zeroship migrate` whenever the schema changes, or the app's first database
-   call fails with a missing-role error that reaches the user as
-   `{"message":"internal error"}`.
+5. **Deploy does not run migrations.** Run `zeroship migrate` whenever the
+   schema changes, or the app's first database call fails with
+   `schema_not_migrated` — the table or column was never created. `migrate`
+   targets the DATABASE, not an app, so it needs no prior deploy and the two
+   commands run in either order.
 
 ## Commands
 
