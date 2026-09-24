@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use ntex::http::StatusCode;
 use ntex::web;
 use ntex::web::types::{Json, Path, State};
 use serde_json::json;
@@ -57,9 +56,6 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .state(web::types::JsonConfig::default().limit(SCHEMA_BUNDLE_BODY_BYTES))
             .route(web::post().to(schema_bundle)),
     )
-    .service(web::resource("/v1/apps/{app_id}/migrations/plan").route(web::post().to(stub_phase2)))
-    .service(web::resource("/v1/apps/{app_id}/migrations/status").route(web::get().to(stub_phase2)))
-    .service(web::resource("/v1/apps/{app_id}/migrations/rollback").route(web::post().to(rollback)))
     .service(web::resource("/healthz").route(web::get().to(healthz)))
     .service(web::resource("/readyz").route(web::get().to(readyz)));
 }
@@ -289,20 +285,6 @@ pub async fn apply(
     }
 }
 
-/// The Phase 2 rollback implementation is absent, but its mutating route is
-/// already protected so replacing the stub cannot silently publish a new DDL
-/// path without bearer authorization and shared throttling.
-pub async fn rollback(
-    req: web::HttpRequest,
-    state: State<Arc<MigrationServiceState>>,
-    app_id: Path<AppId>,
-) -> web::HttpResponse {
-    if let Err(response) = authorize_mutation(&req, &state, &app_id.into_inner()).await {
-        return response;
-    }
-    stub_phase2().await
-}
-
 async fn authorize_mutation(
     req: &web::HttpRequest,
     state: &MigrationServiceState,
@@ -328,13 +310,6 @@ async fn authorize_mutation(
         return Err(response);
     }
     Ok(caller)
-}
-
-pub async fn stub_phase2() -> web::HttpResponse {
-    web::HttpResponse::build(StatusCode::NOT_IMPLEMENTED).json(&json!({
-        "error": "not_implemented",
-        "detail": "migration plan/status/rollback endpoints are Phase 2"
-    }))
 }
 
 /// The correlation id for this request, stamped onto the authz audit row.
