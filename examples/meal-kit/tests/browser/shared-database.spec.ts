@@ -4,7 +4,7 @@
 // are driven through the real UI, and each browser talks only to its own app.
 
 import { test, expect } from "./fixtures";
-import { signIn, rpc, subject, visit } from "./helpers";
+import { paymentReady, signIn, rpc, subject, visit } from "./helpers";
 import { testOrigin, backofficeOrigin } from "../fixture/settings";
 import { defaultCart, type Order, type Quote } from "@gather/meal-kit/domain";
 import { deliveryDates } from "@gather/meal-kit/catalog";
@@ -27,6 +27,10 @@ test("an operator advancing a box in the back office interface changes what the 
       market: "us",
       outcome: "succeeded",
     });
+    // The scenario is only half the precondition: an unfinished attempt this
+    // customer was left holding refuses the checkout below with
+    // PAYMENT_PENDING, whoever started it. Settle any before placing ours.
+    await paymentReady(context, "us");
 
     // Every request either browser makes, so the closing assertion can say
     // whether the state crossed through the database or through a call. The

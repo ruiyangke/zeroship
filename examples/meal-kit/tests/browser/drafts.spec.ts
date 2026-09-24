@@ -180,5 +180,8 @@ test("a guest box attaches after sign-in, survives another device and stays priv
   await page.getByRole("button", { name: "My account", exact: true }).click();
   await page.getByRole("menuitem", { name: "Sign out", exact: true }).click();
   await visit(page, "/m/us/en/box");
+  // The box still renders its slots; the signed-out visitor just has none of
+  // this customer's meals in them.
+  await expect(page.locator(".box-slot")).toHaveCount(3);
   await expect(page.locator(".box-slot.filled")).toHaveCount(0);
 });

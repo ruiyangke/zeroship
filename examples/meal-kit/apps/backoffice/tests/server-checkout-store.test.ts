@@ -208,6 +208,7 @@ describe("a checkout attempt's hold", () => {
       market: "us",
       payment: "requires_action",
       reservation: "active",
+      expires_at: new Date(Date.now() + 600_000).toISOString(),
     });
     expect(
       await refusal(() => requirePaymentReady(db.tx, owner, "us")),
@@ -217,6 +218,38 @@ describe("a checkout attempt's hold", () => {
     await requirePaymentReady(db.tx, owner, "uk");
     attemptRows(db)[0].payment = "succeeded";
     await requirePaymentReady(db.tx, owner, "us");
+  });
+
+  // `expireReservations` releases the stock and tells the shopper their meals
+  // are no longer reserved, but it leaves `payment` where the provider left it.
+  // A block that reads `payment` alone therefore never lifts: the attempt it
+  // sends the customer to settle is the one settlement can no longer reach.
+  test("an expired hold stops blocking, however its payment was left", async () => {
+    for (const [reservation, expires_at] of [
+      ["expired", new Date(Date.now() - 600_000).toISOString()],
+      ["active", new Date(Date.now() - 1_000).toISOString()],
+    ] as const) {
+      const db = memoryTx();
+      db.table("meal_checkout_attempts").seed({
+        owner_id: owner,
+        market: "us",
+        payment: "requires_action",
+        reservation,
+        expires_at,
+      });
+      // The control: the SAME row, live, is refused - so a pass below is the
+      // expiry lifting the block and not an empty table.
+      attemptRows(db)[0].reservation = "active";
+      attemptRows(db)[0].expires_at = new Date(
+        Date.now() + 600_000,
+      ).toISOString();
+      expect(
+        await refusal(() => requirePaymentReady(db.tx, owner, "us")),
+      ).toMatchObject({ code: "PAYMENT_PENDING", status: 409 });
+      attemptRows(db)[0].reservation = reservation;
+      attemptRows(db)[0].expires_at = expires_at;
+      await requirePaymentReady(db.tx, owner, "us");
+    }
   });
 
   test("expiry releases only overdue active holds in that market and ends the order it still owns", async () => {

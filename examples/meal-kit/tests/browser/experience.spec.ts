@@ -150,27 +150,45 @@ test("stale dates and unavailable meals stay visible until the shopper repairs t
   await page
     .getByRole("button", { name: "Continue to box size", exact: true })
     .click();
-  await expect(
-    page
-      .getByRole("grid", { name: "Delivery date", exact: true })
-      .getByRole("gridcell", { selected: true }),
-  ).toHaveCount(0);
+  const calendar = page.getByRole("grid", { name: "Delivery date", exact: true });
+  // Days are offered; none of them is this box's stale date. Counting the
+  // selected cells without counting the cells first passes on a step that has
+  // no calendar at all, which is what a wizard that failed to advance looks
+  // like.
+  await expect(calendar.getByRole("gridcell")).not.toHaveCount(0);
+  await expect(calendar.getByRole("gridcell", { selected: true })).toHaveCount(
+    0,
+  );
   await expect(
     page.getByText(
       "Your previous delivery date is no longer available. Choose a new date to continue.",
     ),
   ).toBeVisible();
+  // Changing country reloads the box for the new market over the network, so
+  // from here the shopper is looking at a delivery step whose saved values are
+  // still in flight. Hold that load open: without it this passes or fails on
+  // how busy the machine is, and the suite is where it gets busy.
+  await page.route("**/api/drafts/load", async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    await route.continue();
+  });
   await chooseOption(page.getByLabel("Delivery country"), "China");
+  await expect(
+    page.getByLabel("Province or municipality", { exact: true }),
+  ).toBeVisible();
   await expect(page.getByLabel(/ZIP|postal|postcode/i)).toHaveCount(0);
   await chooseOption(page.getByLabel("Delivery country"), "United States");
+  // The saved US delivery area comes back after the round trip. Clicking
+  // before it does submits an empty required field, which the browser refuses
+  // without ever reaching the wizard.
+  await expect(page.getByLabel("ZIP code")).toHaveValue("10001");
   await page
     .getByRole("button", { name: "Continue to box size", exact: true })
     .click();
-  await expect(
-    page
-      .getByRole("grid", { name: "Delivery date", exact: true })
-      .getByRole("gridcell", { selected: true }),
-  ).toHaveCount(0);
+  await expect(calendar.getByRole("gridcell")).not.toHaveCount(0);
+  await expect(calendar.getByRole("gridcell", { selected: true })).toHaveCount(
+    0,
+  );
   await expect(
     page.getByRole("button", { name: "See available meals" }),
   ).toBeDisabled();
@@ -187,12 +205,14 @@ test("allergen filters keep their exclusions, mobile navigation restores focus, 
   await dialog.getByRole("button", { name: "Show meals" }).click();
   await page.getByLabel("Search recipes").fill("no match for this meal");
   await page.getByRole("button", { name: "Clear search and category" }).click();
-  await expect(
-    page.getByRole("heading", { name: "Garden pesto rigatoni", exact: true }),
-  ).toHaveCount(0);
+  // The meal that survives the exclusion first: without it, "the excluded meal
+  // is gone" also holds on a list that has not come back from the search yet.
   await expect(
     page.getByRole("heading", { name: "Miso-glazed salmon", exact: true }),
   ).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Garden pesto rigatoni", exact: true }),
+  ).toHaveCount(0);
   const trigger = page.getByRole("button", { name: "Open navigation" });
   await trigger.click();
   await expect(
@@ -268,5 +288,8 @@ test("checkout follows the entered destination and a changed total requires new 
   await expect(
     page.getByRole("tab", { name: "Order history", exact: true }),
   ).toHaveAttribute("aria-selected", "true");
-  await expect(page.getByText("Your first box is waiting.")).toHaveCount(0);
+  await expect(page.getByRole("tabpanel")).toHaveCount(1);
+  await expect(
+    page.getByRole("tab", { name: "Upcoming boxes", exact: true }),
+  ).toHaveAttribute("aria-selected", "false");
 });

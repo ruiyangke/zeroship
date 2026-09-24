@@ -13,8 +13,16 @@ test("header account menu supports keyboard dismissal and direct account navigat
     .getByRole("button", { name: "My account", exact: true });
   const menu = page.getByRole("menu", { name: "My account", exact: true });
   await expect(trigger).toBeInViewport();
+  const footer = page.locator("footer");
+  // Signing out belongs to the header menu, and the footer this customer does
+  // get is the control: without it, "not in the footer" also passes on a page
+  // with no footer.
+  await expect(footer.getByRole("link", { name: "Manage your plan" })).toBeVisible();
+  await expect(footer.getByText("Sign out", { exact: true })).toHaveCount(0);
+  // The one staff entry point the storefront can render is this footer link,
+  // shown only for a session with staff access. A customer gets none.
   await expect(
-    page.locator("footer").getByText("Sign out", { exact: true }),
+    footer.getByRole("link", { name: "Operations", exact: true }),
   ).toHaveCount(0);
   await trigger.focus();
   await trigger.press("ArrowDown");
@@ -37,6 +45,7 @@ test("header account menu supports keyboard dismissal and direct account navigat
     ["Privacy & data", "account/privacy", "Privacy and data"],
   ]) {
     await trigger.click();
+    await expect(menu.getByRole("menuitem")).not.toHaveCount(0);
     await expect(
       menu.getByRole("menuitem", { name: "Operations", exact: true }),
     ).toHaveCount(0);
@@ -105,6 +114,10 @@ test("mobile account menu signs out from the header and clears private box state
     .toBeNull();
   expect((await loadBox(context)).state.draft).toBeNull();
   await visit(page, "/m/us/en/box");
+  // The box still has its slots; what it no longer has is the signed-out
+  // customer's meals. Counting only the filled ones passes on a page that
+  // never rendered a box.
+  await expect(page.locator(".box-slot")).toHaveCount(3);
   await expect(page.locator(".box-slot.filled")).toHaveCount(0);
   await page
     .getByRole("button", { name: "Open navigation", exact: true })

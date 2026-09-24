@@ -1,5 +1,5 @@
 import { expect, type Page, type BrowserContext } from "@playwright/test";
-import { defaultCart, type Cart } from "@gather/meal-kit/domain";
+import { defaultCart, type Cart, type Order } from "@gather/meal-kit/domain";
 import type { DraftLoad, DraftSave } from "@gather/meal-kit/draft-domain";
 import { draftRevision } from "@gather/meal-kit/draft-domain";
 import { testOrigin, backofficeOrigin } from "../fixture/settings";
@@ -110,4 +110,37 @@ export async function chooseOption(
 
 export async function subject(context: BrowserContext) {
   return (await rpc<{ user: { id: string } }>(context, "session", {}, true)).user.id;
+}
+
+// `requirePaymentReady` refuses a new checkout while this customer has an
+// unfinished attempt in this market, and an attempt outlives the spec that
+// started one. A spec that checks out as a shared demo customer therefore
+// states that the customer has none, instead of inheriting whether the spec
+// before it reached its own settlement. Returns how many it had to settle, so
+// a caller can say whether it inherited anything.
+export async function paymentReady(
+  context: BrowserContext,
+  market: Cart["market"] = "us",
+) {
+  const unfinished = (o: Order) =>
+    ["processing", "requires_action"].includes(o.payment);
+  const inherited = (
+    await rpc<{ orders: Order[] }>(context, "account", { market }, true)
+  ).orders.filter(unfinished);
+  for (const order of inherited) {
+    // Only a verification an earlier spec armed and left can be settled from
+    // here. Anything else is named rather than skipped past, because skipping
+    // it would put the PAYMENT_PENDING refusal back on the next checkout.
+    expect(
+      order.payment,
+      `order ${order.id} (${order.status}) was left unfinished by an earlier spec and cannot be settled here`,
+    ).toBe("requires_action");
+    await rpc(context, "pay", { id: order.id });
+  }
+  expect(
+    (
+      await rpc<{ orders: Order[] }>(context, "account", { market }, true)
+    ).orders.filter(unfinished),
+  ).toEqual([]);
+  return inherited.length;
 }
