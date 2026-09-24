@@ -6,12 +6,6 @@
 
 #[allow(
     dead_code,
-    reason = "source fixture also supports latest selection tests"
-)]
-#[path = "support/latest.rs"]
-mod latest_support;
-#[allow(
-    dead_code,
     reason = "shared queue fixtures also expose backend administration"
 )]
 mod support;
@@ -342,7 +336,6 @@ async fn management_receipts(fixture: &Fixture) {
         },
     )
     .await;
-    let source = latest_support::Source::new(fixture).await;
     let worker = WorkerId::mint();
     register(&coordinator, &worker, 2).await;
     let app = AppId::mint();
@@ -351,7 +344,7 @@ async fn management_receipts(fixture: &Fixture) {
     let other = place(&coordinator, &foreign).await;
     let actor = service_issuer(CONTROL_SERVICE_NAME).unwrap();
     let request = command(&app);
-    accept_management_receipt(&coordinator, &source, &request).await;
+    accept_management_receipt(&coordinator, &request).await;
     assert_eq!(
         coordinator
             .management_receipt(&foreign, &request.request_id)
@@ -388,55 +381,31 @@ async fn management_receipts(fixture: &Fixture) {
         },
         successors: vec![],
     };
-    replay_management_receipt(
-        fixture,
-        &coordinator,
-        &source,
-        &worker,
-        &request,
-        &settlement,
-    )
-    .await;
+    replay_management_receipt(fixture, &coordinator, &worker, &request, &settlement).await;
     assert!(coordinator
-        .manage(&actor, &command(&app), &source.latest)
+        .manage(&actor, &command(&app))
         .await
         .unwrap()
         .outcome
         .is_none());
 }
 
-async fn accept_management_receipt(
-    coordinator: &Coordinator,
-    source: &latest_support::Source,
-    request: &ManageRun,
-) {
+async fn accept_management_receipt(coordinator: &Coordinator, request: &ManageRun) {
     let actor = service_issuer(CONTROL_SERVICE_NAME).unwrap();
     assert_eq!(
         coordinator
-            .manage(
-                &service_issuer(WORKER_SERVICE_NAME).unwrap(),
-                request,
-                &source.latest
-            )
+            .manage(&service_issuer(WORKER_SERVICE_NAME).unwrap(), request)
             .await,
         Err(Error::Denied)
     );
-    let pending = coordinator
-        .manage(&actor, request, &source.latest)
-        .await
-        .unwrap();
+    let pending = coordinator.manage(&actor, request).await.unwrap();
     assert_eq!(pending.outcome, None);
     assert_eq!(
-        coordinator
-            .manage(&actor, request, &source.latest)
-            .await
-            .unwrap(),
+        coordinator.manage(&actor, request).await.unwrap(),
         pending
     );
     assert_eq!(
-        coordinator
-            .manage(&actor, &command(&request.app_id), &source.latest)
-            .await,
+        coordinator.manage(&actor, &command(&request.app_id)).await,
         Err(Error::Capacity)
     );
     let changed = ManageRun {
@@ -444,7 +413,7 @@ async fn accept_management_receipt(
         ..request.clone()
     };
     assert_eq!(
-        coordinator.manage(&actor, &changed, &source.latest).await,
+        coordinator.manage(&actor, &changed).await,
         Err(Error::Conflict)
     );
 }
@@ -452,7 +421,6 @@ async fn accept_management_receipt(
 async fn replay_management_receipt(
     fixture: &Fixture,
     coordinator: &Coordinator,
-    source: &latest_support::Source,
     worker: &WorkerId,
     request: &ManageRun,
     settlement: &Settlement,
@@ -477,10 +445,7 @@ async fn replay_management_receipt(
             .unwrap(),
         receipt
     );
-    let closed = reopened
-        .manage(&actor, request, &source.latest)
-        .await
-        .unwrap();
+    let closed = reopened.manage(&actor, request).await.unwrap();
     assert_eq!(
         closed.outcome,
         Some(ManagementOutcome::Applied {

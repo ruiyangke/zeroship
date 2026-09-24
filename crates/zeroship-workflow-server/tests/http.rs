@@ -493,7 +493,7 @@ async fn verify_latest_management(
     scope: &zeroship_core::workflow_coordination::AssignedScope,
 ) {
     use zeroship_core::{
-        workflow_coordination::{RestartDeploy, RestartOptions},
+        workflow_coordination::{RestartDeploy, RestartDeployment, RestartOptions},
         workflow_jobs::DeploymentId,
     };
     let deployment = DeploymentId::mint();
@@ -502,14 +502,6 @@ async fn verify_latest_management(
         "INSERT INTO zeroship.app_deploys(id,app_id,deploy_hash,manifest_json) VALUES($1,$2,$3,'{}')",
         &[&deployment.as_str(), &scope.app_id.as_str(), &hash],
     ).await.unwrap();
-    fixture
-        .admin
-        .execute(
-            "UPDATE zeroship.apps SET deploy_hash=$2 WHERE id=$1",
-            &[&scope.app_id.as_str(), &hash],
-        )
-        .await
-        .unwrap();
     let command = ManageRun {
         request_id: RequestId::mint(),
         app_id: scope.app_id.clone(),
@@ -519,6 +511,10 @@ async fn verify_latest_management(
                 from: None,
                 deploy: Some(RestartDeploy::Latest),
             },
+            deployment: Some(RestartDeployment {
+                deployment_id: deployment.clone(),
+                deploy_hash: hash.clone(),
+            }),
         },
     };
     let request = serde_json::to_value(&command).unwrap();
@@ -531,11 +527,13 @@ async fn verify_latest_management(
     )
     .await;
     assert_eq!(accepted.0, StatusCode::OK);
+    // The accepted command is frozen: closing the deployment to new holds does
+    // not change the receipt an exact retry replays.
     fixture
         .admin
         .execute(
-            "UPDATE zeroship.apps SET deploy_hash=NULL WHERE id=$1",
-            &[&scope.app_id.as_str()],
+            "UPDATE zeroship.app_deploys SET retention_state='reclaiming' WHERE id=$1",
+            &[&deployment.as_str()],
         )
         .await
         .unwrap();

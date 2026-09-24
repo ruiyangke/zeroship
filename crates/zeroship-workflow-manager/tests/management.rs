@@ -4,8 +4,8 @@
     reason = "native manager fixtures stay on their compio runtime"
 )]
 
-#[path = "support/latest.rs"]
-mod latest_support;
+#[path = "support/deployments.rs"]
+mod deployment_support;
 #[allow(
     dead_code,
     reason = "shared database fixtures support other manager suites"
@@ -26,7 +26,7 @@ use zeroship_core::{
     typed_id,
     workflow_coordination::{
         Assignment, ManageRun, ManagementOperation, ManagementOutcome, RestartDeploy,
-        RestartOptions, RunId, RunOperation, WorkerId,
+        RestartDeployment, RestartOptions, RunId, RunOperation, WorkerId,
     },
     workflow_deployments::HoldGeneration,
     workflow_jobs::{
@@ -122,7 +122,7 @@ impl HoldClient for Holds {
 }
 
 struct Host {
-    source: latest_support::Source,
+    source: deployment_support::Source,
     holds: Rc<Holds>,
     queue: Queue,
     coordinator: Coordinator,
@@ -130,7 +130,7 @@ struct Host {
 }
 impl Host {
     async fn new(fixture: &Fixture) -> Self {
-        let source = latest_support::Source::new(fixture).await;
+        let source = deployment_support::Source::new(fixture).await;
         let holds = Rc::new(Holds {
             inner: CatalogClient::new(source.ledger.clone()),
             acquired: Cell::new(0),
@@ -162,11 +162,7 @@ impl Host {
         request: &ManageRun,
     ) -> Result<zeroship_core::workflow_coordination::ManagementReceipt, Error> {
         self.coordinator
-            .manage(
-                &service_issuer(CONTROL_SERVICE_NAME).unwrap(),
-                request,
-                &self.source.latest,
-            )
+            .manage(&service_issuer(CONTROL_SERVICE_NAME).unwrap(), request)
             .await
     }
     async fn job(&self, request: &ManageRun) -> JobSpec {
@@ -194,13 +190,14 @@ fn command(app: &AppId, run: &RunId, operation: RunOperation) -> ManageRun {
         command: ManagementOperation::Transition { operation },
     }
 }
-fn latest(app: &AppId, run: &RunId) -> ManageRun {
+fn latest(app: &AppId, run: &RunId, deployment: &RestartDeployment) -> ManageRun {
     ManageRun {
         command: ManagementOperation::Restart {
             options: RestartOptions {
                 from: None,
                 deploy: Some(RestartDeploy::Latest),
             },
+            deployment: Some(deployment.clone()),
         },
         ..command(app, run, RunOperation::Pause)
     }

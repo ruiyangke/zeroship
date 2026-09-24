@@ -8,7 +8,7 @@ use zeroship_core::{
     service_peers::{service_issuer, ServiceAuth, CONTROL_SERVICE_NAME},
     workflow_coordination::{
         Assignment, ManageRun, ManagementOperation, ManagementReceipt, ManagementStatus, RequestId,
-        RestartOptions, RunId, RunOperation, VerifyAssignment, AUDIENCE,
+        RestartDeployment, RestartOptions, RunId, RunOperation, VerifyAssignment, AUDIENCE,
     },
     workflow_jobs::{JobOperation, JobSpec},
     workflow_schedules::{ActivateSchedules, DisableSchedules, RegisterSchedules},
@@ -210,6 +210,12 @@ impl ControlCoordinator {
     /// manager accepted the command and has not applied it yet - poll
     /// `management_status` with the same pair.
     ///
+    /// `deployment` names the code a latest restart replays against, and must
+    /// be supplied exactly when `options` resolve to `RestartDeploy::Latest`.
+    /// This caller is the authority for that pointer; the manager validates the
+    /// named deployment against its hold and does not resolve one of its own,
+    /// so an absent or superfluous `deployment` is a refusal, not a lookup.
+    ///
     /// # Errors
     /// Refuses failed exchanges and receipts for another app or request.
     pub async fn restart(
@@ -218,12 +224,16 @@ impl ControlCoordinator {
         app_id: &AppId,
         run_id: &RunId,
         options: RestartOptions,
+        deployment: Option<RestartDeployment>,
     ) -> Result<ManagementReceipt, Error> {
         self.manage(&ManageRun {
             request_id: request_id.clone(),
             app_id: app_id.clone(),
             run_id: run_id.clone(),
-            command: ManagementOperation::Restart { options },
+            command: ManagementOperation::Restart {
+                options,
+                deployment,
+            },
         })
         .await
     }

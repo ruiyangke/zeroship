@@ -205,12 +205,42 @@ pub enum ReleaseReason {
     Refused,
 }
 
+/// The deployment a latest restart replays against, named by the authority for
+/// it rather than resolved by the manager.
+///
+/// This is a Control-only fact, which is why it sits on [`ManagementOperation`]
+/// and not on [`RestartOptions`]: those options reach the manager from creator
+/// code through the workflow service's run binding, and creator code may not
+/// choose the deployment its run restarts onto. A `ManagementOperation` is
+/// reachable only through [`ManageRun`], whose endpoint only Control may call.
+///
+/// The hash travels with the id because the manager checks the pair against the
+/// hold Control minted for that deployment. An id alone would name a deployment
+/// without saying which code it is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RestartDeployment {
+    pub deployment_id: DeploymentId,
+    pub deploy_hash: String,
+}
+
 /// Only lifecycle metadata can enter the durable management queue.
+///
+/// `deployment` is present exactly when the restart's effective deploy policy
+/// is [`RestartDeploy::Latest`], and absent otherwise. The manager's
+/// `validate_request` refuses both mismatches, so the two spellings of one
+/// decision cannot drift apart.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ManagementOperation {
-    Transition { operation: RunOperation },
-    Restart { options: RestartOptions },
+    Transition {
+        operation: RunOperation,
+    },
+    Restart {
+        options: RestartOptions,
+        #[serde(deserialize_with = "nullable")]
+        deployment: Option<RestartDeployment>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

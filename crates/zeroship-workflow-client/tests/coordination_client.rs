@@ -17,8 +17,8 @@ use zeroship_core::{
     service_peers::{ServiceAuth, ServiceKeyring},
     workflow_coordination::{
         AssignedScope, DeploymentId, FailureCode, ManageRun, ManagementOperation, ManagementStatus,
-        RegisterWorker, RequestId, RestartDeploy, RestartOptions, RestartTarget, RunId,
-        RunOperation, ScopePage, VerifyAssignment, WorkerId, WorkerState, AUDIENCE,
+        RegisterWorker, RequestId, RestartDeploy, RestartDeployment, RestartOptions, RestartTarget,
+        RunId, RunOperation, ScopePage, VerifyAssignment, WorkerId, WorkerState, AUDIENCE,
     },
 };
 use zeroship_workflow_client::{ControlCoordinator, Error, Options, WorkerCoordinator};
@@ -930,49 +930,76 @@ async fn control_restart_reuses_the_manage_exchange() {
     let app_id = AppId::mint();
     let run_id = RunId::mint();
     let pinned_to = DeploymentId::mint();
-    let options = RestartOptions {
-        from: Some(RestartTarget {
-            name: "checkpoint".into(),
-            occurrence: Some(2),
-        }),
-        deploy: Some(RestartDeploy::Started),
-    };
-    let expected = ManageRun {
-        request_id: request_id.clone(),
-        app_id: app_id.clone(),
-        run_id: run_id.clone(),
-        command: ManagementOperation::Restart {
-            options: options.clone(),
-        },
-    };
-    for outcome in [
-        json!(null),
-        json!({"kind":"restarted","state":"queued","restartedFromOrdinal":2,
-            "pinnedTo":pinned_to}),
-        json!({"kind":"restarted","state":"queued","restartedFromOrdinal":null,
-            "pinnedTo":pinned_to}),
-        json!({"kind":"not_found"}),
-        json!({"kind":"conflict"}),
-        json!({"kind":"denied"}),
-    ] {
-        let receipt = json!({"appId":app_id,"requestId":request_id,"outcome":outcome});
-        control_reply(
-            response(200, &receipt),
-            endpoints::WORKFLOW_MANAGE,
-            &expected,
-            async |client| {
-                assert_eq!(
-                    serde_json::to_value(
-                        client
-                            .restart(&request_id, &app_id, &run_id, options.clone())
-                            .await
-                            .unwrap()
-                    )
-                    .unwrap(),
-                    receipt
-                );
+    // Both restart shapes: one that replays on the code the run started on and
+    // carries no deployment, and one Control pins to a deployment it names.
+    let shapes = [
+        (
+            RestartOptions {
+                from: Some(RestartTarget {
+                    name: "checkpoint".into(),
+                    occurrence: Some(2),
+                }),
+                deploy: Some(RestartDeploy::Started),
             },
-        )
-        .await;
+            None,
+        ),
+        (
+            RestartOptions {
+                from: None,
+                deploy: Some(RestartDeploy::Latest),
+            },
+            Some(RestartDeployment {
+                deployment_id: DeploymentId::mint(),
+                deploy_hash: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                    .into(),
+            }),
+        ),
+    ];
+    for (options, deployment) in shapes {
+        let expected = ManageRun {
+            request_id: request_id.clone(),
+            app_id: app_id.clone(),
+            run_id: run_id.clone(),
+            command: ManagementOperation::Restart {
+                options: options.clone(),
+                deployment: deployment.clone(),
+            },
+        };
+        for outcome in [
+            json!(null),
+            json!({"kind":"restarted","state":"queued","restartedFromOrdinal":2,
+                "pinnedTo":pinned_to}),
+            json!({"kind":"restarted","state":"queued","restartedFromOrdinal":null,
+                "pinnedTo":pinned_to}),
+            json!({"kind":"not_found"}),
+            json!({"kind":"conflict"}),
+            json!({"kind":"denied"}),
+        ] {
+            let receipt = json!({"appId":app_id,"requestId":request_id,"outcome":outcome});
+            control_reply(
+                response(200, &receipt),
+                endpoints::WORKFLOW_MANAGE,
+                &expected,
+                async |client| {
+                    assert_eq!(
+                        serde_json::to_value(
+                            client
+                                .restart(
+                                    &request_id,
+                                    &app_id,
+                                    &run_id,
+                                    options.clone(),
+                                    deployment.clone(),
+                                )
+                                .await
+                                .unwrap()
+                        )
+                        .unwrap(),
+                        receipt
+                    );
+                },
+            )
+            .await;
+        }
     }
 }

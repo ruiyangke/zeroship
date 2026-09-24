@@ -22,7 +22,6 @@ use zeroship_data_orm::Value;
 
 mod catalog;
 mod error;
-pub mod latest;
 pub use error::Error;
 
 mod schema_definition;

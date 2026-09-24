@@ -1,9 +1,8 @@
 use super::{count, Coordinator, Error};
 use crate::{
-    deployments::latest::{LatestDeployment, LatestDeploymentSource},
     management as commands,
     models::{management, management_scopes, queue_scopes, Scope},
-    queue, retention,
+    retention,
 };
 use zeroship_core::{
     app_id::AppId,
@@ -13,19 +12,46 @@ use zeroship_core::{
     workflow_coordination::{
         ManageRun, ManagementOperation, ManagementReceipt, RequestId, RestartDeploy,
     },
-    workflow_jobs::{JobId, JobOperation, JobSpec, ManagementCommand},
+    workflow_jobs::{DeploymentId, JobId, JobOperation, JobSpec, ManagementCommand},
 };
 use zeroship_data_orm::{orm::Database, value};
 
 enum Acceptance {
     Ready(ManagementReceipt),
-    Observe,
-    Retain,
+    Retain(DeploymentId),
 }
 
 impl Coordinator {
-    /// Accept a Control command and its ordered delivery atomically. Latest is
-    /// observed once outside queue locks; exact raw retries use the retained job.
+    /// Accept a Control command and its ordered delivery atomically. Exact raw
+    /// retries use the retained job.
+    ///
+    /// # What this validates about the deployment, and what it does not
+    ///
+    /// A latest restart names its deployment on the wire, and this call does
+    /// NOT decide which deployment is current. It cannot: the endpoint this
+    /// serves is authorized to Control alone, and Control is the authority for
+    /// `zeroship.apps.deploy_hash` and `zeroship.app_deploys`. Asking the
+    /// catalog again would re-derive an answer its only caller already holds,
+    /// and would answer it a moment later than the caller decided.
+    ///
+    /// What the manager still enforces about the named deployment:
+    ///
+    /// - The queue must hold it. An unheld deployment goes through
+    ///   [`Acceptance::Retain`] into `ensure_deployment_for`, whose acquisition
+    ///   runs inside Control's row lock on `zeroship.app_deploys`: a deployment
+    ///   belonging to another app finds no row and is denied, and one whose
+    ///   retention state has left `available` -- reclaiming or deleted -- is a
+    ///   conflict.
+    /// - The hash must match the hold. `require_held` returns the hash Control
+    ///   minted when it granted the hold, and a request naming a different one
+    ///   is a conflict rather than a restart onto code the caller did not name.
+    ///
+    /// What it has stopped enforcing: that the named deployment is the app's
+    /// CURRENT one. A deployment that really was current, is still available
+    /// and still held, but has since been superseded, is accepted here. Nothing
+    /// in the manager distinguishes that from a fresh command; `request_id`
+    /// bounds the damage to one accepted command per request, and Control being
+    /// the sole caller is what stands in the place a staleness check would.
     ///
     /// # Errors
     /// Rejects unauthorized issuers, changed requests, unavailable deployments,
@@ -34,7 +60,6 @@ impl Coordinator {
         &self,
         actor: &ServiceIssuer,
         request: &ManageRun,
-        latest: &LatestDeploymentSource,
     ) -> Result<ManagementReceipt, Error> {
         let control = service_issuer(CONTROL_SERVICE_NAME).map_err(|_| Error::Storage)?;
         if actor.principal() != control.principal() {
@@ -43,30 +68,18 @@ impl Coordinator {
         commands::validate_request(request)?;
         self.queue.encode(&(actor.as_str(), request))?;
         let budget = self.budget();
-        let mut selected = None;
         loop {
             let result = self
                 .queue
-                .transact_for(budget.clone(), |tx| {
-                    let selected = selected.as_ref();
-                    async move { self.accept(&tx, actor, request, selected).await }
+                .transact_for(budget.clone(), |tx| async move {
+                    self.accept(&tx, actor, request).await
                 })
                 .await?;
             match result {
                 Acceptance::Ready(receipt) => return Ok(receipt),
-                Acceptance::Observe => {
-                    selected = Some(
-                        queue::bounded(budget.clone(), latest.observe(&request.app_id)).await??,
-                    );
-                }
-                Acceptance::Retain => {
-                    let target = selected.as_ref().ok_or(Error::Storage)?;
+                Acceptance::Retain(deployment) => {
                     self.queue
-                        .ensure_deployment_for(
-                            &request.app_id,
-                            &target.deployment_id,
-                            budget.clone(),
-                        )
+                        .ensure_deployment_for(&request.app_id, &deployment, budget.clone())
                         .await?;
                 }
             }
@@ -78,7 +91,6 @@ impl Coordinator {
         tx: &Database,
         actor: &ServiceIssuer,
         request: &ManageRun,
-        selected: Option<&LatestDeployment>,
     ) -> Result<Acceptance, Error> {
         self.scope(tx, &request.app_id, true).await?;
         if let Some(row) = commands::record(tx, &request.app_id, &request.request_id).await? {
@@ -105,33 +117,28 @@ impl Coordinator {
             ManagementOperation::Transition { operation } => ManagementCommand::Transition {
                 operation: *operation,
             },
-            ManagementOperation::Restart { options } => {
-                match options.effective_deploy().map_err(|_| Error::Invalid)? {
-                    RestartDeploy::Started => ManagementCommand::RestartStarted {
-                        from: options.from.clone(),
-                    },
-                    RestartDeploy::Latest => {
-                        let Some(target) = selected else {
-                            return Ok(Acceptance::Observe);
-                        };
-                        if target.app_id != request.app_id {
-                            return Err(Error::Storage);
-                        }
-                        if !retention::prepared(tx, &request.app_id, &target.deployment_id).await? {
-                            return Ok(Acceptance::Retain);
-                        }
-                        let held =
-                            retention::require_held(tx, &request.app_id, &target.deployment_id)
-                                .await?;
-                        if held.deploy_hash != target.deploy_hash {
-                            return Err(Error::Conflict);
-                        }
-                        ManagementCommand::RestartLatest {
-                            deployment_id: target.deployment_id.clone(),
-                        }
+            ManagementOperation::Restart {
+                options,
+                deployment,
+            } => match options.effective_deploy().map_err(|_| Error::Invalid)? {
+                RestartDeploy::Started => ManagementCommand::RestartStarted {
+                    from: options.from.clone(),
+                },
+                RestartDeploy::Latest => {
+                    let target = deployment.as_ref().ok_or(Error::Invalid)?;
+                    if !retention::prepared(tx, &request.app_id, &target.deployment_id).await? {
+                        return Ok(Acceptance::Retain(target.deployment_id.clone()));
+                    }
+                    let held =
+                        retention::require_held(tx, &request.app_id, &target.deployment_id).await?;
+                    if held.deploy_hash != target.deploy_hash {
+                        return Err(Error::Conflict);
+                    }
+                    ManagementCommand::RestartLatest {
+                        deployment_id: target.deployment_id.clone(),
                     }
                 }
-            }
+            },
         };
         self.insert_command(tx, actor, request, command)
             .await
