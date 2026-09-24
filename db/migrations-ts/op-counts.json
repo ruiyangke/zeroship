@@ -42,7 +42,7 @@
   {
     "file": "20260705000000_durable_workflows_journal.ts",
     "name": "durable_workflows_journal",
-    "opCount": 13
+    "opCount": 8
   },
   {
     "file": "20260816000100_service_assertion_replay.ts",
@@ -57,7 +57,7 @@
   {
     "file": "20260831000001_sortable_entity_id_collations.ts",
     "name": "sortable_entity_id_collations",
-    "opCount": 48
+    "opCount": 47
   },
   {
     "file": "20260906000000_organization_entity_model.ts",
@@ -92,7 +92,12 @@
   {
     "file": "20260911000050_workflow_platform_grants.ts",
     "name": "workflow_platform_grants",
-    "opCount": 7
+    "opCount": 5
+  },
+  {
+    "file": "20260911000060_workflow_policy_tables.ts",
+    "name": "workflow_policy_tables",
+    "opCount": 11
   },
   {
     "file": "20260911000100_project_data_keys.ts",

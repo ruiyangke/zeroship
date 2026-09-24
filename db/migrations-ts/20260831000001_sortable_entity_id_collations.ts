@@ -8,9 +8,9 @@ import { raw } from "@zeroship/migrate";
 // against the collated entity id cannot use the copy's ordinary index.
 //
 // This map is semantic, not name-based. It deliberately excludes raw UUID
-// domains; pricing_config.id and workflow_rollout_config.id (the constant
-// "global"); OAuth client ids, provider ids, hashes, idempotency keys, and
-// arbitrary text. Some included ids, such as built-in plan ids, are
+// domains; pricing_config.id (a constant rather than an identity); OAuth client
+// ids, provider ids, hashes, idempotency keys, and arbitrary text. Some
+// included ids, such as built-in plan ids, are
 // deterministically UUID-derived rather than UUIDv7; bytewise comparison is
 // still the canonical identity-domain rule, but those particular values do not
 // encode creation time.
@@ -89,7 +89,6 @@ const typedIdColumnsByTable: Readonly<Record<string, readonly string[]>> = {
 
   // Workflow identities and immutable deployment references.
   app_deploy_holds: ["app_id", "deploy_id", "holder_id"],
-  workflow_policy_ledger: ["id"],
 };
 
 export default {

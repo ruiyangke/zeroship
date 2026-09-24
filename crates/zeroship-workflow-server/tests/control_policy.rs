@@ -1,4 +1,5 @@
-//! The policy source reads the migrated Control schema under its service role.
+//! The policy source reads Control's migrated inputs and its own migrated
+//! publication schema, both under its service role.
 #![expect(
     clippy::future_not_send,
     reason = "platform fixtures use their compio runtime"
@@ -72,7 +73,7 @@ impl Fixture {
 }
 
 async fn connect_store(url: &str) -> ControlPolicyStore {
-    let database = Database::connect(
+    let inputs = Database::connect(
         DbBinding::platform(
             "platform",
             "workflow-policy",
@@ -83,11 +84,22 @@ async fn connect_store(url: &str) -> ControlPolicyStore {
     )
     .await
     .unwrap();
-    ControlPolicyStore::new(database).unwrap()
+    let publication = Database::connect(
+        DbBinding::platform(
+            "workflow-policy-ledger",
+            "workflow-policy-ledger",
+            SchemaName::new("workflow_manager").unwrap(),
+        ),
+        ConnectOptions::new(url, ProjectKeySource::unavailable()).connection_authority(),
+        control::publication_collections().unwrap(),
+    )
+    .await
+    .unwrap();
+    ControlPolicyStore::new(inputs, publication).unwrap()
 }
 
 #[compio::test]
-async fn readiness_checks_source_join_and_ledger_identity_grants_with_an_empty_catalog() {
+async fn readiness_checks_input_join_and_publication_grants_with_an_empty_catalog() {
     let platform = platform::Platform::new().await;
     let source = connect_store(&platform.runtime_url).await;
     let apps: i64 = platform
@@ -115,16 +127,37 @@ async fn readiness_checks_source_join_and_ledger_identity_grants_with_an_empty_c
     platform
         .admin
         .batch_execute(
-            "REVOKE SELECT ON zeroship.workflow_policy_ledger FROM zeroship_workflow; \
+            "REVOKE SELECT ON workflow_manager.workflow_policy_ledger FROM zeroship_workflow; \
              GRANT SELECT (revision, policy_json, source_validity_ms) \
-                ON zeroship.workflow_policy_ledger TO zeroship_workflow",
+                ON workflow_manager.workflow_policy_ledger TO zeroship_workflow",
         )
         .await
         .unwrap();
     assert_eq!(source.ready().await, Err(Error::Unavailable));
     platform
         .admin
-        .batch_execute("GRANT SELECT ON zeroship.workflow_policy_ledger TO zeroship_workflow")
+        .batch_execute(
+            "GRANT SELECT ON workflow_manager.workflow_policy_ledger TO zeroship_workflow",
+        )
+        .await
+        .unwrap();
+    source.ready().await.unwrap();
+
+    // The switches are no longer joined to the inputs, so their grant needs
+    // its own arm: the input join passes without it.
+    platform
+        .admin
+        .batch_execute(
+            "REVOKE SELECT ON workflow_manager.workflow_rollout_config FROM zeroship_workflow",
+        )
+        .await
+        .unwrap();
+    assert_eq!(source.ready().await, Err(Error::Unavailable));
+    platform
+        .admin
+        .batch_execute(
+            "GRANT SELECT ON workflow_manager.workflow_rollout_config TO zeroship_workflow",
+        )
         .await
         .unwrap();
     source.ready().await.unwrap();
@@ -247,7 +280,7 @@ async fn invalid_inputs_do_not_publish(fixture: &Fixture) {
         .platform
         .admin
         .query_one(
-            "SELECT revision FROM zeroship.workflow_policy_ledger WHERE id=$1",
+            "SELECT revision FROM workflow_manager.workflow_policy_ledger WHERE id=$1",
             &[&fixture.app.as_str()],
         )
         .await
@@ -284,7 +317,7 @@ async fn invalid_inputs_do_not_publish(fixture: &Fixture) {
         .platform
         .admin
         .query_one(
-            "SELECT revision FROM zeroship.workflow_policy_ledger WHERE id=$1",
+            "SELECT revision FROM workflow_manager.workflow_policy_ledger WHERE id=$1",
             &[&fixture.app.as_str()],
         )
         .await
@@ -321,7 +354,7 @@ async fn invalid_inputs_do_not_publish(fixture: &Fixture) {
         .platform
         .admin
         .query_one(
-            "SELECT count(*) FROM zeroship.workflow_policy_ledger WHERE id=$1",
+            "SELECT count(*) FROM workflow_manager.workflow_policy_ledger WHERE id=$1",
             &[&absent.as_str()],
         )
         .await
@@ -347,7 +380,7 @@ async fn source_role_cannot_write_inputs_or_read_customer_storage(fixture: &Fixt
     for sql in [
         "SELECT * FROM customer.__zeroship_workflow_history",
         "UPDATE zeroship.apps SET workflows_enabled=true",
-        "DELETE FROM zeroship.workflow_policy_ledger",
+        "DELETE FROM workflow_manager.workflow_policy_ledger",
     ] {
         let error = runtime.batch_execute(sql).await.unwrap_err();
         assert_eq!(error.as_db_error().unwrap().code().code(), "42501");
@@ -361,7 +394,7 @@ async fn publication_reads_after_lock_wait_and_charges_that_wait_to_source_valid
     let original = fixture.source.observe(&fixture.app).await.unwrap();
     fixture.platform.admin.batch_execute("BEGIN").await.unwrap();
     fixture
-        .execute("UPDATE zeroship.workflow_policy_ledger SET id=id WHERE id=$1")
+        .execute("UPDATE workflow_manager.workflow_policy_ledger SET id=id WHERE id=$1")
         .await;
     let source = fixture.source.clone();
     let app = fixture.app.clone();
@@ -408,7 +441,7 @@ async fn publication_reads_after_lock_wait_and_charges_that_wait_to_source_valid
         .unwrap();
     fixture.platform.admin.batch_execute("BEGIN").await.unwrap();
     fixture
-        .execute("UPDATE zeroship.workflow_policy_ledger SET id=id WHERE id=$1")
+        .execute("UPDATE workflow_manager.workflow_policy_ledger SET id=id WHERE id=$1")
         .await;
     let source = fixture.source.clone();
     let app = fixture.app.clone();
@@ -427,7 +460,7 @@ async fn publication_reads_after_lock_wait_and_charges_that_wait_to_source_valid
         .platform
         .admin
         .query_one(
-            "SELECT revision FROM zeroship.workflow_policy_ledger WHERE id=$1",
+            "SELECT revision FROM workflow_manager.workflow_policy_ledger WHERE id=$1",
             &[&fixture.app.as_str()],
         )
         .await
@@ -464,7 +497,7 @@ async fn cached_authority_cannot_be_renewed_from_its_own_ledger() {
     fixture
         .platform
         .admin
-        .batch_execute("DELETE FROM zeroship.workflow_rollout_config")
+        .batch_execute("DELETE FROM workflow_manager.workflow_rollout_config")
         .await
         .unwrap();
     let cached = source.observe(&fixture.app).await.unwrap();

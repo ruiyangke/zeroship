@@ -6,8 +6,14 @@ both gates are true:
 - `zeroship.apps.workflows_enabled = true`
 - `zeroship.plans.workflows_allowed = true` for the app's current plan
 
-The two operator kill-switches live in `zeroship.workflow_rollout_config`
-(`id = 'global'`). If the row is missing, both switches are treated as off.
+The two operator kill-switches live in `workflow_manager.workflow_rollout_config`
+(`id = 'global'`), in the workflow service's own schema. The service reads that
+row and cannot write it, so every statement below runs under an administrative
+credential.
+
+There is no default row and no default for a missing one. A deployment that has
+never published the `global` row fails every policy observation, which refuses
+every app rather than admitting one: provision it before enabling any app.
 
 ## Enable An App
 
@@ -68,7 +74,9 @@ The workflow manager's policy provider requires a provisioned global
 `source_validity_ms` and complete `plans.workflow_policy_json` values. Choose the
 finite validity as an operator bound on stale authority, then use native
 `ControlPolicyStore::set_rollout` and `set_plan_policy`, or explicit SQL
-provisioning. Plan policy follows the closed `AppPolicy` contract in
+provisioning. Either way the credential has to reach both the switches in
+`workflow_manager` and the plan rows in `zeroship`, which no service login does.
+Plan policy follows the closed `AppPolicy` contract in
 `crates/zeroship-core/src/workflow_policy.rs`. Missing fields are not defaulted.
 The SQL placeholders below require that chosen validity when inserting the global
 row; updates preserve its current bound. Manager and worker caches retain their
@@ -77,7 +85,7 @@ original lease deadlines, so a switch update does not prove execution quiescence
 Use this when the replay engine is suspect.
 
 ```sql
-INSERT INTO zeroship.workflow_rollout_config
+INSERT INTO workflow_manager.workflow_rollout_config
        (id, dispatch_paused, ingress_disabled, source_validity_ms, updated_by)
 VALUES ('global', true, false, :source_validity_ms, :operator)
 ON CONFLICT (id) DO UPDATE SET
@@ -89,7 +97,7 @@ ON CONFLICT (id) DO UPDATE SET
 Resume:
 
 ```sql
-UPDATE zeroship.workflow_rollout_config
+UPDATE workflow_manager.workflow_rollout_config
    SET dispatch_paused = false, updated_at = now(), updated_by = :operator
  WHERE id = 'global';
 ```
@@ -103,7 +111,7 @@ commit; everything else remains durably parked in the journal.
 Use this when the public signal edge is suspect.
 
 ```sql
-INSERT INTO zeroship.workflow_rollout_config
+INSERT INTO workflow_manager.workflow_rollout_config
        (id, dispatch_paused, ingress_disabled, source_validity_ms, updated_by)
 VALUES ('global', false, true, :source_validity_ms, :operator)
 ON CONFLICT (id) DO UPDATE SET
@@ -115,7 +123,7 @@ ON CONFLICT (id) DO UPDATE SET
 Re-enable:
 
 ```sql
-UPDATE zeroship.workflow_rollout_config
+UPDATE workflow_manager.workflow_rollout_config
    SET ingress_disabled = false, updated_at = now(), updated_by = :operator
  WHERE id = 'global';
 ```
@@ -129,7 +137,7 @@ App-credentialed `run.signal` remains available.
 Pause new claims first:
 
 ```sql
-UPDATE zeroship.workflow_rollout_config
+UPDATE workflow_manager.workflow_rollout_config
    SET dispatch_paused = true, updated_at = now(), updated_by = :operator
  WHERE id = 'global';
 ```

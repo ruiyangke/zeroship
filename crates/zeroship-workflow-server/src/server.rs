@@ -315,21 +315,36 @@ async fn connect_policies(
         binding::DbBinding, encryption::ProjectKeySource, orm::Database, ConnectOptions,
     };
     compio::time::timeout(options.command_timeout, async {
-        let database = Database::connect(
+        let connections = NonZeroUsize::new(options.connections).ok_or(ManagerError::Invalid)?;
+        let inputs = Database::connect(
             DbBinding::platform(
                 "platform",
                 "workflow-policy",
                 SchemaName::new("zeroship").map_err(|_| ManagerError::Invalid)?,
             ),
             ConnectOptions::new(url, ProjectKeySource::unavailable())
-                .max_connections(
-                    NonZeroUsize::new(options.connections).ok_or(ManagerError::Invalid)?,
-                )
+                .max_connections(connections)
                 .connection_authority(),
             control::collections()?,
         )
         .await?;
-        let store = ControlPolicyStore::new(database)?;
+        // Its own tenant, so the publication transaction takes a lane of its
+        // own. A platform route carries no database id, so every binding that
+        // reused a tenant would share one lane, and a top-level transaction
+        // reached from inside another callback on that lane cannot be admitted.
+        let publication = Database::connect(
+            DbBinding::platform(
+                "workflow-policy-ledger",
+                "workflow-policy-ledger",
+                SchemaName::new("workflow_manager").map_err(|_| ManagerError::Invalid)?,
+            ),
+            ConnectOptions::new(url, ProjectKeySource::unavailable())
+                .max_connections(connections)
+                .connection_authority(),
+            control::publication_collections()?,
+        )
+        .await?;
+        let store = ControlPolicyStore::new(inputs, publication)?;
         store.ready().await?;
         ControlPolicies::new(store, observations, options.command_timeout)
     })

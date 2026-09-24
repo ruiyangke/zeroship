@@ -28,18 +28,37 @@ async fn startup_preserves_archived_plans_and_complete_workflow_policy() {
     seed_plans(&registry).await.unwrap();
     let catalog = PlanCatalog::new(registry.clone());
     catalog.archive(&free_plan_id()).await.unwrap();
-    let database = Database::connect(
+    // The store spans Control's plan rows and the workflow service's own
+    // publication schema, so it binds the administrative credential an operator
+    // publishes with rather than either service login.
+    let operator_url = fixture
+        .runtime_url
+        .replacen("zeroship_workflow@", "postgres@", 1);
+    let inputs = Database::connect(
         DbBinding::platform(
             "platform",
             "workflow-policy",
             SchemaName::new("zeroship").unwrap(),
         ),
-        ConnectOptions::new(&url, ProjectKeySource::unavailable()).connection_authority(),
+        ConnectOptions::new(&operator_url, ProjectKeySource::unavailable())
+            .connection_authority(),
         control::collections().unwrap(),
     )
     .await
     .unwrap();
-    let operator = ControlPolicyStore::new(database).unwrap();
+    let publication = Database::connect(
+        DbBinding::platform(
+            "workflow-policy-ledger",
+            "workflow-policy-ledger",
+            SchemaName::new("workflow_manager").unwrap(),
+        ),
+        ConnectOptions::new(&operator_url, ProjectKeySource::unavailable())
+            .connection_authority(),
+        control::publication_collections().unwrap(),
+    )
+    .await
+    .unwrap();
+    let operator = ControlPolicyStore::new(inputs, publication).unwrap();
     let policy = AppPolicy {
         max_live_runs: 17,
         ..AppPolicy::default()

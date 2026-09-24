@@ -13,9 +13,11 @@ pub async fn seed_app(platform: &platform::Platform, app: &AppId) -> String {
     plan
 }
 
-/// The policy store bound as Control, which owns these rows. The workflow
-/// service reads them and cannot write them, so a fixture that publishes
-/// policy has to connect under the role a deployment publishes it with.
+/// The policy store bound with the administrative credential a deployment
+/// publishes under. The plan policy is Control's row and the rollout switches
+/// are the workflow service's own, and no service login holds both: the service
+/// role reads its switches and cannot write them, and `zeroship_control` cannot
+/// reach the `workflow_manager` schema at all.
 #[allow(
     dead_code,
     reason = "targets that only read policy bind the service role instead"
@@ -23,8 +25,8 @@ pub async fn seed_app(platform: &platform::Platform, app: &AppId) -> String {
 pub async fn operator(platform: &platform::Platform) -> ControlPolicyStore {
     let url = platform
         .runtime_url
-        .replacen("zeroship_workflow@", "zeroship_control@", 1);
-    let database = Database::connect(
+        .replacen("zeroship_workflow@", "postgres@", 1);
+    let inputs = Database::connect(
         DbBinding::platform(
             "platform",
             "workflow-policy",
@@ -35,7 +37,18 @@ pub async fn operator(platform: &platform::Platform) -> ControlPolicyStore {
     )
     .await
     .unwrap();
-    ControlPolicyStore::new(database).unwrap()
+    let publication = Database::connect(
+        DbBinding::platform(
+            "workflow-policy-ledger",
+            "workflow-policy-ledger",
+            SchemaName::new("workflow_manager").unwrap(),
+        ),
+        ConnectOptions::new(&url, ProjectKeySource::unavailable()).connection_authority(),
+        control::publication_collections().unwrap(),
+    )
+    .await
+    .unwrap();
+    ControlPolicyStore::new(inputs, publication).unwrap()
 }
 
 /// The operator switches a deployment publishes alongside its plan policies.
