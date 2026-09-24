@@ -272,7 +272,7 @@ pub(super) async fn ordinary_latest(store: Rc<OrmStore>) {
             .restart(&request, &fixture.run, RestartOptions::default())
             .await
             .unwrap();
-        assert_eq!(result.pinned_to, fixture.replacement.id);
+        assert_eq!(result.pinned_to.as_str(), fixture.replacement.id.as_str());
         fixture
             .assert_generation(i64::try_from(index + 1).unwrap(), &fixture.replacement.id)
             .await;
