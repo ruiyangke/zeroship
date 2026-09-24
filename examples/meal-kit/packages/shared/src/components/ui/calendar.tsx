@@ -53,7 +53,15 @@ function Calendar({
         ),
         month: cn("flex w-full flex-col gap-4", defaultClassNames.month),
         nav: cn(
-          "absolute inset-x-0 top-0 flex w-full items-center justify-between gap-1",
+          // `z-10` is load-bearing, not decoration. The nav is absolutely
+          // positioned across the top; `month_caption` is a full-width element
+          // at the same place whose `px-(--cell-size)` leaves visual room for
+          // these buttons but still covers them. Without a stacking order the
+          // caption paints last and swallows every click on previous/next, so
+          // the month cannot be changed. `pointer-events-none` on the caption
+          // would also clear the path, but the caption carries the dropdown
+          // layout, and those are interactive.
+          "absolute inset-x-0 top-0 z-10 flex w-full items-center justify-between gap-1",
           defaultClassNames.nav,
         ),
         button_previous: cn(
