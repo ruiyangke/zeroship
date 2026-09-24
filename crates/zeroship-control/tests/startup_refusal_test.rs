@@ -143,6 +143,53 @@ fn unusable_publication_settings_refuse_the_check_and_the_boot() {
     assert!(output.status.success(), "{text}");
     assert!(text.contains(r#""workflow_coordinator_url":"https://coordinator.internal""#), "{text}");
     assert!(text.contains(r#""catalog_max_connections":3"#), "{text}");
+    // The plaintext-peer posture is reported EMPTY here, not absent. A field
+    // that only appeared once the fence was relaxed could never be read as
+    // "the fence is intact".
+    assert!(text.contains(r#""plaintext_peers":"""#), "{text}");
+
+    // One variable from the run above: a named peer makes a plaintext origin
+    // the default refuses into a usable coordinator, and the report says which
+    // posture the process is under.
+    let named = run(
+        &scratch,
+        &signed,
+        &[
+            "--check-config",
+            "--check-config-format",
+            "json",
+            "--workflow-coordinator-url",
+            "http://workflow:9093",
+            "--plaintext-peers",
+            "http://workflow:9093",
+        ],
+    );
+    let named_text = self::text(&named);
+    assert!(named.status.success(), "{named_text}");
+    assert!(
+        named_text.contains(r#""plaintext_peers":"http://workflow:9093""#),
+        "{named_text}"
+    );
+
+    // The control: the SAME coordinator origin without the list is refused and
+    // the refusal names the setting, so the admission above is the list's doing.
+    let unnamed = run(
+        &scratch,
+        &signed,
+        &[
+            "--check-config",
+            "--check-config-format",
+            "json",
+            "--workflow-coordinator-url",
+            "http://workflow:9093",
+        ],
+    );
+    let unnamed_text = self::text(&unnamed);
+    assert!(!unnamed.status.success(), "{unnamed_text}");
+    assert!(
+        unnamed_text.contains("control.workflow_coordinator_url"),
+        "{unnamed_text}"
+    );
 }
 
 #[test]
