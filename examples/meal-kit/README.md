@@ -29,6 +29,17 @@ either side: a box the storefront writes is on the operations board when the
 transaction commits, and a menu the back office publishes is what the storefront
 sells. There is no call between the apps and nothing to synchronize.
 
+One database means one writer at a time. Each app runs its own runtime process,
+and in the dev tier both open the same SQLite file, where SQLite admits many
+readers alongside a single writer. So the two apps do not write concurrently -
+they take turns, bounded by the same lock budget a PostgreSQL deployment spends
+on `lock_timeout`, and an explicit transaction takes the write lock on every
+database the connection has open. At this example's volume that is invisible.
+It is worth knowing before copying the shape into something write-heavy, where
+the answer is PostgreSQL rather than a second database: two databases would put
+the boxes and the board back on opposite sides of a call, which is the thing
+this example exists to remove.
+
 Each app still authorizes its own callers. The storefront's procedures scope
 every read and write to the signed-in customer; the back office's check staff
 grants. Staff sign in directly to the back office, on its own origin, so
