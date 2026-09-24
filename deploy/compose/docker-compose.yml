@@ -585,8 +585,17 @@ services:
       # Compose used to leave this unset, which defaulted it to
       # `{issuer}/.well-known/jwks.json` and sent it out through the edge.
       ZEROSHIP_AUTH_PLATFORM_JWKS_URL: http://auth:9092/oauth2/.well-known/jwks.json
+      # The public halves of its peers, and the ONLY thing that makes the
+      # schema-bundle endpoint answerable: without a bundle it refuses every
+      # call with `schema_bundle_unconfigured` and names this setting. That is
+      # the endpoint the workflow manager installs app journals through, so it
+      # is configured here rather than discovered at the first provision. No
+      # key of its own is mounted - migrate-server verifies callers and
+      # presents no assertion of its own.
+      ZEROSHIP_MIGRATE_SERVER_SERVICE_PEERS_FILE: /etc/zeroship/secrets/service-peers.json
     volumes:
       - ../ops/zeroship.toml:/etc/zeroship/zeroship.toml:ro
+      - ${ZEROSHIP_SECRETS_DIR:-./secrets}/service-peers.json:/etc/zeroship/secrets/service-peers.json:ro
       # The privileged DSN the provision setting above references. Same file,
       # same container path and same `zeroship dev init` output as the
       # `migrate` one-shot's mount; deploy/scripts/deploy-remote.sh discovers
@@ -603,6 +612,109 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+
+  # The workflow metadata coordinator: worker registry, placement, the manager
+  # driver's scheduling/recovery/retention/closing lanes, and the creator-facing
+  # run and schedule calls served over its own journal.
+  workflow:
+    build:
+      context: ../..
+      dockerfile: deploy/Dockerfile
+    image: zeroship-platform:dev
+    # `--listen <ADDR>`, NOT the `--port`/`--bind` pair control, migrate-server
+    # and the gateway take. This binary declares one `workflow.listen` setting
+    # holding a whole socket address, so a `--port` here fails at parse time.
+    command: >
+      zeroship-workflow-server
+        --listen 0.0.0.0:9093
+    # /readyz opens the coordination metadata pool, so unhealthy here means
+    # placement and management calls would fail, not merely that the port is
+    # closed. Startup itself verifies more than the probe does: the process
+    # refuses to bind at all unless `workflow_manager` carries the fingerprint
+    # this build expects and the login holds exactly the manager grants.
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS -o /dev/null http://127.0.0.1:9093/readyz"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 30s
+    ports:
+      - "127.0.0.1:9093:9093"
+    environment:
+      # THE RUNTIME LOGIN, NEVER THE MIGRATOR, and the server enforces that
+      # rather than trusting this line: `Coordinator::verify` refuses to start
+      # when its own login is a superuser, can create roles or databases, holds
+      # membership in another role, or holds CREATE on `workflow_manager`. So
+      # the convenient credential - the one the `migrate` one-shot uses - fails
+      # at boot instead of quietly over-privileging the process that runs the
+      # manager driver. `zeroship_workflow_migrator` owns the schema and has no
+      # LOGIN at all; `zeroship_workflow` is the login the grants derive.
+      #
+      # INLINE, unlike migrate-server's PROVISION dsn: this is a least-priv
+      # role whose dev password is a literal in the tracked migration that
+      # creates it, exactly like control's and the gateway's above, so a
+      # secrets file would move a published value without concealing it. A
+      # deployment with a real credential overrides the variable, and may spell
+      # the override `urn:zeroship:file:/path` - every `Secret<T>` setting
+      # resolves that through the same owner-only read a `--<name>-file` flag
+      # uses.
+      ZEROSHIP_WORKFLOW_DATABASE_URL: ${ZEROSHIP_WORKFLOW_DATABASE_URL:-postgres://zeroship_workflow:zeroship_workflow@postgres:5432/zeroship}
+      # This service's OWN assertion key and the public halves of its peers.
+      # The bundle MUST carry Control's key: the process refuses to start
+      # without it, because the retention lane's replies are what it verifies.
+      ZEROSHIP_WORKFLOW_SERVICE_KEY_FILE: /etc/zeroship/secrets/svc-workflow.pem
+      ZEROSHIP_WORKFLOW_SERVICE_PEERS_FILE: /etc/zeroship/secrets/service-peers.json
+      # The two peers this service dials, by their address on this network
+      # rather than by a public name: Control for deployment-queue retention,
+      # and the migration service for installing and upgrading app journals.
+      #
+      # THIS SERVICE DOES NOT COME UP AGAINST THIS TOPOLOGY, and the reason is
+      # these two lines. `Transport::configuration` in zeroship-workflow-client
+      # admits an origin only when its scheme is https or its host is a
+      # loopback IP LITERAL; a DNS name over http is refused. Every platform
+      # service on this network speaks plain http under its service name, and
+      # nothing here terminates TLS between containers - the edge's control
+      # block is an `http://` site and Caddy carries no alias for it - so no
+      # value satisfies both the transport and the topology. `control_url` is
+      # checked while resolving settings, so the process exits naming its
+      # configuration; `migrate_url` is checked when each HTTP thread builds
+      # its state, so a plaintext value there leaves /readyz unanswered instead.
+      #
+      # https:// for both is what a green healthcheck would cost: the process
+      # binds, /readyz answers 200, and every retention and journal call fails
+      # at the handshake against a peer that serves plaintext. These stay the
+      # addresses that are true, so the refusal names the thing to decide.
+      # Nothing else in the platform applies this fence - the gateway, the
+      # worker and auth all reach `http://control:9090` - so whether the
+      # transport relaxes for a private network or the platform grows internal
+      # TLS is a decision for the identity model, not for this file.
+      ZEROSHIP_WORKFLOW_CONTROL_URL: http://control:9090
+      ZEROSHIP_WORKFLOW_MIGRATE_URL: http://migrate-server:9091
+      ZEROSHIP_OBSERVABILITY_LOG_FORMAT: json
+    volumes:
+      - ../ops/zeroship.toml:/etc/zeroship/zeroship.toml:ro
+      - ${ZEROSHIP_SECRETS_DIR:-./secrets}/svc-workflow.pem:/etc/zeroship/secrets/svc-workflow.pem:ro
+      - ${ZEROSHIP_SECRETS_DIR:-./secrets}/service-peers.json:/etc/zeroship/secrets/service-peers.json:ro
+    # compio/io_uring, same as every other native service here.
+    security_opt:
+      - seccomp:unconfined
+    restart: on-failure
+    depends_on:
+      postgres:
+        condition: service_healthy
+      # The manager schema, its grants and the fingerprint row the coordinator
+      # checks all arrive with the platform corpus, and the process refuses to
+      # start against a database that lacks them.
+      migrate:
+        condition: service_completed_successfully
+      # HEALTHY, not merely STARTED: the driver's retention lane dials control
+      # on its first pass, which begins as soon as this process binds.
+      control:
+        condition: service_healthy
+      # Journal installs go here. STARTED is enough - the manager provisions on
+      # demand rather than at boot.
+      migrate-server:
+        condition: service_started
 
   gateway:
     build:

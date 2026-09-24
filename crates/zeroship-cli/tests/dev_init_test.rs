@@ -30,7 +30,7 @@ use zeroship_core::config::{
 //
 // It carries the postgres SUPERUSER password, so of everything here it is the
 // entry that most needs the 0600 the loop below pins.
-const SECRET_FILES: [&str; 11] = [
+const SECRET_FILES: [&str; 12] = [
     "auth-signing.pem",
     "broker-secret",
     "gateway-signing.pem",
@@ -44,6 +44,7 @@ const SECRET_FILES: [&str; 11] = [
     "svc-auth.pem",
     "svc-control.pem",
     "svc-gateway.pem",
+    "svc-workflow.pem",
     // The worker holds no key of its own at all: it joins with a TOKEN a
     // trusted signer minted and mints under an instance key it draws in memory
     // at boot. This is the SIGNER's key, and it never reaches a worker.
@@ -215,8 +216,8 @@ fn dev_init_generates_the_complete_private_deployment_secret_set() {
         "pairwise-salt must have no newline"
     );
 
-    // The peer document publishes the three services that hold a key of their
-    // own and NO worker key: no process holds a `svc/worker` role key.
+    // The peer document publishes every service that holds a key of its own
+    // and NO worker key: no process holds a `svc/worker` role key.
     let peers: serde_json::Value = serde_json::from_slice(
         &std::fs::read(secrets_dir.join("service-peers.json")).expect("read the peer document"),
     )
@@ -233,6 +234,7 @@ fn dev_init_generates_the_complete_private_deployment_secret_set() {
             "spiffe://zeroship.ai/svc/auth",
             "spiffe://zeroship.ai/svc/control",
             "spiffe://zeroship.ai/svc/gateway",
+            "spiffe://zeroship.ai/svc/workflow",
         ]
         .into_iter()
         .map(str::to_owned)
@@ -605,7 +607,12 @@ fn dev_init_rejects_an_empty_pairwise_file_before_creating_siblings() {
 /// `crates/zeroship-gateway/tests/peer_boot.rs`, against the real binaries.
 #[test]
 fn dev_init_refuses_when_two_service_key_paths_hold_the_same_key() {
-    const SERVICE_KEYS: [&str; 3] = ["svc-auth.pem", "svc-control.pem", "svc-gateway.pem"];
+    const SERVICE_KEYS: [&str; 4] = [
+        "svc-auth.pem",
+        "svc-control.pem",
+        "svc-gateway.pem",
+        "svc-workflow.pem",
+    ];
 
     // The control half. Distinct keys, which is what a run generates.
     let temp = tempfile::tempdir().expect("create temp directory");
@@ -633,7 +640,7 @@ fn dev_init_refuses_when_two_service_key_paths_hold_the_same_key() {
     // The case half, one variable changed: svc-auth's key copied over another
     // service's. Every other byte in the directory is the one the control just
     // accepted.
-    for victim in ["svc-gateway.pem", "svc-control.pem"] {
+    for victim in ["svc-gateway.pem", "svc-control.pem", "svc-workflow.pem"] {
         let temp = tempfile::tempdir().expect("create temp directory");
         let secrets_dir = temp.path().join("secrets");
         let env_file = temp.path().join("dev.env");

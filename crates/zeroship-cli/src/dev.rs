@@ -297,10 +297,11 @@ fn validate_migrate_dsn(bytes: &[u8]) -> Result<(), String> {
 /// can mint the identity envelope its own verifier accepts.
 ///
 /// The names match `zeroship_core::service_peers`.
-const SERVICE_KEY_FILES: [(&str, &str); 3] = [
+const SERVICE_KEY_FILES: [(&str, &str); 4] = [
     ("svc-gateway.pem", "svc/gateway"),
     ("svc-control.pem", "svc/control"),
     ("svc-auth.pem", "svc/auth"),
+    ("svc-workflow.pem", "svc/workflow"),
 ];
 
 /// This deployment's OPERATOR SIGNER credential: the `wjs_` id and the Ed25519
@@ -339,24 +340,17 @@ const JOIN_SIGNERS_FILE: &str = "join-signers.json";
 /// carries no state an operator would want preserved.
 const SERVICE_PEERS_FILE: &str = "service-peers.json";
 
-fn secret_specs() -> [SecretSpec; 10] {
-    [
+/// Every generated secret, with the one that creates it and the one that
+/// judges what is already there.
+///
+/// The service key entries are DERIVED from [`SERVICE_KEY_FILES`], not listed
+/// beside it. Listing them is what lets a service reach the peer document
+/// without ever being generated: `write_service_peers` reads every path in
+/// that array, so the run refuses on a file it never offered to create, and
+/// the message names a path the operator has no way to produce.
+fn secret_specs() -> [SecretSpec; SERVICE_KEY_FILES.len() + 7] {
+    const OTHERS: [SecretSpec; 7] = [
         ("migrate-dsn", generate_migrate_dsn, validate_migrate_dsn),
-        (
-            SERVICE_KEY_FILES[0].0,
-            generate_signing_key,
-            validate_signing_key,
-        ),
-        (
-            SERVICE_KEY_FILES[1].0,
-            generate_signing_key,
-            validate_signing_key,
-        ),
-        (
-            SERVICE_KEY_FILES[2].0,
-            generate_signing_key,
-            validate_signing_key,
-        ),
         (JOIN_SIGNER_FILE, generate_join_signer, validate_join_signer),
         (
             "auth-signing.pem",
@@ -383,7 +377,13 @@ fn secret_specs() -> [SecretSpec; 10] {
             generate_base64_secret,
             validate_base64_secret,
         ),
-    ]
+    ];
+    std::array::from_fn(|index| -> SecretSpec {
+        match SERVICE_KEY_FILES.get(index) {
+            Some((file, _)) => (file, generate_signing_key, validate_signing_key),
+            None => OTHERS[index - SERVICE_KEY_FILES.len()],
+        }
+    })
 }
 
 fn reject_env_file_alias(secrets_dir: &Path, env_file: &Path) -> Result<(), String> {
