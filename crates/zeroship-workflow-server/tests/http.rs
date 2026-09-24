@@ -6,6 +6,8 @@
 
 #[path = "support/platform.rs"]
 mod platform;
+#[path = "support/app_facts.rs"]
+mod app_facts;
 #[path = "support/policy.rs"]
 mod policy_fixture;
 #[path = "support/server_process.rs"]
@@ -586,11 +588,12 @@ async fn verify_native_policy_source(
     ));
     let plan = policy_fixture::seed_app(fixture, &scope.app_id).await;
     let operator = policy_fixture::operator(fixture).await;
+    let plans = policy_fixture::plan_admin(fixture).await;
     let policy = AppPolicy {
         admission: false,
         ..AppPolicy::default()
     };
-    operator.set_plan_policy(&plan, &policy).await.unwrap();
+    plans.set_plan_policy(&plan, &policy).await.unwrap();
     operator.set_rollout(policy_fixture::rollout()).await.unwrap();
     let leased = client.policy_lease(&plain_request(scope)).await.unwrap();
     assert_eq!(leased.policy(), &policy);

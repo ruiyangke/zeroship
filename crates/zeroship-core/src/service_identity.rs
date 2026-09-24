@@ -451,6 +451,15 @@ pub mod endpoints {
         ServiceEndpoint::new("control", "POST", "/v1/deployment-holds/queue/acquire");
     pub const CONTROL_QUEUE_DEPLOYMENT_HOLD_RELEASE: ServiceEndpoint =
         ServiceEndpoint::new("control", "POST", "/v1/deployment-holds/queue/release");
+    /// Control's app and plan facts for the workflow service.
+    ///
+    /// POST, and the body is a request rather than a path id, because one call
+    /// answers for a page of apps: the closing lane asks about its whole
+    /// candidate page at once. It is also what this transport can express -
+    /// `Transport` exchanges a serialized request and has no GET - so
+    /// declaring GET here would name a method nothing performs.
+    pub const CONTROL_APP_FACTS: ServiceEndpoint =
+        ServiceEndpoint::new("control", "POST", "/v1/app-facts");
     pub const CONTROL_BILLING_RECONCILE: ServiceEndpoint =
         ServiceEndpoint::new("control", "POST", "/internal/billing/reconcile");
     pub const CONTROL_SPEND_RECONCILE: ServiceEndpoint =
@@ -629,6 +638,11 @@ pub fn service_allowlist() -> &'static [ServiceAuthorization] {
                 &[
                     endpoints::CONTROL_QUEUE_DEPLOYMENT_HOLD_ACQUIRE,
                     endpoints::CONTROL_QUEUE_DEPLOYMENT_HOLD_RELEASE,
+                    // The policy inputs and the deletion marker the manager
+                    // used to read straight out of Control's tables. It reads
+                    // them here instead, so the service holds no grant on
+                    // `zeroship.apps` policy columns or on `zeroship.plans`.
+                    endpoints::CONTROL_APP_FACTS,
                     // The manager owns WHEN a journal must exist, so it is the
                     // one principal that may send a schema bundle. Routing this
                     // through Control would move the workflow artifacts into

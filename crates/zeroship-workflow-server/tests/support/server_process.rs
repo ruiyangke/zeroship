@@ -34,7 +34,7 @@ impl ServerProcess {
         let address = listener.local_addr().unwrap();
         drop(listener);
         let config = directory.join(format!("{name}.toml"));
-        let control = queue_control::Control::start(directory, name).await;
+        let control = queue_control::Control::start(directory, name, database).await;
         super::platform::write_private(
             &config,
             toml::to_string(&serde_json::json!({"workflow":{

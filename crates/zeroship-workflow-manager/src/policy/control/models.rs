@@ -1,19 +1,15 @@
-//! Native projections of Control-owned policy inputs, and the native models of
-//! this service's own publication storage.
+//! Native models of this service's own publication storage, and of the one
+//! Control table an operator credential provisions plan policy into.
 //!
 //! Two declarations rather than one, because they are bound to two different
-//! schemas: the inputs are Control's and are read under column grants, and the
-//! publication tables are the workflow service's own.
+//! schemas under two different credentials: the publication tables are the
+//! workflow service's own, and the plan row belongs to Control and is reached
+//! only by the administrative credential `PlanPolicyStore` takes. The service's
+//! serving path binds neither Control table: its policy inputs arrive over
+//! Control's app-facts endpoint.
 
 zeroship_data_orm::orm::schema! {
-    pub source {
-        apps {
-            #[orm(primary_key)]
-            id: Text,
-            plan_id: Text,
-            workflows_enabled: Boolean,
-            archived_at: Nullable<Timestamp>,
-        }
+    pub plan_admin {
         plans {
             #[orm(primary_key)]
             id: Text,
@@ -40,6 +36,10 @@ zeroship_data_orm::orm::schema! {
             revision: BigInt,
             policy_json: Nullable<Json>,
             source_validity_ms: Nullable<BigInt>,
+            // `source_watermark` is where Control's source stood when the
+            // inputs behind `revision` were read. The publication fence refuses
+            // an observation below it; see the comparison in `store::publish`.
+            source_watermark: Nullable<BigInt>,
         }
     }
 }

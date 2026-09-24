@@ -27,11 +27,14 @@ use zeroship_core::{
     workflow_deployments::{HoldGeneration, HoldReceipt, QueueHoldRequest},
     workflow_jobs::DeploymentId,
 };
-use zeroship_workflow_client::{Options as ClientOptions, QueueDeploymentHolds, Transport};
+use zeroship_workflow_client::{
+    ControlAppFacts, Options as ClientOptions, QueueDeploymentHolds, Transport,
+};
 use zeroship_workflow_manager::{
+    app_facts::{AppFactsFuture, AppFactsSource},
     capacity::{Options as CapacityOptions, StaticPool},
     driver::{Driver, Options as DriverOptions, TickReport},
-    lifecycle::{self, ControlLifecycle},
+    lifecycle::FactsLifecycle,
     policy::control::{self, ControlPolicies, ControlPolicyStore, PolicyObservations},
     recovery::Options as RecoveryOptions,
     retention::HoldClient,
@@ -187,6 +190,12 @@ pub async fn run(settings: WorkflowSettings, options: ServerOptions) -> Result<(
         options.coordinator,
         &plaintext_peers,
     )?;
+    let facts = RemoteAppFacts::new(
+        &control_url,
+        outbound.clone(),
+        options.coordinator,
+        &plaintext_peers,
+    )?;
     // ONE observation store for the whole process, cloned into every HTTP
     // thread's state. A thread's database pool is its own; the observation an
     // app's policy is granted from is not, because the deadline a worker
@@ -194,7 +203,7 @@ pub async fn run(settings: WorkflowSettings, options: ServerOptions) -> Result<(
     let observations = PolicyObservations::new(options.policy_cache_entries);
     // Verify migration readiness before accepting connections. Each HTTP thread
     // constructs its own bounded pool and retention transport in the state factory.
-    let driver = driver(&url, &options, holds, observations.clone()).await?;
+    let driver = driver(&url, &options, holds, Rc::new(facts), observations.clone()).await?;
     compio::time::timeout(options.coordinator.command_timeout, replay.purge_expired()).await??;
     let auth = Arc::new(WorkflowAuth::new(
         verifier,
@@ -227,6 +236,17 @@ pub async fn run(settings: WorkflowSettings, options: ServerOptions) -> Result<(
                         coordinator,
                         &plaintext_peers,
                     )?;
+                    // Per thread, like every other client here: cyper's pooled
+                    // connections belong to the thread that opened them. The
+                    // OBSERVATIONS stay shared; only the transport is per
+                    // thread, so an app's policy still comes from one
+                    // observation whichever thread accepted the connection.
+                    let facts = Rc::new(RemoteAppFacts::new(
+                        &control_url,
+                        outbound.clone(),
+                        coordinator,
+                        &plaintext_peers,
+                    )?);
                     // Absent when no migration-service origin is configured. The
                     // journal endpoint then refuses, rather than answering as
                     // though a journal had been provisioned.
@@ -258,7 +278,7 @@ pub async fn run(settings: WorkflowSettings, options: ServerOptions) -> Result<(
                         service,
                         auth,
                         policy_source: Some(Rc::new(
-                            connect_policies(&url, coordinator, observations).await?,
+                            connect_policies(facts, &url, coordinator, observations).await?,
                         )),
                         runs,
                         journal,
@@ -303,6 +323,7 @@ async fn driver(
     url: &str,
     options: &ServerOptions,
     holds: ControlHolds,
+    facts: Rc<dyn AppFactsSource>,
     observations: PolicyObservations,
 ) -> Result<Driver, Error> {
     let startup = Coordinator::connect(
@@ -312,8 +333,11 @@ async fn driver(
         Rc::new(connect_eligibility(url, options.coordinator).await?),
     )
     .await?;
-    connect_policies(url, options.coordinator, observations).await?;
-    let lifecycle = connect_lifecycle(url, options.coordinator).await?;
+    connect_policies(facts.clone(), url, options.coordinator, observations).await?;
+    // The closing lane reads Control's deletion marker over the same capability
+    // the policy ledger reads its inputs through. There is no second binding
+    // and no second credential: one exchange answers both.
+    let lifecycle = FactsLifecycle::new(facts);
     // A deployment that starts workers itself (compose replicas, a single
     // host) is a static pool: the manager never starts processes and reports
     // exhaustion durably. Adapters that start processes need an orchestrator.
@@ -326,6 +350,7 @@ async fn driver(
 }
 
 async fn connect_policies(
+    facts: Rc<dyn AppFactsSource>,
     url: &str,
     options: Options,
     observations: PolicyObservations,
@@ -336,22 +361,14 @@ async fn connect_policies(
     };
     compio::time::timeout(options.command_timeout, async {
         let connections = NonZeroUsize::new(options.connections).ok_or(ManagerError::Invalid)?;
-        let inputs = Database::connect(
-            DbBinding::platform(
-                "platform",
-                "workflow-policy",
-                SchemaName::new("zeroship").map_err(|_| ManagerError::Invalid)?,
-            ),
-            ConnectOptions::new(url, ProjectKeySource::unavailable())
-                .max_connections(connections)
-                .connection_authority(),
-            control::collections()?,
-        )
-        .await?;
         // Its own tenant, so the publication transaction takes a lane of its
         // own. A platform route carries no database id, so every binding that
         // reused a tenant would share one lane, and a top-level transaction
         // reached from inside another callback on that lane cannot be admitted.
+        //
+        // The ONLY binding this store takes. Its policy inputs are Control's
+        // and arrive over `facts`, so the serving path holds no Control schema
+        // binding for them and needs no grant on the columns that carry them.
         let publication = Database::connect(
             DbBinding::platform(
                 "workflow-policy-ledger",
@@ -364,39 +381,9 @@ async fn connect_policies(
             control::publication_collections()?,
         )
         .await?;
-        let store = ControlPolicyStore::new(inputs, publication)?;
+        let store = ControlPolicyStore::new(facts, publication)?;
         store.ready().await?;
         ControlPolicies::new(store, observations, options.command_timeout)
-    })
-    .await
-    .map_err(|_| ManagerError::Unavailable)?
-}
-
-/// Control's app catalog for the closing lane: identity and the deletion
-/// marker only, through the manager's column grants.
-async fn connect_lifecycle(url: &str, options: Options) -> Result<ControlLifecycle, ManagerError> {
-    use zeroship_core::schema_name::SchemaName;
-    use zeroship_data_orm::{
-        binding::DbBinding, encryption::ProjectKeySource, orm::Database, ConnectOptions,
-    };
-    compio::time::timeout(options.command_timeout, async {
-        let database = Database::connect(
-            DbBinding::platform(
-                "platform",
-                "workflow-lifecycle",
-                SchemaName::new("zeroship").map_err(|_| ManagerError::Invalid)?,
-            ),
-            ConnectOptions::new(url, ProjectKeySource::unavailable())
-                .max_connections(
-                    NonZeroUsize::new(options.connections).ok_or(ManagerError::Invalid)?,
-                )
-                .connection_authority(),
-            lifecycle::collections()?,
-        )
-        .await?;
-        let lifecycle = ControlLifecycle::new(database)?;
-        lifecycle.ready().await?;
-        Ok(lifecycle)
     })
     .await
     .map_err(|_| ManagerError::Unavailable)?
@@ -518,6 +505,31 @@ impl HoldClient for ControlHolds {
                 .await
                 .map_err(retention_error)
         })
+    }
+}
+
+/// Control's policy inputs and deletion marker over the service transport.
+///
+/// One adapter for two consumers: the policy ledger asks about one app under
+/// its publication lock, and the closing lane asks about a page. They share the
+/// exchange, not the cadence.
+#[derive(Debug)]
+struct RemoteAppFacts(ControlAppFacts);
+impl RemoteAppFacts {
+    fn new(
+        url: &str,
+        auth: Arc<ServiceAuth>,
+        options: Options,
+        plaintext_peers: &PlaintextPeers,
+    ) -> Result<Self, ManagerError> {
+        ControlAppFacts::new(url, auth, client_options(options, plaintext_peers))
+            .map(Self)
+            .map_err(retention_error)
+    }
+}
+impl AppFactsSource for RemoteAppFacts {
+    fn observe<'a>(&'a self, apps: &'a [AppId]) -> AppFactsFuture<'a> {
+        Box::pin(async move { self.0.observe(apps).await.map_err(retention_error) })
     }
 }
 

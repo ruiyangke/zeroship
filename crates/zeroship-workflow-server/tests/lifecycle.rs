@@ -1,10 +1,12 @@
-//! Control's terminal deletion, read under the manager's column grants, makes
-//! the driver abandon an app's recovery responsibility instead of closing it.
+//! Control's terminal deletion, read over the app-facts capability, makes the
+//! driver abandon an app's recovery responsibility instead of closing it.
 #![expect(
     clippy::future_not_send,
     reason = "platform fixtures use their compio runtime"
 )]
 
+#[path = "support/app_facts.rs"]
+mod app_facts;
 #[path = "support/holds.rs"]
 mod holds;
 #[allow(dead_code, reason = "the platform fixture also supports process tests")]
@@ -18,16 +20,14 @@ use zeroship_core::{
     schema_name::SchemaName, typed_id, workflow_jobs::DeploymentId, AppId, OrganizationId,
     ProjectId,
 };
-use zeroship_data_orm::{
-    binding::DbBinding, encryption::ProjectKeySource, orm::Database, ConnectOptions,
-};
+use zeroship_data_orm::binding::DbBinding;
 use zeroship_workflow_manager::{
     capacity::LocalCapacity,
     coordinator::{Coordinator, Options as CoordinatorOptions},
     driver::{Driver, Options as DriverOptions},
-    lifecycle::{self, AppLifecycle, ControlLifecycle},
+    lifecycle::{AppLifecycle, FactsLifecycle},
     recovery::{Options as RecoveryOptions, Recovery, ScopeState},
-    Error, Options, Queue,
+    Options, Queue,
 };
 
 async fn seed(platform: &platform::Platform, app: &AppId, name: &str) {
@@ -95,19 +95,12 @@ async fn delete(platform: &platform::Platform, app: &AppId) {
         .unwrap();
 }
 
-async fn connect_lifecycle(url: &str) -> ControlLifecycle {
-    let database = Database::connect(
-        DbBinding::platform(
-            "platform",
-            "workflow-lifecycle",
-            SchemaName::new("zeroship").unwrap(),
-        ),
-        ConnectOptions::new(url, ProjectKeySource::unavailable()).connection_authority(),
-        lifecycle::collections().unwrap(),
-    )
-    .await
-    .unwrap();
-    ControlLifecycle::new(database).unwrap()
+/// The facts source stands in for Control, so it reads with a credential that
+/// can. The workflow role holds no grant on the policy inputs, and the closing
+/// lane's deletion check crosses the same endpoint they do.
+async fn connect_lifecycle(url: &str) -> FactsLifecycle {
+    let control = url.replacen("zeroship_workflow@", "postgres@", 1);
+    FactsLifecycle::new(app_facts::DatabaseAppFacts::connect(&control).await)
 }
 
 async fn queue(platform: &platform::Platform) -> Queue {
@@ -125,47 +118,54 @@ async fn queue(platform: &platform::Platform) -> Queue {
     .unwrap()
 }
 
-/// The runtime role reads only the deletion marker it was granted, and its
-/// readiness fails without that grant.
+/// Only a RECORDED deletion abandons. An app Control has no row for is absent
+/// from the answer, and absence is not deletion: the closing lane must not
+/// abandon an app because a facts read did not mention it.
+///
+/// That distinction is the whole reason the wire contract omits unknown apps
+/// rather than reporting them, so this drives all three states at once - live,
+/// deleted, and unknown to Control - against one answer.
 #[compio::test]
-async fn deletion_marker_is_read_through_its_column_grant_alone() {
+async fn only_a_recorded_deletion_abandons_and_an_unknown_app_does_not() {
     let platform = platform::Platform::new().await;
     let live = AppId::mint();
     let gone = AppId::mint();
     seed(&platform, &live, "lifecycle-live").await;
     seed(&platform, &gone, "lifecycle-gone").await;
     let source = connect_lifecycle(&platform.runtime_url).await;
-    source.ready().await.unwrap();
     let unknown = AppId::mint();
-    let apps = [live.clone(), gone.clone(), unknown];
-    assert!(source.deleted(&apps).await.unwrap().is_empty());
+    let apps = [live.clone(), gone.clone(), unknown.clone()];
+    assert!(
+        source.deleted(&apps).await.unwrap().is_empty(),
+        "no app is deleted yet, and the unknown one is not deleted either"
+    );
     delete(&platform, &gone).await;
     assert_eq!(
         source.deleted(&apps).await.unwrap(),
-        BTreeSet::from([gone.clone()])
+        BTreeSet::from([gone.clone()]),
+        "exactly the recorded deletion"
     );
-
-    let runtime = platform::connect(&platform.runtime_url).await;
-    assert!(
-        runtime
-            .query("SELECT project_id FROM zeroship.apps", &[])
-            .await
-            .is_err(),
-        "the grant is column scoped"
-    );
+    // The unknown app stays out of the answer however many times it is asked
+    // about, including when it is the ONLY app asked about. A source that
+    // reported an absence as a deletion would abandon here.
+    assert!(source.deleted(&[unknown]).await.unwrap().is_empty());
+    // An empty request asks nothing and answers nothing, without an exchange.
+    assert!(source.deleted(&[]).await.unwrap().is_empty());
+    // Archival is not deletion: the marker is `deleted_at`, and an app that is
+    // merely archived stays placeable for maintenance jobs.
     platform
         .admin
-        .batch_execute("REVOKE SELECT (deleted_at) ON zeroship.apps FROM zeroship_workflow")
+        .execute(
+            "UPDATE zeroship.apps SET archived_at = now() WHERE id = $1",
+            &[&live.as_str()],
+        )
         .await
         .unwrap();
-    assert_eq!(source.ready().await, Err(Error::Unavailable));
-    assert!(source.deleted(&apps).await.is_err());
-    platform
-        .admin
-        .batch_execute("GRANT SELECT (deleted_at) ON zeroship.apps TO zeroship_workflow")
-        .await
-        .unwrap();
-    source.ready().await.unwrap();
+    assert_eq!(
+        source.deleted(&apps).await.unwrap(),
+        BTreeSet::from([gone]),
+        "an archived app is not abandoned"
+    );
 }
 
 /// Over the canonical schema, one driver pass abandons the deleted app's

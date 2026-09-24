@@ -8,6 +8,8 @@
 mod holds;
 #[path = "support/platform.rs"]
 mod platform;
+#[path = "support/app_facts.rs"]
+mod app_facts;
 #[path = "support/policy.rs"]
 mod policy_fixture;
 #[allow(

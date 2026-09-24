@@ -5,6 +5,7 @@
     reason = "HTTP connections stay on their compio runtime"
 )]
 
+mod app_facts;
 mod control;
 mod jobs;
 mod policy;
@@ -12,6 +13,7 @@ mod queue_holds;
 mod schema_bundles;
 mod transport;
 
+pub use app_facts::ControlAppFacts;
 pub use control::ControlCoordinator;
 pub use jobs::LeasedJob;
 pub use policy::LeasedPolicy;

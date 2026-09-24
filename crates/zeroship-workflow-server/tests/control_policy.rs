@@ -1,10 +1,12 @@
-//! The policy source reads Control's migrated inputs and its own migrated
-//! publication schema, both under its service role.
+//! The policy source publishes into its own migrated schema under its service
+//! role, from inputs that arrive over Control's app-facts capability.
 #![expect(
     clippy::future_not_send,
     reason = "platform fixtures use their compio runtime"
 )]
 
+#[path = "support/app_facts.rs"]
+mod app_facts;
 #[allow(dead_code, reason = "the platform fixture also supports process tests")]
 #[path = "support/platform.rs"]
 mod platform;
@@ -34,6 +36,7 @@ struct Fixture {
     plan: String,
     source: ControlPolicyStore,
     operator: ControlPolicyStore,
+    plans: zeroship_workflow_manager::policy::control::PlanPolicyStore,
 }
 
 impl Fixture {
@@ -44,20 +47,21 @@ impl Fixture {
             let plan = policy_fixture::seed_app(&platform, &app).await;
             let source = connect_store(&platform.runtime_url).await;
             let operator = policy_fixture::operator(&platform).await;
+            let plans = policy_fixture::plan_admin(&platform).await;
             Self {
                 platform,
                 app,
                 plan,
                 source,
                 operator,
+                plans,
             }
         })
         .await
     }
 
     async fn provision(&self, policy: &AppPolicy) {
-        self.operator
-            .set_plan_policy(&self.plan, policy)
+        Box::pin(self.plans.set_plan_policy(&self.plan, policy))
             .await
             .unwrap();
         self.operator.set_rollout(rollout()).await.unwrap();
@@ -72,18 +76,20 @@ impl Fixture {
     }
 }
 
+/// The publication binding takes the SERVICE role, because the ledger is the
+/// service's own. The facts source takes an administrative credential, because
+/// it stands in for Control: the workflow role holds no grant on the policy
+/// inputs at all now, which
+/// `source_role_cannot_write_inputs_or_read_customer_storage` asserts directly.
 async fn connect_store(url: &str) -> ControlPolicyStore {
-    let inputs = Database::connect(
-        DbBinding::platform(
-            "platform",
-            "workflow-policy",
-            SchemaName::new("zeroship").unwrap(),
-        ),
-        ConnectOptions::new(url, ProjectKeySource::unavailable()).connection_authority(),
-        control::collections().unwrap(),
-    )
-    .await
-    .unwrap();
+    let control = url.replacen("zeroship_workflow@", "postgres@", 1);
+    connect_store_with(url, app_facts::DatabaseAppFacts::connect(&control).await).await
+}
+
+async fn connect_store_with(
+    url: &str,
+    facts: std::rc::Rc<dyn zeroship_workflow_manager::app_facts::AppFactsSource>,
+) -> ControlPolicyStore {
     let publication = Database::connect(
         DbBinding::platform(
             "workflow-policy-ledger",
@@ -95,11 +101,14 @@ async fn connect_store(url: &str) -> ControlPolicyStore {
     )
     .await
     .unwrap();
-    ControlPolicyStore::new(inputs, publication).unwrap()
+    ControlPolicyStore::new(facts, publication).unwrap()
 }
 
+/// Readiness now covers the publication binding ALONE. The policy inputs are
+/// Control's and arrive over its endpoint, so there is no Control grant left
+/// for this probe to check - and no Control database binding for it to hold.
 #[compio::test]
-async fn readiness_checks_input_join_and_publication_grants_with_an_empty_catalog() {
+async fn readiness_checks_publication_grants_alone_with_an_empty_catalog() {
     let platform = platform::Platform::new().await;
     let source = connect_store(&platform.runtime_url).await;
     let apps: i64 = platform
@@ -111,19 +120,10 @@ async fn readiness_checks_input_join_and_publication_grants_with_an_empty_catalo
     assert_eq!(apps, 0, "readiness must not require a configured app");
     source.ready().await.unwrap();
 
-    platform
-        .admin
-        .batch_execute("REVOKE SELECT (plan_id) ON zeroship.apps FROM zeroship_workflow")
-        .await
-        .unwrap();
-    assert_eq!(source.ready().await, Err(Error::Unavailable));
-    platform
-        .admin
-        .batch_execute("GRANT SELECT (plan_id) ON zeroship.apps TO zeroship_workflow")
-        .await
-        .unwrap();
-    source.ready().await.unwrap();
-
+    // Narrowed to everything BUT `source_watermark`, so this arm binds the
+    // watermark column into the projection: a ledger provisioned without it
+    // fails readiness rather than failing later at the publication fence,
+    // where the error would name an app instead of a missing column.
     platform
         .admin
         .batch_execute(
@@ -143,8 +143,7 @@ async fn readiness_checks_input_join_and_publication_grants_with_an_empty_catalo
         .unwrap();
     source.ready().await.unwrap();
 
-    // The switches are no longer joined to the inputs, so their grant needs
-    // its own arm: the input join passes without it.
+    // The switches need their own arm: the ledger probe passes without them.
     platform
         .admin
         .batch_execute(
@@ -173,7 +172,7 @@ async fn authoritative_policy_requires_complete_inputs_and_preserves_publication
         Err(Error::Unavailable)
     ));
     fixture
-        .operator
+        .plans
         .set_plan_policy(&fixture.plan, &policy)
         .await
         .unwrap();
@@ -221,7 +220,7 @@ async fn authoritative_policy_requires_complete_inputs_and_preserves_publication
         ..policy.clone()
     };
     fixture
-        .operator
+        .plans
         .set_plan_policy(&alternate_plan, &alternate)
         .await
         .unwrap();
@@ -330,7 +329,7 @@ async fn invalid_inputs_do_not_publish(fixture: &Fixture) {
     };
     assert_eq!(
         fixture
-            .operator
+            .plans
             .set_plan_policy(&fixture.plan, &invalid)
             .await,
         Err(Error::Invalid)
@@ -367,13 +366,6 @@ async fn invalid_inputs_do_not_publish(fixture: &Fixture) {
 }
 
 async fn source_role_cannot_write_inputs_or_read_customer_storage(fixture: &Fixture) {
-    assert!(
-        fixture
-            .source
-            .set_plan_policy(&fixture.plan, &AppPolicy::default())
-            .await
-            .is_err()
-    );
     assert!(fixture.source.set_rollout(rollout()).await.is_err());
     fixture.platform.admin.batch_execute("CREATE SCHEMA customer; CREATE TABLE customer.__zeroship_workflow_history(id text PRIMARY KEY, payload text);").await.unwrap();
     let runtime = platform::connect(&fixture.platform.runtime_url).await;
@@ -381,9 +373,32 @@ async fn source_role_cannot_write_inputs_or_read_customer_storage(fixture: &Fixt
         "SELECT * FROM customer.__zeroship_workflow_history",
         "UPDATE zeroship.apps SET workflows_enabled=true",
         "DELETE FROM workflow_manager.workflow_policy_ledger",
+        // The policy inputs are no longer reachable at all. The service role
+        // holds no grant on the plan catalog and none on the app columns that
+        // carry policy, because it reads both over Control's endpoint now.
+        "SELECT workflow_policy_json FROM zeroship.plans",
+        "SELECT workflows_enabled FROM zeroship.apps",
+        "SELECT plan_id FROM zeroship.apps",
+        "SELECT archived_at FROM zeroship.apps",
     ] {
         let error = runtime.batch_execute(sql).await.unwrap_err();
-        assert_eq!(error.as_db_error().unwrap().code().code(), "42501");
+        assert_eq!(
+            error.as_db_error().unwrap().code().code(),
+            "42501",
+            "{sql} must be refused for want of a grant"
+        );
+    }
+    // Rejection control: the columns placement and the deployment pointer
+    // still read directly ARE granted, so the four refusals above are the
+    // grant shrinking rather than the whole table having become unreadable.
+    for sql in [
+        "SELECT id, deleted_at, execution_zone_id FROM zeroship.apps",
+        "SELECT id, deploy_hash FROM zeroship.apps",
+    ] {
+        runtime
+            .batch_execute(sql)
+            .await
+            .unwrap_or_else(|error| panic!("{sql} must still be granted: {error}"));
     }
 }
 
@@ -406,7 +421,7 @@ async fn publication_reads_after_lock_wait_and_charges_that_wait_to_source_valid
         ..AppPolicy::default()
     };
     fixture
-        .operator
+        .plans
         .set_plan_policy(&fixture.plan, &changed)
         .await
         .unwrap();
@@ -554,4 +569,129 @@ async fn threads_of_one_manager_grant_from_one_observation() {
     assert_ne!(independent.expires_at(), observed.expires_at());
     assert!(first.revalidate(&independent).is_err());
     assert!(separate.revalidate(&observed).is_err());
+}
+
+/// AN OBSERVATION OLDER THAN THE ONE THE LEDGER ALREADY PUBLISHED FROM IS
+/// REFUSED, AND THE REFUSAL PUBLISHES NOTHING.
+///
+/// This is the property the publication bracket used to get free from a single
+/// PostgreSQL instance: a read issued after a commit could not return state
+/// older than that commit saw. The inputs now arrive over Control's endpoint,
+/// where a lagging replica or a cache in front of the route can return exactly
+/// that, so the ledger carries a watermark and refuses a regression instead.
+///
+/// The hazard is a stale PERMISSIVE policy: `admission`, `dispatch` and
+/// `ingress` are ANDed down when an app is disabled, so the stale answer is the
+/// one that still admits work, and `PolicyRefresh::install` accepts whatever
+/// policy a HIGHER revision carries. This case drives that exact shape - the
+/// regressed answer is the permissive one, and the fresh one denies.
+///
+/// WHAT IT BINDS: delete the comparison in `store::publish` and the regressed
+/// answer publishes, bumping the revision and putting the permissive policy on
+/// top. The `Unavailable` assertion and the unchanged-revision assertion both
+/// fail. It is driven through `ScriptedAppFacts` rather than a real Control,
+/// because neither a replica nor a proxy cache can be arranged in a fixture and
+/// the fence is precisely what a deployment relies on when one appears.
+#[compio::test]
+async fn a_regressed_watermark_refuses_and_publishes_nothing() {
+    let fixture = Fixture::new().await;
+    fixture.provision(&AppPolicy::default()).await;
+    let scripted = app_facts::ScriptedAppFacts::new();
+    let store = connect_store_with(&fixture.platform.runtime_url, scripted.clone()).await;
+
+    let permissive = AppPolicy::default();
+    let restricted = AppPolicy {
+        max_live_runs: AppPolicy::default().max_live_runs + 1,
+        ..AppPolicy::default()
+    };
+    let answer = |watermark: i64, policy: &AppPolicy, enabled: bool| {
+        zeroship_core::workflow_app_facts::AppFactsResponse {
+            watermark: zeroship_core::workflow_app_facts::SourceWatermark::new(watermark).unwrap(),
+            apps: vec![zeroship_core::workflow_app_facts::AppSourceFacts {
+                app_id: fixture.app.clone(),
+                plan_id: fixture.plan.clone(),
+                workflows_enabled: enabled,
+                archived: false,
+                deleted: false,
+                plan: zeroship_core::workflow_app_facts::PlanSourceFacts {
+                    workflows_allowed: true,
+                    archived: false,
+                    workflow_policy: Some(serde_json::to_value(policy).unwrap()),
+                },
+            }],
+        }
+    };
+
+    // A first publication from a fresh source establishes the held watermark.
+    scripted.set(answer(1_000, &permissive, true));
+    let published = store.observe(&fixture.app).await.unwrap();
+    assert!(published.policy().admission, "the held policy admits work");
+    assert_eq!(
+        held(&fixture.platform.admin, &fixture.app).await,
+        (published.revision().get(), Some(1_000)),
+        "the publication records the position it was computed from"
+    );
+
+    // An answer from BEHIND that position, carrying a policy that differs, is
+    // refused. Without the fence it would publish at a higher revision.
+    for stale in [999, 500, 0] {
+        scripted.set(answer(stale, &restricted, true));
+        assert!(
+            matches!(store.observe(&fixture.app).await, Err(Error::Unavailable)),
+            "an answer at {stale} is older than the published 1000"
+        );
+        assert_eq!(
+            held(&fixture.platform.admin, &fixture.app).await,
+            (published.revision().get(), Some(1_000)),
+            "a refused observation leaves the ledger where it was"
+        );
+    }
+
+    // Rejection control, and the direction that matters: the SAME differing
+    // policy at or above the held position publishes. Without this arm the
+    // assertions above would also pass if `observe` had simply stopped working.
+    scripted.set(answer(1_000, &restricted, true));
+    let equal = store.observe(&fixture.app).await.unwrap();
+    assert_eq!(equal.revision().get(), published.revision().get() + 1);
+    assert_eq!(equal.policy(), &restricted);
+    assert_eq!(
+        held(&fixture.platform.admin, &fixture.app).await,
+        (equal.revision().get(), Some(1_000))
+    );
+    scripted.set(answer(2_000, &permissive, true));
+    let ahead = store.observe(&fixture.app).await.unwrap();
+    assert_eq!(ahead.revision().get(), equal.revision().get() + 1);
+    assert_eq!(
+        held(&fixture.platform.admin, &fixture.app).await,
+        (ahead.revision().get(), Some(2_000))
+    );
+
+    // The hazard in its own shape: the app is disabled at a NEWER position, so
+    // the fresh answer denies. A stale answer that still admits cannot climb
+    // over it.
+    scripted.set(answer(3_000, &permissive, false));
+    let denied = store.observe(&fixture.app).await.unwrap();
+    assert!(!denied.policy().admission, "the fresh answer denies");
+    scripted.set(answer(2_500, &permissive, true));
+    assert!(
+        matches!(store.observe(&fixture.app).await, Err(Error::Unavailable)),
+        "a stale answer cannot restore admission over a newer denial"
+    );
+    assert_eq!(
+        held(&fixture.platform.admin, &fixture.app).await,
+        (denied.revision().get(), Some(3_000))
+    );
+}
+
+/// The revision and the source position the ledger currently holds for an app.
+async fn held(ledger: &compio_postgres::Client, app: &AppId) -> (i64, Option<i64>) {
+    let row = ledger
+        .query_one(
+            "SELECT revision, source_watermark \
+               FROM workflow_manager.workflow_policy_ledger WHERE id=$1",
+            &[&app.as_str()],
+        )
+        .await
+        .unwrap();
+    (row.get::<_, i64>(0), row.get::<_, Option<i64>>(1))
 }
