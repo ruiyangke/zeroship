@@ -325,6 +325,162 @@ async fn native_worker_client_uses_the_authenticated_coordinator_api() {
         Error::Refused(FailureCode::Unauthenticated)
     );
 }
+
+/// An instance whose Control lease has run out stops authenticating, and the
+/// readiness probe covers the column that decides it.
+///
+/// `assignments` is the endpoint under test because the registry key lookup is
+/// its only possible refusal: `api.rs::assignments` authenticates and then
+/// lists, reading no zone, app or eligibility row on the way. `register`
+/// refuses a lapsed instance through placement eligibility whatever the
+/// registry reads, so a refusal there would say nothing about this query.
+///
+/// Two variables, each moved alone and each with its control. The lease is
+/// moved with Control's own column while `status` stays `active` and the
+/// registration and assignment rows stay live, so restoring it must bring the
+/// same placements back. The grant is then revoked on the lease column alone:
+/// `WorkflowAuth::ready` projects exactly what `active_key` reads, so a
+/// revoked column grant must fail readiness rather than pass it and refuse
+/// every authenticated worker afterwards.
+#[ntex::test]
+async fn a_lapsed_instance_lease_refuses_a_worker_and_is_covered_by_readiness() {
+    use std::{num::NonZeroU32, sync::Arc};
+    use zeroship_core::{
+        service_assertion::{ServiceTrustBundle, TransportAssertionVerifier},
+        service_peers::{ServiceAuth, ServiceKeyring},
+        workflow_coordination::{FailureCode, RegisterWorker, ScopePage, WorkerState},
+    };
+    use zeroship_workflow_client::{Error, Options, WorkerCoordinator};
+
+    let fixture = platform::Platform::new().await;
+    let control = service_issuer(CONTROL_SERVICE_NAME).unwrap();
+    let control_key = ServiceSigningKey::generate();
+    let peers = fixture.work.path().join("lease-fence-peers.json");
+    platform::write_private(
+        &peers,
+        serde_json::to_vec(&json!({"keys":[{
+            "iss":control.as_str(),"x":control_key.public_jwk_x()
+        }]}))
+        .unwrap(),
+    );
+    let http = Client::new().await;
+    let server = server_process::ServerProcess::start(
+        &fixture.runtime_url,
+        &peers,
+        fixture.work.path(),
+        "lease-fence",
+        &http,
+    )
+    .await;
+
+    let worker = WorkerId::mint();
+    let key = ServiceSigningKey::generate();
+    let public = key.verifying_key_bytes().to_vec();
+    let issuer = ServiceIssuer::parse(&format!(
+        "spiffe://zeroship.ai/svc/worker/{}",
+        worker.as_str()
+    ))
+    .unwrap();
+    let keyring = ServiceKeyring::from_parts(issuer, key, ServiceTrustBundle::new()).unwrap();
+    let auth = Arc::new(ServiceAuth::new(
+        keyring,
+        Arc::new(TransportAssertionVerifier::new(ServiceTrustBundle::new())),
+    ));
+    let client = WorkerCoordinator::new(&server.url, auth, Options::default()).unwrap();
+    fixture.admin.execute("INSERT INTO zeroship.worker_instances(id,ring_key,public_key,advertise_host,advertise_port,status,join_signer_id,join_token_id,execution_zone_id,expires_at) VALUES($1,$2,$3,'127.0.0.1',8080,'active',$4,'tok_testfixturedefault','ezn_default000000000000000000',now() + interval '1 hour')",
+        &[&worker.as_str(), &vec![9u8], &public, &fixture.default_join_signer_id]).await.unwrap();
+    client
+        .register(&RegisterWorker {
+            capacity: NonZeroU32::new(1).unwrap(),
+            state: WorkerState::Ready,
+        })
+        .await
+        .unwrap();
+    let app = AppId::mint();
+    fixture.seed_app(&app).await;
+    fixture
+        .seed_placement(&app, &worker, Duration::from_secs(30))
+        .await;
+    let held = client.assignments(&ScopePage { after: None }).await.unwrap();
+    assert_eq!(
+        held.iter().map(|a| &a.app_id).collect::<Vec<_>>(),
+        vec![&app],
+        "a live instance holds the seeded placement"
+    );
+
+    // THE VARIABLE: the lease runs out. Nothing else about the row changes -
+    // it is still `active`, still registered, still holding the assignment.
+    assert_eq!(
+        fixture
+            .admin
+            .execute(
+                "UPDATE zeroship.worker_instances SET expires_at=now() - interval '1 hour' \
+                 WHERE id=$1",
+                &[&worker.as_str()],
+            )
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        client
+            .assignments(&ScopePage { after: None })
+            .await
+            .unwrap_err(),
+        Error::Refused(FailureCode::Unauthenticated),
+        "a lapsed instance must not authenticate"
+    );
+
+    // THE CONTROL, one renewal apart: the same rows answer the same call.
+    assert_eq!(
+        fixture
+            .admin
+            .execute(
+                "UPDATE zeroship.worker_instances SET expires_at=now() + interval '1 hour' \
+                 WHERE id=$1",
+                &[&worker.as_str()],
+            )
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        client.assignments(&ScopePage { after: None }).await.unwrap(),
+        held,
+        "renewing the lease restores the placements the refusal hid"
+    );
+
+    // THE SECOND VARIABLE: the grant on the lease column alone.
+    fixture
+        .admin
+        .batch_execute("REVOKE SELECT (expires_at) ON zeroship.worker_instances FROM zeroship_workflow")
+        .await
+        .unwrap();
+    let refused = http
+        .get(format!("{}/readyz", server.url))
+        .send()
+        .await
+        .unwrap()
+        .status();
+    fixture
+        .admin
+        .batch_execute("GRANT SELECT (expires_at) ON zeroship.worker_instances TO zeroship_workflow")
+        .await
+        .unwrap();
+    assert_eq!(
+        refused,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "readiness must project the column authentication decides on"
+    );
+    assert_eq!(
+        http.get(format!("{}/readyz", server.url))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+}
 async fn verify_latest_management(
     fixture: &platform::Platform,
     http: &Client,
