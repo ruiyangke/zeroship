@@ -5,6 +5,7 @@
   "type": "module",
   "description": "Tiny billing/metering probe app: serves a measurable request/response body and drives an env.db write+read per request. The platform emits db_writes/db_reads + the five platform counters (metering is infrastructure — no env.meter).",
   "scripts": {
+    "migrate": "zeroship-dev-migrate",
     "gen-types": "vite build --mode development",
     "build": "vite build",
     "typecheck": "tsc --noEmit"

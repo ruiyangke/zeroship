@@ -7,7 +7,6 @@ use uuid::Uuid;
 use zeroship_authn::rate_limit::RateLimitDecision;
 use zeroship_authz::Action;
 use zeroship_core::DatabaseId;
-use zeroship_id::AppId;
 
 use zeroship_core::schema_bundle::{SchemaBundle, MIGRATE_AUDIENCE};
 use zeroship_core::service_assertion::presented_issuer;
@@ -47,7 +46,7 @@ const SCHEMA_BUNDLE_BODY_BYTES: usize = 4 * 1024 * 1024;
 /// and nothing to mutate at runtime.
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(
-        web::resource("/v1/apps/{app_id}/databases/{database_id}/migrations/apply")
+        web::resource("/v1/databases/{database_id}/migrations/apply")
             .state(web::types::JsonConfig::default().limit(APPLY_REQUEST_BODY_BYTES))
             .route(web::post().to(apply)),
     )
@@ -177,7 +176,7 @@ pub async fn readyz(state: State<Arc<MigrationServiceState>>) -> web::HttpRespon
     let ready = state
         .readiness
         .ready(|| async {
-            match state.bindings.probe().await {
+            match state.control_plane.probe().await {
                 Ok(()) => true,
                 Err(error) => {
                     tracing::warn!(
@@ -199,71 +198,41 @@ pub async fn readyz(state: State<Arc<MigrationServiceState>>) -> web::HttpRespon
 /// Apply a creator's frozen IR into the schema of the DATABASE the request
 /// names.
 ///
-/// # Both ids are in the path, and neither is redundant
+/// # THERE IS NO APP IN THIS REQUEST
 ///
-/// The DATABASE is the target: its schema is what the DDL writes, and an app
-/// may hold several databases, so a target derived from the app could only
-/// address one of them. It rides in the path rather than the body because the
-/// CLI posts the recorded migration set VERBATIM - it does not parse or rewrite
-/// what the recorder handed it, and a target it had to splice in would be a
-/// target it could get wrong.
+/// A migration is not an app operation. The DATABASE is the target - its schema
+/// is what the DDL writes - and it is also the authorization subject: the
+/// bearer is checked for [`Action::DatabaseMigrate`] at
+/// [`zeroship_authz::Resource::Database`], which resolves to a qualifying seat
+/// on the project that owns the database. That is the same authority that
+/// created it, so a database with no app bound to it is migratable, which is
+/// the state `zeroship db create` leaves behind and the reason an app in this
+/// path was a coupling rather than a fence.
 ///
-/// The APP is the authorization subject: the bearer is checked for
-/// [`Action::AppsDeploy`] on it, exactly as every other mutation here is. It is
-/// also what [`MigrationServiceState::bindings`] asks about - whether that app
-/// still reaches that database - which is a separate question from whether the
-/// principal may deploy the app, with a separate remedy.
+/// The target rides in the path rather than the body because the CLI posts the
+/// recorded migration set VERBATIM - it does not parse or rewrite what the
+/// recorder handed it, and a target it had to splice in would be a target it
+/// could get wrong.
 ///
-/// Both segments are typed, so a uuid-rendered id or a `dbs_` where an `app_`
+/// The segment is typed, so a uuid-rendered id or an `app_` where a `dbs_`
 /// belongs is a 404 from the extractor rather than a request that authorizes
 /// against something the roster does not hold.
 pub async fn apply(
     req: web::HttpRequest,
     state: State<Arc<MigrationServiceState>>,
-    path: Path<(AppId, DatabaseId)>,
+    path: Path<DatabaseId>,
     body: Json<ApplyMigrationsRequest>,
 ) -> web::HttpResponse {
-    let (app_id, database_id) = path.into_inner();
-    let caller = match authorize_mutation(&req, &state, &app_id).await {
+    let database_id = path.into_inner();
+    let caller = match authorize_mutation(&req, &state, &database_id).await {
         Ok(caller) => caller,
         Err(response) => return response,
     };
-    // ADMISSION, above every side effect. A refused apply must leave no
-    // temporary directory, no role, no ledger row and no lock behind.
-    match state
-        .bindings
-        .holds_live_binding(&app_id, &database_id)
-        .await
-    {
-        Ok(true) => {}
-        Ok(false) => {
-            return apply_error_response(ApplyRequestError::DatabaseNotBound {
-                app_id,
-                database_id,
-            })
-        }
-        Err(error) => {
-            tracing::error!(
-                error = %error,
-                app_id = app_id.as_str(),
-                database_id = database_id.as_str(),
-                "migrate-server: binding admission read failed"
-            );
-            return web::HttpResponse::ServiceUnavailable().json(&json!({
-                "error": "binding_admission_unavailable",
-                "detail": "the control plane could not be asked whether this app holds this \
-                           database",
-            }));
-        }
-    }
 
     match apply_ir_documents(
         &state.provision_dsn,
         &state.tmp_dir,
-        crate::apply::ApplyTarget {
-            app_id: &app_id,
-            database_id: &database_id,
-        },
+        &database_id,
         &body,
         &state.policy_config,
         &caller.principal_id,
@@ -272,7 +241,6 @@ pub async fn apply(
     {
         Ok(report) => {
             tracing::info!(
-                app_id = app_id.as_str(),
                 database_id = database_id.as_str(),
                 principal_id = caller.principal_id.as_str(),
                 applied = report.applied.len(),
@@ -288,7 +256,7 @@ pub async fn apply(
 async fn authorize_mutation(
     req: &web::HttpRequest,
     state: &MigrationServiceState,
-    app_id: &AppId,
+    database_id: &DatabaseId,
 ) -> Result<crate::auth::VerifiedCaller, web::HttpResponse> {
     let Some(token) = bearer_token(req) else {
         return Err(web::HttpResponse::Unauthorized().json(&json!({"error": "unauthenticated"})));
@@ -297,7 +265,13 @@ async fn authorize_mutation(
     let source_ip = source_ip(req, state.trust_proxy);
     let caller = match state
         .authenticator
-        .verify_action(token, app_id, Action::AppsDeploy, source_ip, &request_id)
+        .verify_action(
+            token,
+            database_id,
+            Action::DatabaseMigrate,
+            source_ip,
+            &request_id,
+        )
         .await
     {
         Ok(caller) => caller,
@@ -412,16 +386,6 @@ fn apply_error_response(err: ApplyRequestError) -> web::HttpResponse {
         }));
     } else {
         tracing::debug!(error = %err, "migrated: migration request rejected");
-    }
-    // THE REMEDY NAMES THE CALL, and only where there is one to name. A
-    // database with no schema is waiting on the cluster reconciler, which no
-    // creator request can hurry, so that refusal carries none.
-    if let ApplyRequestError::DatabaseNotBound { database_id, .. } = &err {
-        return web::HttpResponse::build(status).json(&json!({
-            "error": kind,
-            "detail": err.to_string(),
-            "remedy": format!("POST /api/databases/{}/bindings", database_id.as_str()),
-        }));
     }
     // `migration_id` and `gated_versions` used to ride along here, and both existed
     // only for the approval refusals: the id so an operator could approve that row,

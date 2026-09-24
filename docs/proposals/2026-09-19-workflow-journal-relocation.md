@@ -347,13 +347,12 @@ protocol. This extends a working client rather than inventing one.
    Two things bound how far this reaches. `same_binding` compares registry identity, app and
    policy generation, so both services must share the host's `HostPolicies`; that holds for any
    store, since `WorkflowService` keeps store and registry as separate fields. And the worker has
-   no database handle to the service's schema at all - it reaches the manager over HTTP - so this
-   step is demonstrable only where a service store and the engine meet, which today is the test
-   fixtures - `crates/zeroship-workflow/src/service/tests/backend_journal.rs` builds two stores
-   and reads through a handle bound to the second. The workflow server is not such a place:
-   `crates/zeroship-workflow-server` declares no dependency on `zeroship-workflow` and names
-   none of `WorkflowService`, `AppBackend` or `AppWorkflows`, so it holds no handle to bind.
-   Step 3 is what gives it the engine, and the worker waits for step 5.
+   no database handle to the service's schema at all - it reaches the manager over HTTP - so it
+   waits for step 5. Two places hold a handle to bind: the test fixtures in
+   `crates/zeroship-workflow/src/service/tests/backend_journal.rs`, which build two stores and
+   read through a handle bound to the second, and the workflow server, where step 3 put
+   `WorkflowService` and `AppWorkflows` behind `RunService` in
+   `crates/zeroship-workflow-server/src/runs.rs`.
 
 3. **PARTLY DONE - `status` is served; the mutating three are built and refuse.** The endpoints,
    their `svc/worker` grants, the request envelopes, the `RunFailure` refusal envelope and the
@@ -375,9 +374,13 @@ protocol. This extends a working client rather than inventing one.
    prerequisites are the next step, and that test is what flips when they land.
 
 4. **Carry the three direct calls across, merged into the claims that already cross.** This is
-   the step that earns its own review, and it is not "add a remote `TaskTransport`" - that trait
-   is test-only, and building against it would ship a remote implementation of something the
-   worker never calls. What crosses is `accept_job`, `heartbeat_job` and `complete_job`, and
+   the step that earns its own review, and it is not "add a remote `TaskTransport`".
+   `WorkerTasks` implements that trait in production, but the type that dispatches through it,
+   `RunnerSlot` (`crates/zeroship-workflow-runner/src/lib.rs`), is constructed only by tests;
+   the production job path is `DeliverySlot` over `JobTransport`
+   (`crates/zeroship-workflow-runner/src/delivery.rs`). Building against `TaskTransport` would
+   ship a remote implementation of something the worker never calls.
+   What crosses is `accept_job`, `heartbeat_job` and `complete_job`, and
    each already sits immediately beside a call that is remote today: the manager claim, the
    manager heartbeat, the manager settlement. Merge them - the assignment rides the claim reply,
    one renewal carries both leases, the frontier rides the settlement - and the relocation adds
@@ -387,9 +390,9 @@ protocol. This extends a working client rather than inventing one.
    reported execution of a run body must still be counted once. Verify by mutation rather than
    by suite: break each property in turn and require a test to fail on it.
 
-   The scope may be wider than these three. Open 6 leaves it undecided whether `collect_job`
-   joins them on the wire, and that is settled there rather than here. Read it before sizing
-   this step.
+   Collection does not widen this step. Open 6 records why: the journal and the object store
+   are already decoupled by a commit on that path, and the manager already owns when it runs.
+   It is separate, smaller work carrying its own contract.
 
 5. **Cut the worker over** to the remote variants.
 
@@ -669,13 +672,44 @@ stall the defect fixes that motivate the move.
 
    **What it costs.** Not the sweeps. They run no creator code, so they move with the fold, and
    the recovery duty above dissolves rather than transferring: the side that commits the intent
-   is the side that publishes it. The credential is the cost. `collect_job`
+   is the side that publishes it. The cost is the object-store credential, and collection is the
+   weakest case to decide it on.
+
+   **Collection is not the forcing operation.** `AppWorkflows::collect_job`
    (`crates/zeroship-workflow/src/service/collection.rs`) takes a `PayloadDeleter`
-   (`crates/zeroship-workflow/src/service/payloads.rs`), whose production implementation is
-   `PayloadObjects` (`crates/zeroship-workflow-runner/src/payloads/objects.rs`), opened over "a
-   store whose credentials are private to the workflow host". Collection needs the journal and
-   the object store in one operation, so either that credential reaches the service or collection
-   joins `accept_job`, `heartbeat_job` and `complete_job` on the wire. That is undecided.
+   (`crates/zeroship-workflow/src/service/payloads.rs`), but `collect_payload_checked`
+   (`crates/zeroship-workflow/src/service/payloads/collection.rs`) fences the row into
+   `deleting` and commits, calls `deleter.delete` with no transaction open, then opens a fresh
+   transaction to settle. The two stores are deliberately not in one operation, and the module
+   header gives the reason: "an upload already dispatched by a dead writer may still arrive".
+   Its scheduling half already crosses, too - `worker_operation`
+   (`crates/zeroship-workflow-manager/src/coordinator/jobs.rs`) and `worker_publication`
+   (`crates/zeroship-workflow-client/src/jobs.rs`) both refuse a worker-published
+   `JobOperation::Collect`, so the manager already owns when collection runs.
+
+   Other operations couple the stores harder. `cron_job`
+   (`crates/zeroship-workflow/src/service/cron.rs`) takes an `InputStager`, a writer rather
+   than a deleter, and `stage_inner` (`crates/zeroship-workflow/src/service/payloads.rs`) holds
+   a transaction open across the object write - the one place in the tree where the journal and
+   the object store really are in one operation. Decide the credential where `start` and the
+   creator-facing reads move, against that evidence, rather than on collection.
+
+   **What the credential is, as opposed to what the code asks for.** `PayloadObjects::open`
+   asks for "a store whose credentials are private to the workflow host". `ProductionResources`
+   (`crates/zeroship-worker/src/workflow_host.rs`) opens one `StorageStore` and hands it to
+   both the payload store and the `StorageBinding` serving `env.storage`; the field it comes
+   from reads "The creator object store `env.storage` uses; payloads live there". One identity
+   covers deploy blobs, every app's `env.storage` and the workflow payload namespace, separated
+   by key prefix alone. So a prefix-scoped credential held by the service would narrow the
+   process that runs creator code, which is the opposite of how the trade reads at first.
+
+   **Moving it is an invariant change rather than a configuration one.**
+   `workflow_process_dependencies_follow_crate_ownership` (`xtask/tests/workflow_architecture.rs`)
+   walks every non-dev edge and refuses `zeroship-workflow-server` any path to
+   `zeroship-workflow-runner` or `zeroship-storage`, and
+   `crates/zeroship-workflow-server/Cargo.toml` records the consequence beside its engine
+   dependency. That is an invariant to raise deliberately at the step that needs it, not to
+   work around here.
 
    **It is not purely subtractive.** The worker loses authority it holds as a consequence of
    where the journal sits rather than because anything granted it. The service gains authority it
