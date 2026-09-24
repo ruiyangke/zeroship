@@ -127,7 +127,7 @@
   {
     "file": "20260919000000_workflow_journal.ts",
     "name": "workflow_journal",
-    "opCount": 2
+    "opCount": 3
   },
   {
     "file": "20260919000100_project_execution_zone.ts",
