@@ -501,7 +501,34 @@ protocol. This extends a working client rather than inventing one.
    are already decoupled by a commit on that path, and the manager already owns when it runs.
    It is separate, smaller work carrying its own contract.
 
-5. **Cut the worker over** to the remote variants.
+5. **Cut the worker over to the remote variants, and own what step 4 does not.** This is the
+   flag day, and step 4's server half is inside it rather than before it.
+
+   **An HTTP `WorkflowBackend`.** Only `AppBackend`
+   (`crates/zeroship-workflow/src/service/backend.rs`) and `ReadyBackend`
+   (`crates/zeroship-workflow-runner/src/ready.rs`) implement that trait. The creator seam is
+   called the easy half above, and it is, but a third implementation is still work nobody has
+   been assigned.
+
+   **The journal calls that are not the three.** `DeliverySlot::run` in
+   `crates/zeroship-workflow-runner/src/delivery.rs` reaches `activate_job`, `reconcile_job`,
+   `cron_job`, `management_job`, `release_hold_job`, `close_job`, `fanout_job`,
+   `propagation_job`, `release_job` and `job_receipt` beside the three step 4 merges. Open 6
+   concludes the sweeps move WITH the fold rather than crossing, so most of those become deleted
+   branches rather than new remote calls - but a reader of step 4 alone would write them as
+   remote calls, so the conclusion belongs here where the cutover happens.
+
+   **The `TaskPayloads` seam.** `crates/zeroship-worker/src/workflow_creator.rs` builds
+   `WorkerTasks` as the executor's `TaskPayloads`, and `stage` reaches `stage_inner` in
+   `crates/zeroship-workflow/src/service/payloads.rs`, which opens journal transactions around
+   the object write MID-EXECUTION. There is no manager call beside it to merge into, so it is an
+   unavoidable new crossing per dispatch rather than a merge, and no step has owned it.
+
+   **And `RunService` installs no deployments source**, so `tasks::assign` finds no available
+   deploy and a served claim cannot return a task. Installing one is necessary and not
+   sufficient: `record_verified` in `crates/zeroship-workflow/src/service/deploys.rs` is the only
+   writer of that table, so the rows are absent too until something produces them. That is why
+   `start` having no endpoint is a sequencing fact and not a gap in step 3.
 
 6. **Delete the creator-schema path** - `ensure_journal` and its route, the journal bundle,
    `JournalManager`, the worker's repair path, and `SCHEMA_PLACEHOLDER` on the PostgreSQL side.
