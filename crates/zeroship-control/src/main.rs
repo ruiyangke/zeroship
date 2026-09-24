@@ -525,12 +525,20 @@ fn main() -> std::io::Result<()> {
     let master_key = settings.master_key.expose_str().to_owned();
     let workers_str = settings.worker_urls.get().clone();
     let workflow_coordinator_url = settings.workflow_coordinator_url.get().to_owned();
+    // ONE list for the process: every workflow client Control builds - the
+    // lifecycle publisher, the deploy journal and the deployment-hold API - is
+    // bound by the same operator decision.
+    let plaintext_peers =
+        zeroship_core::config::PlaintextPeers::from(settings.plaintext_peers.get().clone());
+    let coordinator_options =
+        zeroship_control::publication::publisher::coordinator_options(plaintext_peers.clone());
     // Lifecycle publication cannot run against an origin the manager client
     // refuses, and a Control that accepts deploys it can never publish leaves
     // them pending forever. A configuration check refuses it too.
-    if let Err(error) =
-        zeroship_control::publication::publisher::validate_coordinator(&workflow_coordinator_url)
-    {
+    if let Err(error) = zeroship_control::publication::publisher::validate_coordinator(
+        &workflow_coordinator_url,
+        &coordinator_options,
+    ) {
         eprintln!("control: refusing to start: {error}");
         tracing::error!(%error, "control: refusing to start");
         std::process::exit(2);
@@ -748,6 +756,10 @@ fn main() -> std::io::Result<()> {
         );
         report.field("workers_count", CheckValue::Count(workers_count));
         report.field("workflow_coordinator_url", CheckValue::Plain(workflow_coordinator_url.clone()));
+        // Reported whether or not it is set. A security posture that appears in
+        // the report only when relaxed cannot be read as "the fence is intact";
+        // an empty field says which of the two this deployment is.
+        report.field("plaintext_peers", CheckValue::Plain(plaintext_peers.joined()));
         report.field(
             "catalog_max_connections",
             CheckValue::Count(catalog_max_connections.get()),
@@ -1302,6 +1314,7 @@ fn main() -> std::io::Result<()> {
         state.registry.catalog(),
         Arc::clone(&state.service_auth),
         &workflow_coordinator_url,
+        coordinator_options.clone(),
         zeroship_control::publication::publisher::PublisherConfig::default(),
     )
     .await
@@ -1360,6 +1373,7 @@ fn main() -> std::io::Result<()> {
     web::server(async move || {
         let hold_state = state.clone();
         let coordinator_url = workflow_coordinator_url.clone();
+        let hold_options = coordinator_options.clone();
         // The deploy path's journal client. Built per serving thread for the
         // same reason the hold client is: the HTTP client's pooled streams
         // belong to the thread that opens them. A refusal here cannot be
@@ -1368,6 +1382,7 @@ fn main() -> std::io::Result<()> {
         // it cannot - so this reports a bug rather than a configuration.
         let journal_url = workflow_coordinator_url.clone();
         let journal_auth = Arc::clone(&state.service_auth);
+        let journal_options = coordinator_options.clone();
         web::App::new()
             .state(state.clone())
             .state(state.control_pg.clone())
@@ -1376,11 +1391,16 @@ fn main() -> std::io::Result<()> {
                 zeroship_control::deployment_hold_api::DeploymentHoldApi::connect(
                     &hold_state,
                     &coordinator_url,
+                    hold_options.clone(),
                 ).await.map(std::rc::Rc::new)
             })
             .state_factory(async move || {
-                zeroship_control::publication::DeployJournal::connect(&journal_url, journal_auth)
-                    .map(std::rc::Rc::new)
+                zeroship_control::publication::DeployJournal::connect(
+                    &journal_url,
+                    journal_auth,
+                    journal_options.clone(),
+                )
+                .map(std::rc::Rc::new)
             })
             // --- Admin API ---
             .service(

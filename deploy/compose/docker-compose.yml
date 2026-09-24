@@ -668,26 +668,15 @@ services:
       # rather than by a public name: Control for deployment-queue retention,
       # and the migration service for installing and upgrading app journals.
       #
-      # THIS SERVICE DOES NOT COME UP AGAINST THIS TOPOLOGY, and the reason is
-      # these two lines. `Transport::configuration` in zeroship-workflow-client
-      # admits an origin only when its scheme is https or its host is a
-      # loopback IP LITERAL; a DNS name over http is refused. Every platform
-      # service on this network speaks plain http under its service name, and
-      # nothing here terminates TLS between containers - the edge's control
-      # block is an `http://` site and Caddy carries no alias for it - so no
-      # value satisfies both the transport and the topology. `control_url` is
-      # checked while resolving settings, so the process exits naming its
-      # configuration; `migrate_url` is checked when each HTTP thread builds
-      # its state, so a plaintext value there leaves /readyz unanswered instead.
-      #
-      # https:// for both is what a green healthcheck would cost: the process
-      # binds, /readyz answers 200, and every retention and journal call fails
-      # at the handshake against a peer that serves plaintext. These stay the
-      # addresses that are true, so the refusal names the thing to decide.
-      # Nothing else in the platform applies this fence - the gateway, the
-      # worker and auth all reach `http://control:9090` - so whether the
-      # transport relaxes for a private network or the platform grows internal
-      # TLS is a decision for the identity model, not for this file.
+      # `Transport::configuration` in zeroship-workflow-client admits plain http
+      # to a loopback IP LITERAL, or to an exact origin named below. Nothing
+      # here terminates TLS between containers, so both peers are named. Read
+      # the fence's own comment before adding a third: the list decides WHICH
+      # peer may be reached in clear and cannot make plaintext safe, a service
+      # assertion carries no digest of the request it accompanies, and the list
+      # belongs to the PROCESS rather than to one client. Every origin here is
+      # one whose whole network path on this compose network is trusted.
+      ZEROSHIP_PLAINTEXT_PEERS: http://control:9090,http://migrate-server:9091
       ZEROSHIP_WORKFLOW_CONTROL_URL: http://control:9090
       ZEROSHIP_WORKFLOW_MIGRATE_URL: http://migrate-server:9091
       ZEROSHIP_OBSERVABILITY_LOG_FORMAT: json

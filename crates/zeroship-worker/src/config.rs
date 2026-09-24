@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use zeroship_core::config::{
     default_http_threads, zeroship_config, CheckFormat, CommandControl, ObservabilityControls,
-    Operational, OverlaySelector, Secret,
+    Operational, OverlaySelector, PlaintextPeer, Secret,
 };
 use zeroship_core::observability::LogFormat;
 
@@ -133,6 +133,17 @@ pub struct WorkerSettings {
     #[config(shared = CONTROL_URL, default = "http://localhost:9090".to_owned())]
     pub control_url: Operational<String>,
 
+    /// Exact `http://host[:port]` origins this process may reach in clear.
+    ///
+    /// Empty (the default) admits HTTPS and literal loopback alone. An entry
+    /// authorizes plaintext to that ORIGIN for every workflow client this
+    /// process builds - the manager client and the deployment-hold client
+    /// alike - and the service assertion each carries crosses the network
+    /// readable; name only origins whose whole network path is trusted.
+    #[arg(value_delimiter = ',')]
+    #[config(shared = PLAINTEXT_PEERS, default = Vec::new())]
+    pub plaintext_peers: Operational<Vec<PlaintextPeer>>,
+
     /// Control-plane polling interval in seconds.
     #[config(shared = POLL_INTERVAL, default = 5)]
     pub poll_interval: Operational<u64>,
@@ -175,7 +186,8 @@ pub struct WorkerSettings {
     /// set, the worker also requires `worker.database_url` for creator
     /// journals and `worker.storage_url` for workflow payloads, and refuses
     /// to start without them. Remote managers must use HTTPS; plain HTTP is
-    /// accepted only for literal loopback addresses.
+    /// accepted for a literal loopback address, or for an origin named in
+    /// `plaintext_peers`.
     #[config(name = "worker.workflow_manager_url", default = String::new())]
     pub workflow_manager_url: Operational<String>,
 

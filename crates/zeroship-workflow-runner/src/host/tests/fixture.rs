@@ -192,7 +192,7 @@ pub(super) fn peer<'a>(
         let client = WorkerCoordinator::new(
             &format!("http://{}", listener.local_addr().unwrap()),
             fixture.auth.clone(),
-            fixture.client_options,
+            fixture.client_options.clone(),
         )
         .unwrap();
         let (issuer, key) = fixture.auth.signing_identity().unwrap();

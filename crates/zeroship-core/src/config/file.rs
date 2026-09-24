@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use thiserror::Error;
 
-use super::topology::{OriginScheme, TrustedOrigin};
+use super::topology::{OriginScheme, PlaintextPeer, TrustedOrigin};
 
 /// Error returned while loading an optional zeroship configuration file.
 #[derive(Debug, Error)]
@@ -81,6 +81,10 @@ pub struct FileConfig {
     /// Trust `X-Forwarded-For` from an upstream proxy, shared by control and
     /// gateway.
     pub trust_proxy: Option<bool>,
+    /// Exact `http://host[:port]` origins platform services may reach over
+    /// plaintext, shared by control, worker and the workflow manager. An absent
+    /// list is the default and admits none.
+    pub plaintext_peers: Option<Vec<PlaintextPeer>>,
     /// Control-plane settings.
     #[serde(default)]
     pub control: ControlSection,

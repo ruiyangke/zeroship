@@ -123,6 +123,17 @@ pub(crate) const SHARED_IDENTITIES: &[SharedIdentity] = &[
         wrapper: "Operational",
         inner: "bool",
     },
+    // Which peers this deployment may reach over plaintext HTTP. ONE list for
+    // the whole deployment, because an operator decides once which private
+    // origins carry service calls in clear, and the three services that make
+    // those calls - control, the worker and the workflow manager - would
+    // otherwise each carry their own spelling of the same decision.
+    SharedIdentity {
+        symbol: "PLAINTEXT_PEERS",
+        canonical: "plaintext_peers",
+        wrapper: "Operational",
+        inner: "Vec<PlaintextPeer>",
+    },
     SharedIdentity {
         symbol: "OAUTH_AUDIENCE",
         canonical: "oauth_audience",

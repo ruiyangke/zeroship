@@ -84,5 +84,6 @@ pub use test_overlay::{
     PROVISION_COMMAND, TEST_OVERLAY_PATH,
 };
 pub use topology::{
-    resolve_origin_scheme, resolve_trusted_origins, OriginScheme, TrustedOrigin,
+    resolve_origin_scheme, resolve_trusted_origins, OriginScheme, PlaintextPeer, PlaintextPeers,
+    TrustedOrigin,
 };

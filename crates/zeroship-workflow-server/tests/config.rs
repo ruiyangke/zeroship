@@ -257,4 +257,54 @@ fn retention_configuration_requires_a_signer_and_unambiguous_control_origin() {
         loopback["workflow"]["control_url"] = url.into();
         resolve(&loopback).unwrap();
     }
+
+    // The named-peer arm, through the whole settings surface: a root-level
+    // `plaintext_peers` list admits the ONE origin it names. `http://control
+    // .example.test` is refused above under the same overlay without it, so the
+    // difference is the list rather than the origin.
+    let mut named = valid.clone();
+    named["workflow"]["control_url"] = "http://control.example.test".into();
+    named["plaintext_peers"] = serde_json::json!(["http://control.example.test"]);
+    let options = resolve(&named).expect("a named plaintext peer is a usable control origin");
+    assert_eq!(
+        options.plaintext_peers.joined(),
+        "http://control.example.test"
+    );
+
+    // One variable from that: a list naming a DIFFERENT origin leaves the same
+    // control_url refused.
+    let mut elsewhere = named.clone();
+    elsewhere["plaintext_peers"] = serde_json::json!(["http://migrate.example.test:9091"]);
+    assert!(resolve(&elsewhere).is_err());
+
+    // An entry that is not one exact http origin is refused while RESOLVING
+    // THE SETTINGS, before any origin is judged against it, rather than
+    // silently admitting nothing. That is a step earlier than `resolve` above
+    // reaches, so it is driven through `resolve_config` directly.
+    let settings = |input: &serde_json::Value| {
+        let overlay: toml::Value = toml::from_str(&toml::to_string(input).unwrap()).unwrap();
+        WorkflowSettings::resolve_config(
+            WorkflowSettingsSources::try_parse_from(["zeroship-workflow-server", "--no-config"])
+                .unwrap(),
+            Some(&overlay),
+        )
+        .map(|resolved| resolved.plaintext_peers.get().clone())
+    };
+    // The control: the well-formed list above resolves, so the refusals below
+    // are about the entry rather than about the key being unreadable.
+    assert_eq!(settings(&named).expect("a well-formed list resolves").len(), 1);
+    for entry in [
+        // https authorizes nothing here; accepting it would let an operator
+        // believe a peer was listed when the list is about plaintext alone.
+        "https://control.example.test",
+        "control.example.test",
+        "*",
+        "http://*.example.test",
+        "http://user:secret@control.example.test",
+        "http://control.example.test/prefix",
+    ] {
+        let mut malformed = named.clone();
+        malformed["plaintext_peers"] = serde_json::json!([entry]);
+        assert!(settings(&malformed).is_err(), "accepted peer {entry}");
+    }
 }

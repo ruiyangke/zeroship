@@ -280,11 +280,17 @@ fn main() -> std::io::Result<()> {
     // The workflow host is optional: without a manager origin no host runs
     // and `env.workflows` refuses every app. A configured one must be usable.
     let workflow_manager_url = settings.workflow_manager_url.get().clone();
+    // One list for the process. It bounds the manager client and the
+    // deployment-hold client towards Control alike, so it is resolved once and
+    // reported once rather than per client.
+    let plaintext_peers =
+        zeroship_core::config::PlaintextPeers::from(settings.plaintext_peers.get().clone());
     let workflow_host_config = (!workflow_manager_url.is_empty()).then(|| {
         zeroship_worker::workflow_host::WorkflowHostConfig {
             manager_url: workflow_manager_url.clone(),
             capacity: *settings.workflow_capacity.get(),
             slots: *settings.workflow_slots.get(),
+            plaintext_peers: plaintext_peers.clone(),
         }
     });
     if let Some(config) = &workflow_host_config {
@@ -360,6 +366,13 @@ fn main() -> std::io::Result<()> {
         report.field(
             "workflow_manager_url",
             CheckValue::Plain(workflow_manager_url.clone()),
+        );
+        // Reported whether or not it is set. A security posture that appears in
+        // the report only when relaxed cannot be read as "the fence is intact";
+        // an empty field says which of the two this deployment is.
+        report.field(
+            "plaintext_peers",
+            CheckValue::Plain(plaintext_peers.joined()),
         );
         report.field(
             "workflow_capacity",
