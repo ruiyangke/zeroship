@@ -64,7 +64,7 @@ export default {
 
     // The manager reads an app's zone and terminal deletion, and an instance's
     // zone and lease; its identity and status columns are granted separately in
-    // 20260911000000_workflow_coordination.ts. Column-scoped grants because
+    // 20260911000050_workflow_platform_grants.ts. Column-scoped grants because
     // `SELECT` on the table would also open creator-owned columns Control wrote
     // into `apps`.
     raw({
