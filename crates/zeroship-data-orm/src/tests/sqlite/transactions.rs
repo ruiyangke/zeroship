@@ -1286,3 +1286,225 @@ fn two_apps_on_one_backend_serialize_their_transactions_through_main() {
         });
     })
 }
+
+/// The lock budget, spelled from the constant every arm below measures against.
+fn lock_budget() -> std::time::Duration {
+    std::time::Duration::from_millis(u64::from(crate::budgets::DB_LOCK_TIMEOUT_MS))
+}
+
+/// **An autocommit write issued beside an open transaction completes.**
+///
+/// The two requests here are ordinary and concurrent: one holds a transaction,
+/// the other writes on the autocommit path, and both belong to apps this one
+/// dev-tier session serves. The write loses the write lock to the transaction,
+/// and the only thing that can release that lock is the transaction's own
+/// `COMMIT` - which is queued behind the write on the session's single actor
+/// thread. A statement that waits in place therefore waits for a holder that
+/// cannot advance until the wait ends.
+///
+/// **The arm is an ordering claim, not a stopwatch.** The autocommit statement
+/// writes down how many rows it could see, and a row the transaction wrote
+/// becomes visible to another connection only when that transaction commits. So
+/// `beside-1` is a record of the schedule: the actor took this statement, could
+/// not run it, went back for the `COMMIT`, ran that, and only then ran this one.
+/// `beside-0` would mean it somehow wrote before the commit, and no row at all
+/// means it never ran.
+///
+/// That distinction is what a wall-clock assertion was reaching for and cannot
+/// reach on a loaded box. It also still refutes the obvious wrong fix: a merely
+/// longer budget leaves the thread inside SQLite, so the `COMMIT` behind it
+/// never runs and the write fails outright rather than succeeding late.
+#[test]
+fn an_autocommit_write_completes_beside_an_open_transaction() {
+    Host::test(|host| {
+        host.run(async {
+            let (backend, _dir) = fresh_backend(host);
+            backend
+                .execute_fixture(
+                    "CREATE TABLE ledger (id INTEGER PRIMARY KEY, who TEXT)",
+                    &[],
+                )
+                .await
+                .expect("create the table");
+
+            let session = backend
+                .open_tx_session(&main_binding("holder"), BeginIntent::Default)
+                .await
+                .expect("open the transaction");
+            session
+                .exec(
+                    "INSERT INTO ledger (who) VALUES ($1)",
+                    &[crate::value::Value::from("holder")],
+                )
+                .await
+                .expect("the transaction writes, so it holds the write lock");
+
+            // Both futures are in flight at once, which is the shape a dev-tier
+            // process serving two concurrent requests produces. The write is
+            // polled first and reaches the actor first; the settle is queued
+            // behind it.
+            let (written, settled) = futures::future::join(
+                ScopedExecutor::exec(
+                    &backend,
+                    &main_binding("beside"),
+                    "INSERT INTO ledger (who) \
+                     SELECT 'beside-' || (SELECT COUNT(*) FROM ledger)",
+                    &[],
+                ),
+                session.settle(SettleIntent::Commit),
+            )
+            .await;
+
+            assert_eq!(
+                written.expect("the autocommit write beside an open transaction must complete"),
+                1,
+                "the write must report the row it inserted"
+            );
+            assert_eq!(settled.0, TerminalResult::Committed, "{:?}", settled.1);
+
+            let rows = backend
+                .autocommit_client()
+                .query("SELECT who FROM ledger ORDER BY id", &[])
+                .await
+                .expect("read the ledger back");
+            assert_eq!(
+                rows.iter()
+                    .map(|row| row[0].as_deref().unwrap_or_default().to_owned())
+                    .collect::<Vec<_>>(),
+                vec!["holder".to_owned(), "beside-1".to_owned()],
+                "both writes must be durable, and the autocommit one must have run on the \
+                 far side of the commit it was waiting for"
+            );
+        });
+    })
+}
+
+/// **The fence.** Lock contention the actor cannot outlast is still lock
+/// contention, and still costs the whole budget before it is reported.
+///
+/// The holder here is a connection of this test's own. Nothing this actor could
+/// run next would release it, so re-queueing buys exactly nothing and the
+/// budget is spent as a deadline instead of inside the busy handler. A change
+/// that made every lock error disappear - a budget quietly extended, a refusal
+/// quietly downgraded to success - fails here, which is what makes the arm above
+/// a fix rather than a removal.
+#[test]
+fn an_autocommit_write_a_foreign_connection_holds_out_is_refused_after_the_budget() {
+    Host::test(|host| {
+        host.run(async {
+            let (backend, dir) = fresh_backend(host);
+            backend
+                .execute_fixture(
+                    "CREATE TABLE ledger (id INTEGER PRIMARY KEY, who TEXT)",
+                    &[],
+                )
+                .await
+                .expect("create the table");
+
+            let holder = rusqlite::Connection::open(platform_file(&dir)).expect("open the holder");
+            holder
+                .execute_batch("BEGIN IMMEDIATE; INSERT INTO ledger (who) VALUES ('holder');")
+                .expect("the holder takes main's write lock");
+
+            let started = std::time::Instant::now();
+            let refused = backend
+                .execute_fixture("INSERT INTO ledger (who) VALUES ('ours')", &[])
+                .await
+                .expect_err("a lock no queued command can release must still be reported");
+            let elapsed = started.elapsed();
+            holder.execute_batch("ROLLBACK").expect("release the lock");
+
+            match &refused {
+                DbError::LockContention { message } => assert!(
+                    message.contains("database is locked") || message.contains("busy"),
+                    "the refusal must carry what SQLite said: {message}"
+                ),
+                other => panic!("a foreign holder must surface as LockContention, got {other:?}"),
+            }
+            assert!(
+                elapsed >= lock_budget(),
+                "the refusal must come after the budget, not before it; took {elapsed:?}"
+            );
+            // A fence, not a wall: the same statement runs once the holder lets go.
+            backend
+                .execute_fixture("INSERT INTO ledger (who) VALUES ('ours')", &[])
+                .await
+                .expect("the write succeeds once the foreign holder releases");
+        });
+    })
+}
+
+/// **The one-variable pair for the arm above**, and the diagnosis that replaces
+/// blaming a second process that does not exist.
+///
+/// Same statement, same budget, same wire code. The only thing that differs is
+/// who holds the lock: here it is a transaction *this same session* has open and
+/// never settles, so the platform can name it and say what ends it. The wire
+/// code stays `lock_not_available` because a spent deadline is a lock not
+/// acquired, and PostgreSQL parity is what the SDK branches on.
+#[test]
+fn a_lock_this_session_holds_itself_is_named_in_the_contention_report() {
+    Host::test(|host| {
+        host.run(async {
+            let (backend, _dir) = fresh_backend(host);
+            backend
+                .execute_fixture(
+                    "CREATE TABLE ledger (id INTEGER PRIMARY KEY, who TEXT)",
+                    &[],
+                )
+                .await
+                .expect("create the table");
+
+            let session = backend
+                .open_tx_session(
+                    &crate::tests::fixtures::harness_binding("tenant_holder"),
+                    BeginIntent::Default,
+                )
+                .await
+                .expect("open the transaction");
+
+            // No settle runs beside this one, so the holder never moves and the
+            // command spends its whole budget retrying.
+            let started = std::time::Instant::now();
+            let refused = backend
+                .execute_fixture("INSERT INTO ledger (who) VALUES ('beside')", &[])
+                .await
+                .expect_err("a transaction that never settles cannot be outlasted either");
+            let elapsed = started.elapsed();
+
+            match &refused {
+                DbError::LockContention { message } => {
+                    assert!(
+                        message.contains("open transaction on this same database session"),
+                        "the report must name the session's own transaction as the holder: \
+                         {message}"
+                    );
+                    // Derived, not spelled: the lane is keyed on the physical
+                    // alias the binding resolves to, and a literal app name
+                    // would assert against a string the actor never sees.
+                    let alias = crate::tests::fixtures::harness_alias("tenant_holder");
+                    assert!(
+                        message.contains(&alias),
+                        "the report must name which database holds it ({alias}): {message}"
+                    );
+                }
+                other => panic!(
+                    "a self-held lock must keep the lock_not_available wire code, got {other:?}"
+                ),
+            }
+            assert!(
+                elapsed >= lock_budget(),
+                "the budget is spent before the report; took {elapsed:?}"
+            );
+
+            assert_eq!(
+                session.settle(SettleIntent::Rollback).await.0,
+                TerminalResult::RolledBack
+            );
+            backend
+                .execute_fixture("INSERT INTO ledger (who) VALUES ('beside')", &[])
+                .await
+                .expect("the write succeeds once the session's own transaction settles");
+        });
+    })
+}
