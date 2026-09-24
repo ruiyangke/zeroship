@@ -608,14 +608,23 @@ stall the defect fixes that motivate the move.
    `workflow_rollout_config` and `workflow_policy_ledger`. Enumerate those reads from the tree
    rather than from this paragraph before sizing the work.
 
-   **The split is not a partition of the corpus, because one migration has to become two.**
-   `20260911000000_workflow_coordination.ts` writes into `workflow_manager`, `zeroship` and
-   `service_authn` in one file: alongside the schema and its roles it grants the workflow
-   login `SELECT` on control tables including `zeroship.apps` and `zeroship.worker_instances`.
-   No routing rule sends one file to two databases. The dependency also runs the other way -
-   `20260914000600_placement_eligibility.ts` is a control migration that grants to
-   `zeroship_workflow` - so the control corpus needs the workflow role to exist, which holds
-   because both files sort into one corpus and stops holding when they do not.
+   **The corpus is partitionable; role identity is what still binds it.** No migration writes
+   into two databases' worth of schemas any more:
+   `db/migrations-ts/20260911000050_workflow_platform_grants.ts` holds the workflow login's
+   reach outside its own schema - USAGE on `zeroship` and `service_authn`, column-scoped
+   `SELECT` on the Control tables its coordinator and policy reads project, and DML on the
+   shared assertion replay store - and `20260911000000_workflow_coordination.ts` keeps the
+   schema, its roles and its own grants.
+
+   What still crosses is the roles, which are cluster-scoped rather than
+   database-scoped. `20260914000600_placement_eligibility.ts` is a control migration granting
+   to `zeroship_workflow`, so the control corpus needs that role to exist; and the revokes in
+   `20260911000000_workflow_coordination.ts` name `zeroship_control`, `zeroship_worker`,
+   `zeroship_gateway` and `zeroship_app`, which a separate cluster would not have. `Op::Revoke`
+   in `crates/zeroship-migrate-postgres/src/vendor.rs` emits a bare
+   `REVOKE {privs} ON {target} FROM {grantees}` with no `IF EXISTS`, and PostgreSQL raises
+   `42704` for a role that does not exist, so a separate cluster aborts the apply at that
+   statement rather than stepping over it. Settle the roles before the routing.
 
    **The third piece is that the service has nowhere to be deployed.** It has no service in
    `deploy/compose/docker-compose.yml` and no chart template, and `workflow.database_url`,
