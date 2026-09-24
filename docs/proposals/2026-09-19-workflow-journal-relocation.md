@@ -329,9 +329,14 @@ protocol. This extends a working client rather than inventing one.
    yet. Verify that the schema installs, that one stamp row covers the installation, and that
    the creator-schema path is untouched.
 
-2. **Bind `AppBackend` to the service's own store.** The store is already a parameter:
+2. **DONE. `AppBackend` binds the store of the journal it is given.**
    `into_backend` in `crates/zeroship-workflow/src/service/backend.rs` takes the journal, checks
-   the handle's binding against that journal's policy registry, and swaps the store. What the
+   the handle's binding against that journal's policy registry, and swaps the store.
+   `a_backend_reads_and_writes_the_journal_it_was_built_over` in
+   `crates/zeroship-workflow/src/service/tests/backend_journal.rs` builds two stores, binds a
+   handle to the second, and reads a run only the first holds; its neighbour
+   `into_backend_refuses_a_journal_from_another_policy_registry` binds a foreign store under the
+   handle's own registry and refuses one under another. What the
    worker passes it is a service opened over the creator database
    (`crates/zeroship-worker/src/workflow_creator.rs`). The work is to pass a service opened over
    the service's store instead.
