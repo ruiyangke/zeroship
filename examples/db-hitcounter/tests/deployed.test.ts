@@ -54,7 +54,13 @@ test("browser writes persist and are priced through the real metering stream", a
   } finally { await browser.close(); }
 
   expect(platform.appId).toMatch(/^[a-zA-Z0-9_-]+$/);
-  const rowCount = async () => Number(await platform.sql(`SELECT count(*) FROM "${platform.appId}".hits`));
+  // THE TABLES BELONG TO THE DATABASE, not to the app that reached them. The
+  // app id names no schema here, and the pair is asserted together so the
+  // absence cannot pass over a cluster where neither name existed.
+  expect(platform.schema).toBe(`db_${platform.databaseId}`);
+  expect(await platform.sql(`SELECT count(*) FROM pg_namespace WHERE nspname='${platform.schema}'`)).toBe("1");
+  expect(await platform.sql(`SELECT count(*) FROM pg_namespace WHERE nspname='${platform.appId}'`)).toBe("0");
+  const rowCount = async () => Number(await platform.sql(`SELECT count(*) FROM "${platform.schema}".hits`));
   const rows = await rowCount();
   expect(rows).toBeGreaterThanOrEqual(browserRequests);
   const requests = platform.readyRequests + browserRequests;
@@ -89,7 +95,7 @@ test("browser writes persist and are priced through the real metering stream", a
   }, { timeout: 45_000, interval: 1000 }).toBe(expectedCharge);
 
   // The database is an independent oracle: deleting a metered row must fail it.
-  await platform.sql(`DELETE FROM "${platform.appId}".hits WHERE ctid IN (SELECT ctid FROM "${platform.appId}".hits LIMIT 1)`);
+  await platform.sql(`DELETE FROM "${platform.schema}".hits WHERE ctid IN (SELECT ctid FROM "${platform.schema}".hits LIMIT 1)`);
   const mutatedRows = await rowCount();
   expect(mutatedRows).toBe(rows - 1);
   expect(() => assertUsage(usage, requests, mutatedRows)).toThrow("Write usage must match the physical table");

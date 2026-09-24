@@ -14,9 +14,19 @@ pnpm --dir examples/db-hitcounter test
 Vitest builds the SDKs, app, and Rust services. Its TypeScript fixture owns
 PostgreSQL, Redpanda, and an identity issuer through testcontainers, and starts
 the control plane, worker, gateway, migration service, and CDC relay on allocated
-ports. It verifies that an unmigrated deploy is refused, applies the emitted
-migrations through the real CLI, and deploys the app. Assertions verify that
-migration provisions the app role and that reapplying the same migration is a no-op.
+ports. It then walks the sequence a creator walks: it creates an organization, a
+project and a database through the control plane, waits for the cluster
+reconciler to make the cluster match, and applies the migrations through the real
+CLI **with no app deployed and no binding in existence** - a migration is
+authorized at the database's own project, not at an app. It then builds the app
+against that database, watches the deploy be refused while the app holds no
+binding, grants one, and deploys.
+
+Assertions verify that the reconciler minted the database's migrator and
+capability roles, that the binding role inherits one capability role without being
+able to assume it while the shared worker login may assume the binding and inherit
+nothing from it, that the deployed app's rows are reachable through that narrowing
+and refused without it, and that reapplying the same migration is a no-op.
 
 Chromium drives real app requests. The test compares metering with the physical
 PostgreSQL rows, waits for projected billing to converge, and verifies its
