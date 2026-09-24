@@ -512,7 +512,23 @@ stall the defect fixes that motivate the move.
    schema in the control database today with its own migrator, login and search path. Moving
    the journal into it puts creator-volume rows - runs, pages, receipts, payloads - in the
    control plane, which is the coupling `docs/proposals/2026-09-05-gateway-central-database-decoupling.md`
-   is fighting on a different axis. The promotion is contained; the question is when.
+   is fighting on a different axis. Step 1 installed the journal, so those rows are there now
+   rather than in prospect.
+
+   The promotion splits in two, and only one half is contained. The CONNECTION is: the
+   `[workflow]` section in `crates/zeroship-core/src/config/file.rs` owns a `database_url` that
+   `crates/zeroship-workflow-server/src/server.rs` requires and nothing in this repo pins, so
+   which store the service opens is a deployment choice. The privilege separation is real
+   alongside it - `Coordinator::verify` in
+   `crates/zeroship-workflow-server/src/coordinator.rs` refuses to start when its own login
+   holds `CREATE` on `workflow_manager`.
+
+   The SCHEMA INSTALLATION is not. `workflow_manager` and its tables arrive from
+   `db/migrations-ts/20260911000000_workflow_coordination.ts`, the journal joined them in
+   `20260919000000_workflow_journal.ts`, and that corpus is applied as one job against one
+   database. Pointing `workflow.database_url` at another store finds no schema in it. So the
+   question to settle is what splits the corpus, which is migration tooling rather than workflow
+   work, and Open 4 waits on the same answer.
 
 4. **Is the service zone-local? This is half of Open 1's answer, not a footnote.** Every number
    behind Open 1 was taken over loopback. A crossing per dispatch is free at that distance and
@@ -520,6 +536,16 @@ stall the defect fixes that motivate the move.
    the dominant one. It should be zone-local - one workflow store per zone, an app's runs living
    in its own zone - consistent with the decoupling's co-location rule, and worth deciding
    before the cutover rather than inheriting.
+
+   An execution zone is already a configured thing: `join_token_zone` and the trusted
+   join-signer file's permitted zones both live in `crates/zeroship-core/src/config/file.rs`.
+   Since the `[workflow]` section owns its `database_url`, a store per zone is a deployment
+   topology and reaches the same corpus question Open 3 names, so the two settle together.
+   `the_two_zones_run_a_workflow_without_reaching_each_other` in
+   `crates/zeroship-control/tests/workflow_private_zones_e2e.rs` holds zone isolation for the
+   creator-schema placement this replaces; a relocated journal needs its own. The numbers Open 1
+   rests on come from `crates/zeroship-workflow-client/tests/round_trip_cost.rs`, so a decision
+   that the service may sit further away is one to re-measure there rather than re-argue here.
 
 5. **What happens to in-flight runs at cutover?** Pre-launch, nothing: there are no runs. That
    answer expires, and the design should say so rather than let a later reader assume a
