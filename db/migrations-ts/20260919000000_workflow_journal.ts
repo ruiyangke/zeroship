@@ -31,11 +31,12 @@ import { readFileSync } from "node:fs";
 // carries SQL rather than operations, and the generated artifact is carried
 // verbatim rather than re-authored.
 //
-// NOTHING IS GRANTED. No role receives a privilege on the journal here: the
-// tables exist and are owned, and that is the whole of this change. A REVOKE
-// would only mask a default privilege arriving from somewhere else;
-// crates/zeroship-workflow-server/tests/platform_schema.rs asserts the absence
-// instead, which surfaces one.
+// ONE ROLE IS GRANTED, AND IT IS NOT NAMED HERE. The grantee is derived below
+// from the grants the coordination tables in this schema already carry, and no
+// other role receives anything. There is no REVOKE: it would only mask a
+// default privilege arriving from somewhere else, and
+// crates/zeroship-workflow-server/tests/platform_schema.rs asserts that every
+// other role holds nothing, which surfaces one instead.
 const schema = "workflow_manager";
 
 // The QUOTED placeholder crates/zeroship-workflow-schema generates its
@@ -67,6 +68,59 @@ for (const name of tables) {
   }
 }
 
+// THE GRANTEE IS DERIVED FROM THE CATALOG, NOT NAMED HERE.
+//
+// The journal is the storage of whichever service already serves this schema,
+// not a second tenant of it, so the role that must read and write it is the one
+// that already holds DML on the coordination tables beside it. Spelling a role
+// here would make this a second place to know that name, free to disagree with
+// the first the moment the service's login moves; the disagreement would
+// surface as a service that starts and then cannot read its own journal. Read
+// from the catalog, the two grants cannot drift: whatever the coordination
+// tables are granted to, the journal follows in the same schema.
+//
+// EXACTLY ONE ROLE, OR NOTHING. A lookup finding none has no grantee to follow,
+// and one finding several cannot say which service the journal belongs to.
+// Both abort. Neither picks.
+//
+// The lookup reads explicit ACL entries only. PUBLIC and the owner's implicit
+// rights are excluded, so it answers with a role that was deliberately granted
+// DML rather than one that merely happens to have it.
+const grantJournal = `DO $$
+DECLARE
+  service_role text;
+  journal_table text;
+BEGIN
+  BEGIN
+    SELECT DISTINCT served.grantee_name
+      INTO STRICT service_role
+      FROM (
+        SELECT pg_get_userbyid(entry.grantee) AS grantee_name
+          FROM pg_class c
+          JOIN pg_namespace n ON n.oid = c.relnamespace
+          CROSS JOIN LATERAL aclexplode(c.relacl) AS entry
+         WHERE n.nspname = '${schema}'
+           AND c.relkind = 'r'
+           AND NOT starts_with(c.relname::text, '__zeroship_workflow_')
+           AND entry.grantee <> 0
+           AND entry.grantee <> c.relowner
+           AND entry.privilege_type IN ('SELECT', 'INSERT', 'UPDATE', 'DELETE')
+         GROUP BY c.oid, entry.grantee
+        HAVING count(DISTINCT entry.privilege_type) = 4
+      ) AS served;
+  EXCEPTION
+    WHEN NO_DATA_FOUND THEN
+      RAISE EXCEPTION 'no role holds DML on the ${schema} coordination tables, so the workflow journal has no grantee to follow';
+    WHEN TOO_MANY_ROWS THEN
+      RAISE EXCEPTION 'several roles hold DML on the ${schema} coordination tables, so the workflow journal grantee is ambiguous';
+  END;
+
+  FOREACH journal_table IN ARRAY ARRAY[${tables.map(name => `'${name}'`).join(", ")}] LOOP
+    EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON %I.%I TO %I', '${schema}', journal_table, service_role);
+  END LOOP;
+END
+$$`;
+
 export default {
   name: "workflow_journal",
   schema() {
@@ -83,6 +137,10 @@ export default {
         .map(name => `ALTER TABLE "${schema}"."${name}" OWNER TO zeroship_workflow_migrator`)
         .join(";\n"),
       reason: "workflow journal ownership belongs to the migration role, as the rest of this schema does",
+    });
+    raw({
+      sql: grantJournal,
+      reason: "the journal is read and written by whichever role already serves this schema",
     });
   },
 };
