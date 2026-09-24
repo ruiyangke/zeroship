@@ -122,7 +122,13 @@ export async function paymentReady(
   context: BrowserContext,
   market: Cart["market"] = "us",
 ) {
+  // The same pair `requirePaymentReady` blocks on: a live hold AND a payment
+  // still in flight. An order whose hold ended is `checkout_expired` and
+  // refuses nothing, so counting it here would name a leftover that blocks
+  // nobody. `gather.account` sweeps expiry for this market before it answers,
+  // so `pending_payment` is the live hold as of this read.
   const unfinished = (o: Order) =>
+    o.status === "pending_payment" &&
     ["processing", "requires_action"].includes(o.payment);
   const inherited = (
     await rpc<{ orders: Order[] }>(context, "account", { market }, true)
