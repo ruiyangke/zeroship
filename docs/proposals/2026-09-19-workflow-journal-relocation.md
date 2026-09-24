@@ -544,8 +544,15 @@ protocol. This extends a working client rather than inventing one.
    learned the lease. The lease predicate is the fix that matters now, and deleting the endpoint
    is what removes the shape.
 
-7. **Drop `zeroship-data-orm` from the crate the worker links.** The last step of moving the
-   `service/` tree, not a deletion available earlier.
+7. **Drop `zeroship-data-orm` from `zeroship-workflow`**, the engine - NOT from
+   `crates/zeroship-worker`, which declares it directly and keeps needing it. The worker's own
+   uses are creator data rather than journal: resolved bindings, connection factories and
+   project keys in `crates/zeroship-worker/src/sync.rs`,
+   `crates/zeroship-worker/src/cache/fixture.rs` and
+   `crates/zeroship-worker/src/workflow_host.rs`. Removing that declaration would break
+   `env.db`, and removing it from the engine is what this step means: once the `service/` tree
+   has moved to the service, the engine holds no store and needs no ORM. It is the last step
+   because nothing earlier makes the engine storeless, not because it is hard.
 
 **Latency is not the gate; payload is, and its bound is settled.** Open 1 holds the answer and
 names `crates/zeroship-workflow-client/tests/round_trip_cost.rs` as the instrument: re-run it
