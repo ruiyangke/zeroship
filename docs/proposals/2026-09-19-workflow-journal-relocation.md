@@ -808,6 +808,15 @@ stall the defect fixes that motivate the move.
    costs is that revocation stops being immediate and becomes bounded by the attestation's
    lifetime, because Control cannot un-say what it has signed. That is the decision.
 
+   **And it is the load-bearing one, not a peer of the others.** `zeroship.worker_instances` is
+   what keeps the Control database binding alive: `PostgresWorkerRegistry` in
+   `crates/zeroship-workflow-server/src/auth.rs` reads it twice - the readiness probe and
+   `active_key` - and `ControlEligibility` in
+   `crates/zeroship-workflow-manager/src/eligibility.rs` projects its worker half for placement.
+   Moving the `apps` reads thins the seam without cutting it, because that table outlives them.
+   So the order to settle these in is authentication first, and the rest afterwards.
+
+
    **A gap this uncovered, unrelated to the move.** `workflow_rollout_config` has no production
    writer: every caller of `set_rollout` and `set_plan_policy` in
    `crates/zeroship-workflow-manager/src/policy/control/store.rs` is a test, and `read_source`
