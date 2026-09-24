@@ -1036,7 +1036,7 @@ mod tests {
         let policy =
             zeroship_migrate_server::policy::ManagedPolicyConfig::default_confined([7u8; 32], 1)
                 .unwrap()
-                .current_ceiling_for_schema(&zeroship_core::AppId::mint(), schema.as_str(), None)
+                .current_ceiling_for_schema(schema.as_str(), None)
                 .unwrap()
                 .policy;
         zeroship_migrate::schema::query::build_create_table_with_fks_for_dialect(

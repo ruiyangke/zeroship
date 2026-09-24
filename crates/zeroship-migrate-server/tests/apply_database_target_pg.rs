@@ -16,14 +16,6 @@
 //! database converged, bound and empty - the control that makes the absence
 //! mean something.
 //!
-//! # The refusal is named, not merely observed
-//!
-//! Several guards on this route answer with a 4xx, and an assertion that could
-//! not tell them apart would pass over a deleted fence. The admission arm
-//! asserts the specific `database_not_bound` kind, the database named in the
-//! body, and the binding call in the remedy - then flips the ONE variable that
-//! makes the binding live and requires the same request to succeed.
-//!
 //! # The role arm needs a control that the apply committed something
 //!
 //! "An apply mints no binding role and retires none" is satisfied by an apply
@@ -96,22 +88,22 @@ async fn control_as_service() -> Arc<Client> {
 // The service under test
 // ---------------------------------------------------------------------------
 
-/// One bearer, one principal, one app. Authorization is not what these arms
-/// measure, so it is the narrowest authenticator that still refuses everything
-/// else.
+/// One bearer, one principal, one database. Authorization is not what these
+/// arms measure - `apply_api_test` drives the real seat resolver - so it is the
+/// narrowest authenticator that still refuses everything else.
 #[derive(Debug)]
-struct SingleAppAuthenticator {
+struct SingleDatabaseAuthenticator {
     token: String,
     principal: UserId,
-    app: AppId,
+    database: DatabaseId,
 }
 
 #[async_trait(?Send)]
-impl Authenticator for SingleAppAuthenticator {
+impl Authenticator for SingleDatabaseAuthenticator {
     async fn verify_action(
         &self,
         token: &str,
-        app_id: &AppId,
+        database_id: &DatabaseId,
         required_action: Action,
         _request_ip: Option<IpAddr>,
         _request_id: &str,
@@ -119,7 +111,7 @@ impl Authenticator for SingleAppAuthenticator {
         if token != self.token {
             return Err(AuthError::Unauthorized);
         }
-        if app_id != &self.app || required_action != Action::AppsDeploy {
+        if database_id != &self.database || required_action != Action::DatabaseMigrate {
             return Err(AuthError::Forbidden);
         }
         Ok(VerifiedCaller {
@@ -155,17 +147,17 @@ fn policy_config() -> ManagedPolicyConfig {
 }
 
 /// The migration service, pointed at the TENANT cluster for DDL and at the
-/// control plane for the apply ledger and the binding admission.
+/// control plane for readiness.
 fn service_state(
     tenant_url: &str,
     principal: &UserId,
-    app: &AppId,
+    database: &DatabaseId,
 ) -> (Arc<MigrationServiceState>, PathBuf) {
     let tmp = tmpdir("service");
-    let authenticator = Arc::new(SingleAppAuthenticator {
+    let authenticator = Arc::new(SingleDatabaseAuthenticator {
         token: "good-token".to_owned(),
         principal: principal.clone(),
-        app: app.clone(),
+        database: database.clone(),
     });
     (
         Arc::new(MigrationServiceState::new(
@@ -320,10 +312,7 @@ async fn a_table_migrates_into_the_named_database_and_not_into_the_other() {
     let report = apply_ir_documents(
         cluster_fixture.url(),
         &tmp,
-        zeroship_migrate_server::apply::ApplyTarget {
-            app_id: &app,
-            database_id: &second,
-        },
+        &second,
         &request,
         &policy_config(),
         &seed_user(&pg).await,
@@ -361,19 +350,32 @@ async fn a_table_migrates_into_the_named_database_and_not_into_the_other() {
     let _ = std::fs::remove_dir_all(tmp);
 }
 
-/// An apply naming a database the app holds no LIVE binding to is refused, and
-/// the same request succeeds once that binding is live.
+/// A database NO APP IS BOUND TO is migratable through the route.
 ///
-/// The two halves differ in exactly one variable: the binding's
-/// `observed_generation`. Everything else - the app, the database, the schema
-/// on the cluster, the bearer, the body - is identical, so the refusal cannot
-/// be attributed to anything the second half also had.
+/// This is the state `zeroship db create` leaves behind: `active`, with its
+/// schema, its migrator and its two capability roles minted, and no binding -
+/// because binding is a separate explicit act. Every other command can address
+/// such a database; this is the one that could not, and the reason was that an
+/// app id sat in the path and a live-binding admission hung off it.
+///
+/// # The absence is MEASURED, on both sides of the apply
+///
+/// "No app is bound" asserted by a fixture that simply did not write a binding
+/// is an assumption, so the binding count is read out of the control plane
+/// before the request. It is read again afterwards for the other direction: an
+/// apply that MINTED an edge to make itself legal would satisfy the first read
+/// and be exactly the coupling this removes.
+///
+/// # The success is read off the cluster, not off the reply
+///
+/// A 200 says the handler returned; the table in `db_<dbs>` says the DDL
+/// reached the tenant.
 #[ntex::test]
-async fn an_apply_naming_a_database_without_a_live_binding_is_refused() {
+async fn an_apply_reaches_a_database_no_app_is_bound_to() {
     let cluster_fixture = tenant::Cluster::start();
     let cluster = connect(cluster_fixture.url()).await;
     let pg = connect(&fixture::migrated_url()).await;
-    let world = World::new(&pg, "apply-admission").await;
+    let world = World::new(&pg, "apply-unbound").await;
     let reconciler = Reconciler::new(
         ControlStore::new(control_as_service().await),
         cluster_fixture.url(),
@@ -381,121 +383,72 @@ async fn an_apply_naming_a_database_without_a_live_binding_is_refused() {
     );
 
     let datastore = pass(&reconciler).await;
-    let app = world.app(&pg, "shop").await;
-    let app = AppId::parse(&app).expect("the world mints canonical app ids");
+    // No app is declared in this world at all, so there is nothing a binding
+    // could name even by accident.
     let database = world.declare_database(&pg, &datastore, "ledger").await;
-    // A binding for a DIFFERENT app on the same database, so the database is
-    // converged and reachable and the only thing missing is THIS app's edge.
-    let neighbour = world.app(&pg, "neighbour").await;
-    world
-        .declare_binding(&pg, &neighbour, &database, DatabaseCapability::ReadWrite)
-        .await;
     pass(&reconciler).await;
+
+    assert_eq!(
+        bindings_on(&pg, &database).await,
+        0,
+        "the world must declare no binding, or this arm measures the bound case"
+    );
     assert_eq!(
         tables_in(&cluster, &database).await,
         Vec::<String>::new(),
-        "the database must be converged before either half runs"
+        "the database must be converged and empty before the apply"
     );
 
     let principal = seed_user(&pg).await;
-    let (state, tmp) = service_state(cluster_fixture.url(), &principal, &app);
+    let (state, tmp) = service_state(cluster_fixture.url(), &principal, &database);
     let service = test::init_service(
         web::App::new()
             .state(state)
             .configure(zeroship_migrate_server::configure),
     )
     .await;
-    let uri = format!(
-        "/v1/apps/{}/databases/{}/migrations/apply",
-        app.as_str(),
-        database.as_str()
-    );
-    let post = || {
-        test::TestRequest::post()
-            .uri(&uri)
-            .header("authorization", "Bearer good-token")
-            .set_json(&create_notes_request())
-            .to_request()
-    };
-
-    let refused = test::call_service(&service, post()).await;
-    let refused_status = refused.status();
-    let refused_body: Value =
-        serde_json::from_slice(&test::read_body(refused).await).expect("a JSON refusal");
-    assert_eq!(
-        refused_status,
-        StatusCode::CONFLICT,
-        "an unbound database is a conflict, not an authorization failure: {refused_body}"
-    );
-    assert_eq!(
-        refused_body["error"], "database_not_bound",
-        "the SPECIFIC guard must be named: several guards on this route answer 4xx \
-         and an assertion that could not tell them apart would pass over a deleted \
-         fence: {refused_body}"
-    );
-    assert!(
-        refused_body["detail"]
-            .as_str()
-            .is_some_and(|detail| detail.contains(database.as_str())),
-        "the refusal must name the database it is about: {refused_body}"
-    );
-    assert_eq!(
-        refused_body["remedy"],
-        json!(format!(
-            "POST /api/databases/{}/bindings",
+    let request = test::TestRequest::post()
+        .uri(&format!(
+            "/v1/databases/{}/migrations/apply",
             database.as_str()
-        )),
-        "the refusal must name the call that fixes it: {refused_body}"
-    );
+        ))
+        .header("authorization", "Bearer good-token")
+        .set_json(&create_notes_request())
+        .to_request();
+    let response = test::call_service(&service, request).await;
+    let status = response.status();
+    let body: Value =
+        serde_json::from_slice(&test::read_body(response).await).expect("a JSON body");
     assert_eq!(
-        tables_in(&cluster, &database).await,
-        Vec::<String>::new(),
-        "a refused apply must leave no DDL behind"
-    );
-    // THE CONTROL. One variable moves: this app's binding becomes live.
-    let binding = world
-        .declare_binding(&pg, app.as_str(), &database, DatabaseCapability::ReadWrite)
-        .await;
-    pass(&reconciler).await;
-    let (status, generation, observed): (String, i32, i32) = {
-        let row = pg
-            .query_one(
-                "SELECT status, generation, observed_generation \
-                   FROM zeroship.database_bindings WHERE id = $1",
-                &[&binding.as_str()],
-            )
-            .await
-            .expect("the binding row must exist to be read");
-        (
-            row.get("status"),
-            row.get("generation"),
-            row.get("observed_generation"),
-        )
-    };
-    assert_eq!(status, "active");
-    assert!(
-        observed >= generation,
-        "the fixture must actually have converged the binding before the control runs"
+        status,
+        StatusCode::OK,
+        "an unbound database must be migratable: {body}"
     );
 
-    let admitted = test::call_service(&service, post()).await;
-    let admitted_status = admitted.status();
-    let admitted_body: Value =
-        serde_json::from_slice(&test::read_body(admitted).await).expect("a JSON reply");
-    assert_eq!(
-        admitted_status,
-        StatusCode::OK,
-        "the identical request must succeed once the binding is live: {admitted_body}"
-    );
     let tables = tables_in(&cluster, &database).await;
     assert!(
         tables.contains(&"notes".to_owned()),
-        "the admitted apply must have written its table: {tables:?}"
+        "the apply must have written its table into the unbound database: {tables:?}"
+    );
+    assert_eq!(
+        bindings_on(&pg, &database).await,
+        0,
+        "the apply must not have minted an app edge to make itself legal"
     );
 
     let _ = std::fs::remove_dir_all(tmp);
 }
 
+/// How many apps reach this database, straight off the control plane.
+async fn bindings_on(pg: &Client, database: &DatabaseId) -> i64 {
+    pg.query_one(
+        "SELECT count(*)::int8 AS n FROM zeroship.database_bindings WHERE database_id = $1",
+        &[&database.as_str()],
+    )
+    .await
+    .expect("count the database's bindings")
+    .get("n")
+}
 
 /// An apply that commits a schema delta mints no binding role and retires none.
 ///
@@ -556,8 +509,7 @@ async fn an_apply_that_commits_a_schema_delta_mints_no_binding_role_and_retires_
     );
 
     // ---- APPLY 1. The first delta this database has ever seen.
-    let report =
-        apply_through(cluster_fixture.url(), &app, &database, &principal, &[NOTES]).await;
+    let report = apply_through(cluster_fixture.url(), &database, &principal, &[NOTES]).await;
     assert!(
         !report.applied.is_empty(),
         "the control for the role assertion below: this apply must have committed \
@@ -577,14 +529,7 @@ async fn an_apply_that_commits_a_schema_delta_mints_no_binding_role_and_retires_
 
     // ---- APPLY 2. A second delta on the same database, for the same reason.
     let before = after;
-    let report = apply_through(
-        cluster_fixture.url(),
-        &app,
-        &database,
-        &principal,
-        &[NOTES, TAGS],
-    )
-    .await;
+    let report = apply_through(cluster_fixture.url(), &database, &principal, &[NOTES, TAGS]).await;
     assert!(
         !report.applied.is_empty(),
         "the second delta must commit too: {report:?}"
@@ -694,7 +639,6 @@ const TAGS: Document = Document {
 /// refused for an incomplete history, not applied.
 async fn apply_through(
     tenant_url: &str,
-    app: &AppId,
     database: &DatabaseId,
     principal: &UserId,
     documents: &[Document],
@@ -724,10 +668,7 @@ async fn apply_through(
     let report = apply_ir_documents(
         tenant_url,
         &tmp,
-        zeroship_migrate_server::apply::ApplyTarget {
-            app_id: app,
-            database_id: database,
-        },
+        database,
         &request,
         &policy_config(),
         principal,

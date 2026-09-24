@@ -8,7 +8,6 @@ use zeroship_core::database_derivation;
 use zeroship_core::database_role::{per_app_role_name, DatabaseCapability, PerAppRoleNameError};
 use zeroship_core::schema_name::SchemaName;
 use zeroship_core::DatabaseId;
-use zeroship_id::AppId;
 use zeroship_id::UserId;
 use zeroship_migrate::apply::journal::DeployRecoveryScope;
 use zeroship_migrate::{
@@ -227,20 +226,6 @@ pub enum ApplyRequestError {
         database_id.as_str()
     )]
     DatabaseNotCreated { database_id: DatabaseId },
-    /// The requesting app holds no LIVE binding to the database it named.
-    ///
-    /// Distinct from every authorization refusal above it: the principal may
-    /// deploy this app and the app simply does not reach this database, which
-    /// is a different remedy - bind it - and a different audience.
-    #[error(
-        "app {} holds no live binding to database {}",
-        app_id.as_str(),
-        database_id.as_str()
-    )]
-    DatabaseNotBound {
-        app_id: AppId,
-        database_id: DatabaseId,
-    },
     #[error("migration role provision: {0}")]
     ProvisionRole(#[from] ProvisionRoleError),
     #[error("unmask audit table provision: {0}")]
@@ -282,29 +267,17 @@ pub enum ProvisionRuntimeRoleError {
 ///
 /// THERE IS ONE PATH. The ceiling the creator runs under is what bounds them, and
 /// the engine still refuses a destructive step it was not handed an [`Approval`] for.
-/// The app whose IR this is, and the database it lands in.
-///
-/// Carried together because they are one fact: an apply targets a database
-/// THROUGH an app's live binding to it, and a caller that could pass one
-/// without the other could post an IR at a database the app does not hold.
-#[derive(Debug, Clone, Copy)]
-pub struct ApplyTarget<'a> {
-    pub app_id: &'a AppId,
-    pub database_id: &'a DatabaseId,
-}
-
+/// THE TARGET IS THE DATABASE, and nothing else identifies it. An app is not a
+/// parameter of a migration: several apps may reach one database and a database
+/// may have none bound at all, so an app id here could only be arbitrary.
 pub async fn apply_ir_documents(
     provision_dsn: &str,
     tmp_root: &Path,
-    target: ApplyTarget<'_>,
+    database_id: &DatabaseId,
     request: &ApplyMigrationsRequest,
     policy_config: &ManagedPolicyConfig,
     principal_id: &UserId,
 ) -> Result<ApplyMigrationsResponse, ApplyRequestError> {
-    let ApplyTarget {
-        app_id,
-        database_id,
-    } = target;
     validate_request_shape(request)?;
     let migration_id = Uuid::now_v7();
 
@@ -316,14 +289,7 @@ pub async fn apply_ir_documents(
     }
 
     // THE SERVICE'S ONE DATABASE-TO-SCHEMA DERIVATION. Everything downstream
-    // that means "the physical schema" takes the [`SchemaName`]; `app_id` stays
-    // for the POLICY CEILING and the apply ledger, which are facts about the
-    // caller's app rather than about the schema being written.
-    //
-    // It is derived from the DATABASE the request named, never from the app:
-    // an app may hold several databases and a database may be held by several
-    // apps, so an app-derived schema would either write the wrong tenant's
-    // tables or make every database after the first unmigratable.
+    // that means "the physical schema" takes the [`SchemaName`].
     let schema_text = database_derivation::schema_name(database_id);
     let schema = SchemaName::new(&schema_text).map_err(|reason| ApplyRequestError::SchemaName {
         schema: schema_text.clone(),
@@ -334,7 +300,7 @@ pub async fn apply_ir_documents(
     // not before the derivation: every namespace-scoped grant in it names the
     // schema this apply writes, and a ceiling bound to any other name grants
     // nothing here and refuses every creator statement as out-of-scope.
-    let policy = resolve_apply_policy(app_id, &schema, request, policy_config)?;
+    let policy = resolve_apply_policy(&schema, request, policy_config)?;
 
     // (a) DRIVER: open a native compio session, wrap it in the adapter's
     // `CompioPgSession`, and drive the published engine over it. Provisioning
@@ -446,7 +412,6 @@ pub async fn apply_ir_documents(
             &backend,
             policy_config,
             &policy,
-            app_id,
             database_id,
             &schema,
             &prepared,
@@ -498,7 +463,6 @@ async fn run_apply(
     backend: &PostgresBackend<'_, CompioPgSession>,
     policy_config: &ManagedPolicyConfig,
     apply_policy: &EffectivePolicy,
-    app_id: &AppId,
     database_id: &DatabaseId,
     schema: &SchemaName,
     prepared: &[PreparedIrDocument],
@@ -513,7 +477,7 @@ async fn run_apply(
     // rendered-DDL guard is the fixed schema-bound no-inject confined charter.
     let sealed_policy = policy_config.seal_effective_for_app(apply_policy.clone())?;
     tracing::debug!(
-        app_id = app_id.as_str(),
+        database_id = database_id.as_str(),
         schema = %schema.as_str(),
         ceiling_id = %sealed_policy.ceiling_id,
         ceiling_version = sealed_policy.ceiling_version,
@@ -781,25 +745,19 @@ async fn apply_prepared_ir_documents(
 /// through a future, and this is where the function becomes synchronous.
 #[allow(clippy::result_large_err)]
 fn resolve_apply_policy(
-    app_id: &AppId,
     schema: &SchemaName,
     request: &ApplyMigrationsRequest,
     policy_config: &ManagedPolicyConfig,
 ) -> Result<EffectivePolicy, ApplyRequestError> {
     let Some(policy) = request.policy.as_ref() else {
-        return Ok(policy_config.compose_effective_for_schema(
-            app_id,
-            schema.as_str(),
-            None,
-            None,
-        )?);
+        return Ok(policy_config.compose_effective_for_schema(schema.as_str(), None, None)?);
     };
     let draft = CreatorPolicyDraft {
         filename: policy.filename.as_str(),
         body: policy.body.as_str(),
     };
     let parsed = policy_config.parse_draft(&draft)?;
-    Ok(policy_config.compose_effective_for_schema(app_id, schema.as_str(), None, Some(&parsed))?)
+    Ok(policy_config.compose_effective_for_schema(schema.as_str(), None, Some(&parsed))?)
 }
 
 /// Lower every document under the guard, refuse a denied plan, and retain the
@@ -1047,13 +1005,6 @@ pub fn apply_error_kind(err: &ApplyRequestError) -> (ntex::http::StatusCode, &'s
         ),
         ApplyRequestError::DatabaseNotCreated { .. } => {
             (ntex::http::StatusCode::CONFLICT, "database_not_created")
-        }
-        // A DISTINCT KIND from every refusal around it, on purpose. The
-        // principal may deploy this app; the app does not reach this database.
-        // A caller that could not tell this from `database_not_created` would
-        // be told to wait for a reconciler that has nothing to do.
-        ApplyRequestError::DatabaseNotBound { .. } => {
-            (ntex::http::StatusCode::CONFLICT, "database_not_bound")
         }
         // Not a creator fault and not retryable: the caller supplied a database
         // id, the service derived a schema name from it, and the derivation
@@ -1563,10 +1514,7 @@ mod tests {
             .block_on(apply_ir_documents(
                 "postgres://unused",
                 Path::new("/tmp"),
-                ApplyTarget {
-                    app_id: &AppId::mint(),
-                    database_id: &DatabaseId::mint(),
-                },
+                &DatabaseId::mint(),
                 &request,
                 &policy_config,
                 &principal_id,
@@ -1597,10 +1545,7 @@ mod tests {
             .block_on(apply_ir_documents(
                 "postgres://unused",
                 Path::new("/tmp"),
-                ApplyTarget {
-                    app_id: &AppId::mint(),
-                    database_id: &DatabaseId::mint(),
-                },
+                &DatabaseId::mint(),
                 &request,
                 &policy_config,
                 &principal_id,
