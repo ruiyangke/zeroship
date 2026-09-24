@@ -25,8 +25,9 @@ pub struct ControlCoordinator {
 }
 
 impl ControlCoordinator {
-    /// Remote coordinators require verified HTTPS; literal loopback hosts may
-    /// use HTTP. Mutations are never retried automatically.
+    /// Remote coordinators require verified HTTPS. Plain HTTP reaches a literal
+    /// loopback host, or an origin the options named in `plaintext_peers`.
+    /// Mutations are never retried automatically.
     ///
     /// # Errors
     /// Rejects missing or non-Control signers, ambiguous endpoints and empty bounds.

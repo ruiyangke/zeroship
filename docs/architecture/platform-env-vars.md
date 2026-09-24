@@ -109,6 +109,7 @@ Every environment name below is `ZEROSHIP_<CANONICAL>` and every overlay path is
 | `oauth_audience` | operational | `ZEROSHIP_OAUTH_AUDIENCE` | `oauth_audience` | zeroship-auth `--oauth-audience`<br>zeroship-control `--oauth-audience`<br>zeroship-migrate-server `--oauth-audience` | `control.zeroship.ai` |
 | `origin_scheme` | operational | `ZEROSHIP_ORIGIN_SCHEME` | `origin_scheme` | zeroship-control `--origin-scheme`<br>zeroship-gate `--origin-scheme` | `OriginScheme::Https` |
 | `pairwise_salt` | secret | `ZEROSHIP_PAIRWISE_SALT` | `pairwise_salt` | zeroship-control `--pairwise-salt-file`<br>zeroship-gate `--pairwise-salt-file` | - |
+| `plaintext_peers` | operational | `ZEROSHIP_PLAINTEXT_PEERS` | `plaintext_peers` | zeroship-control `--plaintext-peers`<br>zeroship-worker `--plaintext-peers`<br>zeroship-workflow-server `--plaintext-peers` | empty |
 | `poll_interval` | operational | `ZEROSHIP_POLL_INTERVAL` | `poll_interval` | zeroship-gate `--poll-interval`<br>zeroship-worker `--poll-interval` | `5` |
 | `trust_proxy` | operational | `ZEROSHIP_TRUST_PROXY` | `trust_proxy` | zeroship-control `--trust-proxy`<br>zeroship-gate `--trust-proxy`<br>zeroship-migrate-server `--trust-proxy` | `false` |
 | `trusted_origins` | operational | `ZEROSHIP_TRUSTED_ORIGINS` | `trusted_origins` | zeroship-gate `--trusted-origins` | empty |

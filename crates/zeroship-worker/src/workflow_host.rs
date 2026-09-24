@@ -39,8 +39,8 @@ use std::{
 };
 use zeroship_bundle::BlobStore;
 use zeroship_core::{
-    app_derivation, app_id::AppId, schema_name::SchemaName, service_peers::ServiceAuth,
-    workflow_coordination::AssignedScope,
+    app_derivation, app_id::AppId, config::PlaintextPeers, schema_name::SchemaName,
+    service_peers::ServiceAuth, workflow_coordination::AssignedScope,
 };
 use zeroship_data_orm::{
     binding::{DbBinding, COLD_START_DEPLOY_TOKEN},
@@ -93,12 +93,15 @@ const MAX_SOURCE_BYTES: u64 = zeroship_bundle::MAX_DECOMPRESSED_BYTES;
 /// The workflow host settings resolved from the worker's configuration.
 #[derive(Debug, Clone)]
 pub struct WorkflowHostConfig {
-    /// Manager origin; HTTPS, or HTTP to a literal loopback address.
+    /// Manager origin; HTTPS, or HTTP to a literal loopback address or to an
+    /// origin named in [`Self::plaintext_peers`].
     pub manager_url: String,
     /// App placements advertised to the manager.
     pub capacity: usize,
     /// Delivered jobs executing at once.
     pub slots: usize,
+    /// Origins this process may reach over plaintext HTTP. Empty by default.
+    pub plaintext_peers: PlaintextPeers,
 }
 
 impl WorkflowHostConfig {
@@ -107,9 +110,10 @@ impl WorkflowHostConfig {
     /// # Errors
     /// Names the setting that cannot run a host.
     pub fn validate(&self) -> Result<(), String> {
-        Transport::validate_config(&self.manager_url, client_options()).map_err(|_| {
+        Transport::validate_config(&self.manager_url, &self.client_options()).map_err(|_| {
             "worker.workflow_manager_url must be an HTTPS origin, or HTTP to a literal \
-             loopback address, with no path, query or credentials"
+             loopback address or an origin named in plaintext_peers, with no path, query \
+             or credentials"
                 .to_owned()
         })?;
         if self.capacity == 0 || u32::try_from(self.capacity).is_err() {
@@ -147,10 +151,16 @@ impl WorkflowHostConfig {
             policy_interval: POLICY_INTERVAL,
         }
     }
-}
 
-fn client_options() -> ClientOptions {
-    ClientOptions::default()
+    /// The exchange bounds and plaintext allowance every client this host
+    /// builds is bound by - the manager client and, per assignment, the
+    /// deployment-hold client towards Control.
+    fn client_options(&self) -> ClientOptions {
+        ClientOptions {
+            plaintext_peers: self.plaintext_peers.clone(),
+            ..ClientOptions::default()
+        }
+    }
 }
 
 /// Process resources the host composes creator execution from. Every one of
@@ -309,7 +319,7 @@ async fn run(
     let client = WorkerCoordinator::new(
         &config.manager_url,
         resources.service_auth.clone(),
-        client_options(),
+        config.client_options(),
     )
     .map_err(|error| format!("workflow manager client: {error}"))?;
     let worker = client.worker_id().clone();
@@ -318,7 +328,7 @@ async fn run(
     // can attribute the repair.
     let repair = Rc::new(client.clone());
     let policies = Arc::new(HostPolicies::default());
-    let provider = ProductionResources::open(resources)?;
+    let provider = ProductionResources::open(resources, config.client_options())?;
     let factory = WorkflowCreatorFactory::new(
         provider,
         policies.clone(),
@@ -349,6 +359,9 @@ async fn run(
 /// storage and artifacts are the ones this worker serves every request with.
 struct ProductionResources {
     control_url: String,
+    /// The same bounds and plaintext allowance the manager client carries: a
+    /// hold client towards Control is bound by the one list this process has.
+    client_options: ClientOptions,
     journal: JournalLocation,
     service_auth: Arc<ServiceAuth>,
     db: Arc<DbService>,
@@ -359,7 +372,7 @@ struct ProductionResources {
 }
 
 impl ProductionResources {
-    fn open(resources: HostResources) -> Result<Self, String> {
+    fn open(resources: HostResources, client_options: ClientOptions) -> Result<Self, String> {
         let objects = StorageStore::open(&resources.storage)
             .map_err(|error| format!("workflow payload storage: {error}"))?;
         let meter = Some(resources.meter.clone());
@@ -376,6 +389,7 @@ impl ProductionResources {
         peers.push(Arc::new(zeroship_runtime::auth::AuthPlugin));
         Ok(Self {
             control_url: resources.control_url,
+            client_options,
             service_auth: resources.service_auth,
             db: resources.db_service,
             objects,
@@ -427,7 +441,7 @@ impl WorkflowResourceProvider for ProductionResources {
             &self.control_url,
             self.service_auth.clone(),
             scope,
-            client_options(),
+            self.client_options.clone(),
         )?;
         let deployments = AppDeployments::new(
             self.blob_store.clone(),

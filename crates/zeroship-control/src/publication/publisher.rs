@@ -26,6 +26,7 @@ use std::{
 };
 use zeroship_core::{
     app_id::AppId,
+    config::PlaintextPeers,
     service_peers::ServiceAuth,
     workflow_coordination::Revision,
     workflow_jobs::{DeploymentId, JobOperation, JobSpec},
@@ -473,7 +474,8 @@ pub enum StartError {
     Unsigned,
     #[error(
         "control.workflow_coordinator_url is not a usable workflow coordinator origin ({0}); \
-         use an https origin without path, query or credentials, or http on a loopback address"
+         use an https origin without path, query or credentials, or http on a loopback \
+         address or on an origin named in plaintext_peers"
     )]
     Coordinator(ManagerError),
     #[error("invalid lifecycle publisher bounds: {0}")]
@@ -487,8 +489,23 @@ pub enum StartError {
 ///
 /// # Errors
 /// Refuses an origin the manager client would refuse.
-pub fn validate_coordinator(url: &str) -> Result<(), StartError> {
-    Transport::validate_config(url, Options::default()).map_err(StartError::Coordinator)
+pub fn validate_coordinator(url: &str, options: &Options) -> Result<(), StartError> {
+    Transport::validate_config(url, options).map_err(StartError::Coordinator)
+}
+
+/// The exchange bounds and plaintext allowance every workflow client this
+/// process builds is bound by.
+///
+/// One value for the process, because `plaintext_peers` is one operator
+/// decision: a second construction site is a second place the allowance could
+/// be omitted, and omitting it fails closed but silently on a deployment that
+/// asked for it.
+#[must_use]
+pub fn coordinator_options(plaintext_peers: PlaintextPeers) -> Options {
+    Options {
+        plaintext_peers,
+        ..Options::default()
+    }
 }
 
 /// Start delivering lifecycle intents on one of the shared catalog's threads,
@@ -501,17 +518,18 @@ pub async fn start(
     catalog: &Catalog,
     service_auth: Arc<ServiceAuth>,
     coordinator_url: &str,
+    options: Options,
     config: PublisherConfig,
 ) -> Result<(), StartError> {
     config.validate().map_err(StartError::Config)?;
-    validate_coordinator(coordinator_url)?;
+    validate_coordinator(coordinator_url, &options)?;
     // Built here to refuse, and again on the catalog thread to use: the HTTP
     // client's pooled streams belong to the thread that opens them.
-    manager(coordinator_url, service_auth.clone())?;
+    manager(coordinator_url, service_auth.clone(), options.clone())?;
     let url = coordinator_url.to_owned();
     catalog
         .spawn(move |database, closing| {
-            let manager = manager(&url, service_auth)
+            let manager = manager(&url, service_auth, options.clone())
                 .map_err(|_| CatalogError::Storage("the workflow manager client was refused"))?;
             let publisher = Publisher::new(database, manager, config)?;
             Ok(Box::pin(serve(publisher, closing)))
@@ -523,8 +541,12 @@ pub async fn start(
 /// The manager client publication would use. Building one is the signer
 /// check: the client refuses a missing signer and a signer that is not
 /// Control's, which are the two ways the schedule routes are unreachable.
-fn manager(url: &str, auth: Arc<ServiceAuth>) -> Result<ControlCoordinator, StartError> {
-    ControlCoordinator::new(url, auth, Options::default()).map_err(|error| match error {
+fn manager(
+    url: &str,
+    auth: Arc<ServiceAuth>,
+    options: Options,
+) -> Result<ControlCoordinator, StartError> {
+    ControlCoordinator::new(url, auth, options).map_err(|error| match error {
         ManagerError::Unauthenticated => StartError::Unsigned,
         other => StartError::Coordinator(other),
     })
@@ -653,16 +675,21 @@ mod tests {
     #[test]
     fn startup_refuses_an_unsigned_control_and_an_unusable_coordinator() {
         const ORIGIN: &str = "http://127.0.0.1:9093";
-        assert!(validate_coordinator(ORIGIN).is_ok());
-        assert!(manager(ORIGIN, signer(CONTROL_SERVICE_NAME)).is_ok());
+        let default = coordinator_options(PlaintextPeers::default());
+        assert!(validate_coordinator(ORIGIN, &default).is_ok());
+        assert!(manager(ORIGIN, signer(CONTROL_SERVICE_NAME), default.clone()).is_ok());
 
         assert!(matches!(
-            manager(ORIGIN, Arc::new(ServiceAuth::unconfigured())),
+            manager(
+                ORIGIN,
+                Arc::new(ServiceAuth::unconfigured()),
+                default.clone()
+            ),
             Err(StartError::Unsigned)
         ));
         // The schedule routes accept only Control's own signer.
         assert!(matches!(
-            manager(ORIGIN, signer(WORKER_SERVICE_NAME)),
+            manager(ORIGIN, signer(WORKER_SERVICE_NAME), default.clone()),
             Err(StartError::Unsigned)
         ));
         for origin in [
@@ -675,18 +702,45 @@ mod tests {
         ] {
             assert!(
                 matches!(
-                    validate_coordinator(origin),
+                    validate_coordinator(origin, &default),
                     Err(StartError::Coordinator(ManagerError::InvalidConfig))
                 ),
                 "{origin}"
             );
             assert!(
                 matches!(
-                    manager(origin, signer(CONTROL_SERVICE_NAME)),
+                    manager(origin, signer(CONTROL_SERVICE_NAME), default.clone()),
                     Err(StartError::Coordinator(ManagerError::InvalidConfig))
                 ),
                 "{origin}"
             );
         }
+    }
+
+    /// The one-variable control at Control's boot gate: ONE options value
+    /// naming one origin, and two coordinator URLs judged by it.
+    #[test]
+    fn a_named_plaintext_coordinator_is_admitted_and_an_unnamed_one_is_refused() {
+        const NAMED: &str = "http://workflow:9093";
+        const UNNAMED: &str = "http://coordinator.internal:9093";
+        let options = coordinator_options(
+            std::iter::once(NAMED)
+                .map(|origin| origin.parse().expect("a valid plaintext peer"))
+                .collect(),
+        );
+
+        assert!(validate_coordinator(NAMED, &options).is_ok());
+        assert!(manager(NAMED, signer(CONTROL_SERVICE_NAME), options.clone()).is_ok());
+        assert!(matches!(
+            validate_coordinator(UNNAMED, &options),
+            Err(StartError::Coordinator(ManagerError::InvalidConfig))
+        ));
+
+        // The control: the SAME admitted origin under the default options is
+        // refused, so the admission above is the list's doing.
+        assert!(matches!(
+            validate_coordinator(NAMED, &coordinator_options(PlaintextPeers::default())),
+            Err(StartError::Coordinator(ManagerError::InvalidConfig))
+        ));
     }
 }

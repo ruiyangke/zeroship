@@ -26,6 +26,7 @@ use zeroship_core::workflow_coordination::{
     TransitionRun, TransitionedRun, WorkerId, AUDIENCE,
 };
 use zeroship_core::{
+    config::PlaintextPeers,
     schema_bundle::{EnsureJournal, SchemaBundleOutcome},
     service_assertion::ServiceIssuer,
     service_identity::endpoints,
@@ -33,12 +34,17 @@ use zeroship_core::{
     workflow_policy::{MAX_INPUT_BYTES_CEILING, MAX_JOURNAL_BYTES_CEILING},
 };
 
-/// Bounds the complete exchange, including streamed error bodies.
-#[derive(Clone, Copy, Debug)]
+/// Bounds the complete exchange, including streamed error bodies, and the
+/// peers this process may reach over plaintext HTTP.
+#[derive(Clone, Debug)]
 pub struct Options {
     pub timeout: Duration,
     pub max_request_bytes: usize,
     pub max_response_bytes: usize,
+    /// Origins an operator named as reachable in clear. Empty by default, and
+    /// the default is the whole deployment that configures nothing: the fence
+    /// in [`Transport`] then admits HTTPS and literal loopback alone.
+    pub plaintext_peers: PlaintextPeers,
 }
 
 impl Default for Options {
@@ -53,6 +59,7 @@ impl Default for Options {
             timeout: Duration::from_secs(5),
             max_request_bytes: MAX_INPUT_BYTES_CEILING,
             max_response_bytes: MAX_JOURNAL_BYTES_CEILING,
+            plaintext_peers: PlaintextPeers::default(),
         }
     }
 }
@@ -107,7 +114,8 @@ pub struct WorkerCoordinator {
 
 impl WorkerCoordinator {
     /// Remote coordinators require HTTPS with system certificate verification.
-    /// HTTP is accepted only for literal loopback addresses used by local hosts.
+    /// HTTP reaches a literal loopback address, or an origin the options named
+    /// in `plaintext_peers`.
     ///
     /// # Errors
     /// Rejects ambiguous endpoints, empty bounds and missing worker instance keys.

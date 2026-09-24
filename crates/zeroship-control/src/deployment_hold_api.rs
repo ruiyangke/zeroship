@@ -47,15 +47,15 @@ impl DeploymentHoldApi {
     ///
     /// # Errors
     /// Refuses unavailable deployment metadata or invalid coordinator endpoints.
-    pub async fn connect(state: &AppState, coordinator_url: &str) -> Result<Self, DeploymentError> {
+    pub async fn connect(
+        state: &AppState,
+        coordinator_url: &str,
+        options: Options,
+    ) -> Result<Self, DeploymentError> {
         let coordinator = if state.service_auth.signing_identity().is_some() {
             Some(
-                ControlCoordinator::new(
-                    coordinator_url,
-                    state.service_auth.clone(),
-                    Options::default(),
-                )
-                .map_err(coordination_error)?,
+                ControlCoordinator::new(coordinator_url, state.service_auth.clone(), options)
+                    .map_err(coordination_error)?,
             )
         } else {
             None

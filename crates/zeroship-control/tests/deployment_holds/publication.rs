@@ -20,6 +20,7 @@ use zeroship_control::{
     },
 };
 use zeroship_core::{
+    config::PlaintextPeers,
     workflow_coordination::{Revision, UnixMillis},
     workflow_jobs::{DeploymentId, JobId, JobOperation, JobSpec},
     workflow_schedules::{ActivateSchedules, DisableSchedules, RegisterSchedules},
@@ -1154,7 +1155,14 @@ async fn publication_starts_only_with_a_signer_and_a_usable_coordinator() {
     let manager = fixture.coordinator().await;
     let catalog = fixture.state.registry.catalog();
     let refusal = |auth: Arc<ServiceAuth>, url: String, config: PublisherConfig| async move {
-        publisher::start(catalog, auth, &url, config).await
+        publisher::start(
+            catalog,
+            auth,
+            &url,
+            publisher::coordinator_options(PlaintextPeers::default()),
+            config,
+        )
+        .await
     };
     assert!(matches!(
         refusal(
@@ -1195,6 +1203,7 @@ async fn publication_starts_only_with_a_signer_and_a_usable_coordinator() {
         catalog,
         fixture.state.service_auth.clone(),
         &origin(&manager),
+        publisher::coordinator_options(PlaintextPeers::default()),
         PublisherConfig {
             interval: Duration::from_millis(50),
             ..PublisherConfig::default()

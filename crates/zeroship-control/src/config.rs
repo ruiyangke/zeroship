@@ -10,7 +10,8 @@ use std::path::{Path, PathBuf};
 
 use zeroship_core::config::{
     default_http_threads, zeroship_config, AuthProviderKind, BootstrapControl, CheckFormat,
-    CommandControl, ObservabilityControls, Operational, OriginScheme, OverlaySelector, Secret,
+    CommandControl, ObservabilityControls, Operational, OriginScheme, OverlaySelector,
+    PlaintextPeer, Secret,
 };
 use zeroship_core::observability::LogFormat;
 
@@ -77,9 +78,20 @@ pub struct ControlSettings {
 
     /// Workflow coordinator used to verify app placement and queue management,
     /// and to publish app lifecycle intents. An origin the manager client
-    /// would refuse refuses the boot.
+    /// would refuse refuses the boot: HTTPS, or plain HTTP to a literal
+    /// loopback address or to an origin named in `plaintext_peers`.
     #[config(name = "control.workflow_coordinator_url", default = "http://127.0.0.1:9093".to_owned())]
     pub workflow_coordinator_url: Operational<String>,
+
+    /// Exact `http://host[:port]` origins this process may reach in clear.
+    ///
+    /// Empty (the default) admits HTTPS and literal loopback alone. An entry
+    /// authorizes plaintext to that ORIGIN for every workflow client this
+    /// process builds, and the service assertion each carries crosses the
+    /// network readable; name only origins whose whole network path is trusted.
+    #[arg(value_delimiter = ',')]
+    #[config(shared = PLAINTEXT_PEERS, default = Vec::new())]
+    pub plaintext_peers: Operational<Vec<PlaintextPeer>>,
 
     /// Catalog sessions the whole process may hold at once, each on a thread
     /// of its own, and so also the catalog transactions that run at once.

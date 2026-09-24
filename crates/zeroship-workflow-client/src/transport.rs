@@ -24,18 +24,47 @@ pub struct Transport {
     options: Options,
 }
 
+/// Why an origin passed the fence, so the one predicate that decides it is
+/// also the one thing that reports it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Admission {
+    /// HTTPS, or plain HTTP to a literal loopback address.
+    Fenced,
+    /// Plain HTTP to an origin the operator named.
+    NamedPlaintextPeer,
+}
+
 impl Transport {
     /// Bind a metadata peer origin, service signer, audience and exchange limits.
     ///
     /// # Errors
-    /// Rejects ambiguous origins, plaintext remote peers and empty limits.
+    /// Rejects ambiguous origins, empty limits, and plaintext remote peers the
+    /// options did not name.
     pub fn new(
         raw: &str,
         auth: Arc<ServiceAuth>,
         audience: ServiceIssuer,
         options: Options,
     ) -> Result<Self, Error> {
-        let base = Self::configuration(raw, options)?;
+        let (base, admission) = Self::configuration(raw, &options)?;
+        if admission == Admission::NamedPlaintextPeer {
+            // Emitted from the CONSTRUCTOR rather than from each service's
+            // `main`, because this is the one place a client that will speak
+            // plaintext comes into existence: a process cannot reach a named
+            // peer without passing through here, so the posture cannot be
+            // active and unreported.
+            //
+            // Not from the validation path below. That path serves
+            // `--check-config`, whose stdout is a machine-read JSON report, and
+            // a log line there would be another JSON object on the same stream.
+            // The dry run states the posture in its own `plaintext_peers`
+            // report field instead.
+            tracing::warn!(
+                peer = %base.origin().ascii_serialization(),
+                "workflow coordination transport admitted a named plaintext peer; \
+                 this exchange and its service assertion cross the network in clear"
+            );
+        }
         Ok(Self {
             base,
             auth,
@@ -49,18 +78,47 @@ impl Transport {
     ///
     /// # Errors
     /// Rejects the same origin and bounds as [`Self::new`].
-    pub fn validate_config(raw: &str, options: Options) -> Result<(), Error> {
+    pub fn validate_config(raw: &str, options: &Options) -> Result<(), Error> {
         Self::configuration(raw, options).map(|_| ())
     }
 
-    fn configuration(raw: &str, options: Options) -> Result<Url, Error> {
+    fn configuration(raw: &str, options: &Options) -> Result<(Url, Admission), Error> {
         let base = Url::parse(raw).map_err(|_| Error::InvalidConfig)?;
         let loopback = match base.host() {
             Some(Host::Ipv4(ip)) => ip.is_loopback(),
             Some(Host::Ipv6(ip)) => ip.is_loopback(),
             _ => false,
         };
-        if !(base.scheme() == "https" || (base.scheme() == "http" && loopback))
+        // THE FENCE. HTTPS always; plain HTTP only to a literal loopback
+        // address, or to an exact origin an operator named in
+        // `plaintext_peers`. Nothing here resolves a name or classifies an
+        // address range, so a name that resolves elsewhere tomorrow cannot move
+        // the fence on its own.
+        //
+        // WHAT THE LIST CANNOT DO. It decides WHICH peer may be reached in
+        // clear. It cannot make plaintext safe. Service assertions on these
+        // edges are verified under the full profile with a single-use `jti`
+        // (`zeroship_core::service_assertion`), so straight replay is closed -
+        // but an assertion carries `iss, sub, aud, exp, iat, jti` and NO digest
+        // of the request it accompanies. An on-path attacker inside that
+        // network therefore reads every exchange in clear and can lift a live
+        // assertion onto a MODIFIED body within its window, winning the `jti`
+        // race against the legitimate request. That is the full authority of
+        // the calling service, once per observed request.
+        //
+        // WHAT ITS GRANULARITY IS. The list belongs to the PROCESS, not to a
+        // role or a setting. Naming an origin so one client can reach it
+        // authorizes EVERY client this process builds to speak plaintext to
+        // that origin. In compose that is harmless only because the origins
+        // happen to be distinct - it is a fact about that deployment, not a
+        // property enforced here.
+        //
+        // So every origin on this list is one whose entire network path is
+        // trusted. Internal TLS is the end state this DEFERS, not one it
+        // replaces; a reader adding a fourth origin is signing up for the two
+        // paragraphs above, for that origin's whole path.
+        let plaintext_peer = base.scheme() == "http" && options.plaintext_peers.admits(&base);
+        if !(base.scheme() == "https" || (base.scheme() == "http" && loopback) || plaintext_peer)
             || base.host().is_none()
             || !base.username().is_empty()
             || base.password().is_some()
@@ -73,7 +131,14 @@ impl Transport {
         {
             return Err(Error::InvalidConfig);
         }
-        Ok(base)
+        Ok((
+            base,
+            if plaintext_peer {
+                Admission::NamedPlaintextPeer
+            } else {
+                Admission::Fenced
+            },
+        ))
     }
 
     /// One authenticated exchange, returning its status and bounded body.

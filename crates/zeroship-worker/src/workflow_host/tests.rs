@@ -7,6 +7,7 @@ fn config(manager_url: &str) -> WorkflowHostConfig {
         manager_url: manager_url.to_owned(),
         capacity: 8,
         slots: 2,
+        plaintext_peers: PlaintextPeers::default(),
     }
 }
 
@@ -15,7 +16,7 @@ fn config(manager_url: &str) -> WorkflowHostConfig {
 // plaintext manager anywhere but this machine would hand those assertions to
 // the network.
 #[test]
-fn a_manager_origin_is_https_or_plain_http_only_to_a_literal_loopback_address() {
+fn a_manager_origin_is_https_or_plain_http_to_a_literal_loopback_address_by_default() {
     for url in [
         "https://workflow.example",
         "https://workflow.example:9443",
@@ -43,6 +44,40 @@ fn a_manager_origin_is_https_or_plain_http_only_to_a_literal_loopback_address() 
             .expect_err("an unusable manager origin is refused");
         assert!(error.contains("worker.workflow_manager_url"), "{url}: {error}");
     }
+}
+
+// The one-variable control at the worker's own configuration surface: ONE
+// settings value naming one origin, and two manager URLs judged by it.
+//
+// The list also reaches the deployment-hold client this host builds per
+// assignment, which `client_options` is what ties together; that client is
+// constructed against Control's origin rather than the manager's, so it is not
+// reachable from this pure check.
+#[test]
+fn a_named_plaintext_peer_is_a_usable_manager_origin_and_an_unnamed_one_is_not() {
+    let named: PlaintextPeers = std::iter::once("http://workflow:9093")
+        .map(|origin| origin.parse().expect("a valid plaintext peer"))
+        .collect();
+
+    let mut admitted = config("http://workflow:9093");
+    admitted.plaintext_peers = named.clone();
+    admitted
+        .validate()
+        .expect("a manager origin this worker named is usable");
+
+    let mut refused = config("http://control:9090");
+    refused.plaintext_peers = named;
+    let error = refused
+        .validate()
+        .expect_err("an origin this worker did not name stays refused");
+    assert!(
+        error.contains("worker.workflow_manager_url"),
+        "the refusal names the setting: {error}"
+    );
+
+    // The control on the control: the SAME admitted URL under the default
+    // settings is refused, so the admission above is the list's doing.
+    assert!(config("http://workflow:9093").validate().is_err());
 }
 
 // Capacity is advertised to the manager as the placements this worker will

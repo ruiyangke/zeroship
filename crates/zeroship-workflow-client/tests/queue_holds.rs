@@ -332,7 +332,7 @@ async fn queue_hold_configuration_requires_the_workflow_role_and_secure_origin()
             "{origin}"
         );
         assert_eq!(
-            Transport::validate_config(origin, Options::default()),
+            Transport::validate_config(origin, &Options::default()),
             Err(Error::InvalidConfig)
         );
     }
@@ -351,11 +351,11 @@ async fn queue_hold_configuration_requires_the_workflow_role_and_secure_origin()
         },
     ] {
         assert!(matches!(
-            QueueDeploymentHolds::new("https://control.example", auth.clone(), options),
+            QueueDeploymentHolds::new("https://control.example", auth.clone(), options.clone()),
             Err(Error::InvalidConfig)
         ));
         assert_eq!(
-            Transport::validate_config("https://control.example", options),
+            Transport::validate_config("https://control.example", &options),
             Err(Error::InvalidConfig)
         );
     }
@@ -366,7 +366,7 @@ async fn queue_hold_configuration_requires_the_workflow_role_and_secure_origin()
     ] {
         assert!(QueueDeploymentHolds::new(origin, auth.clone(), Options::default()).is_ok());
         assert_eq!(
-            Transport::validate_config(origin, Options::default()),
+            Transport::validate_config(origin, &Options::default()),
             Ok(())
         );
     }

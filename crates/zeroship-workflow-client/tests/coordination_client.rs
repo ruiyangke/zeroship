@@ -364,7 +364,7 @@ async fn transport_bounds_bodies_and_time_and_never_follows_redirects() {
     };
     let oversized = json!({"secret":"x".repeat(256)});
     for status in [200, 503] {
-        reply(response(status, &oversized), options, async |client| {
+        reply(response(status, &oversized), options.clone(), async |client| {
             assert_eq!(
                 client.register(&registration()).await.unwrap_err(),
                 Error::ResponseTooLarge
@@ -378,7 +378,7 @@ async fn transport_bounds_bodies_and_time_and_never_follows_redirects() {
         chunk.len()
     )
     .into_bytes();
-    reply(bytes, options, async |client| {
+    reply(bytes, options.clone(), async |client| {
         assert_eq!(
             client.register(&registration()).await.unwrap_err(),
             Error::ResponseTooLarge
@@ -393,7 +393,7 @@ async fn transport_bounds_bodies_and_time_and_never_follows_redirects() {
             bytes,
             Options {
                 timeout: Duration::from_millis(100),
-                ..options
+                ..options.clone()
             },
             async |client| {
                 assert_eq!(
@@ -411,7 +411,7 @@ async fn transport_bounds_bodies_and_time_and_never_follows_redirects() {
             sink.local_addr().unwrap()
         )
         .into_bytes();
-        reply(bytes, options, async |client| {
+        reply(bytes, options.clone(), async |client| {
             assert_eq!(
                 client.register(&registration()).await.unwrap_err(),
                 Error::InvalidResponse

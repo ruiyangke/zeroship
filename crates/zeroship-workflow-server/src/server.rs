@@ -18,6 +18,7 @@ use std::{
 use zeroship_authn::service_replay::SharedClientReplayStore;
 use zeroship_core::{
     app_id::AppId,
+    config::PlaintextPeers,
     service_assertion::ServiceAssertionVerifier,
     service_peers::{
         service_issuer, ServiceAuth, ServiceKeyring, CONTROL_SERVICE_NAME, WORKFLOW_SERVICE_NAME,
@@ -47,6 +48,8 @@ pub struct ServerOptions {
     pub policy_cache_entries: NonZeroUsize,
     pub max_request_bytes: usize,
     pub coordinator: Options,
+    /// Origins this process may reach over plaintext HTTP. Empty by default.
+    pub plaintext_peers: PlaintextPeers,
     replay_sweep: Duration,
     pub driver: DriverOptions,
     pub driver_interval: Duration,
@@ -120,7 +123,11 @@ impl ServerOptions {
             ..DriverOptions::default()
         };
         driver.validate()?;
-        Transport::validate_config(settings.control_url.get(), client_options(coordinator))?;
+        let plaintext_peers = PlaintextPeers::from(settings.plaintext_peers.get().clone());
+        Transport::validate_config(
+            settings.control_url.get(),
+            &client_options(coordinator, &plaintext_peers),
+        )?;
         Ok(Self {
             listen,
             http_threads,
@@ -128,6 +135,7 @@ impl ServerOptions {
             policy_cache_entries,
             max_request_bytes,
             coordinator,
+            plaintext_peers,
             replay_sweep,
             driver,
             driver_interval,
@@ -172,7 +180,13 @@ pub async fn run(settings: WorkflowSettings, options: ServerOptions) -> Result<(
     let outbound = Arc::new(ServiceAuth::new(keyring, verifier.clone()));
     let control_url = settings.control_url.get().clone();
     let migrate_url = settings.migrate_url.get().clone();
-    let holds = ControlHolds::new(&control_url, outbound.clone(), options.coordinator)?;
+    let plaintext_peers = options.plaintext_peers.clone();
+    let holds = ControlHolds::new(
+        &control_url,
+        outbound.clone(),
+        options.coordinator,
+        &plaintext_peers,
+    )?;
     // ONE observation store for the whole process, cloned into every HTTP
     // thread's state. A thread's database pool is its own; the observation an
     // app's policy is granted from is not, because the deadline a worker
@@ -202,11 +216,17 @@ pub async fn run(settings: WorkflowSettings, options: ServerOptions) -> Result<(
         let outbound = outbound.clone();
         let control_url = control_url.clone();
         let migrate_url = migrate_url.clone();
+        let plaintext_peers = plaintext_peers.clone();
         let observations = observations.clone();
         async move {
             web::App::new()
                 .state_factory(async move || {
-                    let holds = ControlHolds::new(&control_url, outbound.clone(), coordinator)?;
+                    let holds = ControlHolds::new(
+                        &control_url,
+                        outbound.clone(),
+                        coordinator,
+                        &plaintext_peers,
+                    )?;
                     // Absent when no migration-service origin is configured. The
                     // journal endpoint then refuses, rather than answering as
                     // though a journal had been provisioned.
@@ -216,7 +236,7 @@ pub async fn run(settings: WorkflowSettings, options: ServerOptions) -> Result<(
                         Some(crate::journal::Journal::new(
                             &migrate_url,
                             outbound,
-                            client_options(coordinator),
+                            client_options(coordinator, &plaintext_peers),
                         )?)
                     };
                     let eligibility = Rc::new(connect_eligibility(&url, coordinator).await?);
@@ -442,9 +462,10 @@ fn report_tick(report: TickReport) {
     }
 }
 
-fn client_options(options: Options) -> ClientOptions {
+fn client_options(options: Options, plaintext_peers: &PlaintextPeers) -> ClientOptions {
     ClientOptions {
         timeout: options.command_timeout,
+        plaintext_peers: plaintext_peers.clone(),
         ..ClientOptions::default()
     }
 }
@@ -452,8 +473,13 @@ fn client_options(options: Options) -> ClientOptions {
 #[derive(Debug)]
 struct ControlHolds(QueueDeploymentHolds);
 impl ControlHolds {
-    fn new(url: &str, auth: Arc<ServiceAuth>, options: Options) -> Result<Self, ManagerError> {
-        QueueDeploymentHolds::new(url, auth, client_options(options))
+    fn new(
+        url: &str,
+        auth: Arc<ServiceAuth>,
+        options: Options,
+        plaintext_peers: &PlaintextPeers,
+    ) -> Result<Self, ManagerError> {
+        QueueDeploymentHolds::new(url, auth, client_options(options, plaintext_peers))
             .map(Self)
             .map_err(retention_error)
     }

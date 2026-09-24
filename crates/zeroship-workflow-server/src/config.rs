@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use zeroship_core::config::{
     zeroship_config, BootstrapControl, CheckFormat, CommandControl, ObservabilityControls,
-    Operational, OverlaySelector, Secret,
+    Operational, OverlaySelector, PlaintextPeer, Secret,
 };
 use zeroship_core::observability::LogFormat;
 
@@ -40,8 +40,20 @@ pub struct WorkflowSettings {
     #[config(name = "workflow.service_key_file", default = PathBuf::new())]
     pub service_key_file: Operational<PathBuf>,
     /// Control origin used for deployment queue retention.
+    ///
+    /// HTTPS, or plain HTTP to a literal loopback address or to an origin named
+    /// in `plaintext_peers`.
     #[config(name = "workflow.control_url", default = String::new())]
     pub control_url: Operational<String>,
+    /// Exact `http://host[:port]` origins this process may reach in clear.
+    ///
+    /// Empty (the default) admits HTTPS and literal loopback alone. An entry
+    /// authorizes plaintext to that ORIGIN for every client this process
+    /// builds, and the service assertion it carries crosses the network
+    /// readable; name only origins whose whole network path is trusted.
+    #[arg(value_delimiter = ',')]
+    #[config(shared = PLAINTEXT_PEERS, default = Vec::new())]
+    pub plaintext_peers: Operational<Vec<PlaintextPeer>>,
     /// Migration-service origin used to install and upgrade app journals.
     ///
     /// Empty disables the journal endpoint, loudly: Control and workers are told

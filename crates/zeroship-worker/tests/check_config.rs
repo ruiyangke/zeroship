@@ -223,7 +223,17 @@ fn a_workflow_host_is_refused_without_a_usable_manager_origin_or_creator_resourc
         report(&unset.stdout).get("workflow_host_configured"),
         Some(&serde_json::Value::Bool(false))
     );
+    // The plaintext-peer posture is reported EMPTY here, not absent. A field
+    // that only appeared once the fence was relaxed could never be read as
+    // "the fence is intact".
+    assert_eq!(
+        report(&unset.stdout)
+            .get("plaintext_peers")
+            .and_then(serde_json::Value::as_str),
+        Some("")
+    );
 }
+
 
 #[test]
 fn worker_rejects_shared_overlay_selectors() {

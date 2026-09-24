@@ -81,11 +81,13 @@ impl DeployJournal {
     /// # Errors
     /// Refuses an origin the manager client refuses and a process that carries
     /// no Control service signer.
-    pub fn connect(url: &str, auth: Arc<ServiceAuth>) -> Result<Self, ManagerError> {
+    pub fn connect(
+        url: &str,
+        auth: Arc<ServiceAuth>,
+        options: Options,
+    ) -> Result<Self, ManagerError> {
         Ok(Self::new(Rc::new(ControlCoordinator::new(
-            url,
-            auth,
-            Options::default(),
+            url, auth, options,
         )?)))
     }
 
