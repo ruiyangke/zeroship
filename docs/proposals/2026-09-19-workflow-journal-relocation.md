@@ -530,9 +530,19 @@ protocol. This extends a working client rather than inventing one.
    writer of that table, so the rows are absent too until something produces them. That is why
    `start` having no endpoint is a sequencing fact and not a gap in step 3.
 
-6. **Delete the creator-schema path** - `ensure_journal` and its route, the journal bundle,
-   `JournalManager`, the worker's repair path, and `SCHEMA_PLACEHOLDER` on the PostgreSQL side.
-   Only once step 5 is green.
+6. **Delete the creator-schema path**, and say where each piece lives, because they are not all
+   in the workflow crates: `ensure_journal` and its route in
+   `crates/zeroship-workflow-server/src/api.rs`, the journal bundle and `SCHEMA_PLACEHOLDER` in
+   `crates/zeroship-workflow-server/src/journal.rs` and
+   `crates/zeroship-workflow-schema/src/lib.rs`, `JournalManager` in
+   `crates/zeroship-control/src/publication/journal.rs`, and the worker's repair path in
+   `crates/zeroship-worker/src/workflow_creator.rs`. Only once step 5 is green.
+
+   This step also ends an exposure rather than only removing code. `ensure_journal` is the one
+   worker-authenticated endpoint that reaches no placement, app or zone, so the registry key
+   lookup is its whole gate; a lapsed instance was admitted there indefinitely until that lookup
+   learned the lease. The lease predicate is the fix that matters now, and deleting the endpoint
+   is what removes the shape.
 
 7. **Drop `zeroship-data-orm` from the crate the worker links.** The last step of moving the
    `service/` tree, not a deletion available earlier.
