@@ -1571,6 +1571,7 @@ fn main() -> std::io::Result<()> {
             // human is the last owner of anything.
             .configure(erasure::configure)
             .configure(zeroship_control::deployment_hold_api::configure)
+            .configure(zeroship_control::app_facts_api::configure)
             .service(
                 web::resource("/internal/webhooks/stripe")
                     // Give the Bytes extractor headroom above the handler's body cap so

@@ -6,6 +6,8 @@
 
 #[path = "support/platform.rs"]
 mod platform;
+#[path = "support/app_facts.rs"]
+mod app_facts;
 #[allow(
     dead_code,
     reason = "shared process fixture supports other failure probes"

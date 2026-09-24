@@ -8,13 +8,9 @@
     reason = "lifecycle reads stay on the manager's owning compio runtime"
 )]
 
-use crate::Error;
-use std::{collections::BTreeSet, fmt::Debug, future::Future, pin::Pin};
+use crate::{Error, app_facts::AppFactsSource};
+use std::{collections::BTreeSet, fmt::Debug, future::Future, pin::Pin, rc::Rc};
 use zeroship_core::app_id::AppId;
-use zeroship_data_orm::{
-    orm::{Database, Entity, FromRow},
-    schema::Schema,
-};
 
 /// Reports the apps whose terminal deletion Control recorded.
 pub trait AppLifecycle: Debug {
@@ -40,72 +36,26 @@ impl AppLifecycle for Undeletable {
     }
 }
 
-zeroship_data_orm::orm::schema! {
-    source {
-        apps {
-            #[orm(primary_key)]
-            id: Text,
-            deleted_at: Nullable<Timestamp>,
-        }
-    }
-}
-use source::apps;
-
-/// Native metadata for a host-provisioned Control database binding. The reader
-/// selects only app identity and the deletion marker.
+/// Control's recorded deletions, read through the shared facts capability.
 ///
-/// # Errors
-/// Refuses invalid native model declarations.
-pub fn collections() -> Result<Schema, Error> {
-    let schema = Schema::new(vec![(
-        apps::Entity::COLLECTION.into(),
-        apps::Entity::schema().clone(),
-    )]);
-    schema.validate()?;
-    Ok(schema)
-}
-
-#[derive(FromRow)]
-#[orm(entity = apps)]
-struct Deleted {
-    id: String,
-}
-
-/// Control's app catalog, read through the manager's column grants. It opens
-/// no creator database and writes nothing.
+/// One exchange per pass rather than one per app: the lane hands its whole
+/// candidate page over, and the answer names the rows Control has. The
+/// watermark the answer also carries is ignored here on purpose - the lane
+/// orders nothing against it and publishes no authority from it. Only the
+/// policy ledger spends that guarantee.
 #[derive(Debug, Clone)]
-pub struct ControlLifecycle {
-    database: Database,
+pub struct FactsLifecycle {
+    facts: Rc<dyn AppFactsSource>,
 }
 
-impl ControlLifecycle {
-    /// Bind a Control database provisioned and authorized by the platform host.
-    ///
-    /// # Errors
-    /// Refuses missing or incompatible native collection metadata.
-    pub fn new(database: Database) -> Result<Self, Error> {
-        database.entity::<apps::Entity>()?;
-        Ok(Self { database })
-    }
-
-    /// Verify the deletion marker is readable before the driver relies on it.
-    ///
-    /// # Errors
-    /// Refuses unavailable or unauthorized source storage.
-    pub async fn ready(&self) -> Result<(), Error> {
-        self.database
-            .entity::<apps::Entity>()?
-            .query()
-            .filter(apps::deleted_at.is_not_null())
-            .limit(1)?
-            .all::<Deleted>()
-            .await
-            .map(|_| ())
-            .map_err(|_| Error::Unavailable)
+impl FactsLifecycle {
+    #[must_use]
+    pub const fn new(facts: Rc<dyn AppFactsSource>) -> Self {
+        Self { facts }
     }
 }
 
-impl AppLifecycle for ControlLifecycle {
+impl AppLifecycle for FactsLifecycle {
     fn deleted<'a>(
         &'a self,
         apps: &'a [AppId],
@@ -114,24 +64,14 @@ impl AppLifecycle for ControlLifecycle {
             if apps.is_empty() {
                 return Ok(BTreeSet::new());
             }
-            let limit = i64::try_from(apps.len()).map_err(|_| Error::Capacity)?;
-            let rows = self
-                .database
-                .entity::<apps::Entity>()?
-                .query()
-                .filter(
-                    apps::id
-                        .in_values(apps.iter().map(AppId::as_str))?
-                        .and(apps::deleted_at.is_not_null()),
-                )
-                .limit(limit)?
-                .all::<Deleted>()
-                .await?;
-            rows.into_iter()
-                .map(|row| {
-                    let app = AppId::parse(&row.id).map_err(|_| Error::Storage)?;
-                    if apps.contains(&app) {
-                        Ok(app)
+            let response = self.facts.observe(apps).await?;
+            response
+                .apps
+                .into_iter()
+                .filter(|facts| facts.deleted)
+                .map(|facts| {
+                    if apps.contains(&facts.app_id) {
+                        Ok(facts.app_id)
                     } else {
                         Err(Error::Storage)
                     }

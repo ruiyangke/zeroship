@@ -9,6 +9,8 @@ mod platform;
 
 #[path = "common/deployments.rs"]
 mod deployment_commands;
+#[path = "deployment_holds/app_facts.rs"]
+mod app_facts;
 #[path = "deployment_holds/queue.rs"]
 mod queue_holds;
 #[path = "deployment_holds/collector.rs"]
@@ -419,6 +421,10 @@ impl Fixture {
                         ),
                     )
                     .configure(deployment_hold_api::configure)
+                    // The other route `svc/workflow` reaches on this service.
+                    // It shares this harness because it shares the credential
+                    // and the issuer gate the harness exists to exercise.
+                    .configure(zeroship_control::app_facts_api::configure)
             }
         })
         .await

@@ -9,6 +9,7 @@
 pub mod account_status;
 pub mod api;
 mod app_id;
+pub mod app_facts_api;
 pub mod app_oauth_client;
 pub mod audit;
 pub mod auth_audit;

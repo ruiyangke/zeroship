@@ -41,18 +41,25 @@ export default {
     wm("workflow_rollout_config").check("workflow_rollout_config_id_check").add({ expr: (c) => c("id").eq("global") });
     wm("workflow_rollout_config").check("workflow_rollout_config_validity_check").add({ expr: (c) => c("source_validity_ms").gt(0) });
 
+    // `source_watermark` is where Control's source stood when the inputs behind
+    // `revision` were read. The publication bracket used to get its ordering
+    // free from a single PostgreSQL instance, because the inputs were a second
+    // binding on the same server; they now arrive over Control's app-facts
+    // endpoint, so the order is paid for here instead. `publish` refuses an
+    // observation below the value this column holds.
     wm("workflow_policy_ledger").create({
       columns: {
         id: t.text().required(),
         revision: t.bigInt().required().default(0),
         policy_json: t.json(),
         source_validity_ms: t.bigInt(),
+        source_watermark: t.bigInt(),
       },
       primaryKey: ["id"],
     });
     wm("workflow_policy_ledger").check("workflow_policy_ledger_publication_check").add({
-      expr: (c) => c("revision").eq(0).and(c("policy_json").isNull(), c("source_validity_ms").isNull())
-        .or(c("revision").gt(0).and(c("policy_json").isNotNull(), c("source_validity_ms").isNotNull(), c("source_validity_ms").gt(0))),
+      expr: (c) => c("revision").eq(0).and(c("policy_json").isNull(), c("source_validity_ms").isNull(), c("source_watermark").isNull())
+        .or(c("revision").gt(0).and(c("policy_json").isNotNull(), c("source_validity_ms").isNotNull(), c("source_validity_ms").gt(0), c("source_watermark").isNotNull(), c("source_watermark").ge(0))),
     });
     // The ledger is keyed by app id, a sortable typed id, so it needs the
     // bytewise comparison the platform's identity domains use. The rollout

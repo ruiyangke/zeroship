@@ -42,6 +42,7 @@ pub mod usage_event;
 pub mod user_envelope;
 pub mod worker_join;
 pub mod worker_ring;
+pub mod workflow_app_facts;
 pub mod workflow_coordination;
 pub mod workflow_deployments;
 pub mod workflow_jobs;

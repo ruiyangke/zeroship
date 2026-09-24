@@ -19,15 +19,16 @@ mod cache;
 mod models;
 mod store;
 pub use cache::PolicyObservations;
-pub use store::{ControlPolicyStore, RolloutPolicy};
+pub use store::{ControlPolicyStore, PlanPolicyStore, RolloutPolicy};
 
-/// Native metadata for the Control binding. These projections contain only the
-/// policy contributors the manager's column grants name.
+/// Native metadata for the one Control table an administrative credential
+/// provisions plan policy into. The serving path binds no Control table at
+/// all; its policy inputs arrive over Control's app-facts endpoint.
 ///
 /// # Errors
 /// Refuses invalid native model declarations.
-pub fn collections() -> Result<zeroship_data_orm::schema::Schema, Error> {
-    let schema = models::source::schema();
+pub fn plan_admin_collections() -> Result<zeroship_data_orm::schema::Schema, Error> {
+    let schema = models::plan_admin::schema();
     schema.validate()?;
     Ok(schema)
 }

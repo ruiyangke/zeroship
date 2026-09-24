@@ -16,7 +16,7 @@ use zeroship_core::{schema_name::SchemaName, workflow_policy::AppPolicy};
 use zeroship_data_orm::{
     ConnectOptions, binding::DbBinding, encryption::ProjectKeySource, orm::Database,
 };
-use zeroship_workflow_manager::policy::control::{self, ControlPolicyStore};
+use zeroship_workflow_manager::policy::control::{self, PlanPolicyStore};
 
 #[compio::test]
 async fn startup_preserves_archived_plans_and_complete_workflow_policy() {
@@ -28,45 +28,32 @@ async fn startup_preserves_archived_plans_and_complete_workflow_policy() {
     seed_plans(&registry).await.unwrap();
     let catalog = PlanCatalog::new(registry.clone());
     catalog.archive(&free_plan_id()).await.unwrap();
-    // The store spans Control's plan rows and the workflow service's own
-    // publication schema, so it binds the administrative credential an operator
-    // publishes with rather than either service login.
+    // Plan policy is Control's row, provisioned under the administrative
+    // credential the runbook describes. No service login reaches it: the
+    // workflow role lost its grant on `zeroship.plans` when the policy inputs
+    // moved behind Control's app-facts endpoint.
     let operator_url = fixture
         .runtime_url
         .replacen("zeroship_workflow@", "postgres@", 1);
     let inputs = Database::connect(
         DbBinding::platform(
             "platform",
-            "workflow-policy",
+            "workflow-plan-admin",
             SchemaName::new("zeroship").unwrap(),
         ),
         ConnectOptions::new(&operator_url, ProjectKeySource::unavailable())
             .connection_authority(),
-        control::collections().unwrap(),
+        control::plan_admin_collections().unwrap(),
     )
     .await
     .unwrap();
-    let publication = Database::connect(
-        DbBinding::platform(
-            "workflow-policy-ledger",
-            "workflow-policy-ledger",
-            SchemaName::new("workflow_manager").unwrap(),
-        ),
-        ConnectOptions::new(&operator_url, ProjectKeySource::unavailable())
-            .connection_authority(),
-        control::publication_collections().unwrap(),
-    )
-    .await
-    .unwrap();
-    let operator = ControlPolicyStore::new(inputs, publication).unwrap();
+    let plans = PlanPolicyStore::new(inputs).unwrap();
+    plans.ready().await.unwrap();
     let policy = AppPolicy {
         max_live_runs: 17,
         ..AppPolicy::default()
     };
-    operator
-        .set_plan_policy(&free_plan_id(), &policy)
-        .await
-        .unwrap();
+    plans.set_plan_policy(&free_plan_id(), &policy).await.unwrap();
 
     seed_plans(&registry).await.unwrap();
     assert!(
