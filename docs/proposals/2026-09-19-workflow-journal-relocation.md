@@ -2071,14 +2071,14 @@ part that dates, not the verdict.
   genuine reason.
 
 - **Do not start `MaintenanceLane` before it can run everything it admits.**
-  `Claimant::Maintenance` admits every kind `maintenance_job` dispatches, and five of those -
-  `activate`, `cron`, `management`, `collect` and `release_hold` - reach
-  `self.service.deployments`, which `RunService` does not attach. A started lane would lease
-  those rows away from the worker that can run them and then answer `unavailable()`, holding
-  each for a lease window on every tick. The lane is built and exercised end to end
-  (`crates/zeroship-workflow-server/src/sweeps.rs`) and has no production caller on purpose,
-  until the deployments source lands beside it. Built and unstarted is the correct state here,
-  not an oversight to repair.
+  `Claimant::Maintenance` admits every kind `maintenance_job` dispatches, and five of those reach
+  `self.service.deployments`: `activate`, `cron`, `management` through its `target.rs`,
+  `release_hold`, and `reconcile`'s deployment-holds phase. `collect` is not among them - it wants
+  a `PayloadDeleter` instead. A started lane would lease those rows away from the worker that can
+  run them and then answer `unavailable()`, holding each for a lease window on every tick. The
+  lane is built and exercised end to end (`crates/zeroship-workflow-server/src/sweeps.rs`) and has
+  no production caller on purpose. Built and unstarted is the correct state here, not an oversight
+  to repair.
 
 ---
 
