@@ -939,6 +939,14 @@ protocol. This extends a working client rather than inventing one.
      `activate_job`, `cron_job`, `management_job` through `management/target.rs`,
      `release_hold_job`, and `reconcile_job`'s deployment-holds phase; the lane that claims them
      is what makes the grant legitimate.
+     The holds in question are the journal's own, not Control's catalog.
+     `admission_generation` (`crates/zeroship-workflow/src/service/deployment_retention.rs`)
+     reads a hold INTENT row through `read_intent`, while the hold against the catalog is taken
+     over Control's endpoint by `RemoteDeploymentHolds`
+     (`crates/zeroship-workflow/src/deployment_holds/remote.rs`). The grant file is explicit that
+     the catalog stays Control's - "the holds it takes against that catalog go through Control's
+     queue endpoint, under Control's credential and inside Control's row lock" - so what moves is
+     the intent side, and that is why the worker needs endpoints for it once it holds no journal.
    - **Then the payload reserve and confirm**, since `start` and `stage` share that one
      mechanism, and the confirm must gain the `state` and `expires_at` predicates it does not
      need while a lock is held across the write. Predicates alone do not make it a compare and
