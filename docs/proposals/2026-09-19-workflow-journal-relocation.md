@@ -761,7 +761,7 @@ part that dates, not the verdict.
 |---|---|---|
 | 1 | ANSWERED - payload is the gate, not latency | nothing; re-run the instrument rather than trusting the prose |
 | 2 | DECIDED - a ceiling governs both sides | nothing |
-| 3 | DECIDED - its own database | **what verifies a worker** once `active_key` goes |
+| 3 | DECIDED - its own database | the registry read STAYS by decision; severing is later work |
 | 4 | DECIDED - zone-local | nothing; the work it waits on is Open 3's |
 | 5 | pre-launch, no in-flight runs | the answer expires at launch |
 | 6 | ANSWERED as a description | nothing; the credential question it raised moved to Open 3 |
@@ -1076,18 +1076,27 @@ part that dates, not the verdict.
    Moving the `apps` reads thins the seam without cutting it, because that table outlives them.
    So the order to settle these in is authentication first, and the rest afterwards.
 
-   **That decision has a second half, and it is not about reading.** The relocation gives the
-   service the journal, and a journal deployment hold is the authority to keep a deployment
-   alive for the runs a journal holds. That hold is `HoldScope::for_app`;
-   `crates/zeroship-core/src/service_identity.rs` grants its endpoints to `svc/worker` while
-   `svc/workflow` holds only the queue-scoped pair, and
+   **DECIDED: defer the severing; the registry read stays.** A comprehensive credential design
+   comes later, so `active_key` keeps reading `zeroship.worker_instances` and the service keeps
+   its binding on Control's database for that one read. Nothing about the check relaxes - the
+   lease predicate added with the fence still refuses a lapsed instance, and the endpoint that
+   most needs the check, `ensure_journal`, reaches no placement, app or zone, so the credential
+   is its whole gate. What this defers is the SEVERING, not the verification. Open 3's own goal
+   is therefore reached in part: the corpus, the tables and the policy inputs have moved, and
+   the registry read is what is left holding the binding open.
+
+   **DECIDED: the journal hold follows the journal.** A journal deployment hold is the
+   authority to keep a deployment alive for the runs a journal holds. Today that hold is
+   `HoldScope::for_app`, `crates/zeroship-core/src/service_identity.rs` grants its endpoints to
+   `svc/worker` while `svc/workflow` holds only the queue-scoped pair, and
    `crates/zeroship-workflow/src/deployment_holds/remote.rs` refuses any signer that is not an
    enrolled worker instance. So `restart` does not merely lack a row: the service lacks the
-   credential to create one, and Plan step 4's deployments source stays inert until that moves.
-   The authority should follow the ownership it describes - when the journal becomes the
-   service's, the journal hold becomes the service's, and the worker keeps only what it still
-   owns - but that is a grant change and a signer change in one patch, so it belongs with the
-   authentication decision above rather than behind it.
+   credential to create one, and Plan step 4's deployments source is inert until that moves.
+   At the cutover the authority moves with the thing it describes - `svc/workflow` gains the
+   journal hold endpoints, the worker keeps only what it still owns, and the signer check
+   widens to admit the service's role assertion. That is a grant change and a signer change in
+   one patch, and it lands with step 5 rather than before it, because the hold is only
+   meaningful once the journal it protects is the service's.
 
 
    **A gap this uncovered, unrelated to the move.** `workflow_rollout_config` has no production
