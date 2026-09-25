@@ -11,7 +11,8 @@ use crate::{
         execution, leased_policy, registered_service, sqlite_store, PostgresFixture,
     },
     service_binding::ServiceFixture,
-    ObjectStepOutputs, PayloadObjects, PayloadRead, RunPayloads, WorkerPayloads,
+    ObjectStepOutputs, PayloadObjects, PayloadRead, RunPayloads, TaskPayloadReader, TaskPayloads,
+    TaskTransport, WorkerBinding, WorkerPayloads, WorkerTasks,
 };
 use futures::{
     future::{select, Either},
@@ -20,6 +21,7 @@ use futures::{
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::{
+    cell::RefCell,
     rc::Rc,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -38,7 +40,10 @@ use zeroship_storage::{
 use zeroship_workflow::{
     engine::WorkflowOutputRef,
     operations::StartOptions,
-    service::{AppPolicy, AppWorkflows, PayloadSlot, PolicySnapshot, RequestId, WorkerIdentity},
+    service::{
+        AppPolicy, AppWorkflows, PayloadSlot, PolicySnapshot, RequestId, StagedPayload, TaskToken,
+        WorkerIdentity,
+    },
     StepOutputReader, WorkflowServiceError,
 };
 
@@ -651,4 +656,191 @@ async fn read_body(
             .await
             .unwrap()
     }
+}
+
+/// A transport that answers a payload read with a different object of the same
+/// run than the one the reader named.
+///
+/// Every answer is a real read through the real transport, so the body still
+/// verifies against the descriptor that comes back and the substitute is an
+/// object this app owns. The one thing that changes is which descriptor that
+/// is -- the shape a payload read takes once it crosses a network boundary and
+/// the reader can no longer be the thing that selected the row.
+struct SubstitutedDescriptor {
+    inner: WorkerTasks,
+    answer: Option<WorkflowOutputRef>,
+    asked: RefCell<Vec<WorkflowOutputRef>>,
+}
+impl SubstitutedDescriptor {
+    fn passthrough(inner: &WorkerTasks) -> Rc<Self> {
+        Rc::new(Self {
+            inner: inner.clone(),
+            answer: None,
+            asked: RefCell::default(),
+        })
+    }
+    fn answering(inner: &WorkerTasks, answer: &WorkflowOutputRef) -> Rc<Self> {
+        Rc::new(Self {
+            inner: inner.clone(),
+            answer: Some(answer.clone()),
+            asked: RefCell::default(),
+        })
+    }
+}
+#[async_trait::async_trait(?Send)]
+impl TaskPayloads for SubstitutedDescriptor {
+    async fn executable(
+        &self,
+        task: &str,
+        token: &TaskToken,
+    ) -> Result<zeroship_bundle::LoadedWorker, WorkflowServiceError> {
+        TaskPayloads::executable(&self.inner, task, token).await
+    }
+    async fn stage(
+        &self,
+        task: &str,
+        token: &TaskToken,
+        request: &RequestId,
+        reference: WorkflowOutputRef,
+        body: BoxChunkSource,
+    ) -> Result<StagedPayload, WorkflowServiceError> {
+        self.inner
+            .stage(task, token, request, reference, body)
+            .await
+    }
+    async fn read(
+        &self,
+        task: &str,
+        token: &TaskToken,
+        reference: &WorkflowOutputRef,
+    ) -> Result<PayloadRead, WorkflowServiceError> {
+        self.asked.borrow_mut().push(reference.clone());
+        self.inner
+            .read(task, token, self.answer.as_ref().unwrap_or(reference))
+            .await
+    }
+}
+
+/// A replay read whose descriptor is not the one the journal named is refused,
+/// whether the hash moved or the size did.
+///
+/// Three real objects belong to this run. `swapped` is byte-for-byte the same
+/// length as the one the journal names, so substituting it moves the hash and
+/// nothing else; `longer` moves the size too, which is what a stale descriptor
+/// looks like. Both are read back through a pass-through transport first, so a
+/// refusal below cannot be an object the run could not reach.
+///
+/// The last arm is the other refusal `read_verified` can produce. It differs
+/// from the control in the host's read budget alone and answers
+/// `PayloadTooLarge`, which is how this test tells the descriptor comparison
+/// apart from the pre-open size check standing in front of it.
+///
+/// The store is not a variable here: the comparison is in the runner, over
+/// whatever a transport answered, so one backend exercises it.
+#[compio::test]
+async fn replay_refuses_a_payload_read_that_answers_with_another_descriptor() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Rc::new(sqlite_store(&directory.path().join("app.sqlite")).await);
+    let objects = PayloadObjects::open(StorageStore::from_backend(Arc::new(LocalFs::new(
+        directory.path(),
+    ))))
+    .unwrap();
+    let (service, app, _, _deployments) = Box::pin(registered_service(store)).await;
+    let scope = service.fixture_app(app);
+    let tasks = service.tasks(
+        WorkerIdentity::new("descriptor-guard".into()).unwrap(),
+        objects,
+    );
+
+    let named = br#"{"value":"original"}"#.to_vec();
+    let swapped = br#"{"value":"replaced"}"#.to_vec();
+    let longer = br#"{"value":"original and then some"}"#.to_vec();
+    assert_eq!(
+        named.len(),
+        swapped.len(),
+        "the hash arm must move the hash and nothing else"
+    );
+    assert_ne!(named.len(), longer.len(), "the size arm must move the size");
+    assert_ne!(reference(&named).hash, reference(&swapped).hash);
+
+    scope
+        .start(&RequestId::mint(), "Example", StartOptions::default())
+        .await
+        .unwrap();
+    let task = tasks.poll().await.unwrap().unwrap();
+    for bytes in [&named, &swapped, &longer] {
+        tasks
+            .stage(
+                &task.id,
+                &task.token,
+                &RequestId::mint(),
+                reference(bytes),
+                Box::new(OnceChunk::new(bytes.clone().into())),
+            )
+            .await
+            .unwrap();
+    }
+    tasks
+        .complete(
+            &task.id,
+            &task.token,
+            execution(json!([
+                {"kind":"StepCompleted","ordinal":0,"name":"named","outputRef":reference(&named)},
+                {"kind":"StepCompleted","ordinal":1,"name":"swapped","outputRef":reference(&swapped)},
+                {"kind":"StepCompleted","ordinal":2,"name":"longer","outputRef":reference(&longer)},
+            ])),
+        )
+        .await
+        .unwrap();
+    let replay = tasks.poll().await.unwrap().unwrap();
+
+    let budget = 256;
+    assert!(
+        longer.len() < budget,
+        "no arm here may be the read budget refusing"
+    );
+
+    // The control: the same fake, answering with the descriptor it was handed.
+    let control = SubstitutedDescriptor::passthrough(&tasks);
+    let reader = TaskPayloadReader::new(control.clone(), &replay, budget).unwrap();
+    assert_eq!(reader.read_step_output("named", 0).await.unwrap(), named);
+    assert_eq!(*control.asked.borrow(), vec![reference(&named)]);
+
+    // Both substitutes are objects this replay can read on their own name.
+    for (step, bytes) in [("swapped", &swapped), ("longer", &longer)] {
+        let reader =
+            TaskPayloadReader::new(SubstitutedDescriptor::passthrough(&tasks), &replay, budget)
+                .unwrap();
+        assert_eq!(&reader.read_step_output(step, 0).await.unwrap(), bytes);
+    }
+
+    // The arms. One variable differs from the control: which descriptor comes
+    // back from a read the reader still issued for the journal's own. Both run
+    // before either is judged, so one verdict covers the hash and the size.
+    let mut outcomes = Vec::new();
+    for substitute in [&swapped, &longer] {
+        let fake = SubstitutedDescriptor::answering(&tasks, &reference(substitute));
+        let reader = TaskPayloadReader::new(fake.clone(), &replay, budget).unwrap();
+        let outcome = reader.read_step_output("named", 0).await;
+        assert_eq!(*fake.asked.borrow(), vec![reference(&named)]);
+        // A reader that lost a replay dependency stays lost, so the host
+        // abandons this execution instead of journaling an app-visible error.
+        assert_eq!(reader.check().err(), outcome.as_ref().err().cloned());
+        outcomes.push(outcome);
+    }
+    let refused =
+        WorkflowServiceError::Unavailable("workflow replay payload descriptor changed".into());
+    assert_eq!(outcomes, vec![Err(refused.clone()), Err(refused)]);
+
+    // The pre-open budget check, which the arms above must not have taken.
+    let tight = TaskPayloadReader::new(
+        SubstitutedDescriptor::passthrough(&tasks),
+        &replay,
+        named.len() - 1,
+    )
+    .unwrap();
+    assert_eq!(
+        tight.read_step_output("named", 0).await.unwrap_err(),
+        WorkflowServiceError::PayloadTooLarge
+    );
 }
