@@ -77,6 +77,78 @@ impl TaskPayloads for LostReceipt {
     }
 }
 
+/// A transport that answers a staging call with the receipt of a different
+/// object than the one it was handed.
+///
+/// Every call still stages for real through the real transport, and the
+/// substituted answer is itself a receipt the real transport returned for an
+/// object this task genuinely staged. The one thing that changes is which
+/// descriptor comes back -- the shape an upload receipt takes once the journal
+/// is remote and the receipt is a decoded response body rather than the
+/// argument the caller handed in.
+struct SubstitutedReceipt {
+    inner: WorkerTasks,
+    answer: Option<StagedPayload>,
+    staged: RefCell<Vec<WorkflowOutputRef>>,
+}
+impl SubstitutedReceipt {
+    fn passthrough(inner: &WorkerTasks) -> Self {
+        Self {
+            inner: inner.clone(),
+            answer: None,
+            staged: RefCell::default(),
+        }
+    }
+    fn answering(inner: &WorkerTasks, answer: &StagedPayload) -> Self {
+        Self {
+            inner: inner.clone(),
+            answer: Some(answer.clone()),
+            staged: RefCell::default(),
+        }
+    }
+}
+#[async_trait(?Send)]
+impl TaskPayloads for SubstitutedReceipt {
+    async fn executable(
+        &self,
+        task: &str,
+        token: &TaskToken,
+    ) -> Result<zeroship_bundle::LoadedWorker, WorkflowServiceError> {
+        TaskPayloads::executable(&self.inner, task, token).await
+    }
+    async fn stage(
+        &self,
+        task: &str,
+        token: &TaskToken,
+        request: &RequestId,
+        reference: WorkflowOutputRef,
+        body: BoxChunkSource,
+    ) -> Result<StagedPayload, WorkflowServiceError> {
+        self.staged.borrow_mut().push(reference.clone());
+        let receipt = self
+            .inner
+            .stage(task, token, request, reference, body)
+            .await?;
+        Ok(self.answer.clone().unwrap_or(receipt))
+    }
+    async fn read(
+        &self,
+        task: &str,
+        token: &TaskToken,
+        reference: &WorkflowOutputRef,
+    ) -> Result<PayloadRead, WorkflowServiceError> {
+        self.inner.read(task, token, reference).await
+    }
+}
+
+fn descriptor(bytes: &[u8]) -> WorkflowOutputRef {
+    WorkflowOutputRef {
+        hash: zeroship_workflow::service::hash(bytes),
+        size: i64::try_from(bytes.len()).unwrap(),
+        content_type: Some("application/json".into()),
+    }
+}
+
 async fn claim(app: &AppWorkflows, tasks: &WorkerTasks) -> TaskAssignment {
     let run = app
         .start(&RequestId::mint(), "Example", StartOptions::default())
@@ -638,6 +710,144 @@ async fn output_contract(store: Rc<OrmStore>) {
         }]
     ));
     tasks.complete(&task.id, &task.token, result).await.unwrap();
+}
+
+/// A staging call answered with a receipt for another object is refused, and
+/// the batch is not committed under the descriptor that came back.
+///
+/// Two real objects belong to this task. One is the value the batch hands the
+/// transport; the other is staged on its own before the batch runs, so the
+/// substituted receipt names an object the service really holds for this task
+/// and the only variable is which of the two the answer names.
+///
+/// The control is the same fake answering with the receipt it was handed, and
+/// it stages the identical batch, so a refusal below cannot be a batch the
+/// service would have refused anyway.
+///
+/// The last arm is the other thing `stage` does with an upload the service
+/// will not take: a payload over the app's policy budget is not an error at
+/// all, it truncates the batch into a limit outcome. It runs over a second app
+/// whose policy cannot carry this value, through the pass-through transport,
+/// which is how this test tells the receipt comparison apart from the size
+/// refusal standing beside it.
+///
+/// The store is not a variable here: the comparison is in the runner, over
+/// whatever a transport answered, so one backend exercises it.
+#[compio::test]
+async fn staging_refuses_an_upload_receipt_that_answers_with_another_descriptor() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("zs-workflow.sqlite");
+    schema::initialize_sqlite(&path).unwrap();
+    let store = Rc::new(sqlite_store(&path).await);
+    let objects = PayloadObjects::open(StorageStore::from_backend(Arc::new(LocalFs::new(
+        dir.path(),
+    ))))
+    .unwrap();
+    let (service, app, other, _deployments) = Box::pin(registered_service(store.clone())).await;
+    let scope = service.fixture_app(app);
+    let tasks = service.tasks(
+        WorkerIdentity::new("receipt-guard".into()).unwrap(),
+        objects,
+    );
+
+    let value = json!({"large":"x".repeat(64)});
+    let encoded = serde_json::to_vec(&value).unwrap();
+    assert!(
+        encoded.len() > LIMITS.max_inline_bytes,
+        "the batch must own an upload for the transport to answer for"
+    );
+    let task = claim(&scope, &tasks).await;
+
+    // The substitute: an object of this same task, staged on its own name, and
+    // not the one any batch below hands the transport.
+    let elsewhere = br#"{"elsewhere":true}"#.to_vec();
+    assert_ne!(descriptor(&elsewhere), descriptor(&encoded));
+    let substitute = tasks
+        .stage(
+            &task.id,
+            &task.token,
+            &RequestId::mint(),
+            descriptor(&elsewhere),
+            Box::new(OnceChunk::new(elsewhere.clone().into())),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        stored_rows(store.as_ref(), &task).await,
+        1,
+        "the substitute must be a durable object of this task"
+    );
+
+    let prepared = prepare(&task, json!([step(value), {"kind":"RunCompleted"}]));
+
+    // The control: the same fake, answering with the receipt it was handed.
+    let control = SubstitutedReceipt::passthrough(&tasks);
+    let execution = prepared.stage(&control).await.unwrap();
+    assert!(
+        matches!(
+            &execution.outcomes[0],
+            StepOutcome::StepCompleted { output: None, output_ref: Some(reference), .. }
+                if *reference == descriptor(&encoded)
+        ),
+        "{:?}",
+        execution.outcomes[0]
+    );
+    assert_eq!(*control.staged.borrow(), vec![descriptor(&encoded)]);
+    assert_eq!(stored_rows(store.as_ref(), &task).await, 2);
+
+    // The arm. One variable differs from the control: which descriptor comes
+    // back from a staging call the runner still issued for its own.
+    let fake = SubstitutedReceipt::answering(&tasks, &substitute);
+    assert_eq!(
+        prepared.stage(&fake).await.unwrap_err(),
+        WorkflowServiceError::Unavailable("workflow upload receipt changed".into())
+    );
+    assert_eq!(*fake.staged.borrow(), vec![descriptor(&encoded)]);
+
+    // The control's batch still commits, so the run is not left mid-flight and
+    // the second app below is the only one with a task to claim.
+    assert_eq!(
+        tasks
+            .complete(&task.id, &task.token, execution)
+            .await
+            .unwrap()
+            .state,
+        RunState::Completed
+    );
+
+    // The size refusal beside it, which the arm above must not have taken.
+    let budgeted = service.fixture_app(other.clone());
+    service
+        .fixture_register(
+            &other,
+            leased_policy(
+                2,
+                AppPolicy {
+                    max_payload_bytes: 16,
+                    ..AppPolicy::default()
+                },
+            ),
+        )
+        .await
+        .unwrap();
+    assert!(
+        i64::try_from(encoded.len()).unwrap() > 16,
+        "the budget must be one this value cannot fit"
+    );
+    let task = claim(&budgeted, &tasks).await;
+    let truncated = prepare(&task, json!([step(json!({"large":"x".repeat(64)}))]))
+        .stage(&SubstitutedReceipt::passthrough(&tasks))
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            &truncated.outcomes[..],
+            [StepOutcome::RunFailed { ordinal: Some(0), name: Some(name), error, .. }]
+                if name == "saved" && error["type"] == "LimitExceededError"
+        ),
+        "{:?}",
+        truncated.outcomes
+    );
 }
 
 /// The startup half of the ceiling invariant: a configured host budget that
