@@ -5,6 +5,7 @@
 
 use super::atomic_application::persisted;
 use super::*;
+use crate::deployment_holds::AssignedHolds;
 use crate::service::{delivery::ATTEMPT_IO_CEILING, AppDeployments};
 use zeroship_core::workflow_jobs::{JobLease, JobOutcome};
 use zeroship_data_orm::Value;
@@ -63,9 +64,12 @@ fn gated(
 ) -> (WorkflowService, Arc<Artifacts>) {
     let source = Arc::new(Artifacts::new(platform.source.clone()));
     let service = service.with_deployments(
-        AppDeployments::new(source.clone(), 1024 * 1024)
-            .unwrap()
-            .with_hold_client(Rc::new(platform.client(app))),
+        AppDeployments::new(
+            source.clone(),
+            1024 * 1024,
+            Rc::new(AssignedHolds::new(Rc::new(platform.client(app)))),
+        )
+        .unwrap(),
     );
     (service, source)
 }

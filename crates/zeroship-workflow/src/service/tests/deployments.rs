@@ -1,4 +1,5 @@
 use super::*;
+use crate::deployment_holds::AssignedHolds;
 use crate::operations::{RunOperation, RunState};
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 mod failures;
@@ -278,5 +279,41 @@ async fn deployment_contract(store: Rc<OrmStore>, deployments: Deployments) {
 fn artifact_binding_rejects_an_empty_source_budget() {
     let dir = tempfile::tempdir().unwrap();
     let source = Arc::new(LocalDiskBlobStore::new(dir.path().into()).unwrap());
-    assert!(super::super::AppDeployments::new(source, 0).is_err());
+    assert!(super::super::AppDeployments::new(
+        source,
+        0,
+        Rc::new(deployment_fixture::HostedApps::default())
+    )
+    .is_err());
+}
+
+/// A worker and a local host bind the retention authority of the one app they
+/// were assigned, and that binding refuses every other app: neither may reach a
+/// neighbour's client through it. The assigned app is the control, so the only
+/// thing that differs between the two arms is the app asked for.
+///
+/// This asserts the binding itself rather than an end-to-end call, because
+/// `deployment_retention::validate_scope` refuses the same pairing downstream
+/// from `client.scope()`. A call through `activate_deploy` answers
+/// `PermissionDenied` either way and cannot tell the two refusals apart.
+#[compio::test]
+async fn an_app_binding_refuses_an_app_it_was_not_assigned() {
+    let platform = Deployments::new().await;
+    let assigned = AppId::mint();
+    let foreign = AppId::mint();
+    let binding = super::super::AppDeployments::new(
+        platform.source.clone(),
+        1024 * 1024,
+        Rc::new(AssignedHolds::new(Rc::new(platform.client(&assigned)))),
+    )
+    .unwrap();
+    assert_eq!(
+        binding.client(&assigned).unwrap().scope().app(),
+        &assigned,
+        "the assigned app is served by its own client"
+    );
+    assert!(matches!(
+        binding.client(&foreign),
+        Err(WorkflowServiceError::PermissionDenied)
+    ));
 }

@@ -1034,7 +1034,7 @@ async fn held_authority(store: Rc<OrmStore>, expire: bool) {
     });
     let gated = service
         .clone()
-        .with_deployments(platform.binding(&[&app]).with_hold_client(client));
+        .with_deployments(platform.binding_with(&[&app], client));
     let scope = gated.fixture_app(app.clone());
     let mut grant = Grant::cron(&app, &deployment, &ScheduleId::mint(), 1, 1000);
     if expire {

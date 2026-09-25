@@ -9,20 +9,24 @@ use super::{
     app::lock_app, deployment_retention::admission_generation, deploys, tasks::authorized_task,
     BundleExecutable, TaskToken, WorkerIdentity, WorkflowService,
 };
-use crate::{deployment_holds::DeploymentHoldClient, WorkflowServiceError};
-use std::{collections::BTreeMap, rc::Rc, sync::Arc};
+use crate::{
+    deployment_holds::{DeploymentHoldAuthority, DeploymentHoldClient},
+    WorkflowServiceError,
+};
+use std::{rc::Rc, sync::Arc};
 use zeroship_bundle::{
     verify_deployment_manifest, BlobError, BlobStore, ExecutableError, LoadedWorker,
 };
 use zeroship_core::app_id::AppId;
 
-/// Normal app artifacts and retention clients supplied by an authenticated host.
-/// Customer SQL cannot install clients or select another app's manifest scope.
+/// Normal app artifacts and the retention authority of an authenticated host.
+/// Customer SQL cannot widen that authority or select another app's manifest
+/// scope.
 #[derive(Clone)]
 pub struct AppDeployments {
     source: Arc<dyn BlobStore>,
     max_source_bytes: usize,
-    clients: BTreeMap<AppId, Rc<dyn DeploymentHoldClient>>,
+    holds: Rc<dyn DeploymentHoldAuthority>,
 }
 impl std::fmt::Debug for AppDeployments {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -30,13 +34,15 @@ impl std::fmt::Debug for AppDeployments {
     }
 }
 impl AppDeployments {
-    /// Bind the normal app artifact store and a host source budget.
+    /// Bind the normal app artifact store, a host source budget and the
+    /// retention authority the host was granted.
     ///
     /// # Errors
     /// Rejects an empty source budget.
     pub fn new(
         source: Arc<dyn BlobStore>,
         max_source_bytes: usize,
+        holds: Rc<dyn DeploymentHoldAuthority>,
     ) -> Result<Self, WorkflowServiceError> {
         if max_source_bytes == 0 {
             return Err(WorkflowServiceError::InvalidRequest(
@@ -46,25 +52,15 @@ impl AppDeployments {
         Ok(Self {
             source,
             max_source_bytes,
-            clients: BTreeMap::new(),
+            holds,
         })
-    }
-
-    /// Install retention authority obtained from the host's app assignment.
-    #[must_use]
-    pub fn with_hold_client(mut self, client: Rc<dyn DeploymentHoldClient>) -> Self {
-        self.clients.insert(client.scope().app().clone(), client);
-        self
     }
 
     pub(super) fn client(
         &self,
         app: &AppId,
     ) -> Result<Rc<dyn DeploymentHoldClient>, WorkflowServiceError> {
-        self.clients
-            .get(app)
-            .cloned()
-            .ok_or(WorkflowServiceError::PermissionDenied)
+        self.holds.client(app)
     }
 
     pub(super) async fn read(

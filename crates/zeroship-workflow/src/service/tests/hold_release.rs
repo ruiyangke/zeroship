@@ -221,11 +221,8 @@ async fn postgres_release_job_ends_a_stalled_attempt_at_the_io_ceiling() {
 async fn io_ceiling(store: Rc<OrmStore>) {
     let (service, app, other, platform) = registered_service(store).await;
     let client = platform.client(&app);
-    let service = service.with_deployments(
-        platform
-            .binding(&[&app, &other])
-            .with_hold_client(Rc::new(Stalled(client.clone()))),
-    );
+    let service = service
+        .with_deployments(platform.binding_with(&[&app, &other], Rc::new(Stalled(client.clone()))));
     let superseded = platform.deploy(&app).await;
     service
         .acquire_deployment_hold(&app, &superseded.id, &superseded.hash, &client)

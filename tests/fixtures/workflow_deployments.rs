@@ -26,7 +26,7 @@ use zeroship_data_orm::{
     value, ConnectOptions, Value,
 };
 use zeroship_workflow::{
-    deployment_holds::DeploymentHoldClient,
+    deployment_holds::{DeploymentHoldAuthority, DeploymentHoldClient},
     service::{AppDeployments, DeployRegistration, WorkflowService},
     WorkflowServiceError,
 };
@@ -118,11 +118,29 @@ impl Deployments {
             _directory: self.directory.clone(),
         }
     }
+    /// A host serving exactly `apps`, each through this catalog's own client.
     pub fn binding(&self, apps: &[&AppId]) -> AppDeployments {
-        apps.iter().fold(
-            AppDeployments::new(self.source.clone(), 1024 * 1024).unwrap(),
-            |binding, app| binding.with_hold_client(Rc::new(self.client(app))),
-        )
+        self.hosting(apps, None)
+    }
+    /// The same host, with `client` standing in for the app it is scoped to.
+    pub fn binding_with(
+        &self,
+        apps: &[&AppId],
+        client: Rc<dyn DeploymentHoldClient>,
+    ) -> AppDeployments {
+        self.hosting(apps, Some(client))
+    }
+    fn hosting(
+        &self,
+        apps: &[&AppId],
+        client: Option<Rc<dyn DeploymentHoldClient>>,
+    ) -> AppDeployments {
+        let hosted = HostedApps::new(
+            apps.iter()
+                .map(|app| Rc::new(self.client(app)) as Rc<dyn DeploymentHoldClient>)
+                .chain(client),
+        );
+        AppDeployments::new(self.source.clone(), 1024 * 1024, Rc::new(hosted)).unwrap()
     }
     pub async fn publish(
         &self,
@@ -273,6 +291,29 @@ impl Deployments {
                 ..
             })
         ));
+    }
+}
+
+/// A test host serving a named set of apps. The set is stated once, where the
+/// host is built, so no later call can add an app to it.
+#[derive(Default)]
+pub struct HostedApps(BTreeMap<AppId, Rc<dyn DeploymentHoldClient>>);
+impl HostedApps {
+    pub fn new(clients: impl IntoIterator<Item = Rc<dyn DeploymentHoldClient>>) -> Self {
+        Self(
+            clients
+                .into_iter()
+                .map(|client| (client.scope().app().clone(), client))
+                .collect(),
+        )
+    }
+}
+impl DeploymentHoldAuthority for HostedApps {
+    fn client(&self, app: &AppId) -> Result<Rc<dyn DeploymentHoldClient>, WorkflowServiceError> {
+        self.0
+            .get(app)
+            .cloned()
+            .ok_or(WorkflowServiceError::PermissionDenied)
     }
 }
 

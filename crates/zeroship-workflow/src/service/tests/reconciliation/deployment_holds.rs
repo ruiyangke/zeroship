@@ -1,6 +1,6 @@
 use super::*;
 use crate::deployment_holds::{
-    DeploymentHoldClient, HoldGeneration, HoldReceipt, HoldScope, HoldState,
+    AssignedHolds, DeploymentHoldClient, HoldGeneration, HoldReceipt, HoldScope, HoldState,
 };
 use crate::service::AppDeployments;
 use futures::{channel::oneshot, future::Either};
@@ -103,9 +103,12 @@ fn with_client(
     client: Rc<HoldClient>,
 ) -> WorkflowService {
     service.with_deployments(
-        AppDeployments::new(platform.source.clone(), 1024 * 1024)
-            .unwrap()
-            .with_hold_client(client),
+        AppDeployments::new(
+            platform.source.clone(),
+            1024 * 1024,
+            Rc::new(AssignedHolds::new(client)),
+        )
+        .unwrap(),
     )
 }
 

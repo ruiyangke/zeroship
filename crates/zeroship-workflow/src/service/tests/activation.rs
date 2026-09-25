@@ -576,11 +576,7 @@ impl DeploymentHoldClient for Holds {
 async fn policy_hold(store: Rc<OrmStore>) {
     let (service, app, other, platform) = empty_service(store, Deployments::new().await).await;
     let client = Rc::new(Holds::new(&platform, &app));
-    let service = service.with_deployments(
-        platform
-            .binding(&[&app, &other])
-            .with_hold_client(client.clone()),
-    );
+    let service = service.with_deployments(platform.binding_with(&[&app, &other], client.clone()));
     let deployment = platform.deploy(&app).await;
     let scope = service.fixture_app(app.clone());
     let grant = Grant::new(&app, &deployment, 1);
@@ -612,11 +608,7 @@ async fn policy_hold(store: Rc<OrmStore>) {
 async fn hold_replies(store: Rc<OrmStore>) {
     let (service, app, other, platform) = empty_service(store, Deployments::new().await).await;
     let client = Rc::new(Holds::new(&platform, &app));
-    let service = service.with_deployments(
-        platform
-            .binding(&[&app, &other])
-            .with_hold_client(client.clone()),
-    );
+    let service = service.with_deployments(platform.binding_with(&[&app, &other], client.clone()));
     let deployment = platform.deploy(&app).await;
     let scope = service.fixture_app(app.clone());
     let grant = Grant::new(&app, &deployment, 1);
@@ -852,11 +844,7 @@ async fn rollback(store: Rc<OrmStore>, fault: ReceiptFault) {
 async fn io_ceiling(store: Rc<OrmStore>) {
     let (service, app, other, platform) = empty_service(store, Deployments::new().await).await;
     let client = Rc::new(Holds::new(&platform, &app));
-    let service = service.with_deployments(
-        platform
-            .binding(&[&app, &other])
-            .with_hold_client(client.clone()),
-    );
+    let service = service.with_deployments(platform.binding_with(&[&app, &other], client.clone()));
     let deployment = platform.deploy(&app).await;
     let scope = service.fixture_app(app.clone());
 

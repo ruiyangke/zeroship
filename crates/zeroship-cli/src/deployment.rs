@@ -5,11 +5,13 @@
 use compio::io::AsyncReadAtExt;
 use std::{
     path::{Path, PathBuf},
+    rc::Rc,
     sync::Arc,
 };
 use zeroship_bundle::{verify_deployment_manifest, BlobStore, LocalDiskBlobStore};
 use zeroship_core::app_id::AppId;
 use zeroship_workflow::{
+    deployment_holds::DeploymentHoldAuthority,
     service::{AppDeployments, BundleExecutable},
     WorkflowServiceError,
 };
@@ -53,8 +55,9 @@ impl AppDeployment {
     pub fn artifacts(
         &self,
         max_source_bytes: usize,
+        holds: Rc<dyn DeploymentHoldAuthority>,
     ) -> Result<AppDeployments, WorkflowServiceError> {
-        AppDeployments::new(self.blobs.clone(), max_source_bytes)
+        AppDeployments::new(self.blobs.clone(), max_source_bytes, holds)
     }
 
     /// Ingest and verify the served archive, if any, into the retained store.

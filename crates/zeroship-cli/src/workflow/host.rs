@@ -25,11 +25,10 @@ use zeroship_bundle::LoadedWorker;
 use zeroship_core::{app_id::AppId, workflow_coordination::AssignedScope, workflow_jobs::JobSpec};
 use zeroship_runtime::{NativePlugin, RuntimeLimits};
 use zeroship_workflow::{
+    deployment_holds::AssignedHolds,
     service::{
-        schema,
-        store::HostStorage,
-        AppBackend, AppPolicy, AppWorkflows, HostPolicies, IngressEpochs, PolicyBinding,
-        PolicySnapshot, WorkerIdentity, WorkflowService,
+        schema, store::HostStorage, AppBackend, AppPolicy, AppWorkflows, HostPolicies,
+        IngressEpochs, PolicyBinding, PolicySnapshot, WorkerIdentity, WorkflowService,
     },
     WorkflowServiceError,
 };
@@ -147,11 +146,10 @@ pub async fn open<C: Composition>(
         )?)?;
     let service = WorkflowService::open(Rc::new(store), policies)
         .await?
-        .with_deployments(
-            deployment
-                .artifacts(config.max_source_bytes)?
-                .with_hold_client(Rc::new(manager.journal_holds(&app))),
-        );
+        .with_deployments(deployment.artifacts(
+            config.max_source_bytes,
+            Rc::new(AssignedHolds::new(Rc::new(manager.journal_holds(&app)))),
+        )?);
     let api = service.register_app(&policy).await?;
     let scope = manager.place(&app).await?;
     let installed = deployment

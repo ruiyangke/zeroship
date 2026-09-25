@@ -114,9 +114,7 @@ async fn recovery_contract(store: Rc<OrmStore>) {
         .acquire_deployment_hold(&app, &deploy.id, &"c".repeat(64), &client)
         .await
         .is_err());
-    let unbound = service.clone().with_deployments(
-        super::super::AppDeployments::new(platform.source.clone(), 1024 * 1024).unwrap(),
-    );
+    let unbound = service.clone().with_deployments(platform.binding(&[]));
     assert!(matches!(
         unbound.activate_deploy(&app, &deploy).await,
         Err(WorkflowServiceError::PermissionDenied)
@@ -545,11 +543,9 @@ async fn receipt_contract(store: Rc<OrmStore>) {
                 .unwrap(),
             std::slice::from_ref(&deploy.id)
         );
-        let bad_host = service.clone().with_deployments(
-            platform
-                .binding(&[&app])
-                .with_hold_client(Rc::new(bad.clone())),
-        );
+        let bad_host = service
+            .clone()
+            .with_deployments(platform.binding_with(&[&app], Rc::new(bad.clone())));
         assert!(bad_host.activate_deploy(&app, &deploy).await.is_err());
         service
             .reconcile_deployment_hold(&app, &deploy.id, &client)

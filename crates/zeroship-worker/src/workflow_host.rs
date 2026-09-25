@@ -50,7 +50,7 @@ use zeroship_data_v8::service::DbService;
 use zeroship_runtime::NativePlugin;
 use zeroship_storage::{StorageBackendConfig, StorageStore};
 use zeroship_workflow::{
-    deployment_holds::RemoteDeploymentHolds,
+    deployment_holds::{AssignedHolds, RemoteDeploymentHolds},
     service::{
         maintenance::MaintenanceOptions,
         store::HostStorage,
@@ -441,8 +441,8 @@ impl WorkflowResourceProvider for ProductionResources {
             self.blob_store.clone(),
             usize::try_from(MAX_SOURCE_BYTES)
                 .map_err(|_| unavailable("app source budget is not representable"))?,
-        )?
-        .with_hold_client(Rc::new(holds));
+            Rc::new(AssignedHolds::new(Rc::new(holds))),
+        )?;
         Ok(WorkflowResources {
             storage: HostStorage {
                 connection: self.db.connection().clone(),
