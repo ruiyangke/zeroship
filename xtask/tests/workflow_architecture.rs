@@ -256,5 +256,9 @@ fn workflow_process_dependencies_follow_crate_ownership() {
                 }
             }
         }
+        assert!(
+            visited.len() > 1,
+            "the walk for {name} visited only that package, so an empty result is not evidence"
+        );
     }
 }
