@@ -29,7 +29,8 @@ use crate::{
     coordinator::{Coordinator, Placed},
     eligibility::ZoneId,
     models::{
-        assignments, capacity_demands as demands, capacity_targets as targets, workers, Worker,
+        assignments, capacity_demands as demands, capacity_targets as targets, workers, Claimant,
+        Worker,
     },
     queue::lock_scope,
     scheduling, Error,
@@ -419,9 +420,16 @@ impl Capacity {
                 // Placement carries no policy authority, so it applies no
                 // delivery ceiling: an app is due while any row remains
                 // claimable, and the claim transaction decides deliverability.
-                Ok(Box::pin(scheduling::candidate(&tx, app, now, None))
-                    .await?
-                    .is_some())
+                //
+                // It asks as the claimant the placement leads to, the same one
+                // `Queue::claim_authorized` claims as. An app whose queue holds
+                // only rows that claimant refuses is not due, so it neither
+                // takes capacity nor records demand for work nobody will take.
+                Ok(
+                    Box::pin(scheduling::candidate(&tx, app, now, Claimant::Placed, None))
+                        .await?
+                        .is_some(),
+                )
             })
             .await?;
         if !due {

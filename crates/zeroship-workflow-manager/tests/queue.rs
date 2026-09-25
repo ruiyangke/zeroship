@@ -20,7 +20,7 @@ use zeroship_data_orm::{
     orm::{Database, Operation, Output},
     value, Value,
 };
-use zeroship_workflow_manager::{Error, Options, Queue};
+use zeroship_workflow_manager::{Claimant, Error, Options, Queue};
 
 macro_rules! case {
     ($sqlite:ident, $postgres:ident, $contract:ident) => {
@@ -77,6 +77,11 @@ case!(
     sqlite_bounds_and_privileges,
     postgres_bounds_and_privileges,
     bounds_and_privileges
+);
+case!(
+    sqlite_refused_kind_at_the_head_does_not_hide_the_rows_behind_it,
+    postgres_refused_kind_at_the_head_does_not_hide_the_rows_behind_it,
+    refused_kind_at_the_head
 );
 
 async fn queue(fixture: &Fixture, options: Options) -> Queue {
@@ -149,6 +154,37 @@ fn job(app: &AppId) -> JobSpec {
         },
         available_at: 0.try_into().unwrap(),
     }
+}
+
+/// A row the maintenance dispatch settles, carrying no creator code.
+fn sweep(app: &AppId) -> JobSpec {
+    JobSpec {
+        id: JobId::mint(),
+        app_id: app.clone(),
+        operation: JobOperation::Reconcile {},
+        available_at: 0.try_into().unwrap(),
+    }
+}
+
+/// An app whose queue holds a creator row at the head of the dispatch order and
+/// a maintenance row behind it. Returns them in that order.
+async fn head_then_sweep(queue: &Queue, fixture: &Fixture, app: &AppId) -> (JobSpec, JobSpec) {
+    queue.register_scope(app).await.unwrap();
+    let head = job(app);
+    let behind = sweep(app);
+    queue.submit(&head).await.unwrap();
+    queue.submit(&behind).await.unwrap();
+    assert!(
+        dispatch_order(fixture, &head.id).await < dispatch_order(fixture, &behind.id).await,
+        "the creator row must sit at the head for this to measure anything"
+    );
+    (head, behind)
+}
+
+async fn dispatch_order(fixture: &Fixture, id: &JobId) -> i64 {
+    stored(fixture, id).await.expect("the job was submitted")["dispatch_order"]
+        .as_i64()
+        .expect("dispatch order is an integer")
 }
 
 fn settlement(delivery: &Delivery, successors: Vec<JobSpec>) -> Settlement {
@@ -1132,10 +1168,15 @@ async fn revocation_rolls_back_mutations(fixture: &Fixture) {
     let checks = Cell::new(0);
     assert!(matches!(
         queue
-            .claim_authorized(&identity(&authority), Ok(support::delivery_ceiling()), |tx| {
-                checks.set(checks.get() + 1);
-                revoke_in_transaction(tx, &authority, &spec, ["ready", "leased"], checks.get())
-            })
+            .claim_authorized(
+                &identity(&authority),
+                Claimant::Placed,
+                Ok(support::delivery_ceiling()),
+                |tx| {
+                    checks.set(checks.get() + 1);
+                    revoke_in_transaction(tx, &authority, &spec, ["ready", "leased"], checks.get())
+                }
+            )
             .await,
         Err(Error::Denied)
     ));
@@ -1334,18 +1375,23 @@ async fn claim_timeout_rolls_back(fixture: &Fixture) {
     let checks = Cell::new(0);
     let timed = compio::time::timeout(
         Duration::from_secs(1),
-        expiring.claim_authorized(&identity(&expiring_authority), Ok(support::delivery_ceiling()), |_| {
-            checks.set(checks.get() + 1);
-            let first = checks.get() == 1;
-            let authority = expiring_authority.clone();
-            async move {
-                if first {
-                    Ok(authority)
-                } else {
-                    std::future::pending().await
+        expiring.claim_authorized(
+            &identity(&expiring_authority),
+            Claimant::Placed,
+            Ok(support::delivery_ceiling()),
+            |_| {
+                checks.set(checks.get() + 1);
+                let first = checks.get() == 1;
+                let authority = expiring_authority.clone();
+                async move {
+                    if first {
+                        Ok(authority)
+                    } else {
+                        std::future::pending().await
+                    }
                 }
-            }
-        }),
+            },
+        ),
     )
     .await
     .expect("stored delivery expiry must shorten the transaction timeout");
@@ -1355,6 +1401,80 @@ async fn claim_timeout_rolls_back(fixture: &Fixture) {
         value!(0)
     );
     assert!(expiring.claim(&expiring_authority).await.unwrap().is_some());
+}
+
+/// A claimant that refuses the kind at the head of the dispatch order still
+/// reaches the rows behind it.
+///
+/// The claim answers one id and never tries the next, so this is the property
+/// that says the refusal happened while candidates were being selected rather
+/// than after one was loaded. The control differs only in the claimant: the
+/// same two rows, claimed by one that refuses nothing, answer the head.
+async fn refused_kind_at_the_head(fixture: &Fixture) {
+    let queue = queue(fixture, Options::default()).await;
+    let restricted = AppId::mint();
+    let (head, behind) = head_then_sweep(&queue, fixture, &restricted).await;
+    let authority = assignment(fixture, &restricted).await;
+    let claimed = queue
+        .claim_authorized(
+            &identity(&authority),
+            Claimant::Maintenance,
+            Ok(support::delivery_ceiling()),
+            |_| ready(Ok(authority.clone())),
+        )
+        .await
+        .unwrap()
+        .expect("the maintenance row behind the head is claimable");
+    assert_eq!(claimed.delivery().job, behind);
+
+    // The control: the same two rows in the same order, claimed by the host
+    // that refuses neither.
+    let full = AppId::mint();
+    let (control_head, _) = head_then_sweep(&queue, fixture, &full).await;
+    let control_authority = assignment(fixture, &full).await;
+    let control = queue
+        .claim_authorized(
+            &identity(&control_authority),
+            Claimant::Placed,
+            Ok(support::delivery_ceiling()),
+            |_| ready(Ok(control_authority.clone())),
+        )
+        .await
+        .unwrap()
+        .expect("the head is claimable by a host that refuses nothing");
+    assert_eq!(control.delivery().job, control_head);
+
+    // And the refusal itself: with the maintenance row settled, the head is all
+    // that is left, and the restricted claimant answers nothing rather than it.
+    queue
+        .settle(&authority, &settlement(claimed.delivery(), vec![]))
+        .await
+        .unwrap();
+    assert_eq!(
+        stored(fixture, &head.id).await.unwrap()["state"],
+        value!("ready"),
+        "the refused head must still be waiting for a claimant that takes it"
+    );
+    assert!(queue
+        .claim_authorized(
+            &identity(&authority),
+            Claimant::Maintenance,
+            Ok(support::delivery_ceiling()),
+            |_| ready(Ok(authority.clone())),
+        )
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        queue
+            .claim(&authority)
+            .await
+            .unwrap()
+            .expect("a host that refuses nothing still takes the head")
+            .delivery()
+            .job,
+        head
+    );
 }
 
 async fn bounds_and_privileges(fixture: &Fixture) {
@@ -1527,7 +1647,9 @@ async fn delivery_budget_bounds_redelivery(fixture: &Fixture) {
         let queue = queue.clone();
         async move {
             queue
-                .claim_authorized(&selector, Ok(ceiling), move |_| ready(Ok(authority.clone())))
+                .claim_authorized(&selector, Claimant::Placed, Ok(ceiling), move |_| {
+                    ready(Ok(authority.clone()))
+                })
                 .await
                 .unwrap()
         }
@@ -1585,7 +1707,9 @@ async fn delivery_budget_bounds_redelivery(fixture: &Fixture) {
     assert_eq!(readmitted.delivery().job, spec);
     assert!(matches!(
         queue
-            .claim_authorized(&selector, Ok(0), |_| ready(Ok(authority.clone())))
+            .claim_authorized(&selector, Claimant::Placed, Ok(0), |_| ready(Ok(
+                authority.clone()
+            )))
             .await,
         Err(Error::Invalid)
     ));
@@ -1621,7 +1745,12 @@ async fn delivery_grant_budget(fixture: &Fixture) {
         .unwrap();
     assert!(matches!(queue.claim(&stale).await, Err(Error::Denied)));
     let grant = queue
-        .claim_authorized(&selector, Ok(support::delivery_ceiling()), |_| ready(Ok(authority.clone())))
+        .claim_authorized(
+            &selector,
+            Claimant::Placed,
+            Ok(support::delivery_ceiling()),
+            |_| ready(Ok(authority.clone())),
+        )
         .await
         .unwrap()
         .unwrap();

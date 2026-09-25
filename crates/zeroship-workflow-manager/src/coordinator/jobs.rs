@@ -1,7 +1,7 @@
 //! Worker delivery binds stored placement and host enrollment inside queue transactions.
 
 use super::Coordinator;
-use crate::{DeliveryGrant, Error};
+use crate::{Claimant, DeliveryGrant, Error};
 use std::future::Future;
 use zeroship_core::{
     workflow_coordination::{AssignedScope, Assignment, VerifyAssignment, WorkerId},
@@ -59,7 +59,7 @@ impl Coordinator {
     {
         let scope = selector(worker, scope);
         self.queue
-            .claim_authorized(&scope, max_delivery_attempts, |tx| {
+            .claim_authorized(&scope, Claimant::Placed, max_delivery_attempts, |tx| {
                 self.delivery_authority(tx, &scope, &authorize)
             })
             .await

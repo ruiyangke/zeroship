@@ -11,6 +11,7 @@ pub mod eligibility;
 mod error;
 pub mod lifecycle;
 pub mod local;
+pub mod maintenance;
 mod models;
 mod management;
 pub mod policy;
@@ -20,5 +21,5 @@ pub mod retention;
 pub mod scheduling;
 
 pub use error::Error;
-pub use models::collections;
+pub use models::{collections, Claimant};
 pub use queue::{DeliveryGrant, Options, Queue};

@@ -6,7 +6,7 @@
 use crate::{
     clock::{Clock, Sample, RESOLUTION_MILLIS},
     error::Error,
-    models::{self, jobs, queue_scopes, Job, Scope},
+    models::{self, jobs, queue_scopes, Claimant, Job, Scope},
     retention::{self, Retention},
 };
 use serde::Serialize;
@@ -193,6 +193,20 @@ impl Queue {
         })
     }
 
+    /// The queue's database clock, which every stored deadline is stated in.
+    ///
+    /// # Errors
+    /// Reports an unreachable or unreadable clock connection.
+    pub async fn now(&self) -> Result<i64, Error> {
+        self.clock.now().await
+    }
+
+    /// The lease window this queue grants a claimed delivery.
+    #[must_use]
+    pub const fn lease(&self) -> Duration {
+        self.options.lease
+    }
+
     /// Register an app selected by trusted platform configuration.
     ///
     /// # Errors
@@ -315,11 +329,14 @@ impl Queue {
     /// authorized form demands: a host that observes its app's policy, or
     /// revalidates placement inside the transaction, calls `claim_authorized`.
     ///
+    /// It claims as [`Claimant::Placed`], because an assignment is a placement.
+    ///
     /// # Errors
     /// Refuses expired authority and failed transactions.
     pub async fn claim(&self, assignment: &Assignment) -> Result<Option<DeliveryGrant>, Error> {
         self.claim_authorized(
             &assignment.into(),
+            Claimant::Placed,
             Ok(AppPolicy::default().max_delivery_attempts),
             |_| ready(Ok(assignment.clone())),
         )
@@ -339,12 +356,17 @@ impl Queue {
     /// app therefore never preempts that app's placement refusal, and a caller
     /// denied the scope is told so rather than told to retry.
     ///
+    /// `claimant` names the host asking, and the kinds it refuses are excluded
+    /// from candidate selection rather than from the claimed row, so a refused
+    /// row at the front of the dispatch order does not hide the rows behind it.
+    ///
     /// # Errors
     /// Refuses revoked assignments, unreadable or invalid ceilings, exhausted
     /// attempt numbering and failed transactions.
     pub async fn claim_authorized<F, Fut>(
         &self,
         assignment: &VerifyAssignment,
+        claimant: Claimant,
         max_delivery_attempts: Result<i64, Error>,
         mut authorize: F,
     ) -> Result<Option<DeliveryGrant>, Error>
@@ -370,6 +392,7 @@ impl Queue {
                 &tx,
                 &assignment.app_id,
                 now,
+                claimant,
                 Some(max_delivery_attempts),
             ))
             .await?

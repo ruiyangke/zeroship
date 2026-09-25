@@ -9,6 +9,7 @@ pub mod coordinator;
 pub mod journal;
 pub mod runs;
 pub mod server;
+pub mod sweeps;
 
 use std::{rc::Rc, sync::Arc};
 

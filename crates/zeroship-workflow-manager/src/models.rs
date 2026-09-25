@@ -139,22 +139,76 @@ pub struct ManagementScope {
     pub settled_revision: i64,
 }
 
-pub const fn operation_kind(
-    operation: &zeroship_core::workflow_jobs::JobOperation,
-) -> &'static str {
-    use zeroship_core::workflow_jobs::JobOperation;
-    match operation {
-        JobOperation::Activate { .. } => "activate",
-        JobOperation::Advance { .. } => "advance",
-        JobOperation::Cron { .. } => "cron",
-        JobOperation::Management { .. } => "management",
-        JobOperation::Fanout { .. } => "fanout",
-        JobOperation::Propagate { .. } => "propagate",
-        JobOperation::ReleaseHold { .. } => "release_hold",
-        JobOperation::Close { .. } => "close",
-        JobOperation::Reconcile {} => "reconcile",
-        JobOperation::Collect {} => "collect",
+/// What running a queued row does, which decides who may claim it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Work {
+    /// A sweep of the journal. It runs no creator code.
+    Maintenance,
+    /// Creator code.
+    Creator,
+}
+
+/// A host that takes rows off an app's queue.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Claimant {
+    /// A worker holding a placement on the app. It runs creator code and the
+    /// maintenance dispatch, so it takes every kind.
+    Placed,
+    /// A lane that runs the maintenance dispatch and nothing else.
+    Maintenance,
+}
+
+impl Claimant {
+    /// The kinds this claimant refuses, for a predicate over
+    /// `jobs.operation_kind`. An empty answer refuses nothing.
+    pub fn denied(self) -> impl Iterator<Item = &'static str> {
+        OPERATIONS
+            .iter()
+            .filter(move |(_, work)| !self.admits(*work))
+            .map(|(kind, _)| *kind)
     }
+
+    const fn admits(self, work: Work) -> bool {
+        match (self, work) {
+            (Self::Placed, _) | (Self::Maintenance, Work::Maintenance) => true,
+            (Self::Maintenance, Work::Creator) => false,
+        }
+    }
+}
+
+/// The `jobs.operation_kind` column's vocabulary, declared once.
+///
+/// One arm per `JobOperation` variant produces both the match that writes the
+/// column and the table a claim predicate reads, so the two cannot disagree: a
+/// variant added to `JobOperation` leaves this match non-exhaustive, and the
+/// arm that repairs it has to name the work the row carries before any
+/// claimant can be told whether to take it.
+macro_rules! operations {
+    ($($variant:ident => $kind:literal, $work:ident;)+) => {
+        pub const fn operation_kind(
+            operation: &zeroship_core::workflow_jobs::JobOperation,
+        ) -> &'static str {
+            use zeroship_core::workflow_jobs::JobOperation;
+            match operation {
+                $(JobOperation::$variant { .. } => $kind,)+
+            }
+        }
+
+        const OPERATIONS: &[(&str, Work)] = &[$(($kind, Work::$work),)+];
+    };
+}
+
+operations! {
+    Activate => "activate", Maintenance;
+    Advance => "advance", Creator;
+    Cron => "cron", Maintenance;
+    Management => "management", Maintenance;
+    Fanout => "fanout", Maintenance;
+    Propagate => "propagate", Maintenance;
+    ReleaseHold => "release_hold", Maintenance;
+    Close => "close", Maintenance;
+    Reconcile => "reconcile", Maintenance;
+    Collect => "collect", Maintenance;
 }
 
 pub fn operation_run(operation: &zeroship_core::workflow_jobs::JobOperation) -> Option<&str> {

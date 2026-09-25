@@ -25,7 +25,7 @@ use zeroship_core::{
     },
 };
 use zeroship_data_orm::orm::{Database, FromRow};
-use zeroship_workflow_manager::{Error, Options, Queue};
+use zeroship_workflow_manager::{Claimant, Error, Options, Queue};
 
 macro_rules! case {
     ($sqlite:ident, $postgres:ident, $contract:ident) => {
@@ -346,27 +346,32 @@ async fn claim_rollback(fixture: &Fixture) {
         assignment_revision: authority.revision,
     };
     let result = queue
-        .claim_authorized(&identity, Ok(support::delivery_ceiling()), |tx| {
-            calls.set(calls.get() + 1);
-            let check = calls.get();
-            let observed = authority.clone();
-            let id = first.id.clone();
-            async move {
-                if check == 2 {
-                    let job = tx
-                        .entity::<jobs::Entity>()?
-                        .query()
-                        .filter(jobs::id.eq(id.as_str())?)
-                        .first::<StoredJob>()
-                        .await?
-                        .unwrap();
-                    assert_eq!(job.state, "leased");
-                    assert_eq!(job.attempt, 1);
-                    return Err(Error::Denied);
+        .claim_authorized(
+            &identity,
+            Claimant::Placed,
+            Ok(support::delivery_ceiling()),
+            |tx| {
+                calls.set(calls.get() + 1);
+                let check = calls.get();
+                let observed = authority.clone();
+                let id = first.id.clone();
+                async move {
+                    if check == 2 {
+                        let job = tx
+                            .entity::<jobs::Entity>()?
+                            .query()
+                            .filter(jobs::id.eq(id.as_str())?)
+                            .first::<StoredJob>()
+                            .await?
+                            .unwrap();
+                        assert_eq!(job.state, "leased");
+                        assert_eq!(job.attempt, 1);
+                        return Err(Error::Denied);
+                    }
+                    Ok(observed)
                 }
-                Ok(observed)
-            }
-        })
+            },
+        )
         .await;
     assert!(matches!(result, Err(Error::Denied)));
     assert_eq!(calls.get(), 2);

@@ -1315,6 +1315,11 @@ struct Candidate {
 /// Filter readiness before limiting candidates, so blocked cron work cannot
 /// hide a deliverable activation or recovery job later in the app's queue.
 ///
+/// `claimant` is the host asking. Its refused kinds are excluded here, in the
+/// query, rather than by an arm over the loaded row: this answers one id with
+/// no retry, so a row refused after loading would stall every row behind it
+/// for as long as it stayed at the front of the dispatch order.
+///
 /// `ceiling` is the app's delivery budget, from the caller's policy authority.
 /// A job that has reached it in counted executions is not a candidate, and
 /// becomes one again only if policy raises the budget. Callers without policy
@@ -1323,6 +1328,7 @@ pub(crate) async fn candidate(
     tx: &Database,
     app: &AppId,
     now: i64,
+    claimant: crate::models::Claimant,
     ceiling: Option<i64>,
 ) -> Result<Option<String>, Error> {
     use crate::models::jobs;
@@ -1363,23 +1369,26 @@ pub(crate) async fn candidate(
     if let Some(ceiling) = ceiling {
         claimable = claimable.and(job.column(jobs::execution_attempts).lt(ceiling)?);
     }
-    let query = query
-        .filter(
-            job.column(jobs::app_id)
-                .eq(app.as_str())?
-                .and(claimable)
-                .and(
-                    occurrence
-                        .column(schedule_occurrences::id)
-                        .is_null()
-                        .or(activation.column(jobs::state).eq("settled")?.and(
-                            activation.column(jobs::outcome).eq(Some(
-                                serde_json::to_string(&JobOutcome::Completed {})
-                                    .map_err(|_| Error::Storage)?,
-                            ))?,
-                        )),
-                ),
-        );
+    let query = query.filter(
+        job.column(jobs::app_id)
+            .eq(app.as_str())?
+            .and(claimable)
+            .and(
+                job.column(jobs::operation_kind)
+                    .not_in_values(claimant.denied())?,
+            )
+            .and(
+                occurrence
+                    .column(schedule_occurrences::id)
+                    .is_null()
+                    .or(activation.column(jobs::state).eq("settled")?.and(
+                        activation.column(jobs::outcome).eq(Some(
+                            serde_json::to_string(&JobOutcome::Completed {})
+                                .map_err(|_| Error::Storage)?,
+                        ))?,
+                    )),
+            ),
+    );
     Ok(management_eligibility(tx, &job, query)?
         .order_by(job.column(jobs::dispatch_order).asc())
         .order_by(job.column(jobs::id).asc())
