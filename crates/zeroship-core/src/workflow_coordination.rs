@@ -11,8 +11,9 @@ pub use zeroship_id::workflow::{DeploymentId, RequestId, RunId, WorkerId};
 
 mod lifecycle;
 pub use lifecycle::{
-    DeliveredSignal, InvalidRestart, RestartDeploy, RestartOptions, RestartTarget, RestartedRun,
-    RunOperation, RunState, RunStatus, SignalOptions, TransitionedRun,
+    ConflictPolicy, DeliveredSignal, InvalidRestart, RestartDeploy, RestartOptions, RestartTarget,
+    RestartedRun, RunOperation, RunState, RunStatus, SignalOptions, StartOptions, StartedRun,
+    TransitionedRun, WorkflowOutputRef,
 };
 
 use crate::app_id::AppId;
