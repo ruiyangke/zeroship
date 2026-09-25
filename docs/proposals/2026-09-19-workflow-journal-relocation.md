@@ -515,6 +515,18 @@ protocol. This extends a working client rather than inventing one.
    what the caller will wait for. Deciding the merge's budget in isolation would set a number
    against an arithmetic that is already inconsistent one call earlier.
 
+   **And half of that is answerable as a description: nothing composes them today.**
+   `authenticate` is bound to a `let` and awaited to completion
+   (`crates/zeroship-workflow-server/src/api/jobs.rs`), so its own bound is finished and dropped
+   before the handler reaches `heartbeat_job`; `bind`
+   (`crates/zeroship-workflow-server/src/api/runs.rs`) resolves the same way for the creator run
+   handlers. And in `renew` (`crates/zeroship-workflow-runner/src/delivery.rs`) the client's
+   deadline and the journal's ceilings are sequential siblings under one `bounded`:
+   `transport.heartbeat` runs first and `app.heartbeat_job` after it, with the grant re-read in
+   between. Never the same instant. So the merge is what would make these simultaneous for the
+   first time, which is why the arithmetic is the merge's to settle rather than something it
+   inherits already decided.
+
    **And the clock ceiling has a second copy, which names the same stall differently.**
    `CLOCK_CEILING` (`crates/zeroship-workflow/src/service/store.rs`) bounds
    `clock.prepare_for_app` and `clock.query` and answers `clock_unavailable()`, an
@@ -974,11 +986,12 @@ protocol. This extends a working client rather than inventing one.
    The reserve and confirm: "One obligation is genuinely new". The backend: "An HTTP
    `WorkflowBackend`, which is not the easy half" and the four bullets under it. The heartbeat:
    "The timeout budget does not survive the merge", "And the mismatch pre-dates the merge", "And
-   the clock ceiling has a second copy", "And only one of the journal's two sites can reach that
-   diagnosis under an attempt", "One guard has no merged equivalent", and "And the merged reply
-   has one validated half and one unvalidated one". The flag: "Then the worker stops holding a
-   journal", "And the order passes through a state the queue has no shape for" and "And the
-   flag's second option removes the call that builds the backend".
+   half of that is answerable as a description", "And the clock ceiling has a second copy", "And
+   only one of the journal's two sites can reach that diagnosis under an attempt", "One guard has
+   no merged equivalent", and "And the merged reply has one validated half and one unvalidated
+   one". The flag: "Then the worker stops holding a journal", "And the order passes through a
+   state the queue has no shape for" and "And the flag's second option removes the call that
+   builds the backend".
 
    **And the first piece is not the loop.** The sweeps split by what they need. `close_job`,
    `fanout_job`, `propagation_job` and `reconcile_job`'s publications phase are journal-only and
@@ -997,10 +1010,16 @@ protocol. This extends a working client rather than inventing one.
 
    That is not an argument for giving the service a payload store. It is the same split `stage`
    and `read` already answer: the journal decision crosses, the bytes stay with the process
-   holding the store. What is genuinely unsettled is which process claims those two jobs once the
-   worker no longer holds the journal, because the capability and the journal end up on opposite
-   sides. The filter is not where the answer shows up, though, and the question ahead of it is
-   not about operations at all.
+   holding the store. `Collect` settles to the service. `collect_payload_checked`
+   (`crates/zeroship-workflow/src/service/payloads/collection.rs`) calls the deleter between a
+   committed fence and the next `begin`, holding no transaction, so a remote one-method deleter is
+   the whole of what it needs. `Cron` does not settle, because its byte write sits inside a
+   transaction held on purpose - "A bounded upload holds this lock until the store finishes, so GC
+   cannot race a live writer" (`crates/zeroship-workflow/src/service/payloads.rs`) - so what it
+   wants is the reserve and confirm this list already carries, not a second mechanism. What stays
+   genuinely unsettled is which process claims `Cron` once the worker no longer holds the journal.
+   The filter is not where that answer shows up, though, and the question ahead of it is not about
+   operations at all.
 
    **The queue admits one claimant identity per app, so a filter presupposes what placement
    refuses.** Every claim reaches `bound`
