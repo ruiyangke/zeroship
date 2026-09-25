@@ -63,6 +63,11 @@ paired!(
     postgres_a_failed_childs_own_error_reaches_its_parent_rather_than_a_verdict,
     failed_child
 );
+paired!(
+    sqlite_a_stalled_childs_verdict_reaches_its_parent_rather_than_wedging_it,
+    postgres_a_stalled_childs_verdict_reaches_its_parent_rather_than_wedging_it,
+    stalled_child
+);
 
 /// An instant far enough behind any test clock that the wait is already past
 /// due when the parent is next examined. Absolute rather than a duration, so no
@@ -467,4 +472,76 @@ async fn failed_child(store: Rc<OrmStore>) {
         );
         assert!(row.output.is_none(), "{row:?}");
     }
+}
+
+/// A child the platform gave up on comes to rest at `stalled`, and that is a
+/// terminal state, so the join settles on it the way it settles on any other.
+/// The verdict is the host's and the child records it, so the parent is handed
+/// `StalledError` rather than the stand-in the engine keeps for a child that
+/// recorded nothing.
+///
+/// The stall is driven through the frontier rather than written into the row:
+/// the child's dispatches are reclaimed with nothing reported until its strike
+/// budget is spent, which is the only thing that produces the state the join
+/// then has to read. A row spelled `stalled` by hand would carry the same
+/// characters and say nothing about what writes them.
+///
+/// The control differing in one variable is [`untimed_child_wait`]: the same
+/// parent on the same untimed join, whose child keeps being dispatched and
+/// leaves the parent waiting. This case differs only in those dispatches never
+/// reporting.
+async fn stalled_child(store: Rc<OrmStore>) {
+    let (service, app_id, _, _deployments) = registered_service(store).await;
+    let scope = service.fixture_app(app_id.clone());
+    let worker = WorkerIdentity::new("stalled-child".into()).unwrap();
+    let parent = parent_awaiting_child(&service, &scope, &worker, json!({})).await;
+    let child = accepted_child(&scope, &parent).await;
+
+    // The lease is short enough to expire inside the case, so each dispatch is
+    // reclaimed rather than released: nothing reports an outcome, exactly as a
+    // worker that died would not. Two of them spend the budget.
+    service
+        .fixture_install(
+            &app_id,
+            leased_policy(
+                2,
+                AppPolicy {
+                    lease_ms: 1_000,
+                    max_stuck_dispatches: 2,
+                    ..AppPolicy::default()
+                },
+            ),
+        )
+        .unwrap();
+    for _ in 0..2 {
+        let task = service
+            .poll(&worker)
+            .await
+            .unwrap()
+            .expect("an untimed join leaves the child the only runnable run");
+        assert_eq!(task.invocation.run_id, child);
+        compio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
+    assert!(
+        service.poll(&worker).await.unwrap().is_none(),
+        "a spent strike budget must bring the child to rest rather than dispatch it again"
+    );
+    let status = scope.status(&child).await.unwrap();
+    assert_eq!(status.state, RunState::Stalled);
+    assert_eq!(
+        status.error.as_ref().map(|error| error["type"].clone()),
+        Some(json!("StalledError")),
+        "the join can only read the verdict the child recorded: {:?}",
+        status.error
+    );
+    deliver_propagations(&scope).await;
+
+    let row = parent_join_row(&service, &worker, &parent).await;
+    let error = row
+        .error
+        .clone()
+        .expect("a stalled child fails its parent join");
+    assert_eq!(error["type"], json!("StalledError"), "{error}");
+    assert!(row.output.is_none(), "{row:?}");
+    assert!(row.output_ref.is_none(), "{row:?}");
 }
