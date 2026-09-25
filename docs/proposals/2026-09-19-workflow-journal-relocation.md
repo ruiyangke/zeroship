@@ -482,6 +482,43 @@ protocol. This extends a working client rather than inventing one.
    `queue_routes_authenticate_before_body_and_reject_open_metadata` probing that boundary on
    purpose. Re-measure there rather than assuming headroom.
 
+   **The timeout budget does not survive the merge, and this step has to decide what moves.**
+   Today the two calls spend their budgets in sequence under one `OPERATION_TIMEOUT`
+   (`crates/zeroship-worker/src/workflow_host.rs`): the wire half answers to the client's own
+   default timeout and the journal half to `ATTEMPT_IO_CEILING`
+   (`crates/zeroship-workflow/src/service/delivery.rs`), and the two fit inside it exactly.
+   Merged, both run inside ONE client-bounded request, while the server must fit
+   `authenticate` (`crates/zeroship-workflow-server/src/api/jobs.rs`), the manager's queue
+   transaction, AND a journal attempt carrying that same ceiling - so the server's worst case
+   exceeds what the client will wait for. That is arithmetic over four constants rather than a
+   measurement, and none of the three candidates is chosen: the client's timeout for this
+   endpoint, the attempt ceiling on this path, or a tighter bound inside the server. The other
+   two pairs do not have it. `accept_job` runs under no bounded wrapper, so there is no shared
+   budget to overrun, and settle already retries, which absorbs a longer server call where a
+   single `?` cannot.
+
+   **One guard has no merged equivalent.** `renew` re-reads the grant's remaining time BETWEEN
+   the two calls, so a manager reply arriving after the old grant lapsed cannot be followed by
+   a journal write. Merged, the journal half has already committed on the server before the
+   runner evaluates anything, which admits a case the split path refuses. Name it where it
+   lands rather than leaving it to be found.
+
+   **The partial commit moves rather than goes.** The journal call takes the manager call's
+   output as its grant, so the server commits the manager half first and the journal half
+   second, across two stores with no shared transaction. Merging hides which half succeeded
+   from the runner; it does not make them atomic.
+
+   **Do not write the server handler ahead of the cutover.** Not because it would sit unwired,
+   but because it would be a LIVE endpoint reading a merged body whose journal half it cannot
+   serve, and a client speaking the merged contract would break against it at once.
+
+   **The port trait is not what this step is for.** The client validates nothing about the
+   journal half - every check it makes is on `Delivery` fields it already owns - so carrying
+   that half as an opaque value loses no guarantee the client exercises, and moving to
+   associated types later touches one method signature and one implementation. Take the trait
+   only if the server half is commissioned in the same breath; otherwise it is a bet on a
+   schedule rather than an argument from the code.
+
    **What must survive, and where each is enforced.** The manager's evidence that an execution
    began is `renewal` in `crates/zeroship-workflow-manager/src/queue.rs`, NOT any method named
    `heartbeat_job` - that name resolves to three different methods in three crates, and a
