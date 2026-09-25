@@ -923,6 +923,19 @@ protocol. This extends a working client rather than inventing one.
    sides. Settle it before the claim filter is written, since the filter is where the answer
    shows up.
 
+   **Neither needs a store in the service, and they need different things.** `PayloadDeleter`
+   (`crates/zeroship-workflow/src/service/payloads.rs`) is one method, `delete(app, id)` - ids
+   only, no bytes - so the service can hold a remote implementation that asks whoever owns the
+   store to delete, and `collect_job` needs nothing further. `InputStager`
+   (`crates/zeroship-workflow/src/backend.rs`) is the harder one: `stage_input` takes the journal
+   handle AND the value, so it does journal work and a byte write in one call. But the service
+   holds the value already - a schedule's input is inline in the journal - so it can hash it and
+   record ownership itself and only the object write crosses. That is the reserve-and-confirm
+   split `stage` already needs, not a second mechanism.
+
+   So the blocker is smaller than "two sweeps cannot move": one wants a one-method remote
+   capability, the other reuses a split already on the list.
+
    **And do not reach for the classification that already exists; it splits on a different
    axis.** `worker_operation` (`crates/zeroship-workflow-manager/src/coordinator/jobs.rs`)
    admits `Advance`, `Fanout` and `Propagate` and denies the other seven, but it is a PUBLISH
