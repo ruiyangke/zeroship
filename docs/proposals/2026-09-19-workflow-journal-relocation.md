@@ -1061,19 +1061,25 @@ protocol. This extends a working client rather than inventing one.
    "And that arm removes the call that builds the backend".
 
    **And the first piece is not the loop.** The sweeps split by what they need. `close_job`,
-   `fanout_job`, `propagation_job` and `reconcile_job`'s publications phase are journal-only and
-   the service could run them with nothing new but a claim path. `activate_job`, `cron_job` and
-   `management_job` are the only ones that reach `record_verified` in production - and they are
-   exactly the ones needing an artifact source, a journal-class deployment hold and the
-   authorization to take one. The cheap group writes no `deploys` row at all, so a dispatch loop
-   without them has three dead arms and the foreign key stays shut.
+   `fanout_job`, `propagation_job` and `reconcile_job`'s publications phase need nothing but a
+   claim path. `activate_job`, `cron_job` and `management_job` are the ones that reach
+   `record_verified` in production - the third through
+   `crates/zeroship-workflow/src/service/management/target.rs` - and they are exactly the ones
+   needing an artifact source, a journal-class deployment hold and the authorization to take one.
+   `release_hold_job` belongs with those rather than with the cheap group: it reaches
+   `self.service.deployments` for a hold client
+   (`crates/zeroship-workflow/src/service/hold_release.rs`) even though it writes no `deploys`
+   row. The cheap group writes no `deploys` row at all, so a dispatch loop holding only it has
+   dead arms and the foreign key stays shut.
 
    **And two of the nine cannot move at all as they stand.** `cron_job` takes an `InputStager`
    and `collect_job` a `PayloadDeleter`. The only production implementation of either is
    `PayloadObjects` (`crates/zeroship-workflow-runner/src/payloads/objects.rs`) - everything else
    in the tree is a test fake - and that crate is the one the service may not reach, under the
-   same gate arm that makes lifting the dispatch necessary in the first place. So seven sweeps
-   are journal-only and can run in the service; these two move creator bytes and cannot.
+   same gate arm that makes lifting the dispatch necessary in the first place. So seven of the
+   nine move no creator bytes and these two cannot - but moving no bytes is not the same as
+   wanting only the journal, and the group needing only a claim path is the four named above. The
+   rest want the deployments source, which lands with the grant in the bullet after this one.
 
    That is not an argument for giving the service a payload store. It is the same split `stage`
    and `read` already answer: the journal decision crosses, the bytes stay with the process
