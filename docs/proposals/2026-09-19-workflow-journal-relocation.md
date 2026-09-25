@@ -502,6 +502,19 @@ protocol. This extends a working client rather than inventing one.
    budget to overrun, and settle already retries, which absorbs a longer server call where a
    single `?` cannot.
 
+   **And the mismatch pre-dates the merge, which changes what has to be decided.**
+   `authenticate` (`crates/zeroship-workflow-server/src/api/jobs.rs`) bounds the auth step alone
+   at the same five seconds the client allows for the whole exchange. So a server that ever
+   approached its own authentication ceiling would already lose the client on any endpoint, today
+   - the ceilings do not compose into anything the client's bound can hold, and the system
+   tolerates that because they are ceilings rather than costs. The merge does not introduce the
+   class of problem; it stacks a second such ceiling on one that already equals the whole budget.
+
+   So the question is not "what does the merged heartbeat's budget become". It is whether these
+   bounds are meant to compose at all, and if they are, which of them shrinks so the sum fits
+   what the caller will wait for. Deciding the merge's budget in isolation would set a number
+   against an arithmetic that is already inconsistent one call earlier.
+
    **One guard has no merged equivalent.** `renew` re-reads the grant's remaining time BETWEEN
    the two calls, so a manager reply arriving after the old grant lapsed cannot be followed by
    a journal write. Merged, the journal half has already committed on the server before the
