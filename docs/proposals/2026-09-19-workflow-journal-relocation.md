@@ -751,9 +751,41 @@ protocol. This extends a working client rather than inventing one.
    predicates and check that exactly one row changed, the way `collect_payload_checked` in
    `crates/zeroship-workflow/src/service/payloads/collection.rs` already does.
 
-   **And `read` is the crossing to scope, not `stage`.** App code drives it through the
-   `TaskOutputReader` slot an unbounded number of times, it has no adjacent call of any kind,
-   and it is the only one of the three that can fire while an isolate is live.
+   **And `read` crosses once per dispatch, not once per call.** It is the only one of the three
+   that fires while an isolate is live, but the journal contributes exactly one thing the worker
+   cannot supply itself: the payload id. `WorkflowOutputRef` carries hash, size and content type
+   and no key; the key is minted by `typed_id::generate` in `stage_payload`, and the object store
+   is addressed by it. Name to descriptor is already local - the assignment carries the whole
+   journal, and `TaskPayloadReader` resolves names against it with no I/O. And the mapping is
+   immutable for the dispatch: once a step output is `referenced`, the matching arm of
+   `owned_reference` carries no expiry predicate and collection skips that state entirely. So
+   the descriptor-to-id map for a dispatch is a constant, and one prefetch replaces N reads.
+
+   **Two things constrain how that map travels.** It must NOT ride inside `WorkflowInvocation`:
+   `V8Execution::wait` serializes that into the envelope creator code receives, and the
+   executor's own contract says only `assignment.invocation` may enter app code. It belongs on
+   `TaskAssignment` beside the token. And prefetch the MAPPING, not the bytes - the JS bridge
+   already memoises byte reads per dispatch by `(run, name, occurrence, hash)` in
+   `crates/zeroship-workflow-v8/js/dispatch.js`, deliberately lazily, so eagerly fetching bytes
+   would pay for outputs the body never touches.
+
+   **Moving this read remote shrinks a lock rather than widening one.** Today
+   `authorized_task` takes `lock_app_state` - app-wide, not run-scoped - and `lock_run`, and the
+   object open happens inside that transaction, so an S3 header round trip runs with both held
+   and every replay read serializes against every journal mutation for the app. Served, the
+   service answers the mapping and commits; the worker opens the object afterwards.
+
+   **One guard is currently unreachable and becomes live on the move.** `read_verified` refuses
+   when the returned descriptor differs from the one asked for, but today the row is selected by
+   equality on hash, size and content type, so it cannot differ. Nothing asserts that refusal -
+   the message appears once in the tree, at its own definition. It is the one check positioned
+   for the relocation, and it needs a test before the transport changes under it.
+
+   **What would make a prefetch silently wrong.** It drops the per-read lease recheck, and
+   nothing in the tree drives a read after the lease is lost while an isolate is live - the
+   outage test fakes an unavailable transport, which is a different mechanism. So the suite
+   would confirm a prefetch and say nothing about the property the prefetch removes. That test
+   comes first.
 
    **And `RunService` installs no deployments source**, so `tasks::assign` finds no available
    deploy and a served claim cannot return a task. Installing one is necessary and not
