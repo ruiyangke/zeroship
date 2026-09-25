@@ -978,12 +978,12 @@ protocol. This extends a working client rather than inventing one.
    one and has no production caller. The lease such a caller grants itself is still capped by
    `Queue::deadline` at the manager's configured lease rather than by its own number. So the
    service can claim in process without a placement today, with no change to the queue at all.
-   Whether it SHOULD is the question, and the tree argues against: the one in-process host that
-   exists registers as a worker and places the app on it, omitting "only enrollment and network
-   transport" (`crates/zeroship-cli/src/workflow/manager.rs`). Being trusted and in-process has
-   bought the omission of enrollment, never of placement. The other arm makes the service the
-   first claimant whose authority is asserted rather than recorded, in the one table an operator
-   reads to answer which process is executing an app.
+   Whether it SHOULD is the question, and the objection to answer is this: the one in-process
+   host that exists registers as a worker and places the app on it, omitting "only enrollment and
+   network transport" (`crates/zeroship-cli/src/workflow/manager.rs`). Read that way, being
+   trusted and in process buys the omission of enrollment and never of placement, and the other
+   arm makes the service the first claimant whose authority is asserted rather than recorded, in
+   the one table an operator reads to answer which process is executing an app.
 
    **And the ways around deciding it are each worse.** Issuing the service a placement means
    widening a lane whose own header reads "Placement admits an app onto a worker only within
@@ -1094,9 +1094,11 @@ protocol. This extends a working client rather than inventing one.
    transaction held on purpose - "A bounded upload holds this lock until the store finishes, so GC
    cannot race a live writer" (`crates/zeroship-workflow/src/service/payloads.rs`) - so what it
    wants is the reserve and confirm this list already carries, not a second mechanism. So both
-   capability halves are answerable, and they differ. What stays genuinely unsettled for both is
-   which process CLAIMS them once the worker no longer holds the journal. That is not a question
-   about capability, and the filter is not where its answer shows up.
+   capability halves are answerable, and they differ. What decides where they run is not
+   capability but claim authority, and the flag-day order answers that: the service claims them in
+   process, so `Collect` needs only the remote deleter and `Cron` needs the reserve and confirm
+   already on the list. See "And the service is already a claimant of this kind, which answers
+   it".
 
    **A second claimant blocks rather than skipping, which is what puts authority first.** Two
    claimants on one app are representable and this order needs them; what they are not is free.
