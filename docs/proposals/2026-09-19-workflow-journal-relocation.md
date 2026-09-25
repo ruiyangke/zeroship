@@ -753,9 +753,12 @@ protocol. This extends a working client rather than inventing one.
 
    **Three are wiring, and the wire already exists on both ends.**
    `WorkerCoordinator::run_status`, `signal_run` and `transition_run` in
-   `crates/zeroship-workflow-client/src/lib.rs` are written, their endpoints are served, and
-   NOTHING calls them - no production caller and no test, in either crate. That is the built
-   half of this step already sitting in the tree unwired, and wiring it is the small part.
+   `crates/zeroship-workflow-client/src/lib.rs` are written and their endpoints are served, and
+   `the_client_and_the_service_agree_on_every_run_call`
+   (`crates/zeroship-workflow-server/tests/run_wire_pair.rs`) drives each of the three against its
+   served route, so the two halves are bound to each other. What none of them has is a production
+   caller. That is the built half of this step sitting in the tree awaiting one, and supplying it
+   is the small part.
 
    **One is a service capability.** `restart` has its endpoint and handler and refuses
    unconditionally, because `RunService` builds its service without deployments; see the
