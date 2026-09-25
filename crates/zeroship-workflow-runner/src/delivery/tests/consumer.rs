@@ -3,6 +3,7 @@ use crate::consumer::{
     ConsumerBindings, ConsumerOptions, ConsumerScope, JobConsumer,
 };
 use std::collections::VecDeque;
+use zeroship_core::workflow_jobs::DeploymentId;
 
 enum Event {
     Claimed,
@@ -1415,4 +1416,134 @@ async fn consumer_delivers_close_under_archived_policy_and_the_scope_retires() {
         WorkflowServiceError::PermissionDenied,
         "archive refuses admission itself"
     );
+}
+
+/// Move a confirmed queue hold past any release grace, as the manager's own
+/// retention suite does. The lane only considers a deployment whose hold was
+/// confirmed long enough ago that its acquirer has committed its dependency.
+fn age_queue_hold(manager: &NativeManager, app: &AppId, deployment: &DeploymentId) {
+    let connection = rusqlite::Connection::open(&manager.database.path).unwrap();
+    assert_eq!(
+        connection
+            .execute(
+                "UPDATE deployment_holds SET held_at=0 \
+                 WHERE app_id=?1 AND deployment_id=?2 AND state='held'",
+                [app.as_str(), deployment.as_str()],
+            )
+            .unwrap(),
+        1
+    );
+}
+
+/// The retention lane's journal release duty reaches the creator engine's hold
+/// release through the delivery dispatch.
+///
+/// The operation is never constructed here: the manager's own lane mints it from
+/// a released queue hold, and the delivery slot claims what it published. That is
+/// what this binds. Every sweep revalidates its own operation kind, so an arm
+/// pointed at another sweep refuses the delivery instead of releasing the hold,
+/// and the journal keeps the deployment.
+#[compio::test]
+async fn retention_release_duty_dispatches_to_the_creator_hold_release() {
+    let fixture = Fixture::new(AppPolicy::default()).await;
+    let app = fixture.app.app_id().clone();
+    let manager = NativeManager::new(&fixture).await;
+
+    // A deployment this app never selected, whose journal hold the creator
+    // engine holds and nothing in its journal depends on.
+    let superseded = fixture.deployments.deploy(&app).await;
+    let client = fixture.deployments.client(&app);
+    fixture
+        .service
+        .acquire_deployment_hold(&app, &superseded.id, &superseded.hash, &client)
+        .await
+        .unwrap();
+    fixture.deployments.assert_held(&app, &superseded.id).await;
+
+    // The manager's own queue hold on it, aged past the release grace.
+    let deployment = DeploymentId::parse(&superseded.id).unwrap();
+    manager
+        .database
+        .queue
+        .ensure_deployment(&app, &deployment)
+        .await
+        .unwrap();
+    age_queue_hold(&manager, &app, &deployment);
+
+    // Two retention turns: the first gives the queue hold back, the second
+    // publishes the journal release duty the creator engine answers.
+    let mut driver = zeroship_workflow_manager::driver::Driver::new(
+        manager.coordinator.clone(),
+        zeroship_workflow_manager::driver::Options::default(),
+        Rc::new(zeroship_workflow_manager::lifecycle::Undeletable),
+        Rc::new(zeroship_workflow_manager::capacity::LocalCapacity),
+    )
+    .unwrap();
+    for turn in 0..2 {
+        let retention = driver.tick().await.retention;
+        assert!(
+            retention.failures.is_empty(),
+            "turn {turn}: {:?}",
+            retention.failures
+        );
+        assert_eq!(retention.completed, 1, "turn {turn}: {retention:?}");
+    }
+
+    let grant = manager
+        .claim(&manager.scope)
+        .await
+        .unwrap()
+        .expect("the retention lane published a deliverable release duty");
+    let job = grant.delivery().job.clone();
+    assert_eq!(
+        job.operation,
+        JobOperation::ReleaseHold {
+            deployment_id: deployment.clone()
+        },
+        "the lane minted the operation this delivery dispatches"
+    );
+    assert_eq!(job.deployment_id(), None, "a release needs no hold");
+
+    let mut slot = DeliverySlot::new(
+        manager.clone(),
+        Rc::new(Executor {
+            probe: fixture.probe.clone(),
+            service: fixture.service.clone(),
+        }),
+        fixture.objects.clone(),
+        DeliveryOptions {
+            execution_timeout: Duration::from_secs(5),
+            operation_timeout: Duration::from_secs(5),
+            retry_delay: Duration::from_millis(5),
+            maintenance: MaintenanceOptions::default(),
+        },
+    )
+    .unwrap();
+    let DeliveryOutcome::Settled {
+        creator,
+        manager: acknowledged,
+    } = Box::pin(slot.run(&fixture.app, grant)).await.unwrap()
+    else {
+        panic!("a release duty settles without deferring or executing")
+    };
+    assert_eq!(creator.job, job);
+    assert_eq!(creator.outcome, JobOutcome::Completed {});
+    assert_eq!(acknowledged.outcome, JobOutcome::Completed {});
+    // The hold release is the sweep that ran: the creator journal gave the
+    // deployment back, so the platform collector's fence now commits.
+    fixture
+        .deployments
+        .assert_reclaimable(&app, &superseded.id)
+        .await;
+    assert_eq!(
+        fixture.app.job_receipt(&job).await.unwrap(),
+        Some(*creator),
+        "the committed receipt is the release's own"
+    );
+    assert_eq!(fixture.probe.starts.get(), 0, "a release runs no app code");
+    let requests = manager.requests.borrow();
+    assert_eq!(requests.len(), 2, "the lost acknowledgement was retried");
+    assert_eq!(requests[0], requests[1]);
+    assert_eq!(requests[0].delivery.job, job);
+    assert!(requests[0].successors.is_empty());
 }
