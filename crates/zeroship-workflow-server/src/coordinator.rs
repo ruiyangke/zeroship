@@ -255,6 +255,15 @@ impl Coordinator {
         if get::<&str>(row, "fingerprint")? != FINGERPRINT.trim() {
             return Err(Error::Unavailable);
         }
+        // Every column this process reads, and nothing beyond it. `/readyz`
+        // answers from this call alone (`ready` in `crate::api`), so the
+        // `zeroship.apps` line is the only continuous proof that placement's
+        // Control reads are still granted: it projects exactly what
+        // `ControlEligibility::app`
+        // (crates/zeroship-workflow-manager/src/eligibility.rs) filters and
+        // selects. A probe narrower than those reads reports ready and then
+        // refuses every placement; a probe wider than the grants fails
+        // readiness for a capability nothing here reads.
         self.pool.batch_execute(
             "SELECT id,capacity,state,expires_at,lock_version,execution_zone_id FROM workflow_manager.workers LIMIT 0;
              SELECT id,lock_version,dispatch_cursor FROM workflow_manager.queue_scopes LIMIT 0;
@@ -274,8 +283,7 @@ impl Coordinator {
              SELECT id,app_id,kind,next_due_at,pending_job_id FROM workflow_manager.recovery_duties LIMIT 0;
              SELECT id,execution_zone_id,recorded_at FROM workflow_manager.capacity_demands LIMIT 0;
              SELECT id,revision,desired,state,refusal,observed,attempt,attempt_deadline,retry_at,below_since,lock_version FROM workflow_manager.capacity_targets LIMIT 0;
-             SELECT id,deploy_hash,deleted_at FROM zeroship.apps LIMIT 0;
-             SELECT id,app_id,deploy_hash,retention_state FROM zeroship.app_deploys LIMIT 0;"
+             SELECT id,execution_zone_id,deleted_at FROM zeroship.apps LIMIT 0;"
         ).await?;
         Ok(())
     }

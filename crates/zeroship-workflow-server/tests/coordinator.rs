@@ -61,7 +61,7 @@ impl Fixture {
                 "CREATE ROLE coordinator_test LOGIN;
              CREATE SCHEMA workflow_manager;
              CREATE SCHEMA zeroship;
-             CREATE TABLE zeroship.apps(id text PRIMARY KEY,deploy_hash text,deleted_at timestamptz);
+             CREATE TABLE zeroship.apps(id text PRIMARY KEY,execution_zone_id text,deleted_at timestamptz);
              CREATE SCHEMA customer;
              CREATE TABLE customer.__zeroship_workflow_history(id text PRIMARY KEY,secret text);
              REVOKE ALL ON SCHEMA customer FROM PUBLIC;",
@@ -82,8 +82,7 @@ impl Fixture {
             .unwrap();
         admin.batch_execute(
             "GRANT USAGE ON SCHEMA workflow_manager,zeroship TO coordinator_test;
-             GRANT SELECT(id,deploy_hash,deleted_at) ON zeroship.apps TO coordinator_test;
-             GRANT SELECT(id,app_id,deploy_hash,retention_state) ON zeroship.app_deploys TO coordinator_test;
+             GRANT SELECT(id,execution_zone_id,deleted_at) ON zeroship.apps TO coordinator_test;
              GRANT SELECT ON workflow_manager.schema_version TO coordinator_test;
              GRANT SELECT,INSERT,UPDATE,DELETE ON workflow_manager.workers,
                workflow_manager.queue_scopes,workflow_manager.deployment_holds,workflow_manager.assignments,

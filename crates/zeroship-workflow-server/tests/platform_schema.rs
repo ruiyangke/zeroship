@@ -362,8 +362,6 @@ async fn platform_role_serves_the_journal_without_customer_or_ddl_privileges() {
         .unwrap();
     for sql in [
         "SELECT id FROM workflow_manager.queue_scopes",
-        "SELECT id,deploy_hash FROM zeroship.apps",
-        "SELECT id,app_id,deploy_hash,retention_state FROM zeroship.app_deploys",
         "SELECT id,status,public_key FROM zeroship.worker_instances",
         "SELECT id,execution_zone_id,deleted_at FROM zeroship.apps",
         "SELECT id,execution_zone_id FROM zeroship.worker_instances",
@@ -394,6 +392,7 @@ async fn platform_role_serves_the_journal_without_customer_or_ddl_privileges() {
             "coordinator accepted {sql}"
         );
     }
+    deployment_catalog_is_out_of_reach(&runtime).await;
     manager_queue_authority(&fixture, &runtime).await;
     journal_is_installed_and_served_by_one_role(&fixture).await;
     journal_payload_columns_are_a_closed_set(&fixture).await;
@@ -486,25 +485,34 @@ async fn platform_role_serves_the_journal_without_customer_or_ddl_privileges() {
             .unwrap();
         service.verify().await.unwrap();
     }
-    for (table, columns) in [
-        ("apps", "deploy_hash"),
-        ("app_deploys", "id,app_id,deploy_hash,retention_state"),
-    ] {
+    // The startup probe and the grants move together, one column at a time.
+    // `/readyz` answers from `Coordinator::verify` alone (`ready` in
+    // `zeroship_workflow_server::api`), so this call is the only continuous
+    // proof that placement's Control reads are still granted. Each of these is
+    // a column `ControlEligibility` filters or projects
+    // (crates/zeroship-workflow-manager/src/eligibility.rs); losing any one of
+    // them must fail readiness rather than leave a host that reports ready and
+    // then refuses every placement.
+    //
+    // One column per arm rather than all three at once: a probe that stopped
+    // naming exactly one of them would still be caught by the other two if
+    // they were revoked together.
+    for column in ["id", "execution_zone_id", "deleted_at"] {
         fixture
             .admin
             .batch_execute(&format!(
-                "REVOKE SELECT({columns}) ON zeroship.{table} FROM zeroship_workflow"
+                "REVOKE SELECT({column}) ON zeroship.apps FROM zeroship_workflow"
             ))
             .await
             .unwrap();
         assert!(
             service.verify().await.is_err(),
-            "missing latest-deployment source privilege on {table}"
+            "readiness survived the loss of zeroship.apps({column})"
         );
         fixture
             .admin
             .batch_execute(&format!(
-                "GRANT SELECT({columns}) ON zeroship.{table} TO zeroship_workflow"
+                "GRANT SELECT({column}) ON zeroship.apps TO zeroship_workflow"
             ))
             .await
             .unwrap();
@@ -735,6 +743,46 @@ async fn manager_scheduling_authority(fixture: &platform::Platform) {
     assert!(matches!(page.jobs[0].operation, JobOperation::Cron { .. }));
     assert!(!page.more);
     assert!(scheduler.due(None).await.unwrap().is_empty());
+}
+
+/// Control's deployment catalog is out of this role's reach: `deploy_hash` on
+/// `zeroship.apps`, and every column of `zeroship.app_deploys`.
+///
+/// The workflow process holds no reader for either. A management command names
+/// its deployment on the wire rather than deciding which one is current
+/// (`Coordinator::manage`, crates/zeroship-workflow-manager/src/coordinator/
+/// management.rs), and the holds it takes against that catalog go through
+/// Control's queue endpoint under Control's own credential
+/// (`ControlHolds` in crates/zeroship-workflow-server/src/server.rs).
+///
+/// THE REFUSALS ARE READ BY SQLSTATE, not by `is_err`. A statement that failed
+/// because the relation was missing, because `USAGE ON SCHEMA zeroship` had
+/// gone, or because the connection had dropped would satisfy `is_err`
+/// identically and turn this into a check that passes for the wrong reason.
+///
+/// THE CONTROL RUNS FIRST, on the same role over the same connection, and the
+/// two differ only in which columns of which table are named. Without it a
+/// blanket `REVOKE ... FROM zeroship_workflow` - or a role that reaches nothing
+/// in `zeroship` at all - passes the refusals below unchanged.
+async fn deployment_catalog_is_out_of_reach(runtime: &compio_postgres::Client) {
+    runtime
+        .batch_execute("SELECT id,execution_zone_id,deleted_at FROM zeroship.apps")
+        .await
+        .expect("placement's own columns of zeroship.apps stay granted");
+    for sql in [
+        "SELECT deploy_hash FROM zeroship.apps",
+        "SELECT id FROM zeroship.app_deploys",
+    ] {
+        let refusal = runtime
+            .batch_execute(sql)
+            .await
+            .expect_err("the workflow role reached the deployment catalog");
+        assert_eq!(
+            refusal.as_db_error().map(compio_postgres::error::DbError::code),
+            Some(&compio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE),
+            "{sql} failed for something other than the withheld grant"
+        );
+    }
 }
 
 #[expect(
