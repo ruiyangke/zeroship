@@ -148,12 +148,34 @@ pub(super) async fn provision_binding_schema(pool: &std::rc::Rc<Pool>, app: &str
         .to_owned()
 }
 
+/// Gate every row of `collection` behind `current_user`, admitting exactly
+/// `roles`.
+///
+/// The gate is what makes a fixture able to say WHICH role a statement ran
+/// under: a login that reached the row through an ambient privilege sees
+/// nothing, so a read that returns the row proves the session narrowed.
+///
+/// It takes a LIST because one dispatch can legitimately run under two roles. A
+/// masked field's real value is granted to the database's unmask role alone, so
+/// the audited raw-column read assumes it for that one statement while every
+/// other statement of the same dispatch stays on the binding role. A gate
+/// naming only the binding role would hide the row from the read rather than
+/// prove anything about it.
 pub(super) async fn install_role_bound_select_policy(
     pool: &std::rc::Rc<Pool>,
     app: &str,
     collection: &str,
-    role: &str,
+    roles: &[&str],
 ) {
+    assert!(
+        !roles.is_empty(),
+        "a role gate admitting nobody would hide the row from every arm"
+    );
+    let admitted = roles
+        .iter()
+        .map(|role| format!("'{role}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
     let alias = crate::tests::fixtures::harness_alias(app);
     pool.execute(
         &format!("ALTER TABLE \"{alias}\".\"{collection}\" ENABLE ROW LEVEL SECURITY"),
@@ -176,7 +198,7 @@ pub(super) async fn install_role_bound_select_policy(
     pool.execute(
         &format!(
             "CREATE POLICY role_gate ON \"{alias}\".\"{collection}\" \
-             FOR SELECT USING (current_user = '{role}')"
+             FOR SELECT USING (current_user IN ({admitted}))"
         ),
         &[],
     )

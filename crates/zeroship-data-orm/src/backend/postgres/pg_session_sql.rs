@@ -56,6 +56,69 @@ pub(crate) fn autocommit_local_session_setup_sql(
     session_setup_sql(binding, authority, false)
 }
 
+/// A creator session asked to reach a masked field's real value on a binding
+/// that names no unmask role.
+///
+/// Refused for the reason [`unbound_session`] gives, applied to the statement
+/// that carries the highest privilege the data plane can reach: running it
+/// under whatever role the session already holds is the outcome that must not
+/// be available, because the shared worker login is a member of every live
+/// binding on the cluster.
+fn unbound_unmask() -> DbError {
+    DbError::config(
+        "binding_not_resolved",
+        "db: this connection narrows per binding, and the binding names no database to unmask in",
+    )
+}
+
+/// The two role statements that bracket one audited raw-column read.
+///
+/// Composed as a pair so the statement that assumes the privilege and the one
+/// that gives it back are derived from one binding in one place. Both names are
+/// the ones the binding carries, quoted through the same path the setup batch
+/// uses.
+#[derive(Debug)]
+pub(crate) struct UnmaskElevation {
+    /// Assume the database's unmask role.
+    pub(crate) assume: String,
+    /// Narrow back to the binding role.
+    pub(crate) restore: String,
+}
+
+/// Compose the elevation one audited raw-column read runs under, or `None` when
+/// this connection's authority is the login's own.
+///
+/// `Connection` authority is a trusted native service reading its OWN schema on
+/// a connection that already authenticates as the role owning it. There is no
+/// per-binding narrowing to step out of and no unmask role to step into, so
+/// there is nothing to bracket - which is the same answer
+/// [`session_setup_sql`] gives that authority.
+///
+/// # Errors
+///
+/// [`DbError`] when the connection narrows per binding and the binding carries
+/// no database edge to name either role.
+pub(crate) fn unmask_elevation_sql(
+    binding: &DbBinding,
+    authority: SessionAuthority,
+) -> Result<Option<UnmaskElevation>, DbError> {
+    if authority == SessionAuthority::Connection {
+        return Ok(None);
+    }
+    let unmask = binding.unmask_role().ok_or_else(unbound_unmask)?;
+    let session = binding.session_role().ok_or_else(unbound_unmask)?;
+    Ok(Some(UnmaskElevation {
+        assume: format!(
+            "SET LOCAL ROLE {}",
+            crate::sql::mapping::quote_ident(unmask)
+        ),
+        restore: format!(
+            "SET LOCAL ROLE {}",
+            crate::sql::mapping::quote_ident(session)
+        ),
+    }))
+}
+
 fn session_setup_sql(
     binding: &DbBinding,
     authority: SessionAuthority,
@@ -272,6 +335,86 @@ mod tests {
         assert!(
             !kept.contains("SET LOCAL ROLE"),
             "connection authority keeps the login's role, so it must NOT narrow: {kept}"
+        );
+    }
+
+    /// The bracket names the binding's two roles, and the restore is the role
+    /// the setup batch already narrowed to.
+    ///
+    /// The last assertion is the one that matters: a restore composed from the
+    /// unmask role would look identical in every other respect and would leave
+    /// the creator's next statement elevated.
+    #[test]
+    fn the_unmask_bracket_assumes_the_database_role_and_restores_the_binding() {
+        let binding = creator_binding();
+        let elevation = unmask_elevation_sql(&binding, SessionAuthority::PerBindingRole)
+            .expect("a creator binding names both roles")
+            .expect("per-binding authority brackets the read");
+        assert_eq!(
+            elevation.assume,
+            format!(
+                r#"SET LOCAL ROLE "{}""#,
+                binding.unmask_role().expect("a creator binding unmasks")
+            )
+        );
+        assert_eq!(
+            elevation.restore,
+            format!(
+                r#"SET LOCAL ROLE "{}""#,
+                binding.session_role().expect("a creator binding narrows")
+            )
+        );
+        assert_ne!(
+            elevation.assume, elevation.restore,
+            "a bracket whose two halves were one statement would elevate and \
+             never give the privilege back"
+        );
+    }
+
+    /// Both halves are `SET LOCAL`, so an abandoned lease cannot carry the
+    /// elevation into the next borrower.
+    #[test]
+    fn both_halves_of_the_unmask_bracket_are_transaction_scoped() {
+        let binding = creator_binding();
+        let elevation = unmask_elevation_sql(&binding, SessionAuthority::PerBindingRole)
+            .unwrap()
+            .unwrap();
+        for statement in [&elevation.assume, &elevation.restore] {
+            assert!(
+                statement.starts_with("SET LOCAL ROLE "),
+                "a session-level SET would outlive the transaction: {statement}"
+            );
+        }
+    }
+
+    /// A binding that names no database is refused, and the login's own
+    /// authority brackets nothing.
+    ///
+    /// The two arms differ in one variable. Without the `Connection` arm the
+    /// refusal would be indistinguishable from "this composer always refuses a
+    /// platform binding", and without the `PerBindingRole` arm a composer that
+    /// always answered `None` would pass.
+    #[test]
+    fn an_unbound_binding_is_refused_and_connection_authority_brackets_nothing() {
+        let platform = DbBinding::platform(
+            "platform",
+            "fixture",
+            SchemaName::new("zeroship").expect("fixture schema"),
+        );
+        let error = unmask_elevation_sql(&platform, SessionAuthority::PerBindingRole)
+            .expect_err("a narrowing connection needs a role to assume");
+        assert_eq!(error.code(), "binding_not_resolved", "{error}");
+        assert!(
+            unmask_elevation_sql(&platform, SessionAuthority::Connection)
+                .expect("the login's own authority composes")
+                .is_none(),
+            "a trusted native service reading its own schema has nothing to assume"
+        );
+        assert!(
+            unmask_elevation_sql(&creator_binding(), SessionAuthority::PerBindingRole)
+                .expect("a creator binding composes")
+                .is_some(),
+            "the control: the refusal is about the binding, not about the composer"
         );
     }
 

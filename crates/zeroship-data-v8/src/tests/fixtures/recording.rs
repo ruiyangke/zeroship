@@ -125,6 +125,18 @@ impl ScopedExecutor for RecordingBackend {
         record(sql, params);
         self.0.exec(binding, sql, params).await
     }
+    async fn read_unmasked(
+        &self,
+        binding: &DbBinding,
+        session: Option<&Session>,
+        sql: &str,
+        params: &[Value],
+    ) -> Result<Vec<Value>, DbError> {
+        record(sql, params);
+        self.0
+            .read_unmasked(binding, unwrap_session(session), sql, params)
+            .await
+    }
     async fn check_connection(&self) -> Result<(), DbError> {
         self.0.check_connection().await
     }

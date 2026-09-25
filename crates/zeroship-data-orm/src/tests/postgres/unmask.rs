@@ -17,6 +17,19 @@ use crate::sql::mapping::*;
 
 use zeroship_data_orm::encryption;
 
+/// The role an audited raw-column read assumes for exactly that statement.
+///
+/// Composed through the same `zeroship_core::database_derivation` function the
+/// data plane and the cluster reconciler use, so a role gate naming it names
+/// the role the read really assumes.
+fn unmask_role(app: &str) -> String {
+    let binding = crate::tests::fixtures::harness_binding(app);
+    binding
+        .unmask_role()
+        .expect("a harness binding addresses a database")
+        .to_owned()
+}
+
 /// Resolve the backend at the same boundary as the V8 dispatcher.
 async fn unmask_backend(host: &Host) -> zeroship_data_orm::backend::BackendHandle {
     host.backend()
@@ -81,7 +94,13 @@ fn unmask_fetch_runs_under_per_app_role_via_rls() {
                 .await
                 .unwrap();
             fixtures::grant_runtime_select_columns(&admin_pool, &crate::tests::fixtures::harness_binding(app), coll, &["id", &ssn_raw]).await;
-            install_role_bound_select_policy(&admin_pool, app, coll, &role).await;
+            install_role_bound_select_policy(
+                &admin_pool,
+                app,
+                coll,
+                &[role.as_str(), unmask_role(app).as_str()],
+            )
+            .await;
             let login_role = "p6a_unmask_login";
             let (login_url, login_pool) =
                 provision_platform_login_pool(&admin_pool, &url, login_role, "test", &role, app)
@@ -209,7 +228,13 @@ fn unmask_encrypted_column_on_pg_reads_bytea_raw_sibling() {
                 .await
                 .unwrap();
             fixtures::grant_runtime_select_columns(&admin_pool, &crate::tests::fixtures::harness_binding(app), coll, &["id", &ssn_raw]).await;
-            install_role_bound_select_policy(&admin_pool, app, coll, &role).await;
+            install_role_bound_select_policy(
+                &admin_pool,
+                app,
+                coll,
+                &[role.as_str(), unmask_role(app).as_str()],
+            )
+            .await;
             let login_role = "p6a_unmask_enc_login";
             let (login_url, login_pool) =
                 provision_platform_login_pool(&admin_pool, &url, login_role, "test", &role, app)

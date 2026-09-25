@@ -75,6 +75,26 @@ impl ScopedExecutor for SqliteBackend {
             .exec(sql, params)
             .await
     }
+    /// SQLite has no roles, so the real value needs no privilege the caller
+    /// does not already hold and there is nothing to assume.
+    ///
+    /// The whole of the dialect's answer is therefore the routing: the caller's
+    /// own session when it holds one, the autocommit connection otherwise -
+    /// which is exactly what makes a raw read inside a creator transaction see
+    /// that transaction's own uncommitted write
+    /// (`crate::backend_handle::routed_read_tests`).
+    async fn read_unmasked(
+        &self,
+        binding: &DbBinding,
+        session: Option<&Session>,
+        sql: &str,
+        params: &[Value],
+    ) -> Result<Vec<Value>, DbError> {
+        match session {
+            Some(session) => session.query(sql, params).await,
+            None => self.query(binding, sql, params).await,
+        }
+    }
     async fn check_connection(&self) -> Result<(), DbError> {
         // One round trip to the actor on the autocommit connection. It does not
         // reserve a lane, so an app's open transaction does not delay it.

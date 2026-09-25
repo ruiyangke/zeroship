@@ -25,6 +25,14 @@
 //! composer; if the two disagreed, every creator transaction would fail at
 //! session setup.
 //!
+//! The audited raw-column read assumes a SECOND role for the length of its own
+//! statement - `zs_db_<dbs>_unmask`, the only role holding `SELECT` on a masked
+//! field's real-value column - and it is carried on the same terms and for the
+//! same reason. It derives from the DATABASE and not from the edge, because the
+//! columns it reaches are the schema's: one database's masked columns are one
+//! grant however many apps bind to it, and it is the BINDING's membership in
+//! that role that keeps the reachability revocable.
+//!
 //! # Platform bindings narrow to nothing
 //!
 //! A trusted native service - auth, control's catalog, the workflow manager -
@@ -56,16 +64,17 @@ pub const COLD_START_DEPLOY_TOKEN: &str = "cold_start";
 
 /// One app's edge to one project-owned database.
 ///
-/// The role name is composed at construction rather than on use: composing it
-/// per statement would let the setup batch and the error classifier derive it
-/// from different values, and the classifier's whole job is to recognise the
-/// name the batch sent.
+/// Both role names are composed at construction rather than on use: composing
+/// them per statement would let the setup batch and the error classifier derive
+/// them from different values, and the classifier's whole job is to recognise
+/// the name the batch sent.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct DatabaseEdge {
     database: DatabaseId,
     binding: BindingId,
     capability: DatabaseCapability,
     role: String,
+    unmask_role: String,
 }
 
 impl DatabaseEdge {
@@ -91,6 +100,17 @@ impl DatabaseEdge {
     /// `zs_bind_<bnd>`: the role the session-setup batch narrows to.
     pub fn role(&self) -> &str {
         &self.role
+    }
+
+    /// `zs_db_<dbs>_unmask`: the role an audited raw-column read assumes for
+    /// exactly that statement.
+    ///
+    /// Two edges to one database name one role here, which is the whole
+    /// difference from [`Self::role`]: the grant is on the schema's columns, so
+    /// it is stated once per database, and it is each edge's own membership -
+    /// not this name - that a revoke withdraws.
+    pub fn unmask_role(&self) -> &str {
+        &self.unmask_role
     }
 }
 
@@ -125,6 +145,7 @@ impl DbBinding {
         capability: DatabaseCapability,
     ) -> Result<Self, DbError> {
         let role = database_derivation::binding_role_name(&binding)?;
+        let unmask_role = database_derivation::unmask_role_name(&database)?;
         let schema_text = database_derivation::schema_name(&database);
         let schema = SchemaName::new(&schema_text).map_err(|error| {
             DbError::config(
@@ -141,6 +162,7 @@ impl DbBinding {
                 binding,
                 capability,
                 role,
+                unmask_role,
             }),
         })
     }
@@ -191,6 +213,17 @@ impl DbBinding {
     /// narrows to nothing.
     pub fn session_role(&self) -> Option<&str> {
         self.edge.as_ref().map(DatabaseEdge::role)
+    }
+
+    /// The role an audited raw-column read assumes, or `None` when this binding
+    /// narrows to nothing.
+    ///
+    /// A `None` here is a REFUSAL and never a read left under whatever role the
+    /// session already holds, on the terms
+    /// `crate::backend::postgres::pg_session_sql::unbound_session` states for
+    /// the narrowing itself.
+    pub fn unmask_role(&self) -> Option<&str> {
+        self.edge.as_ref().map(DatabaseEdge::unmask_role)
     }
 
     /// The capability control declared for this edge, or `None` for a platform
@@ -342,7 +375,66 @@ mod tests {
                     .as_str()
             )
         );
+        assert_eq!(
+            bound.unmask_role(),
+            Some(
+                database_derivation::unmask_role_name(&database)
+                    .expect("the fixture unmask role name fits")
+                    .as_str()
+            )
+        );
         assert_eq!(bound.database(), Some(&database));
+    }
+
+    /// The two roles a creator binding carries come from DIFFERENT ids, and the
+    /// one the raw read assumes comes from the database.
+    ///
+    /// Two edges to one database: the binding role must differ and the unmask
+    /// role must not. Without the second half a composer that took the binding
+    /// id would satisfy the first and name a role no reconciler created for the
+    /// database's columns; without the first the two would be one name.
+    #[test]
+    fn the_unmask_role_follows_the_database_while_the_binding_role_follows_the_edge() {
+        let database = DatabaseId::mint();
+        let other_database = DatabaseId::mint();
+        assert_ne!(
+            database, other_database,
+            "the control: two mints are two databases"
+        );
+        let compose = |database: &DatabaseId| {
+            DbBinding::to_database(
+                "app_x",
+                "d",
+                database.clone(),
+                BindingId::mint(),
+                DatabaseCapability::ReadWrite,
+            )
+            .expect("the fixture ids compose")
+        };
+
+        let mine = compose(&database);
+        let sibling = compose(&database);
+        assert_ne!(
+            mine.session_role(),
+            sibling.session_role(),
+            "two edges to one database are two binding roles"
+        );
+        assert_eq!(
+            mine.unmask_role(),
+            sibling.unmask_role(),
+            "two edges to one database reach one set of masked columns, so they \
+             name one unmask role"
+        );
+        assert_ne!(
+            mine.unmask_role(),
+            compose(&other_database).unmask_role(),
+            "a second database is a second unmask role"
+        );
+        assert_ne!(
+            mine.unmask_role(),
+            mine.session_role(),
+            "the elevation would be a no-op if the two names were one"
+        );
     }
 
     /// Two edges to ONE database are two roles, and the schema they qualify
@@ -386,7 +478,22 @@ mod tests {
         );
         assert_eq!(platform.database(), None);
         assert_eq!(platform.session_role(), None);
+        assert_eq!(platform.unmask_role(), None);
         assert_eq!(platform.route(), DbRoute::platform("platform"));
+
+        // The control: a creator binding beside it answers both, or the three
+        // `None`s above would hold for accessors that answered `None` always.
+        let (database, binding) = edge_fixture();
+        let creator = DbBinding::to_database(
+            "app_x",
+            "d",
+            database,
+            binding,
+            DatabaseCapability::ReadWrite,
+        )
+        .expect("the fixture ids compose");
+        assert!(creator.session_role().is_some());
+        assert!(creator.unmask_role().is_some());
     }
 
     /// One app on two databases is two routes. The control is the same app on
@@ -476,6 +583,12 @@ mod tests {
             read_only.session_role(),
             "the role name is derived from the edge; the capability must not \
              reach it"
+        );
+        assert_eq!(
+            writable.unmask_role(),
+            read_only.unmask_role(),
+            "the unmask role is derived from the database; the capability must \
+             not reach it either"
         );
         assert_eq!(writable.schema(), read_only.schema());
         assert_eq!(writable.route(), read_only.route());

@@ -36,8 +36,8 @@ use std::sync::Arc;
 
 use compio_postgres::error::SqlState;
 use compio_postgres::{Client, NoTls};
-use uuid::Uuid;
 use fixture::world::World;
+use uuid::Uuid;
 use zeroship_core::database_role::DatabaseCapability;
 use zeroship_core::{database_derivation, BindingId, DatabaseId};
 use zeroship_migrate_server::apply::WORKER_ROLE;
@@ -80,7 +80,6 @@ async fn control_as_service() -> Arc<Client> {
         .expect("the DSN accepts a password");
     Arc::new(connect(url.as_str()).await)
 }
-
 
 // ---------------------------------------------------------------------------
 // Reading state back
@@ -288,6 +287,86 @@ async fn read_under_role(
     Ok(rows[0].get("total"))
 }
 
+/// The real value of the masked field [`seed_table`] plants, read the way the
+/// unmask dispatcher reads it: narrowed to the binding, then assuming the
+/// database's unmask role for exactly that statement, then narrowed back.
+///
+/// The return is `(real value, what the binding role reads afterwards)`. The
+/// second half is not decoration: the session is pooled and the creator's next
+/// statement runs on it, so an elevation that did not narrow back would leave
+/// the unmask role standing - and the only way to see that is to ask the
+/// session a question only the binding role can answer.
+async fn unmask_under_role(
+    client: &mut Client,
+    binding_role: &str,
+    unmask_role: &str,
+    schema: &str,
+) -> Result<(String, i32), compio_postgres::Error> {
+    let raw_column = raw_ssn_column();
+    let transaction = client.transaction().await?;
+    let elevated = async {
+        transaction
+            .simple_query(&format!("SET LOCAL ROLE \"{binding_role}\""))
+            .await?;
+        transaction
+            .simple_query(&format!("SET LOCAL ROLE \"{unmask_role}\""))
+            .await?;
+        let raw = transaction
+            .query(
+                &format!("SELECT \"{raw_column}\" AS v FROM \"{schema}\".orders WHERE id = 1"),
+                &[],
+            )
+            .await?;
+        transaction
+            .simple_query(&format!("SET LOCAL ROLE \"{binding_role}\""))
+            .await?;
+        let back = transaction
+            .query(
+                &format!("SELECT total FROM \"{schema}\".orders WHERE id = 1"),
+                &[],
+            )
+            .await?;
+        Ok::<_, compio_postgres::Error>((raw, back))
+    }
+    .await;
+    let rolled_back = transaction.rollback().await;
+    let (raw, back) = elevated?;
+    rolled_back?;
+    assert_eq!(raw.len(), 1, "the fixture row must be present to be read");
+    assert_eq!(back.len(), 1, "the fixture row must be present to be read");
+    Ok((raw[0].get("v"), back[0].get("total")))
+}
+
+/// Run one statement narrowed to `role`, discarding the rows.
+async fn statement_under_role(
+    client: &mut Client,
+    role: &str,
+    sql: &str,
+) -> Result<(), compio_postgres::Error> {
+    let transaction = client.transaction().await?;
+    let attempted = async {
+        transaction
+            .simple_query(&format!("SET LOCAL ROLE \"{role}\""))
+            .await?;
+        transaction.simple_query(sql).await
+    }
+    .await;
+    let rolled_back = transaction.rollback().await;
+    attempted?;
+    rolled_back?;
+    Ok(())
+}
+
+/// The real-value sibling of the masked `ssn` field [`seed_table`] plants.
+///
+/// Composed from the backend's own prefix rather than spelled as a literal: the
+/// partition `capability_column_grants_sql` takes is on that prefix, so a
+/// fixture carrying its own spelling would stop being the column the emission
+/// withholds without failing anything.
+fn raw_ssn_column() -> String {
+    format!("{}ssn", zeroship_migrate_backend::schema::RAW_COLUMN_PREFIX)
+}
+
 /// Give a converged database the one table the fence arms read.
 ///
 /// This is what an APPLY does, not what the reconciler does: the reconciler
@@ -295,6 +374,13 @@ async fn read_under_role(
 /// capability may touch comes from the owner's own migration IR. Spelling it
 /// here keeps that boundary visible instead of hiding it behind a reconciler
 /// that quietly granted table-wide privileges.
+///
+/// The table carries a masked field as well as an ordinary one, in the shape
+/// `zeroship_migrate_server::capability_grants::capability_column_grants_sql`
+/// emits: `ssn` holds the mask and both capability roles read it, the
+/// `__zs_raw__ssn` sibling holds the real value and only the unmask role reads
+/// it - together with `id`, because the unmask read addresses ONE row and
+/// `PostgreSQL` checks `SELECT` on a column a predicate references.
 async fn seed_table(cluster: &Client, database: &DatabaseId, total: i32) {
     let schema = database_derivation::schema_name(database);
     let readwrite =
@@ -303,13 +389,25 @@ async fn seed_table(cluster: &Client, database: &DatabaseId, total: i32) {
     let readonly =
         database_derivation::capability_role_name(database, DatabaseCapability::ReadOnly)
             .expect("the fixture capability role name fits");
+    let unmask =
+        database_derivation::unmask_role_name(database).expect("the fixture unmask role name fits");
+    let raw = raw_ssn_column();
     cluster
         .batch_execute(&format!(
-            "CREATE TABLE \"{schema}\".orders (id int PRIMARY KEY, total int NOT NULL);
-             INSERT INTO \"{schema}\".orders VALUES (1, {total});
-             GRANT SELECT (id, total), INSERT (id, total), UPDATE (id, total) \
+            "CREATE TABLE \"{schema}\".orders (
+                 id int PRIMARY KEY,
+                 total int NOT NULL,
+                 ssn text NOT NULL,
+                 \"{raw}\" text NOT NULL
+             );
+             INSERT INTO \"{schema}\".orders \
+                 VALUES (1, {total}, '***-**-{total}', 'real-{total}');
+             GRANT SELECT (id, total, ssn), \
+                   INSERT (id, total, ssn, \"{raw}\"), \
+                   UPDATE (id, total, ssn, \"{raw}\") \
                  ON \"{schema}\".orders TO \"{readwrite}\";
-             GRANT SELECT (id, total) ON \"{schema}\".orders TO \"{readonly}\";"
+             GRANT SELECT (id, total, ssn) ON \"{schema}\".orders TO \"{readonly}\";
+             GRANT SELECT (id, \"{raw}\") ON \"{schema}\".orders TO \"{unmask}\";"
         ))
         .await
         .expect("an apply's column grants over a converged schema");
@@ -365,11 +463,9 @@ async fn a_pass_registers_bootstraps_and_converges_then_a_second_pass_changes_no
     // A cluster's authentication material is deployment, and a bootstrap that
     // baked a known password into every tenant cluster's worker login would be
     // worse than the manual step it saves.
-    let Err(unusable) = compio_postgres::connect(
-        &cluster_fixture.url_as(WORKER_ROLE, TENANT_PASSWORD),
-        NoTls,
-    )
-    .await
+    let Err(unusable) =
+        compio_postgres::connect(&cluster_fixture.url_as(WORKER_ROLE, TENANT_PASSWORD), NoTls)
+            .await
     else {
         panic!("a passwordless login must not authenticate")
     };
@@ -408,8 +504,7 @@ async fn a_pass_registers_bootstraps_and_converges_then_a_second_pass_changes_no
         let (status, generation, observed, last_error) = binding_row(&pg, binding).await;
         assert_eq!(status, "active", "binding {}", binding.as_str());
         assert_eq!(
-            observed,
-            generation,
+            observed, generation,
             "a converged binding's observed generation has caught up"
         );
         assert_eq!(last_error, None);
@@ -425,22 +520,38 @@ async fn a_pass_registers_bootstraps_and_converges_then_a_second_pass_changes_no
         .expect("fits");
     let ro = database_derivation::capability_role_name(&database, DatabaseCapability::ReadOnly)
         .expect("fits");
-    let readonly_role =
-        database_derivation::binding_role_name(&readonly).expect("fits");
-    let readwrite_role =
-        database_derivation::binding_role_name(&readwrite).expect("fits");
+    let readonly_role = database_derivation::binding_role_name(&readonly).expect("fits");
+    let readwrite_role = database_derivation::binding_role_name(&readwrite).expect("fits");
+    let unmask = database_derivation::unmask_role_name(&database).expect("fits");
     let roles = platform_roles(&cluster).await;
-    for expected in [&migrator, &rw, &ro, &readonly_role, &readwrite_role] {
-        assert!(roles.contains(expected), "`{expected}` must exist: {roles:?}");
+    for expected in [
+        &migrator,
+        &rw,
+        &ro,
+        &unmask,
+        &readonly_role,
+        &readwrite_role,
+    ] {
+        assert!(
+            roles.contains(expected),
+            "`{expected}` must exist: {roles:?}"
+        );
     }
     assert!(
         schemas(&cluster).await.contains(&schema),
         "the database's schema must exist"
     );
 
+    // The two options are OPPOSITE on the two database edges, and each pairing
+    // is the whole of one fence: a capability role is inherited and never
+    // assumable, so the shared login cannot take a co-tenant's grants; the
+    // unmask role is assumable and never inherited, so the real value is not
+    // ambient on a session that merely narrowed.
     let mut expected_edges = vec![
         (ro.clone(), readonly_role.clone(), true, false),
         (rw.clone(), readwrite_role.clone(), true, false),
+        (unmask.clone(), readonly_role.clone(), false, true),
+        (unmask.clone(), readwrite_role.clone(), false, true),
         (readonly_role.clone(), WORKER_ROLE.to_owned(), false, true),
         (readwrite_role.clone(), WORKER_ROLE.to_owned(), false, true),
     ];
@@ -454,13 +565,16 @@ async fn a_pass_registers_bootstraps_and_converges_then_a_second_pass_changes_no
     assert_eq!(
         observed_edges, expected_edges,
         "every edge, and no other: a binding inherits its database role and may not \
-         assume it, and the worker may assume a binding and inherits nothing"
+         assume it, it may assume the unmask role and inherits nothing from it, and \
+         the worker may assume a binding and inherits nothing"
     );
     assert!(
         !observed_edges
             .iter()
             .any(|(granted, member, _, _)| member == WORKER_ROLE && granted.starts_with("zs_db_")),
-        "the worker must hold no direct membership in a database role"
+        "the worker must hold no direct membership in a database role - the unmask \
+         role included, or a revoked binding would leave the path to the real \
+         value standing"
     );
 
     // PASS 3: the state is converged, so nothing moves.
@@ -583,16 +697,155 @@ async fn a_converged_binding_reaches_its_own_database_and_is_refused_its_neighbo
         server_error(&assumed).message(),
         format!("permission denied to set role \"{database_role}\"")
     );
+
+    // ---------------------------------------------------------------------
+    // The real value, and the role that is the only way to it.
+    // ---------------------------------------------------------------------
+    let raw_column = raw_ssn_column();
+    let my_unmask = database_derivation::unmask_role_name(&mine).expect("fits");
+    let their_unmask = database_derivation::unmask_role_name(&theirs).expect("fits");
+
+    // THE REFUSAL FIRST, so what follows is measured against it: under the
+    // binding role the real value is unreadable, and so is a star projection
+    // that reaches it. This is the property the column emission buys and the
+    // one the elevation below must not dissolve.
+    for projection in [format!("\"{raw_column}\""), "*".to_owned()] {
+        let withheld = statement_under_role(
+            &mut worker,
+            &my_role,
+            &format!("SELECT {projection} FROM \"{my_schema}\".orders WHERE id = 1"),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            server_error(&withheld).code(),
+            &SqlState::INSUFFICIENT_PRIVILEGE,
+            "a narrowed session must be refused {projection}"
+        );
+    }
+
+    // THE SUBJECT: the same session, narrowed to the same binding, assuming the
+    // unmask role for exactly the statement that reads the real value - and
+    // narrowing straight back, which the second half of the answer shows.
+    assert_eq!(
+        unmask_under_role(&mut worker, &my_role, &my_unmask, &my_schema)
+            .await
+            .expect("a live binding reaches its own database's real value"),
+        ("real-42".to_owned(), 42),
+        "the elevation must return the real value and leave the session on the \
+         binding role"
+    );
+
+    // The unmask role is not ambient: it is reachable only by assuming it, so
+    // the arm above is about the SET ROLE and not about a privilege the binding
+    // quietly carries. Re-stated on the binding role after the elevation, which
+    // is where a missing restore would show.
+    let still_withheld = statement_under_role(
+        &mut worker,
+        &my_role,
+        &format!("SELECT \"{raw_column}\" FROM \"{my_schema}\".orders WHERE id = 1"),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        server_error(&still_withheld).code(),
+        &SqlState::INSUFFICIENT_PRIVILEGE
+    );
+
+    // The unmask role narrows rather than widens: beyond the real value and the
+    // key that addresses a row, it reaches nothing - not the mask the capability
+    // roles read, and not a star projection over the table.
+    for projection in ["total", "ssn", "*"] {
+        let denied = statement_under_role(
+            &mut worker,
+            &my_unmask,
+            &format!("SELECT {projection} FROM \"{my_schema}\".orders WHERE id = 1"),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            server_error(&denied).code(),
+            &SqlState::INSUFFICIENT_PRIVILEGE,
+            "the unmask role must not read {projection}"
+        );
+    }
+    let written = statement_under_role(
+        &mut worker,
+        &my_unmask,
+        &format!("UPDATE \"{my_schema}\".orders SET \"{raw_column}\" = 'x' WHERE id = 1"),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        server_error(&written).code(),
+        &SqlState::INSUFFICIENT_PRIVILEGE,
+        "the unmask role reads the real value and never writes it"
+    );
+
+    // ONE DATABASE PER UNMASK ROLE. The neighbour's role reaches the
+    // neighbour's schema and nothing here, so a session that assumed the wrong
+    // one gets a refusal rather than a cross-tenant read.
+    let crossed_unmask = statement_under_role(
+        &mut worker,
+        &their_unmask,
+        &format!("SELECT \"{raw_column}\" FROM \"{my_schema}\".orders WHERE id = 1"),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        server_error(&crossed_unmask).code(),
+        &SqlState::INSUFFICIENT_PRIVILEGE
+    );
+    assert_eq!(
+        server_error(&crossed_unmask).message(),
+        format!("permission denied for schema {my_schema}"),
+        "the neighbour's unmask role must not even reach this schema"
+    );
+    // Its control: the same role on the schema it IS for.
+    assert_eq!(
+        unmask_under_role(&mut worker, &their_role, &their_unmask, &their_schema)
+            .await
+            .expect("the neighbour's binding reaches the neighbour's real value"),
+        ("real-99".to_owned(), 99)
+    );
+
+    // THE MEMBERSHIP, which is what a revoke withdraws. A binding holds
+    // membership in its own database's unmask role and in no other's, so the
+    // reachability the worker has is per binding rather than per cluster.
+    let membership = |granted: String, member: String| {
+        let cluster = &cluster;
+        async move {
+            cluster
+                .query_one(
+                    "SELECT pg_has_role($1::text, $2::text, 'MEMBER') AS held, \
+                            pg_has_role($1::text, $2::text, 'USAGE')  AS inherited",
+                    &[&member, &granted],
+                )
+                .await
+                .map(|row| (row.get::<_, bool>("held"), row.get::<_, bool>("inherited")))
+                .expect("ask PostgreSQL for the membership")
+        }
+    };
+    assert_eq!(
+        membership(my_unmask.clone(), my_role.clone()).await,
+        (true, false),
+        "a binding may ASSUME its own database's unmask role and never INHERITS it"
+    );
+    assert_eq!(
+        membership(their_unmask.clone(), my_role.clone()).await,
+        (false, false),
+        "a binding holds no membership in another database's unmask role"
+    );
 }
 
-/// Revoking withdraws both edges and leaves the role standing.
+/// Revoking withdraws every edge and leaves the role standing.
 ///
 /// The role's survival is the whole arm: the data plane separates a revoked
 /// binding from a retired schema epoch by SQLSTATE alone, so a reconciler that
 /// dropped the role on revoke would report a terminal refusal as a retryable
 /// one.
 #[ntex::test]
-async fn revoking_withdraws_both_edges_and_keeps_the_role_so_the_refusal_stays_42501() {
+async fn revoking_withdraws_every_edge_and_keeps_the_role_so_the_refusal_stays_42501() {
     let cluster_fixture = tenant::Cluster::start();
     let cluster = connect(cluster_fixture.url()).await;
     let pg = control_superuser().await;
@@ -683,6 +936,35 @@ async fn revoking_withdraws_both_edges_and_keeps_the_role_so_the_refusal_stays_4
             .await
             .expect("revoking one binding must not disturb its co-tenant"),
         7
+    );
+
+    // THE UNMASK EDGE goes with the rest. It is granted to the BINDING, so a
+    // revoke that withdrew the capability and left this one standing would
+    // leave a retired binding holding a path to the plaintext - and the
+    // co-tenant beside it shows the withdrawal is per binding rather than a
+    // database-wide one.
+    let unmask_role = database_derivation::unmask_role_name(&database).expect("fits");
+    let held = memberships(&cluster).await;
+    assert!(
+        !held
+            .iter()
+            .any(|(granted, member, _, _)| granted == &unmask_role && member == &leaving_role),
+        "the revoked binding must hold no membership in the unmask role: {held:?}"
+    );
+    assert!(
+        held.iter()
+            .any(|(granted, member, inherit, set)| granted == &unmask_role
+                && member == &staying_role
+                && !*inherit
+                && *set),
+        "the control: the co-tenant keeps its unmask edge, non-inheriting and \
+         assumable: {held:?}"
+    );
+    assert_eq!(
+        unmask_under_role(&mut worker, &staying_role, &unmask_role, &schema)
+            .await
+            .expect("the surviving binding still reaches the real value"),
+        ("real-7".to_owned(), 7)
     );
 }
 
@@ -838,12 +1120,25 @@ async fn an_undeclared_schema_is_reported_and_a_deleting_declaration_removes_it(
         orphaned.undeclared_database_objects.contains(&migrator),
         "and so is the role that owns it: {orphaned:?}"
     );
+    let unmask = database_derivation::unmask_role_name(&database).expect("fits");
+    assert!(
+        orphaned.undeclared_database_objects.contains(&unmask),
+        "and so is the role holding its real values, which the classifier has to \
+         attribute rather than leave unattributed: {orphaned:?}"
+    );
+    assert!(
+        orphaned.unattributed_roles.is_empty(),
+        "a database role the composer produced is never unattributable: {orphaned:?}"
+    );
     assert!(
         schemas(&cluster).await.contains(&schema),
         "an undeclared schema must still be standing"
     );
     let surviving: i64 = cluster
-        .query_one(&format!("SELECT count(*) AS rows FROM \"{schema}\".orders"), &[])
+        .query_one(
+            &format!("SELECT count(*) AS rows FROM \"{schema}\".orders"),
+            &[],
+        )
         .await
         .expect("the orphaned schema's table must still be readable")
         .get("rows");
@@ -859,12 +1154,7 @@ async fn an_undeclared_schema_is_reported_and_a_deleting_declaration_removes_it(
         "INSERT INTO zeroship.databases \
              (id, project_id, execution_zone_id, datastore_id, name, status) \
          VALUES ($1, $2, $3, $4, 'doomed', 'deleting')",
-        &[
-            &database.as_str(),
-            &world.project,
-            &world.zone,
-            &datastore,
-        ],
+        &[&database.as_str(), &world.project, &world.zone, &datastore],
     )
     .await
     .expect("declare the teardown");
@@ -878,9 +1168,17 @@ async fn an_undeclared_schema_is_reported_and_a_deleting_declaration_removes_it(
         !schemas(&cluster).await.contains(&schema),
         "a declared teardown removes the schema"
     );
+    let surviving_roles = platform_roles(&cluster).await;
+    for role in [&migrator, &unmask] {
+        assert!(
+            !surviving_roles.contains(role),
+            "`{role}` must go with the schema: {surviving_roles:?}"
+        );
+    }
     assert!(
-        !platform_roles(&cluster).await.contains(&migrator),
-        "and its roles, after it"
+        !surviving_roles.is_empty(),
+        "the control for the two absences above: the catalog read must not be \
+         reporting an empty cluster"
     );
     assert_eq!(
         database_status(&pg, &database).await,
@@ -982,9 +1280,7 @@ async fn a_direct_worker_membership_in_a_database_role_refuses_the_pass() {
         database_derivation::capability_role_name(&database, DatabaseCapability::ReadWrite)
             .expect("fits");
     cluster
-        .batch_execute(&format!(
-            "GRANT \"{database_role}\" TO \"{WORKER_ROLE}\""
-        ))
+        .batch_execute(&format!("GRANT \"{database_role}\" TO \"{WORKER_ROLE}\""))
         .await
         .expect("the membership PostgreSQL will not complain about");
 
@@ -1026,7 +1322,10 @@ async fn a_cluster_below_the_version_floor_is_refused_and_never_bootstrapped() {
     // The control for the whole arm: this really is a server below the floor,
     // and its catalog really does lack the columns the fence is recorded in.
     let version: i32 = cluster
-        .query_one("SELECT current_setting('server_version_num')::int AS v", &[])
+        .query_one(
+            "SELECT current_setting('server_version_num')::int AS v",
+            &[],
+        )
         .await
         .expect("the fixture server reports its version")
         .get("v");
@@ -1114,12 +1413,11 @@ async fn an_unconfigured_zone_refuses_to_choose_among_several() {
         .reconcile_once()
         .await
         .expect_err("an ambiguous zone must not be chosen");
+    assert!(matches!(refused, ReconcileError::Zone(_)), "got: {refused}");
     assert!(
-        matches!(refused, ReconcileError::Zone(_)),
-        "got: {refused}"
-    );
-    assert!(
-        refused.to_string().contains("migrate_server.execution_zone"),
+        refused
+            .to_string()
+            .contains("migrate_server.execution_zone"),
         "the refusal must name the setting that resolves it: {refused}"
     );
 
