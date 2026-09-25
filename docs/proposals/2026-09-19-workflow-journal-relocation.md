@@ -812,7 +812,10 @@ protocol. This extends a working client rather than inventing one.
      the transport is remote.
    - Bind what a prefetch would remove: a read driven after the lease is lost while an isolate
      is live. The outage test fakes an unavailable transport, which is a different mechanism, so
-     nothing covers this today.
+     nothing covers this today. This one is contingent - it earns its place only if the prefetch
+     is built, since the property is defence in depth rather than the fence, and a heartbeat
+     re-runs the same check within a third of the lease window. Do the unconditional items
+     first.
    - Move `StartOptions`, `StartedRun`, `ConflictPolicy` and `WorkflowOutputRef` into
      `zeroship-core`. The lifecycle types already made that move and `operations.rs`
      re-exports them back, so the shape is settled; it changes no behaviour and it is what lets
