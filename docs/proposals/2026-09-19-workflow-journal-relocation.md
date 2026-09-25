@@ -1240,7 +1240,7 @@ part that dates, not the verdict.
 | 5 | pre-launch, no in-flight runs | the answer expires at launch |
 | 6 | ANSWERED as a description | nothing; the credential question it raised moved to Open 3 |
 | 7 | ANSWERED - creator payload is not in the journal | nothing |
-| 8 | ANSWERED - a run input is an ordinary payload object | nothing |
+| 8 | ANSWERED - a run input is an ordinary payload object | an inline arm below a size line, deferred with its accounting stated |
 
 1. **ANSWERED - latency is not the gate; payload is.** Measured before anything was built, by
    `crates/zeroship-workflow-client/tests/round_trip_cost.rs`, which exercises the shipped
@@ -1874,6 +1874,23 @@ part that dates, not the verdict.
    The accepted cost: "no input" and "reference never attached" become one observable state,
    because `TaskPayloadReader::input` in `crates/zeroship-workflow-runner/src/payloads.rs` returns
    success on absence.
+
+   **The alternative, and why it is not taken here.** The journal can already hold a value with no
+   object beside it: `StepOutput::Inline` (`crates/zeroship-workflow/src/service/payloads.rs`) is
+   "the journal holds the value itself; no object was ever written", and `RunUpdate::Completed`
+   (`crates/zeroship-workflow/src/service/frontier.rs`) carries `output` beside `output_ref`, so
+   the producer picks the shape and the journal takes either. An input could take that arm below a
+   size line, and the line exists - `MAX_INPUT_BYTES_CEILING` bounds a run input well under
+   `MAX_JOURNAL_BYTES_CEILING` (`crates/zeroship-core/src/workflow_policy.rs`) - with the empty
+   input already carved out exactly this way. What stops it is the accounting above.
+   `stage_payload` is the single admission gate, so a value that never reaches it consumes neither
+   counter, and raising the line is the exemption this entry refuses unless inline inputs are
+   metered against a journal budget instead. That turns one gate into two that have to be bounded
+   together, or an app routes around its payload quota by staying under the line. The second cost
+   is retention: an object is collectable on its own, while an inline value lives exactly as long
+   as its row, so the trade is a quota'd object for journal bytes held for the life of the run.
+   Worth revisiting if the reserve and confirm proves painful in practice. It does not avoid that
+   work, since `start` needs the same mechanism either way.
 
    **The continuation successor is a typed field beside a distinct terminal state.** The nullable
    `continued_as_new_run_id` column on the generation, added by
