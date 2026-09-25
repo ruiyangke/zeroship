@@ -922,16 +922,20 @@ protocol. This extends a working client rather than inventing one.
    **The order the flag day has to take, and why it is forced.** The pieces are not
    independent; each one below is what makes the next possible.
 
-   - **The sweeps move first.** Open 6 answers why they can: they run no creator code, so they
-     move with the fold. They are also what fills the service's journal - the manager enqueues
-     an activation, the service's own lane runs `activate_job`, and that is the path to
-     `record_verified`, the only writer of `deploys`. Until this moves, everything below
-     operates on an empty table and a `deploys` row is what `start`, `restart` and a served
-     claim each need first.
-   - **The grant and signer change lands with its reader**, not before it. `svc/workflow` gains
-     the journal hold endpoints and `RunService` gains its deployments source in one change,
-     because a capability this process has no reader for is one it must not hold - the rule
-     `db/migrations-ts/20260911000050_workflow_platform_grants.ts` already states.
+   - **The grant and its reader move first**, together. `svc/workflow` gains the journal hold
+     endpoints and `RunService` gains its deployments source in one change, because a capability
+     this process has no reader for is one it must not hold - the rule
+     `db/migrations-ts/20260911000050_workflow_platform_grants.ts` already states. It is first
+     rather than second because the sweeps below need it: `RunService::connect`
+     (`crates/zeroship-workflow-server/src/runs.rs`) calls `WorkflowService::open` and attaches
+     no deployments source, and `with_deployments` appears nowhere in that crate, so until this
+     lands the service cannot reach `record_verified` at all.
+   - **Then the sweeps.** Open 6 answers why they can move: they run no creator code, so they go
+     with the fold. They are also what fills the service's journal - the manager enqueues an
+     activation, the service's own lane runs `activate_job`, and that is the path to
+     `record_verified`, the only writer of `deploys`. Until they move, everything below operates
+     on an empty table, and a `deploys` row is what `start`, `restart` and a served claim each
+     need first.
    - **Then the payload reserve and confirm**, since `start` and `stage` share that one
      mechanism, and the confirm must gain the `state` and `expires_at` predicates it does not
      need while a lock is held across the write.
@@ -953,8 +957,8 @@ protocol. This extends a working client rather than inventing one.
 
    Step 6 follows once that is green.
 
-   **And the order needs a second claimant, which nothing will issue.** Between the first bullet
-   and the sixth the service claims the sweeps from its own journal while the worker still claims
+   **And the order needs a second claimant, which nothing will issue.** From the sweeps moving
+   until the flag, the service claims them from its own journal while the worker still claims
    `Advance` for creator code. That is two claimant identities on one app, and the bar is narrower
    than it looks. The `assignments` domain key is `["app_id", "worker_id"]`
    (`crates/zeroship-workflow-manager/schema/schema.ts`), so a second row per app is
@@ -1079,7 +1083,7 @@ protocol. This extends a working client rather than inventing one.
    same gate arm that makes lifting the dispatch necessary in the first place. So seven of the
    nine move no creator bytes and these two cannot - but moving no bytes is not the same as
    wanting only the journal, and the group needing only a claim path is the four named above. The
-   rest want the deployments source, which lands with the grant in the bullet after this one.
+   rest want the deployments source, which the grant supplies before they move.
 
    That is not an argument for giving the service a payload store. It is the same split `stage`
    and `read` already answer: the journal decision crosses, the bytes stay with the process
