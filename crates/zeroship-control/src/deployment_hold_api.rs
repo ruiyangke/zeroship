@@ -20,11 +20,11 @@ use std::{
 };
 use zeroship_core::{
     schema_name::SchemaName,
-    service_assertion::presented_issuer,
+    service_assertion::{ServiceIssuer, presented_issuer},
     service_identity::{AuthError, ServiceEndpoint, endpoints},
     service_peers::{WORKER_SERVICE_NAME, WORKFLOW_SERVICE_NAME, service_issuer},
     workflow_coordination::{Failure, FailureCode, VerifyAssignment, WorkerId},
-    workflow_deployments::{HoldReceipt, HoldRequest, HoldScope, QueueHoldRequest},
+    workflow_deployments::{HoldGeneration, HoldReceipt, HoldRequest, HoldScope, QueueHoldRequest},
 };
 use zeroship_data_orm::{
     ConnectOptions, binding::DbBinding, encryption::ProjectKeySource, orm::Database,
@@ -116,6 +116,36 @@ impl DeploymentHoldApi {
         self.change(worker, request, false).await
     }
 
+    /// The journal-scoped pair for a host whose authority is its own role.
+    ///
+    /// The HTTP boundary authenticates the workflow service before calling
+    /// this, and the journal a hold protects belongs to that service rather
+    /// than to a placement, so there is no assignment to verify and no worker
+    /// to name. Everything else the placed pair refuses is refused here, by the
+    /// same ledger operation: a deployment that is not the app's, a deployment
+    /// whose reclamation has closed admission, a stale generation or transition,
+    /// and unavailable storage.
+    ///
+    /// # Errors
+    /// Refuses a request naming a placement, foreign deployments, closed
+    /// admission, stale generations and unavailable storage.
+    pub async fn acquire_asserted(
+        &self,
+        request: &HoldRequest,
+    ) -> Result<HoldReceipt, DeploymentError> {
+        self.change_asserted(request, true).await
+    }
+
+    /// # Errors
+    /// Refuses a request naming a placement, foreign deployments, stale
+    /// generations and unavailable storage.
+    pub async fn release_asserted(
+        &self,
+        request: &HoldRequest,
+    ) -> Result<HoldReceipt, DeploymentError> {
+        self.change_asserted(request, false).await
+    }
+
     /// The HTTP boundary authenticates the workflow service before calling this.
     /// Queue ownership is stable across manager replicas and has no worker lease.
     ///
@@ -142,16 +172,52 @@ impl DeploymentHoldApi {
         request: &QueueHoldRequest,
         acquire: bool,
     ) -> Result<HoldReceipt, DeploymentError> {
-        let scope = HoldScope::for_queue(request.app_id.clone());
+        self.change_unverified(
+            &HoldScope::for_queue(request.app_id.clone()),
+            request.deploy_id.as_str(),
+            request.generation,
+            acquire,
+        )
+        .await
+    }
+
+    async fn change_asserted(
+        &self,
+        request: &HoldRequest,
+        acquire: bool,
+    ) -> Result<HoldReceipt, DeploymentError> {
+        // A caller with no placement may not name one. The field is the placed
+        // pair's authorization input, so accepting it here would leave a body
+        // field that reads like authority and is checked by nothing.
+        if request.assignment_revision.is_some() {
+            return Err(DeploymentError::InvalidRequest(
+                "an asserted deployment hold names no placement".into(),
+            ));
+        }
+        self.change_unverified(
+            &HoldScope::for_app(request.app_id.clone()),
+            &request.deploy_id,
+            request.generation,
+            acquire,
+        )
+        .await
+    }
+
+    /// Apply a hold whose caller was authenticated by role, with no placement
+    /// read. The scope decides which holder the ledger acts as, and the host
+    /// derives it from the endpoint and the verified role, never from the body.
+    async fn change_unverified(
+        &self,
+        scope: &HoldScope,
+        deployment: &str,
+        generation: HoldGeneration,
+        acquire: bool,
+    ) -> Result<HoldReceipt, DeploymentError> {
         compio::time::timeout(REQUEST_TIMEOUT, async {
             if acquire {
-                self.ledger
-                    .acquire(&scope, request.deploy_id.as_str(), request.generation)
-                    .await
+                self.ledger.acquire(scope, deployment, generation).await
             } else {
-                self.ledger
-                    .release(&scope, request.deploy_id.as_str(), request.generation)
-                    .await
+                self.ledger.release(scope, deployment, generation).await
             }
         })
         .await
@@ -165,10 +231,15 @@ impl DeploymentHoldApi {
         acquire: bool,
     ) -> Result<HoldReceipt, DeploymentError> {
         let coordinator = self.coordinator.as_ref().ok_or_else(unavailable)?;
+        // A placed caller names its placement. Without one there is nothing to
+        // verify, and a worker is authorized by verification alone.
+        let assignment_revision = request.assignment_revision.ok_or_else(|| {
+            DeploymentError::InvalidRequest("a placed deployment hold names its placement".into())
+        })?;
         let assignment = VerifyAssignment {
             app_id: request.app_id.clone(),
             worker_id: worker.clone(),
-            assignment_revision: request.assignment_revision,
+            assignment_revision,
         };
         let budget = AuthorityBudget::new();
         let authorize = || async {
@@ -428,6 +499,40 @@ async fn release(
         .await,
     )
 }
+/// Which authority a journal-hold caller presented.
+///
+/// Two principals may hold a journal, and they are authorized differently: a
+/// worker by the placement it names, the workflow service by its own role. This
+/// is the whole of the difference, it is decided from the credential before any
+/// body is read, and there is no third arm - a principal that is neither is
+/// refused.
+enum HoldCaller {
+    /// A joined worker instance, whose placement is verified on every call.
+    Placed(WorkerId),
+    /// The workflow service's role, which holds the journal itself. An instance
+    /// credential is NOT admitted here: the role is the authority, exactly as on
+    /// the queue-scoped pair.
+    Asserted,
+}
+
+/// A malformed role constant is this deployment's own defect rather than a
+/// verdict on the credential, so it answers unavailable exactly as the
+/// queue-scoped pair does; every other refusal is unauthenticated.
+fn hold_caller(issuer: &ServiceIssuer) -> Result<HoldCaller, FailureCode> {
+    let worker = service_issuer(WORKER_SERVICE_NAME).map_err(|_| FailureCode::Unavailable)?;
+    if issuer.principal() == worker.principal() {
+        let instance = issuer.instance().ok_or(FailureCode::Unauthenticated)?;
+        return WorkerId::parse(instance)
+            .map(HoldCaller::Placed)
+            .map_err(|_| FailureCode::Unauthenticated);
+    }
+    let service = service_issuer(WORKFLOW_SERVICE_NAME).map_err(|_| FailureCode::Unavailable)?;
+    if issuer == &service {
+        return Ok(HoldCaller::Asserted);
+    }
+    Err(FailureCode::Unauthenticated)
+}
+
 async fn handle(
     request: web::HttpRequest,
     state: State<Arc<AppState>>,
@@ -442,19 +547,16 @@ async fn handle(
             .get("authorization")
             .and_then(|value| value.to_str().ok());
         let issuer = presented_issuer(authorization).ok_or(FailureCode::Unauthenticated)?;
-        let role = service_issuer(WORKER_SERVICE_NAME).map_err(|_| FailureCode::Unavailable)?;
-        if issuer.principal() != role.principal() {
-            return Err(FailureCode::Unauthenticated);
-        }
-        let worker = WorkerId::parse(issuer.instance().ok_or(FailureCode::Unauthenticated)?)
-            .map_err(|_| FailureCode::Unauthenticated)?;
+        let caller = hold_caller(&issuer)?;
         crate::internal::verify_service_caller(&state, authorization, endpoint)
             .await
             .map_err(|error| match error {
                 AuthError::StoreUnavailable => FailureCode::Unavailable,
                 _ => FailureCode::Unauthenticated,
             })?;
-        // The issuer selector now belongs to the verified enrolled instance.
+        // The issuer selector now belongs to the verified enrolled instance or
+        // to the verified service role. Only then is a body decoded, so neither
+        // one can select the other's authority through a field.
         let mut body = body.into_inner();
         let command =
             <Json<HoldRequest> as web::FromRequest<web::error::DefaultError>>::from_request(
@@ -466,10 +568,11 @@ async fn handle(
                 _ => FailureCode::Invalid,
             })?
             .into_inner();
-        let result = if acquire {
-            api.acquire(&worker, &command).await
-        } else {
-            api.release(&worker, &command).await
+        let result = match (&caller, acquire) {
+            (HoldCaller::Placed(worker), true) => api.acquire(worker, &command).await,
+            (HoldCaller::Placed(worker), false) => api.release(worker, &command).await,
+            (HoldCaller::Asserted, true) => api.acquire_asserted(&command).await,
+            (HoldCaller::Asserted, false) => api.release_asserted(&command).await,
         };
         result.map_err(|error| failure(&error))
     })

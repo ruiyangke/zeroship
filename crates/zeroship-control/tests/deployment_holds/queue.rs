@@ -142,6 +142,8 @@ async fn queue_hold_http_authenticates_before_decoding_and_closes_scope() {
             Some(control_header(&fixture.worker_role)),
             Some(control_header(&worker_auth)),
             Some(control_header(&fixture.state.service_auth)),
+            // Trusted key, no grant: refused for its principal.
+            Some(control_header(&fixture.gateway_role)),
             Some(control_header(&workflow_instance)),
             Some(control_header(&wrong_key)),
             Some(
@@ -163,6 +165,12 @@ async fn queue_hold_http_authenticates_before_decoding_and_closes_scope() {
             assert_eq!(failure, json!({"code":"unauthenticated"}));
         }
     }
+    // The journal-scoped pair admits exactly two principals, and the workflow
+    // role is one of them: it holds the journals, so it reaches body decoding
+    // and its refusal here is the forged holder rather than its credential.
+    // Everything else is refused before a body is read - the GATEWAY role above
+    // all, whose key this deployment trusts and which holds no grant, so its
+    // 401 is about the principal and not about a signature that never verified.
     for endpoint in [
         endpoints::CONTROL_DEPLOYMENT_HOLD_ACQUIRE,
         endpoints::CONTROL_DEPLOYMENT_HOLD_RELEASE,
@@ -176,8 +184,29 @@ async fn queue_hold_http_authenticates_before_decoding_and_closes_scope() {
             &json!({"holderId":"forged"}),
         )
         .await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
-        assert_eq!(failure, json!({"code":"unauthenticated"}));
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(failure, json!({"code":"invalid"}));
+        for token in [
+            None,
+            Some(control_header(&fixture.gateway_role)),
+            // The worker role at ROLE arity: the journal pair still requires an
+            // enrolled instance of it.
+            Some(control_header(&fixture.worker_role)),
+            // The workflow role at INSTANCE arity, which no registry resolves.
+            Some(control_header(&workflow_instance)),
+            Some(control_header(&wrong_key)),
+        ] {
+            let (status, failure) = post(
+                &http,
+                &origin,
+                endpoint,
+                token.as_deref(),
+                &json!({"holderId":"forged"}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+            assert_eq!(failure, json!({"code":"unauthenticated"}));
+        }
     }
     let request = QueueHoldRequest {
         app_id: app.clone(),

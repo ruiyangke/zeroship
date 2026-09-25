@@ -27,6 +27,7 @@ use zeroship_core::{
     workflow_deployments::{HoldGeneration, HoldReceipt, QueueHoldRequest},
     workflow_jobs::DeploymentId,
 };
+use zeroship_workflow::{deployment_holds::ServiceHolds, service::AppDeployments};
 use zeroship_workflow_client::{
     ControlAppFacts, Options as ClientOptions, QueueDeploymentHolds, Transport,
 };
@@ -247,6 +248,19 @@ pub async fn run(settings: WorkflowSettings, options: ServerOptions) -> Result<(
                         coordinator,
                         &plaintext_peers,
                     )?);
+                    // The journal's OWN deployment holds, on the same Control
+                    // origin and the same signer as the queue-scoped ones
+                    // above. A journal hold is decided beside the runs it
+                    // protects and applied to the deploy catalog by Control, so
+                    // the process holding the journal is the one that carries
+                    // this. It is the retention authority alone: the artifacts
+                    // stay with the hosts that hold a blob store, and an
+                    // operation needing one is refused by name.
+                    let deployments = AppDeployments::holds_only(Rc::new(ServiceHolds::new(
+                        control_url.clone(),
+                        outbound.clone(),
+                        client_options(coordinator, &plaintext_peers),
+                    )));
                     // Absent when no migration-service origin is configured. The
                     // journal endpoint then refuses, rather than answering as
                     // though a journal had been provisioned.
@@ -272,7 +286,8 @@ pub async fn run(settings: WorkflowSettings, options: ServerOptions) -> Result<(
                     let runs = Rc::new(
                         crate::runs::RunService::connect(&url, service.recovery(recovery)?)
                             .await
-                            .map_err(|_| crate::coordinator::Error::Unavailable)?,
+                            .map_err(|_| crate::coordinator::Error::Unavailable)?
+                            .with_deployments(deployments),
                     );
                     Ok::<_, crate::coordinator::Error>(Rc::new(WorkflowHttpState {
                         service,

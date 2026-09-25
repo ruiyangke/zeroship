@@ -423,6 +423,11 @@ fn measured_allowlist_is_encoded_and_enforced_row_by_row() {
         &[
             endpoints::CONTROL_QUEUE_DEPLOYMENT_HOLD_ACQUIRE,
             endpoints::CONTROL_QUEUE_DEPLOYMENT_HOLD_RELEASE,
+            // The journal-scoped pair, which the worker also holds: a journal
+            // hold is decided where the journal is and applied to the catalog
+            // by Control.
+            endpoints::CONTROL_DEPLOYMENT_HOLD_ACQUIRE,
+            endpoints::CONTROL_DEPLOYMENT_HOLD_RELEASE,
             // Policy inputs and the deletion marker, so the workflow service
             // needs no grant on the Control columns that carry them.
             endpoints::CONTROL_APP_FACTS,

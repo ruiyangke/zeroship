@@ -207,15 +207,15 @@ impl Fixture {
 /// goes red while both existing suites stay green, because each of those
 /// supplies its own counterpart.
 ///
-/// `restart_run` IS PINNED AS A REFUSAL, not as a success. `RunService`
-/// installs no deployments source, so `restart` resolves a retained deployment
-/// it cannot reach and refuses `unavailable` before it ever reaches the ingress
-/// fence -- the same split `http_runs.rs` pins in process. The refusal is a
-/// wire contract in its own right: the service picks the status from
-/// `RunFailure::status`, and the client believes a refusal body only when the
-/// status it arrived with is the one that code pairs with. What this arm proves
-/// is that the pairing survives the round trip. It flips to a success arm when
-/// that deployment source lands.
+/// `restart_run` IS PINNED AS A REFUSAL, not as a success. Nothing holds the
+/// seeded run's deployment in this fixture's journal, so `restart` resolves that
+/// retained deployment and then refuses `unavailable` at `require_journal_hold`,
+/// before it ever reaches the ingress fence -- the same split `http_runs.rs`
+/// pins in process. The refusal is a wire contract in its own right: the service
+/// picks the status from `RunFailure::status`, and the client believes a refusal
+/// body only when the status it arrived with is the one that code pairs with.
+/// What this arm proves is that the pairing survives the round trip. It flips to
+/// a success arm when this fixture's journal holds that deployment.
 #[ntex::test]
 async fn the_client_and_the_service_agree_on_every_run_call() {
     let fixture = Box::pin(Fixture::new()).await;
@@ -322,6 +322,6 @@ async fn the_client_and_the_service_agree_on_every_run_call() {
             options: RestartOptions::default(),
         })
         .await
-        .expect_err("restart was served, so its deployment source has landed");
+        .expect_err("restart was served, so this journal now holds its deployment");
     assert_eq!(refused, RunError::Refused(RunFailure::Unavailable {}));
 }

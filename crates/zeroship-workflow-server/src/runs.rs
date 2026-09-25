@@ -18,8 +18,8 @@ use zeroship_data_orm::{
 };
 use zeroship_workflow::{
     service::{
-        store::OrmStore, AppWorkflows, HostPolicies, IngressEpochs, PolicyBinding, PolicySnapshot,
-        WorkflowService,
+        store::OrmStore, AppDeployments, AppWorkflows, HostPolicies, IngressEpochs, PolicyBinding,
+        PolicySnapshot, WorkflowService,
     },
     WorkflowServiceError,
 };
@@ -84,6 +84,28 @@ impl RunService {
             recovery,
             ingress: RefCell::new(HashMap::new()),
         })
+    }
+
+    /// Bind the deployment retention authority this journal decides holds
+    /// under.
+    ///
+    /// A journal hold is recorded here, beside the runs it protects, and Control
+    /// applies it to the deploy catalog; without this the journal can read its
+    /// own hold rows and cannot tell Control about them.
+    #[must_use]
+    pub fn with_deployments(self, deployments: AppDeployments) -> Self {
+        let Self {
+            journal,
+            policies,
+            recovery,
+            ingress,
+        } = self;
+        Self {
+            journal: journal.with_deployments(deployments),
+            policies,
+            recovery,
+            ingress,
+        }
     }
 
     /// Bind `app` to this journal under the admission policy just observed.

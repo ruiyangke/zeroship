@@ -13,6 +13,10 @@ mod deployment_commands;
 mod app_facts;
 #[path = "deployment_holds/queue.rs"]
 mod queue_holds;
+#[path = "deployment_holds/journal.rs"]
+mod journal_holds;
+#[path = "../../zeroship-workflow-server/tests/support/journal.rs"]
+mod journal;
 #[path = "deployment_holds/collector.rs"]
 mod collector;
 #[path = "deployment_holds/publication.rs"]
@@ -56,8 +60,8 @@ use zeroship_core::{
     },
     service_identity::{ServiceEndpoint, endpoints, verify_service_call},
     service_peers::{
-        CONTROL_SERVICE_NAME, ServiceAuth, ServiceKeyring, WORKER_SERVICE_NAME,
-        WORKFLOW_SERVICE_NAME, service_issuer,
+        CONTROL_SERVICE_NAME, GATEWAY_SERVICE_NAME, ServiceAuth, ServiceKeyring,
+        WORKER_SERVICE_NAME, WORKFLOW_SERVICE_NAME, service_issuer,
     },
     typed_id,
     worker_join::{join_proof_message, mint_join_token, JoinTokenGrant, DEFAULT_EXECUTION_ZONE},
@@ -109,6 +113,14 @@ struct Fixture {
     /// here must refuse it at role arity.
     worker_role: Arc<ServiceAuth>,
     workflow_role: Arc<ServiceAuth>,
+    /// A platform role whose key this deployment TRUSTS and which holds no
+    /// deployment-hold grant.
+    ///
+    /// The third principal, and it is trusted on purpose: a refusal of an
+    /// untrusted key says nothing about which principals a hold endpoint admits,
+    /// because the credential never reaches the comparison. This one verifies
+    /// and is still refused, so the refusal is about the principal.
+    gateway_role: Arc<ServiceAuth>,
     control_url: String,
 }
 
@@ -137,6 +149,14 @@ impl Fixture {
         let (workflow_issuer, workflow_key) = workflow_role.signing_identity().unwrap();
         peers
             .trust_signing_key(workflow_issuer, workflow_key.key_id(), workflow_key)
+            .unwrap();
+        let gateway_role = signer(
+            service_issuer(GATEWAY_SERVICE_NAME).unwrap(),
+            ServiceSigningKey::generate(),
+        );
+        let (gateway_issuer, gateway_key) = gateway_role.signing_identity().unwrap();
+        peers
+            .trust_signing_key(gateway_issuer, gateway_key.key_id(), gateway_key)
             .unwrap();
         let service_auth = Arc::new(ServiceAuth::new(
             ServiceKeyring::from_parts(
@@ -242,6 +262,7 @@ impl Fixture {
             join_token,
             worker_role,
             workflow_role,
+            gateway_role,
             control_url,
         }
     }
@@ -593,7 +614,7 @@ async fn signed_deployment_holds_preserve_app_scope_across_worker_replacement() 
     let assignment = placement(&fixture.platform, &worker, &app).await;
     let request = HoldRequest {
         app_id: app.clone(),
-        assignment_revision: assignment.revision,
+        assignment_revision: Some(assignment.revision),
         deploy_id: deploy.clone(),
         generation: generation(1),
     };
@@ -782,7 +803,7 @@ async fn signed_deployment_holds_preserve_app_scope_across_worker_replacement() 
     let token = control_header(&replacement_auth);
     let request = HoldRequest {
         generation: generation(2),
-        assignment_revision: replacement_assignment.revision,
+        assignment_revision: Some(replacement_assignment.revision),
         ..request
     };
     let body = serde_json::to_value(&request).unwrap();
@@ -947,7 +968,7 @@ async fn failed_final_placement_authorization_rolls_back_hold_generations() {
     .unwrap();
     let mut request = HoldRequest {
         app_id: app,
-        assignment_revision: 1.try_into().unwrap(),
+        assignment_revision: Some(1.try_into().unwrap()),
         deploy_id: deploy,
         generation: generation(1),
     };

@@ -30,6 +30,45 @@ fn deployment(hash: char) -> DeployRegistration {
     }
 }
 
+/// A host given the retention authority and no artifact store serves its hold
+/// client and refuses an artifact read by name.
+///
+/// The refusal must NOT be a condition `damaged` names. Parking is for a
+/// deployment whose artifacts are wrong, and it takes that deployment away from
+/// every host; a capability this process was never given says nothing about the
+/// deployment. The second arm differs in one variable - the same host with a
+/// store, reading the same absent manifest - and is damaged, so the first arm is
+/// about the missing store rather than about the missing object.
+#[compio::test]
+async fn a_host_with_no_artifact_store_keeps_its_holds_and_refuses_a_read() {
+    let deployments = Deployments::new().await;
+    let app = AppId::mint();
+    let hash = "a".repeat(64);
+    let holds = super::super::AppDeployments::holds_only(Rc::new(AssignedHolds::new(Rc::new(
+        deployments.client(&app),
+    ))));
+    assert_eq!(
+        holds.client(&app).unwrap().scope(),
+        &zeroship_core::workflow_deployments::HoldScope::for_app(app.clone())
+    );
+    let refused = holds.read(&app, &hash).await.unwrap_err();
+    assert!(
+        format!("{refused}").contains("artifact store"),
+        "the refusal must name the missing capability: {refused}"
+    );
+    assert!(
+        !super::super::deployments::damaged(&refused),
+        "a host with no store must not park the deployment: {refused}"
+    );
+
+    let stored = deployments.binding(&[&app]);
+    let missing = stored.read(&app, &hash).await.unwrap_err();
+    assert!(
+        super::super::deployments::damaged(&missing),
+        "an absent manifest is damaged: {missing}"
+    );
+}
+
 #[compio::test]
 async fn sqlite_deployments_survive_redeploy_restart_corruption_and_repair() {
     let dir = tempfile::tempdir().unwrap();

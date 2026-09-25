@@ -154,7 +154,10 @@ impl ObservedRequest {
         assert_eq!(self.body, fixture.request());
         let request: HoldRequest = serde_json::from_value(self.body.clone()).unwrap();
         assert_eq!(request.app_id, fixture.scope.app_id);
-        assert_eq!(request.assignment_revision, fixture.scope.assignment_revision);
+        assert_eq!(
+            request.assignment_revision,
+            Some(fixture.scope.assignment_revision)
+        );
     }
 }
 
@@ -328,7 +331,7 @@ fn request_contract_rejects_caller_supplied_holder_and_unscoped_metadata() {
             "{field}"
         );
     }
-    for field in ["appId", "assignmentRevision", "deployId", "generation"] {
+    for field in ["appId", "deployId", "generation"] {
         let mut body = valid.clone();
         body.as_object_mut().unwrap().remove(field);
         assert!(
@@ -336,6 +339,17 @@ fn request_contract_rejects_caller_supplied_holder_and_unscoped_metadata() {
             "{field}"
         );
     }
+    // The placement is the one field a caller may omit, because a caller
+    // holding no placement has none to name. Which callers those are is
+    // decided against the authenticated principal in Control, not here.
+    let mut asserted = valid;
+    asserted.as_object_mut().unwrap().remove("assignmentRevision");
+    assert_eq!(
+        serde_json::from_value::<HoldRequest>(asserted)
+            .unwrap()
+            .assignment_revision,
+        None
+    );
 }
 
 #[compio::test]
@@ -435,6 +449,117 @@ async fn client_requires_an_enrolled_worker_signer_and_a_secure_unambiguous_orig
             Err(WorkflowServiceError::InvalidRequest(_))
         ));
     }
+}
+
+/// The journal-holding service's client is admitted by its role alone, names no
+/// placement on the wire, and holds the same journal scope a worker's does.
+///
+/// Every arm but the last is a refusal, and the last two are the controls: the
+/// role itself is admitted, so the refusals above are about WHICH signer rather
+/// than about the constructor refusing everything.
+#[compio::test]
+async fn the_asserted_client_takes_the_service_role_and_names_no_placement() {
+    let fixture = Fixture::new();
+    let app = fixture.scope.app_id.clone();
+    for issuer in [
+        CONTROL_AUDIENCE.to_owned(),
+        "spiffe://zeroship.ai/svc/worker".to_owned(),
+        format!(
+            "spiffe://zeroship.ai/svc/worker/{}",
+            fixture.worker_id.as_str()
+        ),
+        // An instance credential of the right service is still refused: the
+        // journal belongs to the service, not to one of its replicas.
+        format!(
+            "spiffe://zeroship.ai/svc/workflow/{}",
+            WorkerId::mint().as_str()
+        ),
+    ] {
+        assert_eq!(
+            RemoteDeploymentHolds::asserted(
+                "https://control.example",
+                auth(ServiceIssuer::parse(&issuer).unwrap()),
+                app.clone(),
+                Options::default(),
+            )
+            .unwrap_err(),
+            WorkflowServiceError::PermissionDenied,
+            "{issuer}"
+        );
+    }
+    assert_eq!(
+        RemoteDeploymentHolds::asserted(
+            "https://control.example",
+            Arc::new(ServiceAuth::unconfigured()),
+            app.clone(),
+            Options::default(),
+        )
+        .unwrap_err(),
+        WorkflowServiceError::Unauthenticated
+    );
+    let service = auth(ServiceIssuer::parse("spiffe://zeroship.ai/svc/workflow").unwrap());
+    let client = RemoteDeploymentHolds::asserted(
+        "https://control.example",
+        service.clone(),
+        app.clone(),
+        Options::default(),
+    )
+    .unwrap();
+    assert_eq!(client.scope(), &HoldScope::for_app(app.clone()));
+    assert_eq!(
+        client.scope().holder(),
+        fixture.client("https://control.example").scope().holder(),
+        "one app has one journal holder, whichever host holds the journal"
+    );
+
+    let listener = compio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let client = RemoteDeploymentHolds::asserted(
+        &format!("http://{}", listener.local_addr().unwrap()),
+        service,
+        app.clone(),
+        Options::default(),
+    )
+    .unwrap();
+    let server = async {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let request = read_request(&mut stream).await;
+        assert_eq!(
+            request.header.lines().next().unwrap(),
+            format!(
+                "POST {} HTTP/1.1",
+                endpoints::CONTROL_DEPLOYMENT_HOLD_ACQUIRE.path_template()
+            )
+        );
+        assert_eq!(
+            request.body,
+            json!({
+                "appId": app,
+                "deployId": fixture.deploy_id,
+                "generation": fixture.generation,
+            }),
+            "an asserted hold request carries no placement field at all"
+        );
+        assert!(!request.bearer().is_empty());
+        stream
+            .write_all(response(200, &fixture.receipt(HoldState::Held)))
+            .await
+            .0
+            .unwrap();
+    };
+    let call = async {
+        assert_eq!(
+            client
+                .acquire(&fixture.deploy_id, fixture.generation)
+                .await
+                .unwrap(),
+            fixture.receipt(HoldState::Held)
+        );
+    };
+    compio::time::timeout(Duration::from_secs(10), async {
+        futures::join!(server, call);
+    })
+    .await
+    .expect("asserted hold exchange completed");
 }
 
 #[compio::test]

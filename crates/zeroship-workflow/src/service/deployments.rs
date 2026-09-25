@@ -19,18 +19,33 @@ use zeroship_bundle::{
 };
 use zeroship_core::app_id::AppId;
 
+/// The normal app artifact store a host holds, with the budget it reads under.
+#[derive(Clone)]
+struct Artifacts {
+    source: Arc<dyn BlobStore>,
+    max_source_bytes: usize,
+}
+
 /// Normal app artifacts and the retention authority of an authenticated host.
 /// Customer SQL cannot widen that authority or select another app's manifest
 /// scope.
+///
+/// The two are separate capabilities, and a host may hold the retention
+/// authority without the artifact store: retention is a catalog decision about
+/// a deployment's identity, while reading a manifest needs the bytes. A host
+/// with no store is refused BY NAME at the read rather than treated as a host
+/// with no deployments at all, so an operation that needs an artifact says what
+/// is missing and one that needs only a hold proceeds.
 #[derive(Clone)]
 pub struct AppDeployments {
-    source: Arc<dyn BlobStore>,
-    max_source_bytes: usize,
+    artifacts: Option<Artifacts>,
     holds: Rc<dyn DeploymentHoldAuthority>,
 }
 impl std::fmt::Debug for AppDeployments {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AppDeployments").finish_non_exhaustive()
+        f.debug_struct("AppDeployments")
+            .field("artifacts", &self.artifacts.is_some())
+            .finish_non_exhaustive()
     }
 }
 impl AppDeployments {
@@ -50,10 +65,22 @@ impl AppDeployments {
             ));
         }
         Ok(Self {
-            source,
-            max_source_bytes,
+            artifacts: Some(Artifacts {
+                source,
+                max_source_bytes,
+            }),
             holds,
         })
+    }
+
+    /// Bind the retention authority alone, for a host that holds no app
+    /// artifact store.
+    #[must_use]
+    pub fn holds_only(holds: Rc<dyn DeploymentHoldAuthority>) -> Self {
+        Self {
+            artifacts: None,
+            holds,
+        }
     }
 
     pub(super) fn client(
@@ -63,13 +90,24 @@ impl AppDeployments {
         self.holds.client(app)
     }
 
+    /// Load the manifest and executable of `hash`.
+    ///
+    /// A host holding no artifact store refuses as a BACKEND failure, which is
+    /// deliberately not one of the conditions `damaged` names: a capability this
+    /// process was never given says nothing about the deployment, and parking it
+    /// would take a live deployment away from the hosts that can read it.
     pub(super) async fn read(
         &self,
         app: &AppId,
         hash: &str,
     ) -> Result<BundleExecutable, ExecutableError> {
-        let bytes = self
-            .source
+        let artifacts = self.artifacts.as_ref().ok_or_else(|| {
+            ExecutableError::Storage(BlobError::Backend(
+                "this host holds no app deployment artifact store".into(),
+            ))
+        })?;
+        let source = artifacts.source.as_ref();
+        let bytes = source
             .get_manifest(app, hash)
             .await
             .map_err(|error| match error {
@@ -80,7 +118,7 @@ impl AppDeployments {
             return Err(ExecutableError::InvalidManifest);
         }
         let manifest = verify_deployment_manifest(&bytes, hash)?;
-        BundleExecutable::load(&manifest, self.source.as_ref(), self.max_source_bytes).await
+        BundleExecutable::load(&manifest, source, artifacts.max_source_bytes).await
     }
 }
 

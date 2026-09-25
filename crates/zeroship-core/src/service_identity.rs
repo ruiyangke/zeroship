@@ -638,6 +638,14 @@ pub fn service_allowlist() -> &'static [ServiceAuthorization] {
                 &[
                     endpoints::CONTROL_QUEUE_DEPLOYMENT_HOLD_ACQUIRE,
                     endpoints::CONTROL_QUEUE_DEPLOYMENT_HOLD_RELEASE,
+                    // The journal-scoped pair on the same ledger. A journal
+                    // hold is decided and recorded where the journal is, and
+                    // Control is where it takes effect on the deploy catalog,
+                    // so the process that holds the journal is the one that
+                    // has to be able to say so. The worker keeps this pair for
+                    // the journals it still holds.
+                    endpoints::CONTROL_DEPLOYMENT_HOLD_ACQUIRE,
+                    endpoints::CONTROL_DEPLOYMENT_HOLD_RELEASE,
                     // The policy inputs and the deletion marker the manager
                     // used to read straight out of Control's tables. It reads
                     // them here instead, so the service holds no grant on

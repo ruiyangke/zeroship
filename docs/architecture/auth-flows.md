@@ -691,11 +691,15 @@ The rows, by principal:
 - `svc/auth` reaches the gateway's back-channel logout endpoint and Control's erasure preflight. It
   holds no shared key: that single call is on an assertion precisely so the process rendering the
   login form does not also hold the route table, the version feed and both reconcile triggers.
-- `svc/workflow` reaches Control's queue deployment-hold pair, Control's app-facts read, and the
-  migration service's schema bundle apply. The app-facts read is how the workflow manager gets the
-  policy inputs and the deletion marker, which is why it holds no grant on `zeroship.apps` policy
-  columns or on `zeroship.plans`. Routing the bundle through Control would move workflow artifacts
-  into Control, which is the leak the bundle path removes.
+- `svc/workflow` reaches both of Control's deployment-hold pairs, Control's app-facts read, and the
+  migration service's schema bundle apply. The journal-scoped pair is the direct one `svc/worker`
+  also holds, and the service reaches it because a journal hold is decided and recorded where the
+  journal is while Control is where it takes effect on the deploy catalog; Control admits the
+  service there by its role and reads no placement, because a non-worker caller has none. The
+  app-facts read is how the workflow manager gets the policy inputs and the deletion marker, which
+  is why it holds no grant on `zeroship.apps` policy columns or on `zeroship.plans`. Routing the
+  bundle through Control would move workflow artifacts into Control, which is the leak the bundle
+  path removes.
 - `svc/gateway` reaches Control's route feed and the worker's dispatch endpoint.
 - `svc/worker` reaches Control's version, app, environment, data-key and binding reads, Control's
   direct deployment-hold pair, its own retire and renew, the workflow register, assignment, renew,
