@@ -997,6 +997,28 @@ protocol. This extends a working client rather than inventing one.
    cannot host a dispatcher at all. What is left is the authority question, and it wants an
    answer rather than a route around it.
 
+   **And the service is already a claimant of this kind, which answers it.** Placement authorizes
+   a REMOTE identity to execute creator code for one app, and it is read at ingress - by `bind`
+   (`crates/zeroship-workflow-server/src/api/runs.rs`) and by `delivery_authority`
+   (`crates/zeroship-workflow-manager/src/coordinator/jobs.rs`) - for a caller whose own assertion
+   cannot be taken. The service is neither remote nor an executor of creator code, and it already
+   operates this queue without a placement at a wider scope than a claim: the recovery lane
+   inserts jobs directly, `self.queue.insert(&tx, &spec, now)`
+   (`crates/zeroship-workflow-manager/src/recovery.rs`); `Queue::submit`
+   (`crates/zeroship-workflow-manager/src/queue.rs`) takes no authorizer at all, unlike its
+   `submit_authorized` sibling; and the placement lane writes `assignments` itself. No lane in
+   `crates/zeroship-workflow-manager/src/driver.rs` takes an instance lease or holds an election.
+   They are deconflicted by the per-app lock and by each operation's own compare-and-swap. A lane
+   that leases a maintenance job is the same kind of thing as the lanes already there.
+
+   **Which dissolves the objection rather than accepting it.** `assignments` does not answer what
+   is touching an app, and is not meant to: the recovery, retention and closing lanes all act on
+   an app without ever appearing in it. It answers which worker may execute creator code there. A
+   sweep lane belongs in it no more than the recovery lane does. The CLI points the same way
+   instead of against - it registers and places itself because it IS the worker for its one app,
+   running creator code, which is precisely the case a placement is for. The sweeps are the case
+   it is not for.
+
    **And that arm removes the call that builds the backend.** Reaching the
    service over HTTP is not only a missing implementation. `AppWorkflows::into_backend`
    (`crates/zeroship-workflow/src/service/backend.rs`) is what produces the backend today, and it
@@ -1034,8 +1056,9 @@ protocol. This extends a working client rather than inventing one.
    no merged equivalent", and "And the merged reply has one validated half and one unvalidated
    one". The flag: "Then the worker stops holding a journal", "And the order needs a second
    claimant, which nothing will issue", "Which moves the question from exclusivity to authority",
-   "And the ways around deciding it are each worse" and "And that arm removes the call that
-   builds the backend".
+   "And the ways around deciding it are each worse", "And the service is already a claimant of
+   this kind, which answers it", "Which dissolves the objection rather than accepting it" and
+   "And that arm removes the call that builds the backend".
 
    **And the first piece is not the loop.** The sweeps split by what they need. `close_job`,
    `fanout_job`, `propagation_job` and `reconcile_job`'s publications phase are journal-only and
