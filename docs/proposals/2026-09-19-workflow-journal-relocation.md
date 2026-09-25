@@ -336,9 +336,11 @@ the decoupling needs nothing from the journal except that it not be in the way.
 ## Plan
 
 Steps 1 to 3 each landed on their own and are verifiable on their own. Step 4 does not: its
-wire and client halves land green and unwired, but its server half shares step 5's flag day,
-because the job endpoints it changes are the live claim path rather than a new one nobody
-calls.
+wire and client halves would land green but unwired, and its server half shares step 5's flag
+day, because the job endpoints it changes are the live claim path rather than a new one nobody
+calls. Land the halves together rather than the client half early. Unwired it changes no
+existing test and has to survive step 5's churn, and the timeout budget recorded under the
+heartbeat has to be settled by whoever writes the server side in any case.
 
 **What is easy, and what is not.** The creator seam is the easy half: `WorkflowBackend` is
 narrow, with two implementations already behind a factory in `crates/zeroship-workflow-v8/src/lib.rs`,
