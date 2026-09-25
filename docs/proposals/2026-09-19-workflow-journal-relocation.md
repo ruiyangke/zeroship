@@ -909,6 +909,20 @@ protocol. This extends a working client rather than inventing one.
    authorization to take one. The cheap group writes no `deploys` row at all, so a dispatch loop
    without them has three dead arms and the foreign key stays shut.
 
+   **And two of the nine cannot move at all as they stand.** `cron_job` takes an `InputStager`
+   and `collect_job` a `PayloadDeleter`. The only production implementation of either is
+   `PayloadObjects` (`crates/zeroship-workflow-runner/src/payloads/objects.rs`) - everything else
+   in the tree is a test fake - and that crate is the one the service may not reach, under the
+   same gate arm that makes lifting the dispatch necessary in the first place. So seven sweeps
+   are journal-only and can run in the service; these two move creator bytes and cannot.
+
+   That is not an argument for giving the service a payload store. It is the same split `stage`
+   and `read` already answer: the journal decision crosses, the bytes stay with the process
+   holding the store. What is genuinely unsettled is which process claims those two jobs once the
+   worker no longer holds the journal, because the capability and the journal end up on opposite
+   sides. Settle it before the claim filter is written, since the filter is where the answer
+   shows up.
+
    **Which raises a fork worth settling before anything is built.** Verifying a deployment means
    reading its manifest. Control already owns the `zeroship.app_deploys` catalog and already
    holds `dhl_`-class authority, while the workflow service would have to grow a blob-store
