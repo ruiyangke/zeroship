@@ -923,6 +923,19 @@ protocol. This extends a working client rather than inventing one.
    sides. Settle it before the claim filter is written, since the filter is where the answer
    shows up.
 
+   **And do not reach for the classification that already exists; it splits on a different
+   axis.** `worker_operation` (`crates/zeroship-workflow-manager/src/coordinator/jobs.rs`)
+   admits `Advance`, `Fanout` and `Propagate` and denies the other seven, but it is a PUBLISH
+   restriction - which operations a worker may submit - not a claim filter. Its comment gives
+   the reason: "A worker that could publish a release would be asking itself to give code back,
+   so retention stays the manager's decision." So it divides by who MINTS a job, and `Fanout`
+   and `Propagate` are worker-published maintenance rather than creator work. A claim filter
+   built from it would hand the service three of the nine and withhold six.
+
+   The set the service wants is the one `maintenance_job` already enumerates: every variant but
+   `Advance`. That is a total match over ten, so the two sets cannot drift apart silently - a
+   new operation kind is a compile error in the dispatch before it is a gap in the filter.
+
    **Which raises a fork worth settling before anything is built.** Verifying a deployment means
    reading its manifest. Control already owns the `zeroship.app_deploys` catalog and already
    holds `dhl_`-class authority, while the workflow service would have to grow a blob-store
