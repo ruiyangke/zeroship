@@ -456,6 +456,32 @@ protocol. This extends a working client rather than inventing one.
    deliverable. And completion is a pipeline rather than a pair: `complete_job` runs in
    `execute`, and `acknowledge` settles the receipt it returned.
 
+   **Take the heartbeat first; its server half waits.** Production journals per app
+   into the creator's own schema - `JournalLocation::CreatorSchema` in
+   `crates/zeroship-worker/src/main.rs` - while `RunService` holds one platform
+   `workflow_manager` schema, so a merged server handler would have no rows to touch. The
+   client, wire and DTO halves land green; leave
+   `crates/zeroship-workflow-server/src/api/jobs.rs` alone until the cutover animates it.
+
+   **Do not add a test module to `service/delivery.rs` to reach `TaskRenewal`.** Its fields are
+   private, and that guard holds by ABSENCE: the file declares no `#[cfg(test)]` and no
+   `mod tests`, so no test is a descendant of the module and the only constructions of the type
+   are the ones inside `heartbeat_job` itself. `DeliveryGrant`
+   (`crates/zeroship-workflow-manager/src/queue.rs`) has equally private fields and IS built
+   field by field by a test, because that file does declare an inline test module. A merged
+   heartbeat needs a second constructor; put the tests that exercise it in
+   `crates/zeroship-workflow/src/service/tests/delivery.rs`, where they still cannot reach the
+   fields.
+
+   **Two measurement traps here.** `impl JobTransport for` misses an implementor -
+   `crates/zeroship-workflow-v8/tests/runner.rs` spells it fully qualified - so a sweep for the
+   test doubles to update has to match `JobTransport for` instead. And the merged body adds a
+   journal object to the delivery envelope while the end-to-end fixture
+   (`crates/zeroship-workflow-server/tests/support/server_process.rs`) caps request bodies far
+   below the production default, with
+   `queue_routes_authenticate_before_body_and_reject_open_metadata` probing that boundary on
+   purpose. Re-measure there rather than assuming headroom.
+
    **What must survive, and where each is enforced.** The manager's evidence that an execution
    began is `renewal` in `crates/zeroship-workflow-manager/src/queue.rs`, NOT any method named
    `heartbeat_job` - that name resolves to three different methods in three crates, and a
