@@ -141,8 +141,9 @@ Regenerate metadata SQL with
 The host needs a platform metadata database login, `workflow.control_url`, its
 private `workflow.service_key_file`, and `workflow.service_peers_file` containing
 Control's public key. Control's peer bundle must contain the workflow service's
-public key. The Control origin requires HTTPS except for literal loopback HTTP
-addresses. The host needs no customer connection or payload location.
+public key. The Control origin requires HTTPS, except for literal
+loopback addresses and exact origins named in `plaintext_peers`, which is empty
+by default. The host needs no customer connection or payload location.
 `workflow.driver_interval_ms` controls the delay after a completed pass;
 `workflow.driver_lane_timeout_ms` bounds each lane. `workflow.batch_limit` also
 bounds the candidate page. The closing lane begins closing an app's recovery
