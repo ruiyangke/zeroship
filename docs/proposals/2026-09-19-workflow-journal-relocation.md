@@ -106,6 +106,13 @@ bundle - so they receive no grants and the worker loses the ability to write the
 arrangement works only because the blanket grant covers everything in the schema, and that
 grant is what goes.
 
+The tripwire for this is already in the tree, and nothing names it.
+`runtime_provisioning_does_not_narrow_table_access_by_name`, in that same file, asserts the
+provisioning still contains `ON ALL TABLES IN SCHEMA`. Deleting the blanket grant turns that
+test red, and the tempting repair is to relax its assertion - which lands this defect rather
+than catching it. Whoever deletes the grant has to add the journal's tables to the generated
+set in the same change.
+
 **4. Under N:M the journal's home is not a function.** `crates/zeroship-worker/src/workflow_creator.rs` takes the schema
 off whichever binding `provider.resolve(scope)` returned. With one binding that is
 deterministic. With several it is not, and an app's runs could split across two schemas with
