@@ -869,7 +869,7 @@ protocol. This extends a working client rather than inventing one.
    `start` having no endpoint is a sequencing fact and not a gap in step 3.
 
    **What proceeds before the flag day, and what already has.** Steps 4 and 5 land together,
-   but not everything in them waits for that. Three preparatory pieces are in:
+   but not everything in them waits for that. What is already in:
 
    - The run endpoints' two halves are bound to each other.
      `the_client_and_the_service_agree_on_every_run_call`
@@ -886,24 +886,25 @@ protocol. This extends a working client rather than inventing one.
      `crates/zeroship-core/src/workflow_coordination/lifecycle.rs`, re-exported from where they
      were defined, so the client can name a start call.
 
-   **One more is worth binding before the move, and one should go.**
-   `PreparedExecution::stage`'s receipt check
+   **And two more have landed since.** `PreparedExecution::stage`'s receipt check
    (`crates/zeroship-workflow-runner/src/outputs.rs`, "workflow upload receipt changed") is the
-   same shape as the descriptor refusal and cannot fire today for the same reason: `stage_inner`
-   takes the reference BY VALUE and returns the caller's own struct, so the comparison is a
-   value against a clone of itself. Over a wire it becomes a decoded response body, and a retry
-   landing on another instance can answer with a different descriptor. One occurrence tree-wide,
-   on the hot path, since every execution stages through it.
+   same shape as the descriptor refusal and cannot fire while `stage_inner` takes the reference
+   BY VALUE and returns the caller's own struct, so the comparison is a value against a clone of
+   itself. Over a wire it becomes a decoded response body, and a retry landing on another
+   instance can answer with a different descriptor.
+   `staging_refuses_an_upload_receipt_that_answers_with_another_descriptor`
+   (`crates/zeroship-workflow-runner/src/outputs/tests.rs`) binds it, so the guard is waiting for
+   the wire that makes it reachable rather than being written once the wire exists.
 
-   The one to delete is `acknowledge`'s settlement-identity check
-   (`crates/zeroship-workflow-runner/src/delivery.rs`), and it takes two arguments rather than
-   one. Over HTTP, `WorkerCoordinator::settle_job` checks a strict superset - the same four
-   fields plus `outcome.valid_for` - and
-   `submission_and_settlement_receipts_cannot_substitute_metadata` substitutes each in turn
-   against a fake peer. The CLI's `LocalTransport` never reaches that check, but it cannot
-   disagree either: `queue.rs` builds three of the receipt's fields from the request and the
-   fourth, `app_id`, from the assignment - which `delivery_selector` selected BY
-   `delivery.job.app_id`. Unreachable both ways, so it is dead weight rather than safety.
+   `acknowledge` (`crates/zeroship-workflow-runner/src/delivery.rs`) settles through
+   `Ok(observed) => return Ok(observed)` and carries no settlement-identity check of its own.
+   Two arguments say that is right rather than missing. Over HTTP,
+   `WorkerCoordinator::settle_job` checks a strict superset - the same four fields plus
+   `outcome.valid_for` - and `submission_and_settlement_receipts_cannot_substitute_metadata`
+   substitutes each in turn against a fake peer. The CLI's `LocalTransport` never reaches that
+   check and cannot disagree either: `queue.rs` builds three of the receipt's fields from the
+   request and the fourth, `app_id`, from the assignment, which `delivery_selector` selected BY
+   `delivery.job.app_id`.
 
    And one worry does NOT apply, written down so nobody builds for it. The `Heartbeat` reply
    (`crates/zeroship-workflow/src/service/types.rs`) carries no task identity at all, and
