@@ -1067,9 +1067,9 @@ protocol. This extends a working client rather than inventing one.
    The sweeps: "And the first piece is not the loop", "And two of the nine cannot move at all as
    they stand", "Neither needs a store in the service", "And the lane has a seat on neither half
    of the service", and for the claim set "And do not reach for the classification that already
-   exists", "A second claimant blocks rather than skipping", "And when it is written it cannot be
-   an arm at the claim site" and "And `candidate` has a second caller, which decides something
-   else". The grant: "That first one is not a line of
+   exists", "A second claimant blocks rather than skipping", "And it is in the query, not an arm
+   at the claim site" and "And `candidate` has a second caller, which decides something else".
+   The grant: "That first one is not a line of
    wiring; it is a credential question" and "And the hold `restart` waits on belongs to another
    principal". The registration: "And the fork resolves toward the pattern already in the tree".
    The reserve and confirm: "One obligation is genuinely new". The backend: "An HTTP
@@ -1142,22 +1142,29 @@ protocol. This extends a working client rather than inventing one.
    authorizes itself - see "And the order needs a second claimant, which nothing will issue" -
    before writing that filter, because the filter presumes that answer.
 
-   **And when it is written it cannot be an arm at the claim site.** `candidate`
+   **And it is in the query, not an arm at the claim site.** `candidate`
    (`crates/zeroship-workflow-manager/src/scheduling.rs`) answers `Result<Option<String>, Error>`
    - one id, ordered by `dispatch_order`, with nothing that tries the next one - so an arm
    refusing a row after it is loaded would head-of-line block, one unclaimable job at the front
-   stalling everything behind it. The filter belongs inside `candidate`'s own query, over the
-   `jobs::operation_kind` text column that `jobs_operation_idx` already indexes
-   (`crates/zeroship-workflow-manager/schema/schema.ts`). A string predicate loses the
-   exhaustiveness `maintenance_job` has, and the way back is to derive the admitted strings from
-   a total match over `JobOperation`, as `models::operation_kind`
-   (`crates/zeroship-workflow-manager/src/models.rs`) already does for the write side. A list
-   written by hand in the query cannot. The tree already enforces that placement and names the
-   reason: `sqlite_management_barriers_filter_before_candidate_limit` and its postgres twin
-   (`crates/zeroship-workflow-manager/tests/management/barriers.rs`) enqueue blocked advances and
-   assert `claim` answers nothing while a barrier holds. The predicates those tests cover compare
-   the same column to literals, and they are the whole of what binds them, so a new predicate
-   needs an arm of that kind rather than a careful spelling.
+   stalling everything behind it. The predicate sits in the query instead, over the
+   `jobs::operation_kind` column that `jobs_operation_idx` already indexes
+   (`crates/zeroship-workflow-manager/schema/schema.ts`), as `not_in_values(claimant.denied())`.
+   Its exhaustiveness comes from one declaration rather than from care: a macro in
+   `crates/zeroship-workflow-manager/src/models.rs` emits both `operation_kind`'s total match and
+   the `OPERATIONS` table the predicate reads, from the same arms, so a `JobOperation` variant
+   added without a `Work` class leaves that match non-exhaustive at the invocation - the string
+   and the classification cannot drift because they are the same line. `Claimant::Placed` denies
+   nothing, and an empty `NotIn` collapses to an always-true clause naming the field
+   (`crates/zeroship-data-orm/src/orm/read_builder/predicates.rs`), so the worker's claim is
+   unchanged. `sqlite_refused_kind_at_the_head_does_not_hide_the_rows_behind_it` and its postgres
+   twin (`crates/zeroship-workflow-manager/tests/queue.rs`) put a refused kind at the head with an
+   admitted row behind it and assert the row behind is what answers; the control differs only in
+   the claimant, and a third arm settles the admitted row so the restricted claimant answers
+   nothing rather than the head. The literal predicates already on that column, `management` and
+   `advance` in `management_eligibility`, are bound by
+   `sqlite_management_barriers_filter_before_candidate_limit` and its postgres twin
+   (`crates/zeroship-workflow-manager/tests/management/barriers.rs`) and by nothing else, so an
+   edit to either spelling has one test standing behind it.
 
    **And `candidate` has a second caller, which decides something else.** `Capacity::visit`
    (`crates/zeroship-workflow-manager/src/capacity.rs`) asks it whether an app has claimable
