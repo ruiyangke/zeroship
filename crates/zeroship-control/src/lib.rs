@@ -539,8 +539,7 @@ pub struct AppState {
     ///
     /// The console is a regular gateway-fronted app authenticated via
     /// `@zeroship/auth` (BFF); the control plane is a pure API resource
-    /// server with NO OIDC RP of its own — the bespoke `ConsoleOidcRp` +
-    /// `console_sessions` surface was removed in the R5 cutover.
+    /// server with NO OIDC RP and no session surface of its own.
     pub control_pg: Arc<compio_postgres::Client>,
     /// Apex domain hosted creator apps serve under, e.g. `zeroship.ai`
     /// (prod) or `zeroship.localhost` (dev). An app named `myapp` serves
