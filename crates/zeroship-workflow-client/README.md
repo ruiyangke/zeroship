@@ -5,7 +5,8 @@ clients validate assignment and receipt identity, mint fresh service assertions,
 bound requests and responses, and use compio HTTP connections.
 
 This crate depends on shared wire types, not the customer engine, manager, ORM
-or V8. Remote origins require HTTPS; literal loopback HTTP supports local hosts.
+or V8. Remote origins require HTTPS, with two exceptions: literal loopback, and
+exact origins an operator lists in `plaintext_peers`, which is empty by default.
 Mutation callers retain their logical request identity across uncertain replies.
 
 `WorkerCoordinator` submits creator intents, claims jobs, heartbeats live grants
