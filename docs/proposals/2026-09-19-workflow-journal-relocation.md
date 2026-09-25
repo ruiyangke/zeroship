@@ -1624,6 +1624,17 @@ part that dates, not the verdict.
    one patch, and it lands with step 5 rather than before it, because the hold is only
    meaningful once the journal it protects is the service's.
 
+   **And that signer check has two sides, one of them in another service.** The refusal named
+   above is the client's. Control enforces the same split itself:
+   `crates/zeroship-control/src/deployment_hold_api.rs` admits the queue pair only for an issuer
+   equal to the workflow role, and admits the normal pair only for the WORKER principal with an
+   instance that parses as a `WorkerId`. So the change is three edits across two services - the
+   allowlist row in `crates/zeroship-core/src/service_identity.rs`, the client refusal in
+   `crates/zeroship-workflow/src/deployment_holds/remote.rs`, and Control's own check - and the
+   last of those is a change to what Control will accept as a holder, which is a trust decision
+   rather than a wiring one. It belongs with the grant rather than after it, because a client
+   that widened alone would be refused at the far end and a Control that widened alone would
+   admit a caller nothing yet sends.
 
    **A gap this uncovered, unrelated to the move.** `workflow_rollout_config` has no production
    writer, and that is the stated posture rather than an omission:
