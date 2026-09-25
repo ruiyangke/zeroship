@@ -83,7 +83,12 @@ fn invalid_row(key: &str) -> WorkflowServiceError {
 /// and where the lease and the task leave room that deadline is this same
 /// value; `compio::time::timeout` then resolves the pair through
 /// `futures::select!`, which shuffles its branches, so the attempt names the
-/// clock for some stalls and reports `Timeout` for others. A budget shorter
+/// clock for some stalls and reports `Timeout` for others. That applies to
+/// the `begin` site alone, which arms before the attempt has done storage
+/// work, and there only on SQLite, where the call bounds a lazy attachment;
+/// the PostgreSQL `prepare_for_app` is ready on its first poll and cannot
+/// elapse. The `now` site arms later in the attempt, leaving that deadline
+/// strictly earlier and `Timeout` the answer. A budget shorter
 /// than this one always reports `Timeout`, which is the truer answer there.
 /// Tightening this value to settle the pair would make a storage ceiling
 /// depend on a delivery one, and the retry path already treats both alike.
