@@ -943,8 +943,10 @@ protocol. This extends a working client rather than inventing one.
      `RunService::connect` opens `workflow_manager` through
      `ConnectionFactory::for_platform_url`. The arms differ by schema, not by database. So the
      flag is either repointing the worker's journal connection at the platform database, or the
-     worker opening no journal at all and reaching the service over HTTP - and there is no
-     remote `WorkflowBackend` today.
+     worker opening no journal at all and reaching the service over HTTP. The first of those is
+     what the do-not note below forbids - a DSN to the journal database held by the one process
+     that executes creator code, whose only tenant separation is an `app_id` column - so the flag
+     has one arm rather than two, and the worker opening no journal is it.
 
    Step 6 follows once that is green.
 
@@ -992,7 +994,7 @@ protocol. This extends a working client rather than inventing one.
    cannot host a dispatcher at all. What is left is the authority question, and it wants an
    answer rather than a route around it.
 
-   **And the flag's second option removes the call that builds the backend.** Reaching the
+   **And that arm removes the call that builds the backend.** Reaching the
    service over HTTP is not only a missing implementation. `AppWorkflows::into_backend`
    (`crates/zeroship-workflow/src/service/backend.rs`) is what produces the backend today, and it
    takes the journal in order to refuse a mismatch - `if !self.binding.belongs_to(&journal.policies)`
@@ -1029,8 +1031,8 @@ protocol. This extends a working client rather than inventing one.
    no merged equivalent", and "And the merged reply has one validated half and one unvalidated
    one". The flag: "Then the worker stops holding a journal", "And the order needs a second
    claimant, which nothing will issue", "Which moves the question from exclusivity to authority",
-   "And the ways around deciding it are each worse" and "And the flag's second option removes the
-   call that builds the backend".
+   "And the ways around deciding it are each worse" and "And that arm removes the call that
+   builds the backend".
 
    **And the first piece is not the loop.** The sweeps split by what they need. `close_job`,
    `fanout_job`, `propagation_job` and `reconcile_job`'s publications phase are journal-only and
