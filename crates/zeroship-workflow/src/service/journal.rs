@@ -263,7 +263,16 @@ pub(super) fn validate_child_result(
                 return Err(invalid());
             }
         }
-        "failed" | "cancelled" => {
+        // Every terminal state a child can settle at other than completion
+        // fails the join, and the three are one arm because the join reads the
+        // same two things off all of them: the state is terminal and not
+        // `completed`, so the step failed, and the error is whatever the child
+        // recorded. What differs between them is only whether anything was
+        // recorded. A cancellation is the one close that records nothing, so
+        // the engine's own verdict stands in there; a stall records the host's
+        // liveness verdict and a failure records the creator's, and both reach
+        // the parent as the child's own value.
+        "failed" | "cancelled" | "stalled" => {
             let error = result.outcome.error.as_deref().map(decode::<Value>).transpose()?.unwrap_or_else(|| json!({"type":"ChildCancelledError","message":"child workflow was cancelled"}));
             if step.state != "failed"
                 || step.error.as_ref() != Some(&error)
