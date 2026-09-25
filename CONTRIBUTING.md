@@ -98,7 +98,7 @@ Web Platform Tests (only when you touch the runtime's web surface) are fetched o
 demand and are not tracked in git:
 
 ```
-./crates/runtime/tests/setup-wpt.sh
+./crates/zeroship-runtime/tests/setup-wpt.sh
 ```
 
 The native auth suite builds the platform migration host and runs the complete

@@ -686,18 +686,20 @@ delegated-user or resource-scope check that endpoint owns.
 
 The rows, by principal:
 
-- `svc/control` reaches the workflow management, schedule and journal-ensure endpoints and the
-  worker log read.
+- `svc/control` reaches the workflow assignment-verify, management, schedule and journal-ensure
+  endpoints and the worker log read.
 - `svc/auth` reaches the gateway's back-channel logout endpoint and Control's erasure preflight. It
   holds no shared key: that single call is on an assertion precisely so the process rendering the
   login form does not also hold the route table, the version feed and both reconcile triggers.
-- `svc/workflow` reaches Control's queue deployment-hold pair and the migration service's schema
-  bundle apply. Routing the bundle through Control would move workflow artifacts into Control,
-  which is the leak the bundle path removes.
+- `svc/workflow` reaches Control's queue deployment-hold pair, Control's app-facts read, and the
+  migration service's schema bundle apply. The app-facts read is how the workflow manager gets the
+  policy inputs and the deletion marker, which is why it holds no grant on `zeroship.apps` policy
+  columns or on `zeroship.plans`. Routing the bundle through Control would move workflow artifacts
+  into Control, which is the leak the bundle path removes.
 - `svc/gateway` reaches Control's route feed and the worker's dispatch endpoint.
-- `svc/worker` reaches Control's version, app, environment, data-key and binding reads, its own
-  retire and renew, the workflow register, assignment, renew, release and job endpoints, the policy
-  lease, CDC subscribe, and journal ensure.
+- `svc/worker` reaches Control's version, app, environment, data-key and binding reads, Control's
+  direct deployment-hold pair, its own retire and renew, the workflow register, assignment, renew,
+  release, job and run endpoints, the policy lease, CDC subscribe, and journal ensure.
 - `svc/migrate-server` mints but reaches nothing.
 
 The route declaration and the authorization are one statement on both ends: `configure` in

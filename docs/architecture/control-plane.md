@@ -46,7 +46,7 @@ api.rs             app CRUD, deploy, plan, usage reads
 internal.rs        route/version/env feeds, usage ingest
 oauth_clients.rs   boot-time OAuth-client reconcile from `[auth] oauth_clients`
 oauth_grants_handlers.rs  per-app OAuth grant management
-authz_guard.rs     Cedar-backed request authorization (crates/authz)
+authz_guard.rs     Cedar-backed request authorization (crates/zeroship-authz)
 egress_rules.rs    creator self-service raw-TCP egress rules
 env_handlers.rs    vars/secrets CRUD + process.env exposure list
 env_store.rs       encrypted-at-rest env/secrets storage
@@ -254,7 +254,7 @@ resource server with no RP of its own — the bespoke `ConsoleOidcRp` +
 
 ```text
 Gateway -> 302 to auth /oauth2/authorize (no session cookie)
-crates/auth -> login / OAuth / consent, then native OP code issuance
+crates/zeroship-auth -> login / OAuth / consent, then native OP code issuance
 Gateway -> /__zeroship/auth/callback: code exchange, sets `__Host-zeroship_app_session`
 Gateway -> validates the session and forwards `ZeroShip-User` (ed25519-signed)
 Worker/runtime -> reads the forwarded user context
