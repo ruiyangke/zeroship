@@ -800,6 +800,28 @@ protocol. This extends a working client rather than inventing one.
    writer of that table, so the rows are absent too until something produces them. That is why
    `start` having no endpoint is a sequencing fact and not a gap in step 3.
 
+   **What can proceed before the flag day.** Steps 4 and 5 land together, but not everything in
+   them waits for that. These are behaviour-preserving or test-only, and each makes a later
+   piece verifiable rather than hopeful:
+
+   - Bind the run endpoints' client and server halves to each other. Their wire format is
+     asserted twice today and never compared: `http_runs.rs` builds requests by hand and the
+     client's suite drives its own peer, so a divergence leaves both green.
+   - Test `read_verified`'s descriptor-change refusal. It cannot fire today, because the row is
+     selected by equality on the fields it compares, and it becomes the guard that matters when
+     the transport is remote.
+   - Bind what a prefetch would remove: a read driven after the lease is lost while an isolate
+     is live. The outage test fakes an unavailable transport, which is a different mechanism, so
+     nothing covers this today.
+   - Move `StartOptions`, `StartedRun`, `ConflictPolicy` and `WorkflowOutputRef` into
+     `zeroship-core`. The twelve lifecycle types already made that move and `operations.rs`
+     re-exports them back, so the shape is settled; it changes no behaviour and it is what lets
+     the client name a start call at all.
+
+   Two decisions gate the rest and neither needs code first: whether the byte-returning reads
+   become descriptor-returning, and the grant and signer change that gives the service its
+   journal hold.
+
 6. **Delete the creator-schema path**, and say where each piece lives, because they are not all
    in the workflow crates: `ensure_journal` and its route in
    `crates/zeroship-workflow-server/src/api.rs`, the journal bundle and `SCHEMA_PLACEHOLDER` in
