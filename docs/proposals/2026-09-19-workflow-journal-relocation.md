@@ -10,6 +10,17 @@ its own ingress epoch; `restart` refuses, naming the prerequisite it still needs
 production writes this journal yet - there is no `start` endpoint - so step 5 is what gives the
 endpoints rows to operate on.
 
+Step 5 has started. The claim predicate that lets two claimants share one queue is in
+`crates/zeroship-workflow-manager/src/scheduling.rs`, deriving its admitted kinds from the same
+declaration that writes `jobs.operation_kind`; the service's maintenance lane and the one
+function that states how it claims are in `crates/zeroship-workflow-server/src/sweeps.rs` and
+`crates/zeroship-workflow-manager/src/maintenance.rs`. The lane is exercised end to end against
+the real journal and the real queue and has NO production caller, which is deliberate and has a
+do-not note of its own: it admits operations that need a deployments source the service does not
+hold yet, and starting it before that lands would take those rows from the worker that can run
+them. That source, its grant and the signer change on both sides of it are what the first bullet
+of the flag day still owes.
+
 Open 3 names three pieces behind a store of its own: splitting the corpus, severing the
 service's control-plane reads, and giving the service a deployment site. The first and third
 have landed, and the second is nearly done. The two tables the service owns have moved into
