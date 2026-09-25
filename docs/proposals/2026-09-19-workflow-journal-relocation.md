@@ -491,12 +491,29 @@ protocol. This extends a working client rather than inventing one.
 
    **The concurrency the merge introduces.** Today every accept for an app runs in the one worker
    process holding that app's binding. Served, accepts run in `RunService`, which is one per HTTP
-   worker thread because its store is `!Send`, across every replica. `lock_app_state`
-   (`crates/zeroship-workflow/src/service/app.rs`) is a filtered row update and does serialize
-   across connections, so the single-assignment invariant holds - but the compare-and-swap in
+   worker thread because its store is `!Send`, across every replica. `lock_app`
+   (`crates/zeroship-workflow/src/service/app.rs`) takes `lock_app_state`, and `assign` then takes
+   `lock_run` on the run itself; both are filtered row updates and do serialize across
+   connections, so the single-assignment invariant holds - but the compare-and-swap in
    `tasks::assign` stops being unreachable by construction and becomes what stands between a lock
-   bug and two live tasks on one run. Nothing exercises its failing branch today, because
-   `reclaim` refuses first. Close that here rather than after.
+   bug and two live tasks on one run.
+
+   **Its refusal is already bound. Its ORDERING is not, and that is the half this step owns.**
+   `sqlite_a_run_holding_a_dispatch_is_not_assigned_another` and its postgres twin in
+   `crates/zeroship-workflow/src/service/tests/task_models.rs` drive `assign` against a run
+   holding the live dispatch its own `poll` handed out, and take the same call again after
+   `release` as the control. No production caller reaches that refusal - `reclaim`
+   (`crates/zeroship-workflow/src/service/delivery.rs`) defers the whole delivery unless it can
+   expire the held task and null the column first, and `poll` expires it in place - so the test
+   reaches it directly through `claim_again`. What no test binds is the part the merge makes
+   reachable: both arms run inside ONE transaction under the app lock, so nothing says whether
+   two claimants on two connections are ordered at all, nor what the loser sees when it
+   re-evaluates the filter after the winner commits. Write that one; the filter has its test.
+
+   **And most of that filter cannot miss.** Under `lock_run` the `generation` and `lease_epoch`
+   terms are read back from the row the lock pins, inside the same call, so only a non-null
+   `task_id` can drop the match to zero. A mutation deleting either of the other two prints
+   green, and a test that races epochs against this filter exercises nothing.
 
    Collection does not widen this step. Open 6 records why: the journal and the object store
    are already decoupled by a commit on that path, and the manager already owns when it runs.
