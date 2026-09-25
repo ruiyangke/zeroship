@@ -1076,6 +1076,19 @@ part that dates, not the verdict.
    Moving the `apps` reads thins the seam without cutting it, because that table outlives them.
    So the order to settle these in is authentication first, and the rest afterwards.
 
+   **That decision has a second half, and it is not about reading.** The relocation gives the
+   service the journal, and a journal deployment hold is the authority to keep a deployment
+   alive for the runs a journal holds. That hold is `HoldScope::for_app`;
+   `crates/zeroship-core/src/service_identity.rs` grants its endpoints to `svc/worker` while
+   `svc/workflow` holds only the queue-scoped pair, and
+   `crates/zeroship-workflow/src/deployment_holds/remote.rs` refuses any signer that is not an
+   enrolled worker instance. So `restart` does not merely lack a row: the service lacks the
+   credential to create one, and Plan step 4's deployments source stays inert until that moves.
+   The authority should follow the ownership it describes - when the journal becomes the
+   service's, the journal hold becomes the service's, and the worker keeps only what it still
+   owns - but that is a grant change and a signer change in one patch, so it belongs with the
+   authentication decision above rather than behind it.
+
 
    **A gap this uncovered, unrelated to the move.** `workflow_rollout_config` has no production
    writer, and that is the stated posture rather than an omission:
