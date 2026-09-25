@@ -812,9 +812,9 @@ with this queue namespace; it is not a second authoritative placement store.
 | `workflow_manager.schedule_occurrences` | Stable occurrence request, run and job identities bound to a schedule revision, instant and activation prerequisite. |
 | `zeroship.worker_instances` | Control-owned enrollment, public key, frozen execution zone, admitting signer and token id, identity expiry and revocation state; distinct from workflow registration. |
 | `zeroship.execution_zones`, `zeroship.worker_join_signers` | Control-owned zones and the trusted signers that may mint join tokens for them. The manager reads an instance's frozen zone and its status. |
-| `zeroship.app_deploys` | Control-owned immutable deployment metadata and reclamation state. |
+| `zeroship.app_deploys` | Control-owned immutable deployment metadata and reclamation state. Out of the workflow role's reach: Control resolves deployments and names them on the wire. |
 | `zeroship.app_deploy_holds` | Control-owned app/deployment/holder generation and retention state. |
-| `zeroship.apps`, `zeroship.plans` | Control-owned lifecycle, entitlement and complete workflow policy inputs, and each app's frozen execution zone. The manager receives column-scoped read access. |
+| `zeroship.apps` | Control-owned lifecycle and each app's frozen execution zone. The manager reads `id`, `execution_zone_id` and `deleted_at` for placement; the policy inputs and `zeroship.plans` reach it over Control's app-facts endpoint. |
 | `workflow_manager.workflow_rollout_config` | Operator dispatch/ingress switches and the finite source-validity bound. |
 | `workflow_manager.workflow_policy_ledger` | Durable per-app ordered policy publication. The manager locks and updates this row, without writing its app or plan inputs. An unpublished row grants nothing. |
 
@@ -2050,30 +2050,31 @@ partial restart is invalid. Derive these effective policies before constructing
 the delivery prerequisite; checking only an explicit deployment option would
 misclassify a default restart.
 
-`deployments::latest::LatestDeploymentSource` now uses a native ORM join over the
-platform catalog: match `zeroship.apps.deploy_hash` to the same app's `app_deploys`
-row and return its typed deployment identity and validated hash only when
-available. Missing or unavailable targets refuse without a history fallback;
-malformed matched identities, hashes or retention states are storage failures.
-Calendar activation history and activation timestamps cannot select the ordinary
-live deployment. This reader acquires no lock or hold and grants no admission
-authority. PostgreSQL and SQLite tests exercise app isolation, moving pointers,
-unavailable targets, malformed storage and refusal of source writes. Give the
-manager only the source columns required by this query. The canonical platform
-migration supplies those grants and server readiness probes them. This source
-needs no creator database or run metadata; the creator
-checks workflow membership when preparing the frozen target.
+The manager does not resolve the latest deployment. `ManageRun` carries the
+deployment Control names - `ManagementOperation::Restart` holds a
+`RestartDeployment` exactly when the effective policy is Latest - because the
+endpoint is authorized to Control alone and Control is the authority for
+`zeroship.apps.deploy_hash` and `zeroship.app_deploys`. Re-deriving the answer
+in the manager would answer it a moment later than the caller decided.
 
-Latest is observed during the acceptance attempt. It does not promise that the
-app pointer remains unchanged at the later manager commit. Under the manager app
-lock, replay the exact original request before consulting the source. For a new
-request, keep its selected target through hold preparation outside queue locks,
-then reacquire the lock and repeat receipt matching before atomically inserting
-the resolved command, job, order and barrier. Require the confirmed hold for that
-same target before accepting. Source or retention failure before acceptance is
-retryable; a committed receipt bypasses current-deployment lookup. Preserve raw
+What the manager validates about the named deployment is in
+`Coordinator::manage` (`crates/zeroship-workflow-manager/src/coordinator/management.rs`):
+the queue must hold it, with acquisition running inside Control's row lock so a
+deployment belonging to another app finds no row and one whose retention state
+has left `available` is a conflict; and the wire hash must equal the hash
+Control minted when it granted the hold. What it does not validate is that the
+named deployment is the app's current one.
+
+Control selects the target before it issues the command, so acceptance does not
+promise the app pointer is unchanged at the later manager commit. Under the
+manager app lock, replay the exact original request first. For a new request,
+keep its named target through hold preparation outside queue locks, then
+reacquire the lock and repeat receipt matching before atomically inserting the
+resolved command, job, order and barrier. Require the confirmed hold for that
+same target before accepting. Retention failure before acceptance is retryable;
+a committed receipt is replayed rather than re-resolved. Preserve raw
 request identity separately from effective restart normalization. The manager
-acceptance path and server now compose this reader with queue retention. Command
+acceptance path composes the named target with queue retention. Command
 and job records independently anchor the original request identity: damaged
 lookup metadata must fail closed rather than admit a duplicate command.
 Status lookup first checks whether the app scope exists, then takes its lock
