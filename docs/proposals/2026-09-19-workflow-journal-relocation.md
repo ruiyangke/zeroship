@@ -834,11 +834,14 @@ protocol. This extends a working client rather than inventing one.
    on the hot path, since every execution stages through it.
 
    The one to delete is `acknowledge`'s settlement-identity check
-   (`crates/zeroship-workflow-runner/src/delivery.rs`). `WorkerCoordinator::settle_job` already
-   checks a strict superset against the actual wire, and
-   `submission_and_settlement_receipts_cannot_substitute_metadata` substitutes each field in
-   turn against a fake peer. Both production transports reach it. An unreachable check that
-   stays unreachable is dead weight, not safety.
+   (`crates/zeroship-workflow-runner/src/delivery.rs`), and it takes two arguments rather than
+   one. Over HTTP, `WorkerCoordinator::settle_job` checks a strict superset - the same four
+   fields plus `outcome.valid_for` - and
+   `submission_and_settlement_receipts_cannot_substitute_metadata` substitutes each in turn
+   against a fake peer. The CLI's `LocalTransport` never reaches that check, but it cannot
+   disagree either: `queue.rs` builds three of the receipt's fields from the request and the
+   fourth, `app_id`, from the assignment - which `delivery_selector` selected BY
+   `delivery.job.app_id`. Unreachable both ways, so it is dead weight rather than safety.
 
    And one worry does NOT apply, written down so nobody builds for it. The `Heartbeat` reply
    (`crates/zeroship-workflow/src/service/types.rs`) carries no task identity at all, and
