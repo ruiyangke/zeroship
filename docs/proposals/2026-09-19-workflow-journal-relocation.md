@@ -916,6 +916,22 @@ protocol. This extends a working client rather than inventing one.
    establishing the journal's `deploys` row where the artifacts and the hold authority already
    are, rather than moving both to a service that has neither.
 
+   **And the fork resolves toward the pattern already in the tree.** What the journal stores is
+   not the artifact: `record_verified` takes a `DeployRegistration`
+   (`crates/zeroship-workflow/src/service/types.rs`) of `id`, `hash`, `workflows` and
+   `schedules` - a manifest summary, already serde, built by `registration` in
+   `crates/zeroship-workflow/src/service/bundle.rs` from a parsed bundle. Control parses that
+   bundle when it publishes, so it can produce the same value. Asserting it over an endpoint the
+   service consumes is exactly the shape `POST /v1/app-facts` already took for the policy
+   inputs, and it costs the service no blob-store client and no artifact read.
+
+   That leaves only the hold, which is retention rather than verification, and the decision
+   above already settles it: the journal hold follows the journal. So the recommendation is to
+   carry the registration as an assertion and let the service record its own row, rather than
+   grow it a second way to reach creator artifacts. The service would be trusting Control for a
+   manifest listing, which is strictly less than the policy authority it already trusts Control
+   for. Take the other arm only if a reason appears that the service must see the bytes itself.
+
 6. **Delete the creator-schema path**, and say where each piece lives, because they are not all
    in the workflow crates: `ensure_journal` and its route in
    `crates/zeroship-workflow-server/src/api.rs`, the journal bundle and `SCHEMA_PLACEHOLDER` in
