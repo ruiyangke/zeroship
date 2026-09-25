@@ -1160,9 +1160,11 @@ protocol. This extends a working client rather than inventing one.
    (`crates/zeroship-workflow-manager/src/queue.rs`), an update-as-lock requiring
    `Output::Count(1)` that answers `Error::Denied` otherwise. So two lanes polling one app contend
    on every claim, heartbeat, settle and publish rather than dividing the work between them, and
-   the filter below is what stops them wanting the same rows. Settle how the service's lane
-   authorizes itself - see "And the order needs a second claimant, which nothing will issue" -
-   before writing that filter, because the filter presumes that answer.
+   the filter below is what stops them wanting the same rows. How the lane authorizes itself was
+   settled first, because the filter presumes that answer - see "And the order needs a second
+   claimant, which nothing will issue", and `MaintenanceAuthority::asserted`
+   (`crates/zeroship-workflow-manager/src/maintenance.rs`), which is the only place that states
+   it and says so.
 
    **And it is in the query, not an arm at the claim site.** `candidate`
    (`crates/zeroship-workflow-manager/src/scheduling.rs`) answers `Result<Option<String>, Error>`
