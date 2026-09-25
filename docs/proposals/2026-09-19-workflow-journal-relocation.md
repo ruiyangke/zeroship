@@ -16,10 +16,13 @@ declaration that writes `jobs.operation_kind`; the service's maintenance lane an
 function that states how it claims are in `crates/zeroship-workflow-server/src/sweeps.rs` and
 `crates/zeroship-workflow-manager/src/maintenance.rs`. The lane is exercised end to end against
 the real journal and the real queue and has NO production caller, which is deliberate and has a
-do-not note of its own: it admits operations that need a deployments source the service does not
-hold yet, and starting it before that lands would take those rows from the worker that can run
-them. Its hold authority, the grant for it and the signer change on both sides are what the
-first bullet of the flag day still owes.
+do-not note of its own: it admits operations needing an artifact source the service does not
+hold, and starting it before that lands would take those rows from the worker that can run them.
+The journal-hold authority is in - `svc/workflow` holds the journal pair, `ServiceHolds` signs as
+the role with no instance, and Control classifies the caller before decoding a body. What the
+first bullet still owes is the artifact half: `activate`, `cron` and `management` read a
+deployment's executable to check it against the journal's own row, and a hold-only host refuses
+that by name. Then the lane can start.
 
 Open 3 names three pieces behind a store of its own: splitting the corpus, severing the
 service's control-plane reads, and giving the service a deployment site. The first and third
@@ -619,14 +622,13 @@ protocol. This extends a working client rather than inventing one.
    foreign key, so the journal cannot hold a run at all until something writes a deploy. That
    is why `crates/zeroship-workflow-server/tests/http_runs.rs` seeds both by raw SQL.
 
-   **And the hold `restart` waits on belongs to another principal.** The journal holder is
+   **And the hold `restart` waits on belongs to this service now too.** The journal holder is
    `HoldScope::for_app`, while the server's `ControlHolds` takes `QueueDeploymentHolds`, whose
    scope is the queue's. `crates/zeroship-core/src/service_identity.rs` grants `svc/workflow`
-   the queue hold pair and `svc/worker` the direct one, and
-   `crates/zeroship-workflow/src/deployment_holds/remote.rs` refuses any signer that is not an
-   enrolled worker instance. Letting the service take a journal hold means granting it an
-   endpoint only a worker may call today - the same credential question Open 3 carries, not a
-   `.with_deployments(...)` line.
+   both pairs, and `RemoteDeploymentHolds::asserted`
+   (`crates/zeroship-workflow/src/deployment_holds/remote.rs`) signs for the journal pair as the
+   role itself, with no instance. So this is no longer a credential question: what `restart` waits
+   on is the `deploys` row, and that waits on the sweeps that write it.
 
    **Where the merged client lives: a port trait in the client, implemented in the runner.**
    The gate is not what decides this, and reading it as the constraint understates the problem.
@@ -969,8 +971,9 @@ protocol. This extends a working client rather than inventing one.
      (`crates/zeroship-workflow/src/service/tests/deployments.rs`), and it asserts the binding
      directly because an end-to-end call cannot attribute the answer: `validate_scope`
      (`crates/zeroship-workflow/src/service/deployment_retention.rs`) compares the same pair at
-     every consumer, so such a call refuses either way. What the service still lacks is an
-     authority to pass, which is the grant above.
+     every consumer, so such a call refuses either way. The service passes `ServiceHolds`
+     (`crates/zeroship-workflow/src/deployment_holds/mod.rs`), which mints an asserted client per
+     app and scopes each to the one app it was asked for.
    - **Then the payload reserve and confirm**, since `start` and `stage` share that one
      mechanism, and the confirm must gain the `state` and `expires_at` predicates it does not
      need while a lock is held across the write. Predicates alone do not make it a compare and
@@ -1094,8 +1097,8 @@ protocol. This extends a working client rather than inventing one.
    exists", "A second claimant blocks rather than skipping", "And it is in the query, not an arm
    at the claim site" and "And `candidate` has a second caller, which decides something else".
    The grant: "That first one is not a line of
-   wiring; it is a credential question" and "And the hold `restart` waits on belongs to another
-   principal". The registration: "And the fork resolves toward the pattern already in the tree".
+   wiring; it is a credential question" and "And the hold `restart` waits on belongs to this
+   service now too". The registration: "And the fork resolves toward the pattern already in the tree".
    The reserve and confirm: "One obligation is genuinely new". The backend: "An HTTP
    `WorkflowBackend`, which is not the easy half" and the four bullets under it. The heartbeat:
    "The timeout budget does not survive the merge", "And the mismatch pre-dates the merge", "And
@@ -1627,42 +1630,31 @@ part that dates, not the verdict.
    the registry read is what is left holding the binding open.
 
    **DECIDED: the journal hold follows the journal.** A journal deployment hold is the
-   authority to keep a deployment alive for the runs a journal holds. Today that hold is
-   `HoldScope::for_app`, `crates/zeroship-core/src/service_identity.rs` grants its endpoints to
-   `svc/worker` while `svc/workflow` holds only the queue-scoped pair, and
-   `crates/zeroship-workflow/src/deployment_holds/remote.rs` refuses any signer that is not an
-   enrolled worker instance. So `restart` does not merely lack a row: the service lacks the
-   credential to create one, and Plan step 4's deployments source is inert until that moves.
-   At the cutover the authority moves with the thing it describes - `svc/workflow` gains the
-   journal hold endpoints, the worker keeps only what it still owns, and the signer check
-   widens to admit the service's role assertion. That is a grant change and a signer change in
-   one patch, and it lands with step 5 rather than before it, because the hold is only
-   meaningful once the journal it protects is the service's.
+   authority to keep a deployment alive for the runs a journal holds, and that authority has
+   moved. The hold is `HoldScope::for_app`.
+   `crates/zeroship-core/src/service_identity.rs` grants the journal pair to `svc/workflow`
+   beside the queue-scoped one, and `svc/worker` keeps it for the journals it still holds.
+   `RemoteDeploymentHolds::asserted`
+   (`crates/zeroship-workflow/src/deployment_holds/remote.rs`) signs as the workflow role and
+   refuses an instance credential of it, exactly as the queue pair does. Control classifies the
+   caller before any body is decoded: `hold_caller`
+   (`crates/zeroship-control/src/deployment_hold_api.rs`) admits the worker principal with an
+   enrolled instance, or the workflow role by full issuer equality, and refuses everything else.
+   The placed arm still verifies its placement. The asserted arm names none, and is refused if it
+   tries: `HoldRequest::assignment_revision` is optional on the wire, and its presence is compared
+   against the principal the host authenticated rather than trusted from the body, so a worker
+   that omits it and a service that supplies it are both refused.
 
-   **And that signer check has two sides, one of them in another service.** The refusal named
-   above is the client's. Control enforces the same split itself:
-   `crates/zeroship-control/src/deployment_hold_api.rs` admits the queue pair only for an issuer
-   equal to the workflow role, and admits the normal pair only for the WORKER principal with an
-   instance that parses as a `WorkerId`. So the change is three edits across two services - the
-   allowlist row in `crates/zeroship-core/src/service_identity.rs`, the client refusal in
-   `crates/zeroship-workflow/src/deployment_holds/remote.rs`, and Control's own check - and the
-   last of those is a change to what Control will accept as a holder, which is a trust decision
-   rather than a wiring one. It belongs with the grant rather than after it, because a client
-   that widened alone would be refused at the far end and a Control that widened alone would
-   admit a caller nothing yet sends.
+   So what `restart` lacks is a `deploys` row rather than the credential to create one, and that
+   waits on the sweeps that write it.
 
-   **And what widens is a placement check, not a spelling.** Control already serves two hold
-   shapes on one ledger (`crates/zeroship-control/src/deployment_hold_api.rs`). The queue pair
-   takes no worker at all - "Queue ownership is stable across manager replicas and has no worker
-   lease" - and acts on `HoldScope::for_queue`. The normal pair builds a `VerifyAssignment` from
-   the authenticated worker and the request's `assignment_revision`, passes it to
-   `verify_authority`, and only then acts on `HoldScope::for_app`. A journal hold is
-   `for_app`: `require_journal_hold` (`crates/zeroship-workflow/src/service/control/restart.rs`)
-   reaches `admission_generation` under `HoldScope::for_app`. So the service cannot borrow the
-   queue pair it already holds - a different scope is a different hold - and what it needs is
-   authority over a `for_app` hold with no placement to verify, which is the one input
-   `verify_authority` exists to check. That is the trust decision, stated as what it removes
-   rather than as which line moves.
+   **And it could not borrow the queue pair it already held.** Control serves two hold shapes on
+   one ledger (`crates/zeroship-control/src/deployment_hold_api.rs`). The queue pair takes no
+   worker - "Queue ownership is stable across manager replicas and has no worker lease" - and
+   acts on `HoldScope::for_queue`. A journal hold is `for_app`: `require_journal_hold`
+   (`crates/zeroship-workflow/src/service/control/restart.rs`) reaches `admission_generation`
+   under that scope. A different scope is a different hold, so the widening was the only route
+   open, and what it removed was the placement check rather than a spelling.
 
    **And the journal already names the holder, which is why this follows the journal.** The row
    `acquire_deployment_hold_checked` writes
@@ -2071,14 +2063,16 @@ part that dates, not the verdict.
   genuine reason.
 
 - **Do not start `MaintenanceLane` before it can run everything it admits.**
-  `Claimant::Maintenance` admits every kind `maintenance_job` dispatches, and five of those reach
-  `self.service.deployments`: `activate`, `cron`, `management` through its `target.rs`,
-  `release_hold`, and `reconcile`'s deployment-holds phase. `collect` is not among them - it wants
-  a `PayloadDeleter` instead. A started lane would lease those rows away from the worker that can
-  run them and then answer `unavailable()`, holding each for a lease window on every tick. The
-  lane is built and exercised end to end (`crates/zeroship-workflow-server/src/sweeps.rs`) and has
-  no production caller on purpose. Built and unstarted is the correct state here, not an oversight
-  to repair.
+  `Claimant::Maintenance` admits every kind `maintenance_job` dispatches. `RunService` attaches a
+  hold-only source (`AppDeployments::holds_only`), so `release_hold` and `reconcile`'s
+  deployment-holds phase can run - they ask only for `client(app)`. Three cannot: `activate`,
+  `cron` and `management` through its `target.rs` reach `source.read` for the executable they
+  check the journal's row against, and a hold-only host refuses that by name. `collect` is a
+  fourth, wanting a `PayloadDeleter` rather than anything here. A started lane would lease those
+  rows away from the worker that can run them and then refuse, holding each for a lease window on
+  every tick. The lane is built and exercised end to end
+  (`crates/zeroship-workflow-server/src/sweeps.rs`) and has no production caller on purpose.
+  Built and unstarted is the correct state here, not an oversight to repair.
 
 ---
 
