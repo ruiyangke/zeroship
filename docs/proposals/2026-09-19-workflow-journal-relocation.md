@@ -547,8 +547,8 @@ protocol. This extends a working client rather than inventing one.
    and `crates/zeroship-cli/src/workflow/host.rs` both pass - and `tasks::assign` opens with a
    `deploys` lookup, so a merged claim on today's server can never return a task. The other two
    belong to step 5: an HTTP `WorkflowBackend`, and the `TaskPayloads` seam that
-   `crates/zeroship-worker/src/workflow_creator.rs` constructs on `WorkerTasks`, whose `stage`
-   opens journal transactions mid-execution with no manager call to merge into.
+   `crates/zeroship-worker/src/workflow_creator.rs` constructs on `WorkerTasks` - where the
+   half that cannot merge is `read` rather than `stage`, as step 5 records.
 
    **That first one is not a line of wiring; it is a credential question.** `AppDeployments`
    (`crates/zeroship-workflow/src/service/deployments.rs`) holds a `BlobStore`, a byte budget
@@ -698,11 +698,33 @@ protocol. This extends a working client rather than inventing one.
    branches rather than new remote calls - but a reader of step 4 alone would write them as
    remote calls, so the conclusion belongs here where the cutover happens.
 
-   **The `TaskPayloads` seam.** `crates/zeroship-worker/src/workflow_creator.rs` builds
-   `WorkerTasks` as the executor's `TaskPayloads`, and `stage` reaches `stage_inner` in
-   `crates/zeroship-workflow/src/service/payloads.rs`, which opens journal transactions around
-   the object write MID-EXECUTION. There is no manager call beside it to merge into, so it is an
-   unavoidable new crossing per dispatch rather than a merge, and no step has owned it.
+   **The `TaskPayloads` seam, which is smaller than it looks.** `stage` does NOT run
+   mid-execution. `V8Execution::wait` (`crates/zeroship-workflow-v8/src/executor.rs`) calls
+   `self.stop().await` first - "app code has finished its frontier" - and
+   `crates/zeroship-workflow-v8/tests/runner.rs` asserts every isolate probe is disposed before
+   a stage arrives. Nor is it without a neighbour: between `stage` returning and `complete_job`
+   in `crates/zeroship-workflow-runner/src/delivery.rs` there is no I/O at all, and
+   `complete_job` already reads and writes the same payload rows through `promote` and `attach`.
+
+   **So it is half-mergeable, and the bytes never cross.** `stage_inner`
+   (`crates/zeroship-workflow/src/service/payloads.rs`) opens two transactions: the first
+   reserves an id under the quota and the payload ceiling, the second holds the app and run
+   locks ACROSS the object write and then confirms. Only the reserve must precede the write,
+   because it mints the id the object is keyed by; the confirm folds into `complete_job`. The
+   reserve batches per dispatch, since `PreparedExecution::from_runtime_json` decodes and
+   deduplicates every descriptor before any upload starts. What crosses is `WorkflowOutputRef`
+   and ids, never payload bytes -
+   `the_workflow_admission_crate_declares_no_payload_storage_dependency` holds that split.
+
+   **One obligation is genuinely new.** The confirm update filters on the primary key alone and
+   discards its row count, which is safe only because the lock is held across the write. Split
+   across a request boundary it has to carry `state` and the reserved `expires_at` as
+   predicates and check that exactly one row changed, the way `collect_payload_checked` in
+   `crates/zeroship-workflow/src/service/payloads/collection.rs` already does.
+
+   **And `read` is the crossing to scope, not `stage`.** App code drives it through the
+   `TaskOutputReader` slot an unbounded number of times, it has no adjacent call of any kind,
+   and it is the only one of the three that can fire while an isolate is live.
 
    **And `RunService` installs no deployments source**, so `tasks::assign` finds no available
    deploy and a served claim cannot return a task. Installing one is necessary and not
