@@ -1013,24 +1013,27 @@ protocol. This extends a working client rather than inventing one.
    holding the store. `Collect` settles to the service. `collect_payload_checked`
    (`crates/zeroship-workflow/src/service/payloads/collection.rs`) calls the deleter between a
    committed fence and the next `begin`, holding no transaction, so a remote one-method deleter is
-   the whole of what it needs. `Cron` does not settle, because its byte write sits inside a
+   the whole of what it needs. `Cron` does not settle that way, because its byte write sits inside a
    transaction held on purpose - "A bounded upload holds this lock until the store finishes, so GC
    cannot race a live writer" (`crates/zeroship-workflow/src/service/payloads.rs`) - so what it
-   wants is the reserve and confirm this list already carries, not a second mechanism. What stays
-   genuinely unsettled is which process claims `Cron` once the worker no longer holds the journal.
-   The filter is not where that answer shows up, though, and the question ahead of it is not about
-   operations at all.
+   wants is the reserve and confirm this list already carries, not a second mechanism. So both
+   capability halves are answerable, and they differ. What stays genuinely unsettled for both is
+   which process CLAIMS them once the worker no longer holds the journal. That is not a question
+   about capability, and the filter is not where its answer shows up.
 
    **The queue admits one claimant identity per app, so a filter presupposes what placement
    refuses.** Every claim reaches `bound`
    (`crates/zeroship-workflow-manager/src/coordinator/placement.rs`), which denies a claimant
    holding no placement for the app - `let row = placement(tx, app, worker).await?.ok_or(Error::Denied)?;`
    - and `admit` in the same file will not create a second one:
-   `if self.has_owner(&tx, app, true).await? { return Ok(None); }`. Nothing in the tree uses
-   `SKIP LOCKED`. Concurrent claimants serialize instead, on the per-app `queue_scopes` row
-   through `lock_scope` (`crates/zeroship-workflow-manager/src/queue.rs`), an update-as-lock
-   that requires `Output::Count(1)` and answers `Error::Denied` otherwise - so a second claimant
-   blocks rather than skipping to another row. A service that claims anything must therefore hold
+   `if self.has_owner(&tx, app, true).await? { return Ok(None); }`. Nor can the contention be
+   skipped: the ORM offers no `SKIP LOCKED`, by decision, because "skipping locked rows would
+   silently omit them" (`docs/architecture/data-orm.md`), so a competing lock waits under
+   `budgets::DB_LOCK_TIMEOUT_MS` and surfaces as `lock_not_available`. Claimants serialize on the
+   per-app `queue_scopes` row through `lock_scope`
+   (`crates/zeroship-workflow-manager/src/queue.rs`), an update-as-lock requiring
+   `Output::Count(1)` that answers `Error::Denied` otherwise, so a second claimant blocks rather
+   than moving on. A service that claims anything must therefore hold
    the app's placement, which is the placement the worker needs in order to claim `Advance`.
    Settle whether placement stops being exclusive BEFORE settling which process claims `Cron`
    and `Collect`, because a filter dividing operations between two claimants describes a
