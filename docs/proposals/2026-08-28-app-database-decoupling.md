@@ -932,6 +932,22 @@ table-level grant alongside a column list returns the plaintext and `ALTER DEFAU
 no column-list form. Every apply regenerates explicit per-column grants inside the same
 transaction as the DDL.
 
+**The audited path needs a role of its own, and that is the third piece.** Withholding the raw
+sibling from the capability roles also withholds it from `dispatch_unmask`, which reads it on the
+caller's own route under `SET LOCAL ROLE <binding>` - so the one authorized, policy-checked,
+audited way to see the value was the only way the fence blocked. A fourth per-database role,
+`zs_db_<dbs>_unmask`, holds `SELECT` on the raw siblings and on the key that addresses a row,
+and nothing else; each binding gets `GRANT <unmask> TO <binding> WITH INHERIT FALSE`, so a bound
+session MAY ASSUME it for the length of one read and does not carry it. The capability roles are
+unchanged and still refused.
+
+**The key rides with the raw column because PostgreSQL says so.** `SELECT` is checked against
+every column an expression REFERENCES, not only the projected ones, and the read is
+`SELECT <raw> AS _raw FROM <t> WHERE id = $1`. Granting the sibling alone leaves the statement
+refused while a bare `SELECT <raw>` succeeds - measured, not inferred. The widening is exactly one
+column: the mask stays refused to the unmask role, as the raw sibling stays refused to the
+capabilities.
+
 The runtime descriptor is demoted from security boundary to shape declaration. That is its correct
 altitude whether or not sharing ships.
 
