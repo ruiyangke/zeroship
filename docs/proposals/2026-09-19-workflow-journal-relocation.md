@@ -342,12 +342,15 @@ calls. Land the halves together rather than the client half early. Unwired it ch
 existing test and has to survive step 5's churn, and the timeout budget recorded under the
 heartbeat has to be settled by whoever writes the server side in any case.
 
-**What is easy, and what is not.** The creator seam is the easy half: `WorkflowBackend` is
-narrow, with two implementations already behind a factory in `crates/zeroship-workflow-v8/src/lib.rs`,
-so a third that speaks HTTP is mechanical. The execution seam is the work. `TaskTransport`'s only
-production implementor, `WorkerTasks`, holds the service and calls it directly, so it has to
-become remote - and it is the half carrying the durability semantics. Read the steps with that
-asymmetry in mind: steps 1 to 3 are preparation, step 4 is the project.
+**What is easy, and what is not.** Neither seam is the one to start from. The creator seam
+looks narrow - `WorkflowBackend` has seven methods and the factory in
+`crates/zeroship-workflow-v8/src/lib.rs` takes a third arm cleanly - but those seven divide
+into wiring, a service capability, one blocked on the payload seam, and two whose `Vec<u8>`
+shape may be wrong for a remote seam at all; step 5 counts them. And the execution seam is not
+`TaskTransport`: the type that dispatches through it is built only by tests, so a remote
+implementation of it would serve nobody. Step 4 names what actually crosses, which is the three
+journal calls beside the manager calls the worker already makes. Steps 1 to 3 are preparation,
+and steps 4 and 5 land together at the cutover.
 
 The machinery to carry it exists. The worker already reaches the manager over HTTPS through
 `zeroship-workflow-client` with a validated `Transport`, so job delivery is already a remote
