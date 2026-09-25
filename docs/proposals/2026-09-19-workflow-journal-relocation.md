@@ -1583,8 +1583,9 @@ part that dates, not the verdict.
    value.
 
    The `insert_run` callers also differ in how far a reference form is from them.
-   `AppWorkflows::start` is additive: `StartOptions` in `crates/zeroship-workflow/src/operations.rs`
-   can grow a reference field beside its `input`. The child run and the schedule are not. A child's
+   `AppWorkflows::start` is additive: `StartOptions` in
+   `crates/zeroship-core/src/workflow_coordination/lifecycle.rs` can grow a reference field
+   beside its `input`. The child run and the schedule are not. A child's
    input arrives on `StepOutcome::Child` in `crates/zeroship-workflow/src/engine.rs`, and a
    schedule's on `ScheduleRegistration` in `crates/zeroship-workflow/src/service/schedules.rs`,
    which `record_verified` in `crates/zeroship-workflow/src/service/deploys.rs` stores in
