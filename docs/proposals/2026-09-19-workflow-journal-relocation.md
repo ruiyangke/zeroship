@@ -716,15 +716,21 @@ protocol. This extends a working client rather than inventing one.
    client can spell the call, and a request type that is a creator-safe subset of
    `StartOptions`, since `input_ref` is a descriptor a creator must never supply.
 
-   **And two may be the wrong shape to build at all.** `read_step_output` and `read_output`
-   return `Vec<u8>`. A single payload answers to `MAX_PAYLOAD_BYTES_CEILING` while the client's
-   reply answers to `MAX_JOURNAL_BYTES_CEILING`, which is smaller, and the transport is
-   buffered JSON with no byte-stream path. `crates/zeroship-core/src/workflow_coordination.rs`
-   already states the rule - what crosses is "at most the descriptor that locates one" - and
-   `AppWorkflows::read_step_output` already splits `Inline` from `Object`. So the journal
-   lookup is what should cross, with the host resolving bytes from its own store. That changes
-   the TRAIT rather than the count of implementations, and it is the thing to settle before
-   anyone writes a third one.
+   **And two carry bytes the transport cannot.** `read_step_output` and `read_output` return
+   `Vec<u8>`. A single payload answers to `MAX_PAYLOAD_BYTES_CEILING` while the client's reply
+   answers to `MAX_JOURNAL_BYTES_CEILING`, which is smaller, and the transport is buffered JSON
+   with no byte-stream path. `crates/zeroship-core/src/workflow_coordination.rs` already states
+   the rule - what crosses is "at most the descriptor that locates one" - and
+   `AppWorkflows::read_step_output` already splits `Inline` from `Object`. So the journal lookup
+   crosses and the bytes do not.
+
+   **That does not change the trait, though it looks like it must.** The HTTP implementation's
+   legal home is `zeroship-workflow-runner`, and `PayloadObjects` and `ObjectOpener` already
+   live there (`crates/zeroship-workflow-runner/src/payloads/objects.rs`). So it can ask the
+   service for the descriptor and open the object from the store it already holds, behind an
+   unchanged `Vec<u8>` signature. The method stays what it is and becomes two-phase inside.
+   Changing the trait instead would push an opener into every implementor, including the
+   in-process one that needs none.
 
    **The journal calls that are not the three.** `DeliverySlot::run` in
    `crates/zeroship-workflow-runner/src/delivery.rs` reaches `activate_job`, `reconcile_job`,
