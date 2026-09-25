@@ -922,20 +922,21 @@ protocol. This extends a working client rather than inventing one.
    **The order the flag day has to take, and why it is forced.** The pieces are not
    independent; each one below is what makes the next possible.
 
-   - **The grant and its reader move first**, together. `svc/workflow` gains the journal hold
-     endpoints and `RunService` gains its deployments source in one change, because a capability
-     this process has no reader for is one it must not hold - the rule
-     `db/migrations-ts/20260911000050_workflow_platform_grants.ts` already states. It is first
-     rather than second because the sweeps below need it: `RunService::connect`
+   - **The grant, the deployments source and the sweep lane are one change.** They cannot be
+     separated in either direction. The sweeps need the source: `RunService::connect`
      (`crates/zeroship-workflow-server/src/runs.rs`) calls `WorkflowService::open` and attaches
-     no deployments source, and `with_deployments` appears nowhere in that crate, so until this
-     lands the service cannot reach `record_verified` at all.
-   - **Then the sweeps.** Open 6 answers why they can move: they run no creator code, so they go
-     with the fold. They are also what fills the service's journal - the manager enqueues an
-     activation, the service's own lane runs `activate_job`, and that is the path to
-     `record_verified`, the only writer of `deploys`. Until they move, everything below operates
-     on an empty table, and a `deploys` row is what `start`, `restart` and a served claim each
-     need first.
+     none, and `with_deployments` appears nowhere in that crate, so until it lands the service
+     cannot reach `record_verified`. And the source has no reader without the sweeps: the served
+     endpoints are `status`, `signal`, `transition` and `restart`, none of which reads
+     `self.deployments` - `restart` wants a `deploys` ROW, through `retained_source`
+     (`crates/zeroship-workflow/src/service/control/restart.rs`), which works "without loading an
+     artifact or consulting the active deployment or a platform service" - and
+     `task_executable_inner`, which does read it, is served by no route. So installing the source
+     alone leaves this process holding a capability nothing reads, which is what the rule in
+     `db/migrations-ts/20260911000050_workflow_platform_grants.ts` forbids. The readers are
+     `activate_job`, `cron_job`, `management_job` through `management/target.rs`,
+     `release_hold_job`, and `reconcile_job`'s deployment-holds phase; the lane that claims them
+     is what makes the grant legitimate.
    - **Then the payload reserve and confirm**, since `start` and `stage` share that one
      mechanism, and the confirm must gain the `state` and `expires_at` predicates it does not
      need while a lock is held across the write.
@@ -1083,7 +1084,7 @@ protocol. This extends a working client rather than inventing one.
    same gate arm that makes lifting the dispatch necessary in the first place. So seven of the
    nine move no creator bytes and these two cannot - but moving no bytes is not the same as
    wanting only the journal, and the group needing only a claim path is the four named above. The
-   rest want the deployments source, which the grant supplies before they move.
+   rest want the deployments source, which the grant supplies in the same change.
 
    That is not an argument for giving the service a payload store. It is the same split `stage`
    and `read` already answer: the journal decision crosses, the bytes stay with the process
