@@ -1027,7 +1027,12 @@ protocol. This extends a working client rather than inventing one.
    exhaustiveness `maintenance_job` has, and the way back is to derive the admitted strings from
    a total match over `JobOperation`, as `models::operation_kind`
    (`crates/zeroship-workflow-manager/src/models.rs`) already does for the write side. A list
-   written by hand in the query cannot.
+   written by hand in the query cannot. The tree already enforces that placement and names the
+   reason: `management_barriers_filter_before_candidate_limit`
+   (`crates/zeroship-workflow-manager/tests/management/barriers.rs`) enqueues blocked advances on
+   both dialects and asserts `claim` answers nothing while a barrier holds. The predicates that
+   test covers compare the same column to literals, and it is the whole of what binds them, so a
+   new predicate needs an arm of that kind rather than a careful spelling.
 
    **And `candidate` has a second caller, which decides something else.** `Capacity::visit`
    (`crates/zeroship-workflow-manager/src/capacity.rs`) asks it whether an app has claimable
