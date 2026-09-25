@@ -736,8 +736,13 @@ part that dates, not the verdict.
    rather than at first use: its probe is a single statement whose `workflow_manager` tables
    are followed by
 
-       SELECT id,deploy_hash,deleted_at FROM zeroship.apps LIMIT 0;
-       SELECT id,app_id,deploy_hash,retention_state FROM zeroship.app_deploys LIMIT 0;
+       SELECT id,execution_zone_id,deleted_at FROM zeroship.apps LIMIT 0;
+
+   which is the whole of what the workflow role is granted on `zeroship` - placement's columns
+   and the key it filters on. The deployment catalog is out of reach: the grants that fed the
+   deleted pointer read are dropped, and `deployment_catalog_is_out_of_reach` in
+   `crates/zeroship-workflow-server/tests/platform_schema.rs` asserts `42501` on
+   `zeroship.app_deploys` and on `apps.deploy_hash`, with the placement columns as its control.
 
    The crossing recurs on the request path and inside the manager. `active_key` in
    `crates/zeroship-workflow-server/src/auth.rs` answers every worker-authenticated call from
