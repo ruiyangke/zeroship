@@ -5,15 +5,12 @@
     reason = "delivery slots own compio-local resources"
 )]
 
-use crate::{CancelOnDrop, ExecutionGuard, PayloadObjects, RunPayloads, TaskExecution, TaskExecutor};
+use crate::{CancelOnDrop, ExecutionGuard, PayloadObjects, TaskExecution, TaskExecutor};
 use zeroship_workflow::{
     service::{
-        collection::CollectionOptions,
         delivery::{DeliveredTask, JobAcceptance, JobReceipt},
-        fanout::FanoutOptions,
-        propagation::PropagationOptions,
+        maintenance::{MaintenanceOptions, MaintenanceOutcome},
         publication::JobPublisher,
-        reconciliation::ReconciliationOptions,
         AppWorkflows, ControlIntent, PolicyAuthority,
     },
     WorkflowServiceError,
@@ -27,9 +24,7 @@ use std::{
 };
 use zeroship_core::{
     workflow_coordination::{AssignedScope, FailureCode},
-    workflow_jobs::{
-        Delivery, JobLease, JobOperation, JobSpec, Settlement, SettlementReceipt, SubmitJob,
-    },
+    workflow_jobs::{Delivery, JobLease, JobSpec, Settlement, SettlementReceipt, SubmitJob},
 };
 use zeroship_workflow_client::{LeasedJob, WorkerCoordinator};
 
@@ -96,18 +91,12 @@ pub struct DeliveryOptions {
     pub execution_timeout: Duration,
     pub operation_timeout: Duration,
     pub retry_delay: Duration,
-    pub reconciliation: ReconciliationOptions,
-    pub collection: CollectionOptions,
-    pub fanout: FanoutOptions,
-    pub propagation: PropagationOptions,
+    pub maintenance: MaintenanceOptions,
 }
 
 impl DeliveryOptions {
     pub(super) fn validate(self) -> Result<(), WorkflowServiceError> {
-        self.reconciliation.validate()?;
-        self.collection.validate()?;
-        self.fanout.validate()?;
-        self.propagation.validate()?;
+        self.maintenance.validate()?;
         if self.execution_timeout.is_zero()
             || self.operation_timeout.is_zero()
             || self.retry_delay.is_zero()
@@ -233,84 +222,30 @@ impl<T: JobTransport> DeliverySlot<T> {
         lease: T::Lease,
     ) -> Result<DeliveryOutcome, WorkflowServiceError> {
         self.drain_interrupted().await;
-        if matches!(
-            lease.delivery().job.operation,
-            JobOperation::Activate { .. }
-        ) {
-            let receipt = bounded(self.options.execution_timeout, app.activate_job(&lease)).await?;
-            return self.acknowledge(receipt, &lease).await;
-        }
-        if matches!(lease.delivery().job.operation, JobOperation::Reconcile {}) {
-            let publisher = Submission {
-                transport: self.transport.as_ref(),
-                scope: AssignedScope {
-                    app_id: lease.delivery().job.app_id.clone(),
-                    assignment_revision: lease.delivery().assignment_revision,
-                },
-            };
-            let receipt = bounded(
-                self.options.execution_timeout,
-                app.reconcile_job(&lease, &publisher, self.options.reconciliation),
-            )
-            .await?;
-            return self.acknowledge(receipt, &lease).await;
-        }
-        if matches!(lease.delivery().job.operation, JobOperation::Cron { .. }) {
-            let receipt =
-                bounded(self.options.execution_timeout, app.cron_job(&lease, &self.objects))
-                    .await?;
-            return self.acknowledge(receipt, &lease).await;
-        }
-        if matches!(
-            lease.delivery().job.operation,
-            JobOperation::Management { .. }
-        ) {
-            let receipt =
-                bounded(self.options.execution_timeout, app.management_job(&lease)).await?;
-            return self.acknowledge(receipt, &lease).await;
-        }
-        if matches!(
-            lease.delivery().job.operation,
-            JobOperation::ReleaseHold { .. }
-        ) {
-            let receipt =
-                bounded(self.options.execution_timeout, app.release_hold_job(&lease)).await?;
-            return self.acknowledge(receipt, &lease).await;
-        }
-        if matches!(lease.delivery().job.operation, JobOperation::Collect {}) {
-            let receipt = bounded(
-                self.options.execution_timeout,
-                app.payloads(&self.objects)
-                    .collect_job(&lease, self.options.collection),
-            )
-            .await?;
-            return self.acknowledge(receipt, &lease).await;
-        }
-        if matches!(lease.delivery().job.operation, JobOperation::Close { .. }) {
-            let receipt = bounded(self.options.execution_timeout, app.close_job(&lease)).await?;
-            return self.acknowledge(receipt, &lease).await;
-        }
-        if matches!(lease.delivery().job.operation, JobOperation::Fanout { .. }) {
-            let receipt = bounded(
-                self.options.execution_timeout,
-                app.fanout_job(&lease, self.options.fanout),
-            )
-            .await?;
-            return match receipt {
-                Some(receipt) => self.acknowledge(receipt, &lease).await,
-                None => Ok(DeliveryOutcome::Deferred),
-            };
-        }
-        if matches!(
-            lease.delivery().job.operation,
-            JobOperation::Propagate { .. }
-        ) {
-            let receipt = bounded(
-                self.options.execution_timeout,
-                app.propagation_job(&lease, self.options.propagation),
-            )
-            .await?;
-            return self.acknowledge(receipt, &lease).await;
+        let publisher = Submission {
+            transport: self.transport.as_ref(),
+            scope: AssignedScope {
+                app_id: lease.delivery().job.app_id.clone(),
+                assignment_revision: lease.delivery().assignment_revision,
+            },
+        };
+        let maintenance = bounded(
+            self.options.execution_timeout,
+            app.maintenance_job(
+                &lease,
+                &publisher,
+                &self.objects,
+                &self.objects,
+                self.options.maintenance,
+            ),
+        )
+        .await?;
+        match maintenance {
+            MaintenanceOutcome::Settled(receipt) => {
+                return self.acknowledge(*receipt, &lease).await
+            }
+            MaintenanceOutcome::Deferred => return Ok(DeliveryOutcome::Deferred),
+            MaintenanceOutcome::Unclaimed => {}
         }
         let authority = app.captured_authority();
         let accepted = app.accept_job(&lease).await?;

@@ -9,8 +9,8 @@ mod propagation;
 use zeroship_workflow::{
     operations::{RunState, StartOptions},
     service::{
-        schema, store::OrmStore, AppPolicy, DeployRegistration, HostPolicies, PolicySnapshot,
-        RequestId, TaskAssignment, WorkflowService,
+        collection::CollectionOptions, schema, store::OrmStore, AppPolicy, DeployRegistration,
+        HostPolicies, PolicySnapshot, RequestId, TaskAssignment, WorkflowService,
     },
     WorkflowExecution,
 };
@@ -23,7 +23,7 @@ use zeroship_core::{
     schema_name::SchemaName,
     typed_id,
     workflow_coordination::{Revision, WorkerId},
-    workflow_jobs::{JobOutcome, JobSpec},
+    workflow_jobs::{JobOperation, JobOutcome, JobSpec},
 };
 use zeroship_data_orm::{
     binding::DbBinding, connection::ConnectionFactory, encryption::ProjectKeySource, orm::Output,
@@ -419,10 +419,10 @@ impl Fixture {
                 execution_timeout,
                 operation_timeout: Duration::from_secs(5),
                 retry_delay: Duration::from_millis(5),
-                reconciliation: ReconciliationOptions::default(),
-                collection,
-                fanout: zeroship_workflow::service::fanout::FanoutOptions::default(),
-                propagation: zeroship_workflow::service::propagation::PropagationOptions::default(),
+                maintenance: MaintenanceOptions {
+                    collection,
+                    ..MaintenanceOptions::default()
+                },
             },
         )
     }
@@ -459,10 +459,7 @@ async fn unrepresentable_retry_delay_is_rejected_before_execution() {
             execution_timeout: Duration::from_secs(5),
             operation_timeout: Duration::from_secs(1),
             retry_delay: Duration::MAX,
-            reconciliation: ReconciliationOptions::default(),
-            collection: zeroship_workflow::service::collection::CollectionOptions::default(),
-            fanout: zeroship_workflow::service::fanout::FanoutOptions::default(),
-            propagation: zeroship_workflow::service::propagation::PropagationOptions::default(),
+            maintenance: MaintenanceOptions::default(),
         },
     );
     assert!(matches!(

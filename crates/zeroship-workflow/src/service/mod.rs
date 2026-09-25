@@ -24,6 +24,7 @@ mod hold_release;
 mod ingress;
 pub use ingress::{IngressReceipt, RevokedSignals, SignalAuthority, SignalTokenRequest};
 mod journal;
+pub mod maintenance;
 mod management;
 mod models;
 mod payloads;

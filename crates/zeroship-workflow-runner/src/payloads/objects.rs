@@ -7,7 +7,7 @@
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 use std::{cell::Cell, rc::Rc, sync::Arc, time::Duration};
-use zeroship_core::{app_id::AppId, workflow_jobs::JobLease};
+use zeroship_core::app_id::AppId;
 use zeroship_storage::{
     backend::{BoxByteStream, BoxChunkSource, ChunkResult, ChunkSource, OnceChunk},
     Namespace, Storage, StorageError, StorageStore,
@@ -15,9 +15,9 @@ use zeroship_storage::{
 use zeroship_workflow::{
     engine::WorkflowOutputRef,
     service::{
-        collection::CollectionOptions, delivery::JobReceipt, validate_reference, AppWorkflows,
-        PayloadDeleter, PayloadOpener, PayloadSlot, PayloadTarget, PayloadWriter, PolicyAuthority,
-        RequestId, StagedPayload, StepOutput, TaskToken, WorkerIdentity, WorkflowService,
+        validate_reference, AppWorkflows, PayloadDeleter, PayloadOpener, PayloadSlot,
+        PayloadTarget, PayloadWriter, PolicyAuthority, RequestId, StagedPayload, StepOutput,
+        TaskToken, WorkerIdentity, WorkflowService,
     },
     InputStager, StepOutputReader, WorkflowServiceError,
 };
@@ -398,19 +398,6 @@ impl AppPayloads<'_> {
         self.app
             .read_payload(run_id, generation, slot, ObjectOpener(self.objects))
             .await
-    }
-
-    /// Visit a durable page of abandoned preparations and deletion tombstones.
-    ///
-    /// # Errors
-    /// Refuses foreign or changed jobs, damaged page metadata, refused deletion
-    /// and exhausted authority.
-    pub async fn collect_job<L: JobLease>(
-        &self,
-        grant: &L,
-        options: CollectionOptions,
-    ) -> Result<JobReceipt, WorkflowServiceError> {
-        self.app.collect_job(grant, options, self.objects).await
     }
 }
 

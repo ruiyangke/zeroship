@@ -28,10 +28,7 @@ use zeroship_bundle::LoadedWorker;
 use zeroship_core::app_id::AppId;
 use zeroship_runtime::{NativePlugin, RuntimeLimits};
 use zeroship_workflow::service::{
-    collection::CollectionOptions,
-    fanout::FanoutOptions,
-    propagation::PropagationOptions,
-    reconciliation::ReconciliationOptions,
+    maintenance::MaintenanceOptions,
     store::HostStorage,
     AppBackend,
 };
@@ -209,10 +206,7 @@ impl LocalConfig {
                 execution_timeout: Duration::from_millis(consumer.execution_timeout_ms),
                 operation_timeout: Duration::from_millis(consumer.operation_timeout_ms),
                 retry_delay: Duration::from_millis(consumer.retry_delay_ms),
-                reconciliation: ReconciliationOptions::default(),
-                collection: CollectionOptions::default(),
-                fanout: FanoutOptions::default(),
-                propagation: PropagationOptions::default(),
+                maintenance: MaintenanceOptions::default(),
             },
         }
     }
