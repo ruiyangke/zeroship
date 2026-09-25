@@ -703,14 +703,18 @@ protocol. This extends a working client rather than inventing one.
    unconditionally, because `RunService` builds its service without deployments; see the
    credential question under step 4.
 
-   **One is blocked on the payload seam.** `start` needs no deployment input - `start_captured`
-   in `crates/zeroship-workflow/src/service/app.rs` resolves it with `active_deploy` against
-   the journal's own rows - but it must mint a `RequestId` on the wire rather than internally,
-   and it stages the creator's input into a payload store the server may not reach. It also
-   needs `StartOptions`, `StartedRun`, `ConflictPolicy` and `WorkflowOutputRef` moved into
-   `zeroship-core` before the client can spell the call, and a request type that is a
-   creator-safe subset of `StartOptions`, since `input_ref` is a descriptor a creator must
-   never supply.
+   **One waits on the payload seam, which already has its answer.** `start` needs no deployment
+   input - `start_captured` in `crates/zeroship-workflow/src/service/app.rs` resolves it with
+   `active_deploy` against the journal's own rows - but it must mint a `RequestId` on the wire
+   rather than internally, and it stages the creator's input into a payload store the server may
+   not reach. That last part is the same split `stage` has: `stage_input`
+   (`crates/zeroship-workflow-runner/src/payloads/objects.rs`) computes the descriptor from the
+   bytes itself and records ownership through the journal handle it is given, so the worker
+   writes the bytes and only the ownership record crosses. `start` therefore needs no new
+   mechanism, only the one the reserve already defines. It does need `StartOptions`,
+   `StartedRun`, `ConflictPolicy` and `WorkflowOutputRef` moved into `zeroship-core` before the
+   client can spell the call, and a request type that is a creator-safe subset of
+   `StartOptions`, since `input_ref` is a descriptor a creator must never supply.
 
    **And two may be the wrong shape to build at all.** `read_step_output` and `read_output`
    return `Vec<u8>`. A single payload answers to `MAX_PAYLOAD_BYTES_CEILING` while the client's
