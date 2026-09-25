@@ -772,10 +772,11 @@ protocol. This extends a working client rather than inventing one.
    (`crates/zeroship-workflow-runner/src/payloads/objects.rs`) computes the descriptor from the
    bytes itself and records ownership through the journal handle it is given, so the worker
    writes the bytes and only the ownership record crosses. `start` therefore needs no new
-   mechanism, only the one the reserve already defines. It does need `StartOptions`,
-   `StartedRun`, `ConflictPolicy` and `WorkflowOutputRef` moved into `zeroship-core` before the
-   client can spell the call, and a request type that is a creator-safe subset of
-   `StartOptions`, since `input_ref` is a descriptor a creator must never supply.
+   mechanism, only the one the reserve already defines. `StartOptions`, `StartedRun`,
+   `ConflictPolicy` and `WorkflowOutputRef` already live in
+   `crates/zeroship-core/src/workflow_coordination/lifecycle.rs`, so the client can name the call
+   today. What it still needs is a request type that is a creator-safe subset of `StartOptions`,
+   since `input_ref` is a descriptor a creator must never supply.
 
    **And two carry bytes the transport cannot.** `read_step_output` and `read_output` return
    `Vec<u8>`. A single payload answers to `MAX_PAYLOAD_BYTES_CEILING` while the client's reply
