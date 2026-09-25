@@ -18,8 +18,8 @@ function that states how it claims are in `crates/zeroship-workflow-server/src/s
 the real journal and the real queue and has NO production caller, which is deliberate and has a
 do-not note of its own: it admits operations that need a deployments source the service does not
 hold yet, and starting it before that lands would take those rows from the worker that can run
-them. That source, its grant and the signer change on both sides of it are what the first bullet
-of the flag day still owes.
+them. Its hold authority, the grant for it and the signer change on both sides are what the
+first bullet of the flag day still owes.
 
 Open 3 names three pieces behind a store of its own: splitting the corpus, severing the
 service's control-plane reads, and giving the service a deployment site. The first and third
@@ -958,17 +958,19 @@ protocol. This extends a working client rather than inventing one.
      the catalog stays Control's - "the holds it takes against that catalog go through Control's
      queue endpoint, under Control's credential and inside Control's row lock" - so what moves is
      the intent side, and that is why the worker needs endpoints for it once it holds no journal.
-     And the source itself is the wrong shape for a service as it stands. `AppDeployments`
-     (`crates/zeroship-workflow/src/service/deployments.rs`) carries
-     `clients: BTreeMap<AppId, Rc<dyn DeploymentHoldClient>>` and answers `client(app)` with
-     `PermissionDenied` when the app is absent, and `WorkflowService::with_deployments` is a
-     consuming builder, so one source is bound for every app the process serves. That suits the
-     worker, which resolves one app at a time and whose single-entry map IS the app scoping. It
-     does not suit a lane that sweeps many: `MaintenanceLane` holds one `RunService` and takes a
-     per-app engine from `runs.app(...)`, but the deployments source beneath it is shared. What
-     the map wants to become is a source that answers for any app this process may sweep, with
-     the worker's one-app case preserved as a source that refuses every other app - the refusal
-     is scoping, not an accident of how the map was filled.
+     And the source is shaped for that now. `AppDeployments`
+     (`crates/zeroship-workflow/src/service/deployments.rs`) takes an
+     `Rc<dyn DeploymentHoldAuthority>` in `new` rather than a map filled by a builder, so an
+     instance without a stated scope is unrepresentable, and `client(app)` asks it. The worker
+     and the CLI pass `AssignedHolds`
+     (`crates/zeroship-workflow/src/deployment_holds/mod.rs`), which states its served app once
+     as the client's own scope and refuses every other. That refusal is bound now by
+     `an_app_binding_refuses_an_app_it_was_not_assigned`
+     (`crates/zeroship-workflow/src/service/tests/deployments.rs`), and it asserts the binding
+     directly because an end-to-end call cannot attribute the answer: `validate_scope`
+     (`crates/zeroship-workflow/src/service/deployment_retention.rs`) compares the same pair at
+     every consumer, so such a call refuses either way. What the service still lacks is an
+     authority to pass, which is the grant above.
    - **Then the payload reserve and confirm**, since `start` and `stage` share that one
      mechanism, and the confirm must gain the `state` and `expires_at` predicates it does not
      need while a lock is held across the write. Predicates alone do not make it a compare and
