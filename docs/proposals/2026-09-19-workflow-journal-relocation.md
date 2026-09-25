@@ -806,30 +806,32 @@ protocol. This extends a working client rather than inventing one.
    writer of that table, so the rows are absent too until something produces them. That is why
    `start` having no endpoint is a sequencing fact and not a gap in step 3.
 
-   **What can proceed before the flag day.** Steps 4 and 5 land together, but not everything in
-   them waits for that. These are behaviour-preserving or test-only, and each makes a later
-   piece verifiable rather than hopeful:
+   **What proceeds before the flag day, and what already has.** Steps 4 and 5 land together,
+   but not everything in them waits for that. Three preparatory pieces are in:
 
-   - Bind the run endpoints' client and server halves to each other. Their wire format is
-     asserted twice today and never compared: `http_runs.rs` builds requests by hand and the
-     client's suite drives its own peer, so a divergence leaves both green.
-   - Test `read_verified`'s descriptor-change refusal. It cannot fire today, because the row is
-     selected by equality on the fields it compares, and it becomes the guard that matters when
-     the transport is remote.
-   - Bind what a prefetch would remove: a read driven after the lease is lost while an isolate
-     is live. The outage test fakes an unavailable transport, which is a different mechanism, so
-     nothing covers this today. This one is contingent - it earns its place only if the prefetch
-     is built, since the property is defence in depth rather than the fence, and a heartbeat
-     re-runs the same check within a third of the lease window. Do the unconditional items
-     first.
-   - Move `StartOptions`, `StartedRun`, `ConflictPolicy` and `WorkflowOutputRef` into
-     `zeroship-core`. The lifecycle types already made that move and `operations.rs`
-     re-exports them back, so the shape is settled; it changes no behaviour and it is what lets
-     the client name a start call at all.
+   - The run endpoints' two halves are bound to each other.
+     `the_client_and_the_service_agree_on_every_run_call`
+     (`crates/zeroship-workflow-server/tests/run_wire_pair.rs`) drives the real
+     `WorkerCoordinator` against the real server binary. Field spelling cannot drift, because
+     both sides import the same types from `zeroship-core`, so what it binds is which endpoint
+     the client posts to, which struct it posts there, and its own post-validation.
+   - `read_verified`'s descriptor-change refusal is bound.
+     `replay_refuses_a_payload_read_that_answers_with_another_descriptor`
+     (`crates/zeroship-workflow-runner/src/payloads/tests.rs`) answers with a real object of the
+     same run under a different descriptor, with a pass-through control and a budget arm so the
+     refusal cannot be mistaken for the pre-open size check.
+   - `StartOptions`, `StartedRun`, `ConflictPolicy` and `WorkflowOutputRef` now live in
+     `crates/zeroship-core/src/workflow_coordination/lifecycle.rs`, re-exported from where they
+     were defined, so the client can name a start call.
 
-   Two decisions gate the rest and neither needs code first: whether the byte-returning reads
-   become descriptor-returning, and the grant and signer change that gives the service its
-   journal hold.
+   One preparatory piece remains and it is contingent: bind what a prefetch would remove, a read
+   driven after the lease is lost while an isolate is live. The outage test fakes an unavailable
+   transport, which is a different mechanism. It earns its place only if the prefetch is built,
+   since the property is defence in depth rather than the fence and a heartbeat re-runs the same
+   check within a third of the lease window.
+
+   Both decisions that gated the rest are settled. The byte-returning reads need no trait
+   change, and the journal hold follows the journal. What is left is the cutover itself.
 
 6. **Delete the creator-schema path**, and say where each piece lives, because they are not all
    in the workflow crates: `ensure_journal` and its route in
