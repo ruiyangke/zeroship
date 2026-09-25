@@ -124,10 +124,7 @@ impl MaintenanceLane {
         else {
             return Ok(Swept::Idle);
         };
-        let publisher = LanePublisher {
-            queue: &self.queue,
-            app: app.clone(),
-        };
+        let publisher = LanePublisher::new(&self.queue, app.clone());
         let receipt = match engine
             .maintenance_job(
                 &grant,
@@ -160,13 +157,28 @@ impl MaintenanceLane {
 
 /// Publishes a sweep's successors straight into the queue this process owns.
 ///
-/// `Queue::submit` is the manager-origin path and takes no authorizer, which is
-/// what the recovery lane already publishes through. It does not compare the
-/// job's app against a caller's, because a manager-origin caller has none, so
-/// the scope check the worker path gets from its placement is made here.
-struct LanePublisher<'a> {
+/// One journal serves every app the service holds, and the `app_id` columns
+/// inside it are the whole of what tells them apart. So a publication carrying
+/// another app's id is a tenant boundary crossed, and the boundary has to be
+/// asserted wherever one is composed rather than wherever one is expected.
+///
+/// `Queue::submit` asserts nothing of the kind, and is right not to: it is the
+/// manager-origin path, and a manager-origin caller has no identity to compare
+/// a job against. The worker path gets the same assertion from the placement it
+/// claims under. This seam has an app and no placement, so it is the only place
+/// the comparison can be made.
+#[derive(Debug)]
+pub struct LanePublisher<'a> {
     queue: &'a Queue,
     app: AppId,
+}
+
+impl<'a> LanePublisher<'a> {
+    /// Publish into `queue` as `app`, and as nothing else.
+    #[must_use]
+    pub const fn new(queue: &'a Queue, app: AppId) -> Self {
+        Self { queue, app }
+    }
 }
 
 impl JobPublisher for LanePublisher<'_> {
@@ -175,6 +187,9 @@ impl JobPublisher for LanePublisher<'_> {
     }
 
     async fn submit(&self, job: &JobSpec) -> Result<JobSpec, WorkflowServiceError> {
+        // The tenant boundary, not a defence against a caller that can reach
+        // it: the sweep this serves publishes from its own app's journal rows,
+        // so nothing today composes a foreign job here.
         if job.app_id != self.app {
             return Err(WorkflowServiceError::PermissionDenied);
         }

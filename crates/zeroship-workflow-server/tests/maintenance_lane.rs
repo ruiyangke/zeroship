@@ -31,7 +31,10 @@ use zeroship_core::{
     workflow_jobs::{DeploymentId, JobId, JobOperation, JobOutcome, JobSpec},
     workflow_policy::AppPolicy,
 };
-use zeroship_workflow::{service::maintenance::MaintenanceOptions, WorkflowServiceError};
+use zeroship_workflow::{
+    service::{maintenance::MaintenanceOptions, publication::JobPublisher},
+    WorkflowServiceError,
+};
 use zeroship_workflow_manager::{
     policy::{PolicyObservation, PolicySource},
     recovery::Options as RecoveryOptions,
@@ -40,7 +43,7 @@ use zeroship_workflow_manager::{
 use zeroship_workflow_server::{
     coordinator::{connect_eligibility, Coordinator, Options},
     runs::RunService,
-    sweeps::{MaintenanceLane, SweepError, Swept},
+    sweeps::{LanePublisher, MaintenanceLane, SweepError, Swept},
 };
 
 /// One observation, so binding installs a real lease rather than a stub.
@@ -140,6 +143,29 @@ impl Fixture {
             .unwrap();
         (row.get(0), row.get(1), row.get(2))
     }
+
+    /// Whether the queue holds a row for `job` at all.
+    async fn stored(&self, job: &JobId) -> bool {
+        !self
+            .platform
+            .admin
+            .query(
+                "SELECT 1 FROM workflow_manager.jobs WHERE id=$1",
+                &[&job.as_str()],
+            )
+            .await
+            .unwrap()
+            .is_empty()
+    }
+
+    /// A second app with a registered queue scope, so a job naming it is one
+    /// `Queue::submit` would accept.
+    async fn neighbour(&self) -> AppId {
+        let app = AppId::mint();
+        self.platform.seed_app(&app).await;
+        self.queue.register_scope(&app).await.unwrap();
+        app
+    }
 }
 
 fn sweep(app: &AppId) -> JobSpec {
@@ -163,6 +189,45 @@ fn creator_work(app: &AppId) -> JobSpec {
         },
         available_at: 0.try_into().unwrap(),
     }
+}
+
+/// Publication refuses a job naming an app other than the publisher's, and
+/// writes nothing for it.
+///
+/// The job is hand-constructed, so this says the check refuses such a job. It
+/// does not say anything can produce one: the sweep that holds this publisher
+/// publishes from its own app's journal rows. What makes the check worth having
+/// anyway is that one journal serves every app and its `app_id` columns are the
+/// only thing separating them, so this is where that boundary is asserted.
+///
+/// The neighbour's scope is registered, which is what makes the control mean
+/// something: `Queue::submit` would accept this job, so a refusal is the
+/// publisher's own and the pass-through arm beside it proves the publisher is
+/// not refusing everything.
+#[compio::test]
+async fn publication_refuses_a_job_belonging_to_another_app() {
+    let fixture = Box::pin(Fixture::new()).await;
+    let neighbour = fixture.neighbour().await;
+    let publisher = LanePublisher::new(&fixture.queue, fixture.app.clone());
+
+    let foreign = sweep(&neighbour);
+    assert!(matches!(
+        publisher.submit(&foreign).await,
+        Err(WorkflowServiceError::PermissionDenied)
+    ));
+    assert!(
+        !fixture.stored(&foreign.id).await,
+        "a refused publication must leave the neighbour's queue untouched"
+    );
+
+    // The control, differing only in the job's app.
+    let own = sweep(&fixture.app);
+    assert_eq!(publisher.submit(&own).await.unwrap(), own);
+    assert!(
+        fixture.stored(&own.id).await,
+        "the publisher's own app must reach the queue, or the refusal above \
+         proves nothing about the app comparison"
+    );
 }
 
 /// The lane claims a maintenance row without a placement, runs it against the
@@ -244,7 +309,10 @@ async fn an_operation_without_an_artifact_source_is_refused_by_name() {
         "the refusal must name what is missing, not just fail: {reason}"
     );
     let (state, outcome, worker) = fixture.row(&release.id).await;
-    assert_eq!(state, "leased", "a refused row keeps its lease until it lapses");
+    assert_eq!(
+        state, "leased",
+        "a refused row keeps its lease until it lapses"
+    );
     assert_eq!(outcome, None);
     assert_eq!(worker.as_deref(), Some(fixture.lane.identity().as_str()));
 }
