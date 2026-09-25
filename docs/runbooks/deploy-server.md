@@ -29,9 +29,11 @@ Cloudflare (terminates TLS)
        -> gateway:8000         creator apps, {app}.<domain>
        -> auth:9092            OIDC provider, auth.<domain>
        -> control:9090         control.<domain> catch-all
-       -> migrate-server:9091  control.<domain>/v1/*
+       -> migrate-server:9091  control.<domain>/v1/*, the creator namespace
   host:9090 -> control:9090    optional LOOPBACK override, SSH fallback
   host:9091 -> migrate-server  LOOPBACK publish, operator access only
+  compose network              platform services dial control:9090 and
+                               migrate-server:9091 by name, off the edge
 ```
 
 Every base host publication except Caddy's `:80` binds to loopback. Control has
@@ -273,8 +275,14 @@ control: `zeroship migrate` reuses the control URL, but the edge selects
 migrate-server directly.
 
 The complete namespace matcher includes the
-`/v1/databases/{database_id}/migrations/apply` route. Control must
-not declare a `/v1` route.
+`/v1/databases/{database_id}/migrations/apply` route. Control declares no
+creator-facing `/v1` route, so the rule shadows nothing a CLI deploy reaches.
+It does serve `/v1` paths for other platform processes: `/v1/deployment-holds/*`
+(`crates/zeroship-control/src/deployment_hold_api.rs`) and `/v1/app-facts`
+(`crates/zeroship-control/src/app_facts_api.rs`). Those callers dial
+`control:9090` by service name on the internal network, so the edge never sees
+them and the rule above stays correct. An edge that also fronted them would send
+them to migrate-server, which answers no such route.
 
 Verify a migration through the public ingress by reading the apply response
 body, not the status code. A 200 carries `applied` and `skipped`
