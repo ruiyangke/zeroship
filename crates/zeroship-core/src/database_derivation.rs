@@ -68,6 +68,21 @@ pub fn capability_role_name(
     database_role::database_capability_role_name(database.as_str(), capability)
 }
 
+/// The role that reaches this database's masked real-value columns.
+///
+/// Neither capability role holds `SELECT` on a `__zs_raw__` column, so the
+/// audited unmask read assumes this one for exactly the statement that reads
+/// the plaintext and narrows straight back. A binding holds membership in it
+/// `WITH INHERIT FALSE`, which is what stops the privilege being ambient on a
+/// session that merely narrowed to the binding.
+///
+/// # Errors
+///
+/// [`RoleNameTooLong`], on the terms [`migrator_role_name`] gives.
+pub fn unmask_role_name(database: &DatabaseId) -> Result<String, RoleNameTooLong> {
+    database_role::database_unmask_role_name(database.as_str())
+}
+
 /// The role this binding narrows to.
 ///
 /// `SET LOCAL ROLE` authorizes against the memberships of the role that
@@ -180,6 +195,16 @@ mod tests {
         }
 
         assert_eq!(
+            unmask_role_name(&database).expect("composes"),
+            "zs_db_dbs_03cgepu94hyemwpcipafo7264_unmask"
+        );
+        assert_eq!(
+            unmask_role_name(&database).expect("composes"),
+            database_role::database_unmask_role_name(DATABASE_FIXTURE).expect("untyped"),
+            "the seam must compose the role the apply grants the real value to"
+        );
+
+        assert_eq!(
             binding_role_name(&binding).expect("composes"),
             "zs_bind_bnd_03coc2qj4x2ae61h80zwlnnq6"
         );
@@ -231,6 +256,11 @@ mod tests {
                 "{capability:?} must name one database"
             );
         }
+        assert_ne!(
+            unmask_role_name(&first).expect("composes"),
+            unmask_role_name(&second).expect("composes"),
+            "one database's real-value role must not name another's"
+        );
 
         assert_ne!(
             encryption_salt(&first),
@@ -248,19 +278,21 @@ mod tests {
         );
     }
 
-    /// One database's three roles are three names.
+    /// One database's four roles are four names.
     ///
-    /// The migrator owns the schema while the capability roles hold the
-    /// column-listed grants, so two of them collapsing onto one name would
-    /// hand an app the owner's authority or a readonly binding the write
-    /// grants.
+    /// The migrator owns the schema, the capability roles hold the
+    /// column-listed grants and the unmask role holds the real-value `SELECT`
+    /// both of them are withheld, so two of them collapsing onto one name would
+    /// hand an app the owner's authority, a readonly binding the write grants,
+    /// or an ordinary narrowed session the plaintext.
     #[test]
-    fn a_database_names_three_distinct_roles() {
+    fn a_database_names_four_distinct_roles() {
         let database = database();
         let mut names = vec![
             migrator_role_name(&database).expect("composes"),
             capability_role_name(&database, DatabaseCapability::ReadWrite).expect("composes"),
             capability_role_name(&database, DatabaseCapability::ReadOnly).expect("composes"),
+            unmask_role_name(&database).expect("composes"),
         ];
         let composed = names.len();
         names.sort();
@@ -321,6 +353,7 @@ mod tests {
             migrator_role_name(&database).expect("composes"),
             capability_role_name(&database, DatabaseCapability::ReadWrite).expect("composes"),
             capability_role_name(&database, DatabaseCapability::ReadOnly).expect("composes"),
+            unmask_role_name(&database).expect("composes"),
             binding_role_name(&binding).expect("composes"),
         ] {
             if name.len() > widest.len() {
