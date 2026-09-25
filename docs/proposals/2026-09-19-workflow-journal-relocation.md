@@ -475,12 +475,46 @@ protocol. This extends a working client rather than inventing one.
    `crates/zeroship-worker/src/workflow_creator.rs` constructs on `WorkerTasks`, whose `stage`
    opens journal transactions mid-execution with no manager call to merge into.
 
-   **The dependency gate decides where the client lives.**
-   `workflow_process_dependencies_follow_crate_ownership` in `xtask/tests/workflow_architecture.rs`
-   forbids `zeroship-workflow-client` any edge to `zeroship-workflow`, so the merged client
-   methods cannot live there unless `TaskAssignment`, `WorkflowExecution`, `JobReceipt` and their
-   neighbours move to `zeroship-core`. Putting the merged client in `zeroship-workflow-runner`,
-   which may depend on both, is the alternative. That fork is the largest decision in this step.
+   **Where the merged client lives: a port trait in the client, implemented in the runner.**
+   The gate is not what decides this, and reading it as the constraint understates the problem.
+   `crates/zeroship-workflow/Cargo.toml` declares `zeroship-workflow-client` in
+   `[dependencies]`, so an edge back the other way is a Cargo cycle rather than a rule violation;
+   `workflow_process_dependencies_follow_crate_ownership` in
+   `xtask/tests/workflow_architecture.rs` catches the dev-kind and transitive spellings Cargo
+   would tolerate. Moving `TaskAssignment`, `WorkflowExecution`, `JobReceipt` and their
+   neighbours into `zeroship-core` is therefore compulsory for a client that names them, not
+   stylistic - and the closure is not three types. It reaches `WorkflowServiceError`, the DTO
+   half of `crates/zeroship-workflow/src/engine.rs`, and the outcome decoder with its helpers.
+   It would also publish `DeliveredTask` and `TaskRenewal`, whose fields are private precisely so
+   that `renew` is the only way to advance a deadline and every host linking core cannot mint
+   delivery authority.
+
+   **Core's own headers refuse the cargo.** `crates/zeroship-core/src/workflow_jobs.rs` opens
+   "Customer inputs, history and outputs stay in creator storage" and
+   `crates/zeroship-core/src/workflow_coordination.rs` says what crosses is "at most the
+   descriptor that locates one". `WorkflowTrigger.input`, `WorkflowInvocation.journal` and
+   `StepOutcome::StepCompleted.output` are the inputs, history and output bytes those two
+   sentences exclude. A move would contradict the module it moves into.
+
+   **None of that is necessary, because the wire boundary is already core.**
+   `JobReceipt::settlement` (`crates/zeroship-workflow/src/service/delivery.rs`) returns a core
+   `Settlement`, and `acknowledge` in `crates/zeroship-workflow-runner/src/delivery.rs` performs
+   that conversion before it calls `transport.settle`. So the client can own the merged exchange
+   without naming a journal type: declare the port in `zeroship-workflow-client` with associated
+   types for the journal payloads, bounded by serde rather than by identity, and implement it in
+   `zeroship-workflow-runner` over `AppWorkflows`. The precedent is in the tree and points the
+   other way across the same seam: `JobTransport` in
+   `crates/zeroship-workflow-runner/src/delivery.rs` declares `type Lease: JobLease + Clone;` so
+   the runner need not name the client's `LeasedJob`. This is that technique inverted.
+
+   Bounding the body stays with the client, which is where the bound below belongs anyway: it
+   measures serialized bytes and needs no view inside them.
+
+   **The gate this turns on can currently pass over nothing.** Its two siblings in that file each
+   assert the walk was nonempty - "the walk visited only the leaf itself, so an empty result is
+   not evidence" - and `workflow_process_dependencies_follow_crate_ownership` has no such
+   control, so every arm would pass vacuously if the resolve graph came back without edges. Fix
+   that before leaning on it.
 
    **One bound is already wrong for the merged settle.** `Options::default` in
    `crates/zeroship-workflow-client/src/lib.rs` takes `max_request_bytes` from
