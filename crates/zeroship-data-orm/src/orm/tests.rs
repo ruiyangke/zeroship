@@ -985,6 +985,17 @@ impl crate::executor::ScopedExecutor for RegisteredBackend {
     ) -> Result<u64, DbError> {
         self.inner.exec(binding, sql, params).await
     }
+    async fn read_unmasked(
+        &self,
+        binding: &crate::binding::DbBinding,
+        session: Option<&crate::driver::Session>,
+        sql: &str,
+        params: &[Value],
+    ) -> Result<Vec<Value>, DbError> {
+        self.inner
+            .read_unmasked(binding, session, sql, params)
+            .await
+    }
     async fn check_connection(&self) -> Result<(), DbError> {
         self.inner.check_connection().await
     }

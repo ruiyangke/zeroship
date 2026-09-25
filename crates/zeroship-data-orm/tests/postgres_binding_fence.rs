@@ -28,9 +28,11 @@ use zeroship_core::database_role::DatabaseCapability;
 use zeroship_core::{BindingId, DatabaseId};
 use zeroship_data_orm::binding::DbBinding;
 use zeroship_data_orm::encryption::ProjectKeySource;
-use zeroship_data_orm::error::{DbError, GRANT_REVOKED};
+use zeroship_data_orm::driver::Session;
+use zeroship_data_orm::error::{BeginIntent, DbError, GRANT_REVOKED};
 use zeroship_data_orm::orm::{Database, Output};
 use zeroship_data_orm::schema::{CollectionSchema, ColumnSchema, LogicalType, Schema};
+use zeroship_data_orm::orm::Value;
 use zeroship_data_orm::value;
 use zeroship_migrate_server::apply::WORKER_ROLE;
 use zeroship_migrate_server::datastore::cluster;
@@ -607,6 +609,532 @@ async fn one_app_s_two_databases_do_not_cross_deliver_a_shared_collection_name()
     theirs.close();
     drop(to_mine);
     drop(to_theirs);
+    drop(fence);
+    drain().await;
+}
+
+// ---------------------------------------------------------------------------
+// The audited raw-column read
+// ---------------------------------------------------------------------------
+//
+// A masked field occupies two physical columns and the real value lives in the
+// `__zs_raw__` sibling. `zeroship_migrate_server::capability_grants` withholds
+// that sibling from BOTH capability roles, so the read an unmask performs is
+// not one the session's own binding role can make: it has to assume the
+// database's unmask role for exactly that statement and narrow straight back.
+//
+// Everything below runs on a cluster the real reconciler converged and against
+// the grants the real apply-time converger emits, so an arm cannot pass because
+// a fixture granted the column it is about.
+
+use zeroship_data_orm::schema::MaskSchema;
+use zeroship_data_orm::sql::mapping::raw_column_name;
+use zeroship_migrate_server::{capability_grants, provisioning};
+
+/// The collection whose real values the arms below reach.
+const MASKED_COLLECTION: &str = "people";
+
+/// The seeded row's identity and its two real values.
+const ROW_PK: &str = "p1";
+const REAL_SSN: &str = "123-45-6789";
+const MASKED_SSN: &str = "***-**-6789";
+
+/// One masked string field, one masked NUMBER field, and one ordinary column.
+///
+/// `amount`'s real value is stored as `NaN`, which the server returns happily
+/// and the row decoder refuses. It is the only failure shape that leaves the
+/// creator's transaction LIVE, so it is the one that can observe a raw read
+/// that left the session elevated -
+/// `a_failed_raw_read_leaves_the_creators_next_statement_on_the_binding_role`
+/// is what it exists for. `nickname` is the non-raw column the unmask role must
+/// not reach.
+fn people_schema() -> Schema {
+    let mut id = ColumnSchema::new(LogicalType::Text);
+    id.primary_key = true;
+    let mut ssn = ColumnSchema::new(LogicalType::Text);
+    ssn.required = false;
+    ssn.mask = Some(MaskSchema {
+        kind: "last4".into(),
+        classification: "spi".into(),
+    });
+    let mut nickname = ColumnSchema::new(LogicalType::Text);
+    nickname.required = false;
+    let mut amount = ColumnSchema::new(LogicalType::Number);
+    amount.required = false;
+    amount.mask = Some(MaskSchema {
+        kind: "full".into(),
+        classification: "spi".into(),
+    });
+    Schema::new(vec![(
+        MASKED_COLLECTION.into(),
+        CollectionSchema::new([
+            ("id".into(), id),
+            ("ssn".into(), ssn),
+            ("nickname".into(), nickname),
+            ("amount".into(), amount),
+        ]),
+    )])
+}
+
+/// The policy that lets the fixture's actor see `spi`.
+///
+/// Installed explicitly rather than relying on the no-policy fallback: that
+/// fallback grants the reserved `auto` kind, and `sanitize_app_actor` strips
+/// `auto` off anything arriving through the creator surface, so a `find` that
+/// claimed it would be denied before any SQL ran and the arm would measure the
+/// authorization rather than the privilege.
+fn auditor_policy() -> Value {
+    value!({ "auditor": ["spi"] })
+}
+
+/// The read options a creator sends to unmask one column.
+fn unmask_opts(column: &str) -> Value {
+    value!({
+        "unmask": [column],
+        "actor": { "kind": "auditor", "id": "operator-1" },
+        "unmaskReason": "binding fence arm"
+    })
+}
+
+/// A cluster converged for one database, holding one masked table with the
+/// grants an apply emits over it.
+struct MaskedFence {
+    url: String,
+    database: DatabaseId,
+    edge: BindingId,
+}
+
+impl MaskedFence {
+    async fn build(url: String) -> Self {
+        let mut admin = connect(&url).await;
+        require_pinned_major(&admin).await;
+        cluster::apply_bootstrap_corpus(&admin)
+            .await
+            .expect("the datastore bootstrap corpus applies");
+
+        let database = DatabaseId::mint();
+        let edge = BindingId::mint();
+        cluster::converge_database(&mut admin, &database)
+            .await
+            .expect("the reconciler converges the database");
+        cluster::grant_binding(&admin, &edge, &database, DatabaseCapability::ReadWrite)
+            .await
+            .expect("the reconciler grants the binding's edges");
+
+        let schema = database_derivation::schema_name(&database);
+        let ssn_raw = raw_column_name("ssn");
+        let amount_raw = raw_column_name("amount");
+        admin
+            .batch_execute(&format!(
+                "CREATE TABLE \"{schema}\".\"{MASKED_COLLECTION}\" (
+                     id text PRIMARY KEY,
+                     ssn text,
+                     \"{ssn_raw}\" text,
+                     nickname text,
+                     amount numeric,
+                     \"{amount_raw}\" numeric
+                 );
+                 INSERT INTO \"{schema}\".\"{MASKED_COLLECTION}\"
+                     VALUES ('{ROW_PK}', '{MASKED_SSN}', '{REAL_SSN}', 'nick', NULL, 'NaN');"
+            ))
+            .await
+            .expect("the masked fixture table is legal DDL");
+
+        provisioning::provision_audit_unmask_table(&admin, &schema)
+            .await
+            .expect("the migration service creates the app's unmask audit table");
+        let readwrite =
+            database_derivation::capability_role_name(&database, DatabaseCapability::ReadWrite)
+                .expect("the fixture capability role name fits");
+        let readonly =
+            database_derivation::capability_role_name(&database, DatabaseCapability::ReadOnly)
+                .expect("the fixture capability role name fits");
+        provisioning::grant_audit_unmask_to_capabilities(&admin, &schema, &readwrite, &readonly)
+            .await
+            .expect("a bound session may append its own audit row");
+
+        // The apply-time converger, over the live catalog: every capability
+        // grant and the unmask role's `SELECT` on the real-value columns, in
+        // the one emission production uses.
+        capability_grants::grant_capability_columns(&admin, &database)
+            .await
+            .expect("the apply converges this schema's column grants");
+
+        admin
+            .batch_execute(&format!(
+                "ALTER ROLE \"{WORKER_ROLE}\" PASSWORD '{WORKER_PASSWORD}'"
+            ))
+            .await
+            .expect("the operator supplies the worker's authentication material");
+
+        Self {
+            url: worker_url(&url),
+            database,
+            edge,
+        }
+    }
+
+    fn binding(&self) -> DbBinding {
+        DbBinding::to_database(
+            "app_unmask",
+            "deploy_unmask",
+            self.database.clone(),
+            self.edge.clone(),
+            DatabaseCapability::ReadWrite,
+        )
+        .expect("the fixture ids compose a legal role name")
+    }
+
+    async fn open(&self) -> Database {
+        let database = Database::connect(
+            self.binding(),
+            zeroship_data_orm::ConnectOptions::new(&self.url, ProjectKeySource::unavailable()),
+            people_schema(),
+        )
+        .await
+        .expect("the creator opens its database");
+        database
+            .install_mask_policy(auditor_policy())
+            .expect("the app declares its mask policy at boot");
+        database
+    }
+
+    /// Run one statement as the worker login under `role`, the way the data
+    /// plane narrows. Mirrors the tenant fence's helper of the same name.
+    async fn under_role(
+        &self,
+        role: &str,
+        sql: &str,
+    ) -> Result<Vec<compio_postgres::Row>, compio_postgres::Error> {
+        let mut worker = connect(&self.url).await;
+        let transaction = worker.transaction().await?;
+        transaction
+            .simple_query(&format!("SET LOCAL ROLE \"{role}\""))
+            .await?;
+        let rows = transaction.query(sql, &[]).await?;
+        transaction.rollback().await?;
+        Ok(rows)
+    }
+
+    fn table(&self) -> String {
+        format!(
+            "\"{}\".\"{MASKED_COLLECTION}\"",
+            database_derivation::schema_name(&self.database)
+        )
+    }
+
+    fn binding_role(&self) -> String {
+        database_derivation::binding_role_name(&self.edge).expect("the fixture role name fits")
+    }
+
+    fn unmask_role(&self) -> String {
+        database_derivation::unmask_role_name(&self.database).expect("the fixture role name fits")
+    }
+}
+
+/// One unmasked read through the creator's own `find`.
+async fn unmasked_ssn(database: &Database) -> Result<Value, DbError> {
+    let found = database
+        .collection(MASKED_COLLECTION)?
+        .find(value!({ "id": ROW_PK }), unmask_opts("ssn"))
+        .await?;
+    let Output::Rows { mut rows, .. } = found else {
+        panic!("find must return rows");
+    };
+    assert_eq!(rows.len(), 1, "the seeded row must be present to be read");
+    Ok(rows.remove(0)["ssn"].clone())
+}
+
+/// The masked value the same read returns with no `unmask` option.
+async fn masked_ssn(database: &Database) -> Result<Value, DbError> {
+    let found = database
+        .collection(MASKED_COLLECTION)?
+        .find(value!({ "id": ROW_PK }), value!({}))
+        .await?;
+    let Output::Rows { mut rows, .. } = found else {
+        panic!("find must return rows");
+    };
+    assert_eq!(rows.len(), 1, "the seeded row must be present to be read");
+    let wrapper = rows.remove(0)["ssn"].clone();
+    assert_eq!(
+        wrapper["classification"],
+        Value::from("spi"),
+        "an ordinary read must return the masked-value wrapper, not a bare \
+         string - otherwise the control below is not about a masked field: \
+         {wrapper:?}"
+    );
+    Ok(wrapper["masked"].clone())
+}
+
+/// **The property.** An audited unmask reaches the real value on a session
+/// narrowed to the binding role, on both routes a dispatch can take.
+///
+/// The two CONTROLS are the ordinary read beside each: it must return the MASK,
+/// which is what proves the row is reachable, the column is masked, and the
+/// arm is not passing because the raw value happened to be projected anyway.
+#[compio::test]
+async fn an_audited_unmask_reaches_the_real_value_a_binding_role_cannot_select() {
+    let postgres = postgres_fixture::Postgres::start();
+    let fence = MaskedFence::build(postgres.url()).await;
+    let database = fence.open().await;
+
+    // CONTROL: the ordinary read returns the mask.
+    assert_eq!(
+        masked_ssn(&database)
+            .await
+            .expect("the binding role reads the mask column"),
+        Value::from(MASKED_SSN)
+    );
+
+    // SUBJECT, autocommit route.
+    assert_eq!(
+        unmasked_ssn(&database)
+            .await
+            .expect("an audited unmask must reach the real value"),
+        Value::from(REAL_SSN)
+    );
+
+    // SUBJECT, the creator's own transaction: the same read on the lane the
+    // creator's statements run on, with its own control beside it.
+    let inside = database
+        .transaction(|tx| async move {
+            assert_eq!(
+                masked_ssn(&tx).await?,
+                Value::from(MASKED_SSN),
+                "the control: the ordinary read inside the transaction"
+            );
+            unmasked_ssn(&tx).await
+        })
+        .await
+        .expect("an audited unmask inside a creator transaction must reach the real value");
+    assert_eq!(inside, Value::from(REAL_SSN));
+
+    drop(database);
+    drop(fence);
+    drain().await;
+}
+
+/// The privilege is not AMBIENT: under the binding role the real-value column
+/// is refused, and so is a projection that would sweep it up.
+///
+/// Each arm differs from the permitted read in one variable - which column the
+/// statement names - and the control is the mask column, which must come back.
+#[compio::test]
+async fn the_binding_role_is_refused_the_real_value_column_and_the_whole_row() {
+    let postgres = postgres_fixture::Postgres::start();
+    let fence = MaskedFence::build(postgres.url()).await;
+    let table = fence.table();
+    let role = fence.binding_role();
+    let ssn_raw = raw_column_name("ssn");
+
+    // CONTROL: the binding role reads the mask column and the identity.
+    let permitted = fence
+        .under_role(&role, &format!("SELECT ssn FROM {table} WHERE id = '{ROW_PK}'"))
+        .await
+        .expect("the binding role reads the columns its capability was granted");
+    assert_eq!(permitted.len(), 1);
+    assert_eq!(permitted[0].get::<_, &str>("ssn"), MASKED_SSN);
+
+    for (what, sql) in [
+        (
+            "the real-value column by name",
+            format!("SELECT \"{ssn_raw}\" FROM {table} WHERE id = '{ROW_PK}'"),
+        ),
+        (
+            "a whole-row projection",
+            format!("SELECT * FROM {table} WHERE id = '{ROW_PK}'"),
+        ),
+    ] {
+        let error = fence
+            .under_role(&role, &sql)
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("{what} must be refused under the binding role"));
+        assert_eq!(
+            error
+                .as_db_error()
+                .unwrap_or_else(|| panic!("{what}: the server must refuse, not the transport"))
+                .code(),
+            &SqlState::INSUFFICIENT_PRIVILEGE,
+            "{what} must be refused with 42501"
+        );
+    }
+
+    drop(fence);
+    drain().await;
+}
+
+/// The unmask role reaches the real-value column and the identity the read
+/// addresses, and NOTHING else on that table.
+///
+/// Its control is the permitted read: without it a role that had been granted
+/// nothing at all would satisfy every refusal below.
+#[compio::test]
+async fn the_unmask_role_reaches_the_real_value_and_no_other_column_or_verb() {
+    let postgres = postgres_fixture::Postgres::start();
+    let fence = MaskedFence::build(postgres.url()).await;
+    let table = fence.table();
+    let role = fence.unmask_role();
+    let ssn_raw = raw_column_name("ssn");
+
+    // CONTROL: the statement the data plane compiles, under this role.
+    let permitted = fence
+        .under_role(
+            &role,
+            &format!("SELECT \"{ssn_raw}\" AS raw FROM {table} WHERE id = '{ROW_PK}'"),
+        )
+        .await
+        .expect("the unmask role reads the real value it was granted");
+    assert_eq!(permitted.len(), 1);
+    assert_eq!(permitted[0].get::<_, &str>("raw"), REAL_SSN);
+
+    for (what, sql) in [
+        (
+            "a non-raw column it was not granted",
+            format!("SELECT nickname FROM {table} WHERE id = '{ROW_PK}'"),
+        ),
+        (
+            "the mask column",
+            format!("SELECT ssn FROM {table} WHERE id = '{ROW_PK}'"),
+        ),
+        (
+            "a whole-row projection",
+            format!("SELECT * FROM {table} WHERE id = '{ROW_PK}'"),
+        ),
+        (
+            "an INSERT",
+            format!("INSERT INTO {table} (id) VALUES ('p2') RETURNING id"),
+        ),
+        (
+            "an UPDATE",
+            format!("UPDATE {table} SET nickname = 'x' WHERE id = '{ROW_PK}' RETURNING id"),
+        ),
+        (
+            "a DELETE",
+            format!("DELETE FROM {table} WHERE id = '{ROW_PK}' RETURNING id"),
+        ),
+    ] {
+        let error = fence
+            .under_role(&role, &sql)
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("{what} must be refused under the unmask role"));
+        assert_eq!(
+            error
+                .as_db_error()
+                .unwrap_or_else(|| panic!("{what}: the server must refuse, not the transport"))
+                .code(),
+            &SqlState::INSUFFICIENT_PRIVILEGE,
+            "{what} must be refused with 42501"
+        );
+    }
+
+    drop(fence);
+    drain().await;
+}
+
+
+/// The bracket gives the binding role back, whether the read succeeded or not.
+///
+/// Measured on the session ITSELF rather than through a `find`, because the ORM
+/// is not what this is about and its transaction reducer would hide the answer:
+/// a failed operation POISONS the lane (`transaction/reducer`, Invariant 13),
+/// so no creator statement runs after one and the reducer's refusal - not the
+/// role - is what a higher arm would observe. The hazard the bracket exists for
+/// is one level below that: the session is the creator's own, handed straight
+/// back, and a `SET LOCAL ROLE` left on it lasts for the rest of the
+/// transaction.
+///
+/// `current_user` is the instrument, so the elevation is OBSERVED and not
+/// inferred. Three readings, each differing from the next in one step:
+///
+/// - before the bracket, the binding role - the setup batch narrowed to it;
+/// - INSIDE the bracket, the unmask role - without this reading the restore
+///   assertions below would hold on a session that never elevated at all;
+/// - after it, the binding role again, on both the success arm and the failure
+///   arm.
+///
+/// The failing read is `'NaN'::numeric`: the server ANSWERS it and the row
+/// decoder refuses the value, which is the one failure shape that leaves the
+/// transaction live. A statement the server itself rejects aborts it, and then
+/// every later statement is refused `25P02` whatever role it would have run as
+/// - so that failure cannot leak the elevation and cannot measure the restore.
+#[compio::test]
+async fn the_unmask_bracket_gives_the_binding_role_back_on_both_outcomes() {
+    let postgres = postgres_fixture::Postgres::start();
+    let fence = MaskedFence::build(postgres.url()).await;
+    let binding = fence.binding();
+    let backend = zeroship_data_orm::ConnectOptions::new(&fence.url, ProjectKeySource::unavailable())
+        .connect()
+        .await
+        .expect("the worker login opens a backend");
+    let session = backend
+        .open_tx_session(&binding, BeginIntent::Default)
+        .await
+        .expect("the creator's transaction opens and narrows to its binding role");
+
+    let current_user = async |session: &Session| -> String {
+        session
+            .query("SELECT current_user AS u", &[])
+            .await
+            .expect("current_user is readable under any role")[0]["u"]
+            .as_str()
+            .expect("current_user is text")
+            .to_owned()
+    };
+
+    assert_eq!(
+        current_user(&session).await,
+        fence.binding_role(),
+        "the setup batch must have narrowed to the binding role"
+    );
+
+    // SUBJECT 1 - a read that succeeds. Its statement reports the role it ran
+    // under, so the elevation is measured rather than assumed.
+    let during = backend
+        .read_unmasked(
+            &binding,
+            Some(&session),
+            "SELECT current_user AS \"_raw\"",
+            &[],
+        )
+        .await
+        .expect("the bracketed read runs");
+    assert_eq!(
+        during[0]["_raw"],
+        Value::from(fence.unmask_role()),
+        "the bracketed statement must run as the database's unmask role"
+    );
+    assert_eq!(
+        current_user(&session).await,
+        fence.binding_role(),
+        "a successful bracketed read must narrow straight back"
+    );
+
+    // SUBJECT 2 - the same bracket over a read the server answers and the row
+    // decoder refuses. One variable differs: the value that comes back.
+    let failed = backend
+        .read_unmasked(
+            &binding,
+            Some(&session),
+            "SELECT 'NaN'::numeric AS \"_raw\"",
+            &[],
+        )
+        .await
+        .expect_err("a value the row decoder refuses must surface as an error");
+    assert!(
+        failed.to_string().contains("_raw"),
+        "the failure must be the decode of the projected column: {failed}"
+    );
+    assert_eq!(
+        current_user(&session).await,
+        fence.binding_role(),
+        "a FAILED bracketed read must narrow back too, or the creator's next \
+         statement on this session runs as the unmask role"
+    );
+
+    session.discard();
+    drop(backend);
     drop(fence);
     drain().await;
 }

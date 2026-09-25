@@ -63,14 +63,24 @@ pub struct BindingLadderOutcome {
 }
 
 /// Provision one binding's whole ladder: the schema, the capability role that
-/// carries its privileges, the binding role that inherits exactly that one
-/// role, and the membership the connecting login assumes it through.
+/// carries its privileges, the database's unmask role, the binding role that
+/// reaches both, and the membership the connecting login assumes it through.
 ///
-/// The two grant options are the fence and are spelled here the way
+/// The grant options are the fence and are spelled here the way
 /// `zeroship_migrate_server::datastore::cluster::grant_binding` spells them:
 /// `WITH SET FALSE` on the binding-to-database edge so no session can assume
-/// the capability role itself, and `WITH INHERIT FALSE` on the login edge so
-/// the binding's privileges are never ambient on the connection.
+/// the capability role itself, `WITH INHERIT FALSE` on the binding-to-unmask
+/// edge so a session that merely narrowed to the binding does not get a masked
+/// field's real value out of an ordinary `SELECT`, and `WITH INHERIT FALSE` on
+/// the login edge so the binding's privileges are never ambient on the
+/// connection.
+///
+/// The unmask role must exist here even for a fixture that grants the whole
+/// schema, because the data plane NAMES it: an audited raw-column read assumes
+/// it for exactly that statement
+/// (`zeroship_data_orm::backend::postgres::pg_session_sql::unmask_elevation_sql`),
+/// so a ladder without it fails at `SET LOCAL ROLE` with `22023` rather than
+/// measuring what its test is about.
 pub async fn ensure_binding_ladder(
     pool: &Pool,
     binding: &DbBinding,
@@ -88,14 +98,22 @@ pub async fn ensure_binding_ladder(
         )
     })?;
     let capability = database_derivation::capability_role_name(database, DatabaseCapability::ReadWrite)?;
+    let unmask = database_derivation::unmask_role_name(database)?;
 
     let schema = zeroship_data_orm::sql::mapping::quote_ident(binding.schema().as_str());
     let capability_q = zeroship_data_orm::sql::mapping::quote_ident(&capability);
+    let unmask_q = zeroship_data_orm::sql::mapping::quote_ident(&unmask);
     let binding_q = zeroship_data_orm::sql::mapping::quote_ident(binding_role);
 
     create_role_if_missing(
         pool,
         &capability,
+        "NOLOGIN NOREPLICATION NOCREATEDB NOCREATEROLE INHERIT",
+    )
+    .await?;
+    create_role_if_missing(
+        pool,
+        &unmask,
         "NOLOGIN NOREPLICATION NOCREATEDB NOCREATEROLE INHERIT",
     )
     .await?;
@@ -121,7 +139,14 @@ pub async fn ensure_binding_ladder(
             "ALTER DEFAULT PRIVILEGES IN SCHEMA {schema} \
              GRANT USAGE, SELECT ON SEQUENCES TO {capability_q}"
         ),
+        format!("GRANT USAGE ON SCHEMA {schema} TO {unmask_q}"),
+        format!("GRANT SELECT ON ALL TABLES IN SCHEMA {schema} TO {unmask_q}"),
+        format!(
+            "ALTER DEFAULT PRIVILEGES IN SCHEMA {schema} \
+             GRANT SELECT ON TABLES TO {unmask_q}"
+        ),
         format!("GRANT {capability_q} TO {binding_q} WITH SET FALSE"),
+        format!("GRANT {unmask_q} TO {binding_q} WITH INHERIT FALSE"),
         format!("GRANT {binding_q} TO CURRENT_USER WITH INHERIT FALSE"),
     ] {
         pool.execute(&statement, &[])
@@ -147,6 +172,7 @@ pub async fn drop_binding_ladder(pool: &Pool, binding: &DbBinding) -> Result<(),
             database,
             DatabaseCapability::ReadWrite,
         )?);
+        roles.push(database_derivation::unmask_role_name(database)?);
     }
     for role in roles {
         pool.execute(

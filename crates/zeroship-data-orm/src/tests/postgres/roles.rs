@@ -446,7 +446,7 @@ fn vector_search_runs_under_per_app_role_via_rls() {
                 .await
                 .unwrap();
             fixtures::grant_all_runtime_table_columns(&admin_pool, &crate::tests::fixtures::harness_binding(app), coll).await;
-            install_role_bound_select_policy(&admin_pool, app, coll, &role).await;
+            install_role_bound_select_policy(&admin_pool, app, coll, &[role.as_str()]).await;
             let login_role = "p6a_vector_login";
             let (login_url, login_pool) =
                 provision_platform_login_pool(&admin_pool, &url, login_role, "test", &role, app)
@@ -560,7 +560,7 @@ fn spatial_near_runs_under_per_app_role_via_rls() {
                 .await
                 .unwrap();
             fixtures::grant_all_runtime_table_columns(&admin_pool, &crate::tests::fixtures::harness_binding(app), coll).await;
-            install_role_bound_select_policy(&admin_pool, app, coll, &role).await;
+            install_role_bound_select_policy(&admin_pool, app, coll, &[role.as_str()]).await;
             let login_role = "p6a_spatial_login";
             let (login_url, login_pool) =
                 provision_platform_login_pool(&admin_pool, &url, login_role, "test", &role, app)
