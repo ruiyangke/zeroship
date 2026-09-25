@@ -914,6 +914,17 @@ protocol. This extends a working client rather than inventing one.
 
    Step 6 follows once that is green.
 
+   **Where each step's detail lives**, by heading rather than by position, since positions move.
+   The sweeps: "And the first piece is not the loop", "And two of the nine cannot move at all as
+   they stand", "Neither needs a store in the service", and for the claim set "And do not reach
+   for the classification that already exists". The grant: "That decision has a second half".
+   The registration: "And the fork resolves toward the pattern already in the tree". The reserve
+   and confirm: "One obligation is genuinely new". The backend: "An HTTP `WorkflowBackend`, which
+   is not the easy half" and the four bullets under it. The heartbeat: "The timeout budget does
+   not survive the merge", "And the mismatch pre-dates the merge", "One guard has no merged
+   equivalent", and "And the merged reply has one validated half and one unvalidated one". The
+   flag: "Then the worker stops holding a journal" carries its own.
+
    **And the first piece is not the loop.** The sweeps split by what they need. `close_job`,
    `fanout_job`, `propagation_job` and `reconcile_job`'s publications phase are journal-only and
    the service could run them with nothing new but a claim path. `activate_job`, `cron_job` and
