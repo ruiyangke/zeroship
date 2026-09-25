@@ -3,6 +3,7 @@
 use chrono::{DateTime, Utc};
 use serde::{de, Deserialize, Deserializer, Serialize};
 use serde_json::Value;
+pub use zeroship_core::workflow_coordination::WorkflowOutputRef;
 
 pub const DEFAULT_TICK_SECS: u64 = 1;
 
@@ -23,15 +24,6 @@ pub struct JournalStep {
     pub child_run_id: Option<String>,
     #[serde(default, rename = "compensationState")]
     pub compensation_state: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct WorkflowOutputRef {
-    pub hash: String,
-    pub size: i64,
-    #[serde(default)]
-    pub content_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
