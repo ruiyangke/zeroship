@@ -939,7 +939,15 @@ protocol. This extends a working client rather than inventing one.
      is what makes the grant legitimate.
    - **Then the payload reserve and confirm**, since `start` and `stage` share that one
      mechanism, and the confirm must gain the `state` and `expires_at` predicates it does not
-     need while a lock is held across the write.
+     need while a lock is held across the write. Predicates alone do not make it a compare and
+     swap. The confirm discards its update's result today
+     (`crates/zeroship-workflow/src/service/payloads.rs`), so narrowing the filter without
+     reading the count would turn a lost reservation into a silent success - a row nothing
+     matched, reported as staged. The arm it needs is already the idiom in this crate:
+     `if !matches!(changed, Output::Count(1))`, in
+     `crates/zeroship-workflow/src/service/delivery.rs` and
+     `crates/zeroship-workflow/src/service/activation.rs`, where the filter carries the state the
+     caller expects and the count is what proves the swap happened.
    - **Then the backend**, cheapest first: the three methods whose halves the wire-pair test
      already binds, then `start`, then the two reads as two-phase.
    - **Then the merged heartbeat**, which cannot land until its timeout budget is settled.
