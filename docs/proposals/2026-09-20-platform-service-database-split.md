@@ -137,7 +137,8 @@ Ownership is not recorded anywhere in the tree today.
                                 schedule_occurrences, recovery_scopes,
                                 recovery_duties, capacity_demands,
                                 capacity_targets
-    workflow_policy_ledger      workflow_rollout_config
+    workflow_manager.workflow_policy_ledger
+    workflow_manager.workflow_rollout_config
     app_deploys                 CONTESTED - workflow's DDL, control writes
     app_deploy_holds            same
 
@@ -145,7 +146,7 @@ Ownership is not recorded anywhere in the tree today.
 
     email_suppressions
 
-### Shared by design, owned by nobody
+### Shared today; Open 3 concludes a per-service table suffices
 
     service_authn.service_assertion_replay
 
@@ -162,7 +163,8 @@ already opts out with an in-memory store. See open question 3.
 
 Every table above is assigned, and every assignment has been checked against
 the service that actually writes it - see "The assignment, checked against the
-writers" below for the result and the command that re-derives it. A `CONTESTED`
+writers" below for the result, the command that re-derives it, and the
+`zeroship.` qualification that bounds what that command can see. A `CONTESTED`
 note means another service writes the table too, and names which.
 
 ---
@@ -217,8 +219,9 @@ contested pair whose answer the tree already contains.
 
 **`app_deploys`, `app_deploy_holds`.** DDL lives in
 `crates/zeroship-workflow-manager/schema/deployments/schema.ts`; control writes
-them inside its deploy transaction. **Control owns**; the manager reads through
-a projection.
+them inside its deploy transaction. **Control owns**, and the manager no longer
+reaches them: the grant is dropped and `deployment_catalog_is_out_of_reach`
+asserts `42501`. The deployment reaches the manager on the wire instead.
 
 ---
 
@@ -467,9 +470,12 @@ toward the credential-free target.
 
 **4. Workflow.** Already a separate schema with its own migrator role: the
 corpus carries `zeroship_workflow` and `zeroship_workflow_migrator`, and
-`db/migrations-ts/20260919000000_workflow_journal.ts` and
-`db/migrations-ts/20260911000000_workflow_coordination.ts` build the schema. Its
-cross-service reads are column-scoped projections of control tables.
+`db/migrations-ts/20260919000000_workflow_journal.ts`,
+`db/migrations-ts/20260911000000_workflow_coordination.ts` and
+`db/migrations-ts/20260911000060_workflow_policy_tables.ts` build the schema. Its
+policy inputs are not reads of control tables at all; they arrive over
+`POST /v1/app-facts`. What remains a column-scoped projection is `apps` and
+`worker_instances`, unioned across two grant files.
 
 **5. migrate-server.** Needs a role of its own first - it currently logs in
 with control's credential, and there is no `zeroship_migrate` role in the
@@ -512,6 +518,10 @@ survives:
       | grep -vE '/tests?\.rs:|/tests/|_tests?/|_test\.rs:|/bin/|/fixture' \
       | sed -E 's|^crates/zeroship-([a-z0-9-]+)/src/.*zeroship\.([a-z_]+)$|\2 \1|' \
       | sort -u
+
+That pipeline is qualified to `zeroship.`, so it sees nothing a service writes
+into its OWN schema. Tables that have moved out of `zeroship` are outside its
+population and their assignment above is not checked by it.
 
 Three exclusions in that pipeline are load-bearing, and each was found by a
 false positive it let through. A test module in a file named tests.rs is a file, not a
