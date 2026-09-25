@@ -652,11 +652,14 @@ protocol. This extends a working client rather than inventing one.
    Bounding the body stays with the client, which is where the bound below belongs anyway: it
    measures serialized bytes and needs no view inside them.
 
-   **The gate this turns on can currently pass over nothing.** Its two siblings in that file each
-   assert the walk was nonempty - "the walk visited only the leaf itself, so an empty result is
-   not evidence" - and `workflow_process_dependencies_follow_crate_ownership` has no such
-   control, so every arm would pass vacuously if the resolve graph came back without edges. Fix
-   that before leaning on it.
+   **The gate this turns on asserts its own population.**
+   `workflow_process_dependencies_follow_crate_ownership` (`xtask/tests/workflow_architecture.rs`)
+   asserts per package that the walk reached past that package - "the walk for {name} visited only
+   that package, so an empty result is not evidence" - which is the control its two siblings in
+   that file also carry. What that establishes is that the resolve graph came back with edges. It
+   does not establish that any particular forbidden pair was present to be refused, and an arm
+   naming a dependency nothing declares still passes by absence, which is what an arm of that kind
+   is for. So lean on it for the graph being real, not for the arm having ruled.
 
    **One bound is already wrong for the merged settle.** `Options::default` in
    `crates/zeroship-workflow-client/src/lib.rs` takes `max_request_bytes` from
@@ -945,14 +948,33 @@ protocol. This extends a working client rather than inventing one.
 
    Step 6 follows once that is green.
 
-   **And the order passes through a state the queue has no shape for.** Between the first bullet
+   **And the order needs a second claimant, which nothing will issue.** Between the first bullet
    and the sixth the service claims the sweeps from its own journal while the worker still claims
-   `Advance` for creator code. Both claims reach `bound`
-   (`crates/zeroship-workflow-manager/src/coordinator/placement.rs`), both need a placement on the
-   same app, and `admit` in that file will not issue a second one. So every intermediate state
-   this order produces before the flag needs two claimant identities on one app. Either placement
-   stops being exclusive, or the sweeps and the flag land together rather than at opposite ends of
-   this list - and the second reading makes the flag day larger than step 6 alone, not smaller.
+   `Advance` for creator code. That is two claimant identities on one app, and the bar is narrower
+   than it looks. The `assignments` domain key is `["app_id", "worker_id"]`
+   (`crates/zeroship-workflow-manager/schema/schema.ts`), so a second row per app is
+   representable. `bound` (`crates/zeroship-workflow-manager/src/coordinator/placement.rs`) checks
+   revision, release and expiry and never the worker's state, so it admits any recorded placement.
+   And two live placements on one app already occur on purpose, because a draining registration
+   keeps what it holds - "the placements it still holds stay valid until the worker finishes or
+   releases them" (`crates/zeroship-workflow-manager/src/capacity.rs`). What refuses a second one
+   is `admit`'s liveness filter, `if self.has_owner(&tx, app, true)`, together with `candidates`
+   reading only ready workers. That is an issuing policy, not a shape.
+
+   **Which moves the question from exclusivity to authority.** A claimant that never asks for a
+   placement is refused by none of that. `Queue::claim_authorized`
+   (`crates/zeroship-workflow-manager/src/queue.rs`) is public behind a public
+   `Coordinator::queue`, takes its authorizer as a callback, and itself checks only that the
+   returned assignment is self-consistent and unexpired; `Queue::claim` already supplies a passing
+   one and has no production caller. The lease such a caller grants itself is still capped by
+   `Queue::deadline` at the manager's configured lease rather than by its own number. So the
+   service can claim in process without a placement today, with no change to the queue at all.
+   Whether it SHOULD is the question, and the tree argues against: the one in-process host that
+   exists registers as a worker and places the app on it, omitting "only enrollment and network
+   transport" (`crates/zeroship-cli/src/workflow/manager.rs`). Being trusted and in-process has
+   bought the omission of enrollment, never of placement. The other arm makes the service the
+   first claimant whose authority is asserted rather than recorded, in the one table an operator
+   reads to answer which process is executing an app.
 
    **And the flag's second option removes the call that builds the backend.** Reaching the
    service over HTTP is not only a missing implementation. `AppWorkflows::into_backend`
@@ -978,7 +1000,7 @@ protocol. This extends a working client rather than inventing one.
    **Where each step's detail lives**, by heading rather than by position, since positions move.
    The sweeps: "And the first piece is not the loop", "And two of the nine cannot move at all as
    they stand", "Neither needs a store in the service", and for the claim set "And do not reach
-   for the classification that already exists", "The queue admits one claimant identity per app",
+   for the classification that already exists", "A second claimant blocks rather than skipping",
    "And when it is written it cannot be an arm at the claim site" and "And `candidate` has a
    second caller, which decides something else". The grant: "That first one is not a line of
    wiring; it is a credential question" and "And the hold `restart` waits on belongs to another
@@ -989,9 +1011,9 @@ protocol. This extends a working client rather than inventing one.
    half of that is answerable as a description", "And the clock ceiling has a second copy", "And
    only one of the journal's two sites can reach that diagnosis under an attempt", "One guard has
    no merged equivalent", and "And the merged reply has one validated half and one unvalidated
-   one". The flag: "Then the worker stops holding a journal", "And the order passes through a
-   state the queue has no shape for" and "And the flag's second option removes the call that
-   builds the backend".
+   one". The flag: "Then the worker stops holding a journal", "And the order needs a second
+   claimant, which nothing will issue", "Which moves the question from exclusivity to authority"
+   and "And the flag's second option removes the call that builds the backend".
 
    **And the first piece is not the loop.** The sweeps split by what they need. `close_job`,
    `fanout_job`, `propagation_job` and `reconcile_job`'s publications phase are journal-only and
@@ -1021,23 +1043,18 @@ protocol. This extends a working client rather than inventing one.
    which process CLAIMS them once the worker no longer holds the journal. That is not a question
    about capability, and the filter is not where its answer shows up.
 
-   **The queue admits one claimant identity per app, so a filter presupposes what placement
-   refuses.** Every claim reaches `bound`
-   (`crates/zeroship-workflow-manager/src/coordinator/placement.rs`), which denies a claimant
-   holding no placement for the app - `let row = placement(tx, app, worker).await?.ok_or(Error::Denied)?;`
-   - and `admit` in the same file will not create a second one:
-   `if self.has_owner(&tx, app, true).await? { return Ok(None); }`. Nor can the contention be
-   skipped: the ORM offers no `SKIP LOCKED`, by decision, because "skipping locked rows would
-   silently omit them" (`docs/architecture/data-orm.md`), so a competing lock waits under
+   **A second claimant blocks rather than skipping, which is what puts authority first.** Two
+   claimants on one app are representable and this order needs them; what they are not is free.
+   The ORM offers no `SKIP LOCKED`, by decision, because "skipping locked rows would silently omit
+   them" (`docs/architecture/data-orm.md`), so a competing lock waits under
    `budgets::DB_LOCK_TIMEOUT_MS` and surfaces as `lock_not_available`. Claimants serialize on the
    per-app `queue_scopes` row through `lock_scope`
    (`crates/zeroship-workflow-manager/src/queue.rs`), an update-as-lock requiring
-   `Output::Count(1)` that answers `Error::Denied` otherwise, so a second claimant blocks rather
-   than moving on. A service that claims anything must therefore hold
-   the app's placement, which is the placement the worker needs in order to claim `Advance`.
-   Settle whether placement stops being exclusive BEFORE settling which process claims `Cron`
-   and `Collect`, because a filter dividing operations between two claimants describes a
-   concurrency the queue does not offer.
+   `Output::Count(1)` that answers `Error::Denied` otherwise. So two lanes polling one app contend
+   on every claim, heartbeat, settle and publish rather than dividing the work between them, and
+   the filter below is what stops them wanting the same rows. Settle how the service's lane
+   authorizes itself - see "And the order needs a second claimant, which nothing will issue" -
+   before writing that filter, because the filter presumes that answer.
 
    **And when it is written it cannot be an arm at the claim site.** `candidate`
    (`crates/zeroship-workflow-manager/src/scheduling.rs`) answers `Result<Option<String>, Error>`
