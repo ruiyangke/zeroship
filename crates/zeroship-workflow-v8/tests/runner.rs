@@ -1179,12 +1179,7 @@ impl Manager {
         fixture: &Fixture,
         slots: usize,
     ) -> zeroship_workflow_runner::consumer::JobConsumer<Self> {
-        use zeroship_workflow::service::{
-            collection::CollectionOptions,
-            fanout::FanoutOptions,
-            propagation::PropagationOptions,
-            reconciliation::ReconciliationOptions,
-        };
+        use zeroship_workflow::service::maintenance::MaintenanceOptions;
         use zeroship_workflow_runner::{
             consumer::{ConsumerOptions, ConsumerScope, JobConsumer},
             delivery::DeliveryOptions,
@@ -1213,10 +1208,7 @@ impl Manager {
                     execution_timeout: Duration::from_secs(10),
                     operation_timeout: Duration::from_secs(2),
                     retry_delay: Duration::from_millis(5),
-                    reconciliation: ReconciliationOptions::default(),
-                    collection: CollectionOptions::default(),
-                    fanout: FanoutOptions::default(),
-                    propagation: PropagationOptions::default(),
+                    maintenance: MaintenanceOptions::default(),
                 },
             },
         )

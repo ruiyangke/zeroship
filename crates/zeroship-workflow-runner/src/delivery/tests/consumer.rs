@@ -99,10 +99,7 @@ fn options(slots: usize) -> ConsumerOptions {
             execution_timeout: Duration::from_secs(10),
             operation_timeout: Duration::from_secs(1),
             retry_delay: Duration::from_millis(5),
-            reconciliation: ReconciliationOptions::default(),
-            collection: zeroship_workflow::service::collection::CollectionOptions::default(),
-            fanout: zeroship_workflow::service::fanout::FanoutOptions::default(),
-            propagation: zeroship_workflow::service::propagation::PropagationOptions::default(),
+            maintenance: MaintenanceOptions::default(),
         },
     }
 }

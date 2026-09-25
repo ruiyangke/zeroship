@@ -52,10 +52,7 @@ use zeroship_storage::{StorageBackendConfig, StorageStore};
 use zeroship_workflow::{
     deployment_holds::RemoteDeploymentHolds,
     service::{
-        collection::CollectionOptions,
-        fanout::FanoutOptions,
-        propagation::PropagationOptions,
-        reconciliation::ReconciliationOptions,
+        maintenance::MaintenanceOptions,
         store::HostStorage,
         AppDeployments, HostPolicies,
     },
@@ -136,10 +133,7 @@ impl WorkflowHostConfig {
                     execution_timeout: EXECUTION_TIMEOUT,
                     operation_timeout: OPERATION_TIMEOUT,
                     retry_delay: RETRY_DELAY,
-                    reconciliation: ReconciliationOptions::default(),
-                    collection: CollectionOptions::default(),
-                    fanout: FanoutOptions::default(),
-                    propagation: PropagationOptions::default(),
+                    maintenance: MaintenanceOptions::default(),
                 },
             },
             assignments: AssignmentOptions {

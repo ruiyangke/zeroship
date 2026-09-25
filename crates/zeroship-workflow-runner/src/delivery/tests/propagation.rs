@@ -146,7 +146,8 @@ async fn propagation_refuses_invalid_page_bounds_before_delivery() {
     let fixture = Fixture::new(AppPolicy::default()).await;
     for page_size in [0, u32::MAX] {
         let mut options = fixture.slot(Duration::from_secs(5)).options;
-        options.propagation = zeroship_workflow::service::propagation::PropagationOptions { page_size };
+        options.maintenance.propagation =
+            zeroship_workflow::service::propagation::PropagationOptions { page_size };
         assert!(matches!(
             DeliverySlot::new(
                 fixture.metadata.clone(),

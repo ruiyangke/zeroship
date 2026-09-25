@@ -118,11 +118,7 @@ async fn collect_invalid_bounds_are_refused_and_do_not_acknowledge() {
         },
     ] {
         assert!(matches!(
-            fixture
-                .app
-                .payloads(&fixture.objects)
-                .collect_job(&lease, invalid)
-                .await,
+            fixture.app.collect_job(&lease, invalid, &fixture.objects).await,
             Err(WorkflowServiceError::InvalidRequest(_))
         ));
     }

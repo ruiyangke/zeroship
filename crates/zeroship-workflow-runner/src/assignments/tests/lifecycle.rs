@@ -13,10 +13,7 @@ fn options() -> HostOptions {
                 execution_timeout: Duration::from_secs(5),
                 operation_timeout: Duration::from_secs(5),
                 retry_delay: Duration::from_secs(1),
-                reconciliation: ReconciliationOptions::default(),
-                collection: zeroship_workflow::service::collection::CollectionOptions::default(),
-                fanout: zeroship_workflow::service::fanout::FanoutOptions::default(),
-                propagation: zeroship_workflow::service::propagation::PropagationOptions::default(),
+                maintenance: MaintenanceOptions::default(),
             },
         },
         assignments: AssignmentOptions {
