@@ -829,6 +829,17 @@ part that dates, not the verdict.
    keeps passing its tests, and stops fencing. It moves only when that fence is replaced by
    something cacheable, not when a cache is put behind it.
 
+   **Only one of the two columns it reads is fence-relevant, which is where a replacement would
+   aim.** `apps.execution_zone_id` cannot change:
+   `db/migrations-ts/20260914000600_placement_eligibility.ts` installs a BEFORE UPDATE
+   trigger, `apps_frozen_execution_zone`, raising `check_violation`
+   with "an app's execution zone is fixed when the app is created". A value the database refuses
+   to move is one a cache can never hold staler than the truth. So the double read exists for
+   `deleted_at` alone, and a design that carries the frozen zone while leaving deletion a live
+   read would keep the fence the second read provides. That is a redesign rather than this
+   patch, and it does not remove the binding - deletion still needs a reader - but it names
+   which column the work is actually about.
+
    **The monotonic-read bracket is answered rather than assumed.** Control's response carries a
    `SourceWatermark` taken in the SAME statement as the facts, so it is at least the position of
    every change visible in that snapshot, and `publish` refuses an observation below the one the
