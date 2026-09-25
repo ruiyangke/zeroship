@@ -1504,10 +1504,13 @@ part that dates, not the verdict.
    it, so it can sign a short-lived statement binding instance, key thumbprint and zone, and the
    service verifies that against Control's ROLE key - which
    `crates/zeroship-workflow-server/src/server.rs` already refuses to start without.
-   `crates/zeroship-workflow/src/service/capability.rs` already mints and verifies
-   control-signed, audience-bound, short-lived capabilities with no production caller. What it
-   costs is that revocation stops being immediate and becomes bounded by the attestation's
-   lifetime, because Control cannot un-say what it has signed. That is the shape it should take.
+   `crates/zeroship-workflow/src/service/capability.rs` already mints and verifies control-signed,
+   audience-bound, short-lived capabilities, and the shape is not hypothetical:
+   `mint_signal_capability` and `verify_signal_capability` run in production from
+   `crates/zeroship-workflow/src/service/ingress.rs`. It is the app-scoped pair that still waits
+   on a caller. What it costs is that revocation stops being immediate and becomes bounded by the
+   attestation's lifetime, because Control cannot un-say what it has signed. That is the shape it
+   should take.
 
    **And it is the load-bearing one, not a peer of the others.** `zeroship.worker_instances` is
    what keeps the Control database binding alive: `PostgresWorkerRegistry` in
