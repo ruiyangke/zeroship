@@ -888,10 +888,33 @@ protocol. This extends a working client rather than inventing one.
    - **Then the backend**, cheapest first: the three methods whose halves the wire-pair test
      already binds, then `start`, then the two reads as two-phase.
    - **Then the merged heartbeat**, which cannot land until its timeout budget is settled.
-   - **Then `JournalLocation::Service`**, which is the flag itself and is the last thing to
-     flip, not the first.
+   - **Then the worker stops holding a journal**, which is the flag and is bigger than the enum.
+     Flipping `JournalLocation::CreatorSchema` to `Service(..)` does NOT point the worker at the
+     service's journal: `ProductionResources::resolve`
+     (`crates/zeroship-worker/src/workflow_host.rs`) builds its `HostStorage` over
+     `self.db.connection()`, the CREATOR database, whichever schema the enum picks, while
+     `RunService::connect` opens `workflow_manager` through
+     `ConnectionFactory::for_platform_url`. The arms differ by schema, not by database. So the
+     flag is either repointing the worker's journal connection at the platform database, or the
+     worker opening no journal at all and reaching the service over HTTP - and there is no
+     remote `WorkflowBackend` today.
 
    Step 6 follows once that is green.
+
+   **And the first piece is not the loop.** The sweeps split by what they need. `close_job`,
+   `fanout_job`, `propagation_job` and `reconcile_job`'s publications phase are journal-only and
+   the service could run them with nothing new but a claim path. `activate_job`, `cron_job` and
+   `management_job` are the only ones that reach `record_verified` in production - and they are
+   exactly the ones needing an artifact source, a journal-class deployment hold and the
+   authorization to take one. The cheap group writes no `deploys` row at all, so a dispatch loop
+   without them has three dead arms and the foreign key stays shut.
+
+   **Which raises a fork worth settling before anything is built.** Verifying a deployment means
+   reading its manifest. Control already owns the `zeroship.app_deploys` catalog and already
+   holds `dhl_`-class authority, while the workflow service would have to grow a blob-store
+   client and a Control grant it does not have. "Privilege follows the process" cuts toward
+   establishing the journal's `deploys` row where the artifacts and the hold authority already
+   are, rather than moving both to a service that has neither.
 
 6. **Delete the creator-schema path**, and say where each piece lives, because they are not all
    in the workflow crates: `ensure_journal` and its route in
