@@ -92,7 +92,7 @@
   {
     "file": "20260911000050_workflow_platform_grants.ts",
     "name": "workflow_platform_grants",
-    "opCount": 5
+    "opCount": 4
   },
   {
     "file": "20260911000060_workflow_policy_tables.ts",

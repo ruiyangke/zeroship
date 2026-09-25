@@ -373,13 +373,19 @@ async fn source_role_cannot_write_inputs_or_read_customer_storage(fixture: &Fixt
         "SELECT * FROM customer.__zeroship_workflow_history",
         "UPDATE zeroship.apps SET workflows_enabled=true",
         "DELETE FROM workflow_manager.workflow_policy_ledger",
-        // The policy inputs are no longer reachable at all. The service role
-        // holds no grant on the plan catalog and none on the app columns that
-        // carry policy, because it reads both over Control's endpoint now.
+        // The policy inputs are out of reach: the service role holds no grant
+        // on the plan catalog and none on the app columns that carry policy,
+        // because it reads both over Control's endpoint.
         "SELECT workflow_policy_json FROM zeroship.plans",
         "SELECT workflows_enabled FROM zeroship.apps",
         "SELECT plan_id FROM zeroship.apps",
         "SELECT archived_at FROM zeroship.apps",
+        // So is Control's deployment catalog. A management command names its
+        // deployment on the wire and this process decides nothing about which
+        // one is current, so it reads neither the app's pointer nor the
+        // catalog row.
+        "SELECT deploy_hash FROM zeroship.apps",
+        "SELECT id FROM zeroship.app_deploys",
     ] {
         let error = runtime.batch_execute(sql).await.unwrap_err();
         assert_eq!(
@@ -388,18 +394,14 @@ async fn source_role_cannot_write_inputs_or_read_customer_storage(fixture: &Fixt
             "{sql} must be refused for want of a grant"
         );
     }
-    // Rejection control: the columns placement and the deployment pointer
-    // still read directly ARE granted, so the four refusals above are the
-    // grant shrinking rather than the whole table having become unreadable.
-    for sql in [
-        "SELECT id, deleted_at, execution_zone_id FROM zeroship.apps",
-        "SELECT id, deploy_hash FROM zeroship.apps",
-    ] {
-        runtime
-            .batch_execute(sql)
-            .await
-            .unwrap_or_else(|error| panic!("{sql} must still be granted: {error}"));
-    }
+    // Rejection control: the columns placement reads ARE granted, so the
+    // refusals above are a column-scoped grant rather than the whole table,
+    // or the whole schema, having become unreadable to this role.
+    let granted = "SELECT id, deleted_at, execution_zone_id FROM zeroship.apps";
+    runtime
+        .batch_execute(granted)
+        .await
+        .unwrap_or_else(|error| panic!("{granted} must still be granted: {error}"));
 }
 
 #[compio::test]

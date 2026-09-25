@@ -63,10 +63,11 @@ export default {
       });
 
     // The manager reads an app's zone and terminal deletion, and an instance's
-    // zone and lease; its identity and status columns are granted separately in
-    // 20260911000050_workflow_platform_grants.ts. Column-scoped grants because
-    // `SELECT` on the table would also open creator-owned columns Control wrote
-    // into `apps`.
+    // zone and lease. The `id` it filters both rows by, and an instance's
+    // status, are granted in 20260911000050_workflow_platform_grants.ts, so the
+    // reach over each of these tables is the union of the two files and neither
+    // one alone. Column-scoped grants because `SELECT` on the table would also
+    // open creator-owned columns Control wrote into `apps`.
     raw({
       sql: "GRANT SELECT (execution_zone_id,deleted_at) ON zeroship.apps TO zeroship_workflow; "
         + "GRANT SELECT (execution_zone_id,expires_at) ON zeroship.worker_instances TO zeroship_workflow",
