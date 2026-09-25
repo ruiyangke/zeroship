@@ -23,9 +23,9 @@ The journal-hold authority is in - `svc/workflow` holds the journal pair, `Servi
 the role with no instance, and Control classifies the caller before decoding a body. What the
 first bullet still owes is the deployment registration. `activate`, `cron` and `management` read
 a deployment's executable today to check it against the journal's own row, and a hold-only host
-refuses that read by name - but Open 5 settles the remedy against growing the service an artifact
-store: Control parses the bundle when it publishes, so it asserts the `DeployRegistration` and
-the service records its own row. Then the lane can start.
+refuses that read by name. The remedy is settled against an artifact store by "And the fork
+resolves toward the pattern already in the tree": Control parses the bundle when it publishes, so
+it asserts the `DeployRegistration` and the service records its own row. Then the lane can start.
 
 Open 3 names three pieces behind a store of its own: splitting the corpus, severing the
 service's control-plane reads, and giving the service a deployment site. The first and third
@@ -1120,8 +1120,8 @@ protocol. This extends a working client rather than inventing one.
    `record_verified` in production - the third through
    `crates/zeroship-workflow/src/service/management/target.rs` - and they are exactly the ones
    needing an artifact source as they stand, a journal-class deployment hold and the
-   authorization to take one. Open 5 replaces that read with an asserted registration rather than
-   giving this service the artifacts.
+   authorization to take one. "And the fork resolves toward the pattern already in the tree" replaces
+   that read with an asserted registration rather than giving this service the artifacts.
    `release_hold_job` belongs with those rather than with the cheap group: it reaches
    `self.service.deployments` for a hold client
    (`crates/zeroship-workflow/src/service/hold_release.rs`) even though it writes no `deploys`
@@ -2075,9 +2075,10 @@ part that dates, not the verdict.
   executable they check the journal's row against, and a hold-only host refuses that by name.
   `collect` is a fourth, wanting a `PayloadDeleter` rather than anything here. A started lane
   would lease those rows away from the worker that can run them and then refuse, holding each for
-  a lease window on every tick. The remedy is NOT an artifact store: Open 5 settles that, and
-  giving this process a way to read creator bytes to unblock a sweep is the arm that entry
-  declines. Control asserts the `DeployRegistration` instead. The lane is built and exercised end
+  a lease window on every tick. The remedy is NOT an artifact store: "And the fork resolves
+  toward the pattern already in the tree" settles that, and giving this process a way to read
+  creator bytes to unblock a sweep is the arm it declines. Control asserts the
+  `DeployRegistration` instead. The lane is built and exercised end
   to end (`crates/zeroship-workflow-server/src/sweeps.rs`) and has no production caller on
   purpose. Built and unstarted is the correct state here, not an oversight to repair.
 
