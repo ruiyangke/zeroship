@@ -511,9 +511,9 @@ The creator engine accepts trusted `PolicySnapshot` values through immutable
 `PolicyBinding` capabilities and ordered `PolicyRefresh` tickets. App handles,
 queued backend calls and delivered execution retain the original authority across
 asynchronous work. The shared closed raw policy, authenticated lease client and
-server route exist. The server installs the native Control-storage provider and
-refuses missing or invalid operator policy. Production worker assignment and
-policy refresh still require host composition.
+server route exist. The server installs the policy store over Control's facts
+capability and refuses missing or invalid operator policy. Production worker
+assignment and policy refresh still require host composition.
 
 ### Native binding identity and policy revision
 
@@ -655,23 +655,28 @@ revalidation must reject that predecessor permanently across shortening,
 revocation and restoration. `PolicyGrant` retains the source through response
 construction and cannot serialize after source authority is lost.
 
-`policy::control::ControlPolicyStore` implements the direct Control-storage
-provider through native ORM. The server binds its platform credential to the
-`zeroship` schema and verifies source columns before serving. It reads no creator
-database. Its durable inputs are:
+`policy::control::ControlPolicyStore` holds Control's app-facts capability and
+this service's own publication schema. It binds no `zeroship` schema: the app and
+plan facts arrive over `POST /v1/app-facts`, and the one platform binding left in
+the server is `connect_eligibility` in
+`crates/zeroship-workflow-server/src/coordinator.rs`, which serves placement
+rather than policy. It reads no creator database. Its inputs are:
 
 | Input | Authority and contributing writers |
 | --- | --- |
-| `apps.plan_id`, `workflows_enabled`, `archived_at` | Registry app lifecycle and plan changes, billing plan-change transactions, and operator enablement. The database constraint makes deletion imply archive. |
-| `plans.workflow_policy_json` | A complete canonical `AppPolicy`, written by the native operator `set_plan_policy` API or equivalent operator provisioning. Missing or malformed JSON is unavailable, including for a disabled plan. |
-| `plans.workflows_allowed`, `archived` | Operator entitlement and catalog archival. Pricing updates omit the workflow policy column; startup seeding preserves archival and workflow authority. |
-| `workflow_rollout_config` | The required global row contains dispatch/ingress switches and positive `source_validity_ms`. The native `set_rollout` operation writes these together. Missing settings never select defaults. |
+| `AppSourceFacts` - plan id, workflows enabled, archived | Registry app lifecycle and plan changes, billing plan-change transactions, and operator enablement, served by Control. The database constraint makes deletion imply archive. |
+| `PlanSourceFacts` - the canonical policy | A complete canonical `AppPolicy`, written by the operator `set_plan_policy` API on `PlanPolicyStore` or equivalent operator provisioning. Missing or malformed JSON is unavailable, including for a disabled plan. |
+| `PlanSourceFacts` - entitlement and archival | Operator entitlement and catalog archival. Pricing updates omit the workflow policy column; startup seeding preserves archival and workflow authority. |
+| `workflow_manager.workflow_rollout_config` | The required global row contains dispatch/ingress switches and positive `source_validity_ms`. The `set_rollout` operation on `ControlPolicyStore` writes these together. Missing settings never select defaults. |
 
 The publication transaction explicitly requests read-committed isolation. It
 first performs an ID-only upsert on `workflow_policy_ledger`, creating an
 unpublished row or locking the existing publication without resetting it. Only
-after that wait does a relational statement read the selected app, plan and global
-settings together. It validates the complete policy, masks enablement and operator
+after that wait does it read the rollout row on the publication handle and
+observe the app and plan facts over the capability. Those are two authorities
+rather than one snapshot, and what orders them is `SourceWatermark`: `publish`
+refuses an observation carrying one below the watermark the ledger already holds.
+It validates the complete policy, masks enablement and operator
 switches, and publishes changed policy or source validity under an advanced
 revision. Unchanged values preserve the revision. The ledger retains its app ID
 as the sole primary key and has no cascading app deletion. Its unpublished state
@@ -2042,7 +2047,7 @@ Deployment prerequisites follow the effective management operation:
 | --- | --- |
 | Pause, resume, cancel | Journal-only operation with no deployment prerequisite. Cancellation cannot depend on loading an unrelated current bundle. |
 | Restart using the started deployment | Under the creator app/run lock, freeze the current source generation and its deployment identity/hash when the ordered command applies. Verify its existing held journal retention before committing the new generation. The manager does not need that deployment identity. |
-| Restart using the latest deployment | Resolve the target from trusted platform metadata when the manager accepts the command. Persist it in the immutable command identity and job. Creator preparation uses that exact deployment, and verifies its journal hold before the final fenced transaction. |
+| Restart using the latest deployment | Control names the deployment when it mints the command; the manager validates that the queue holds it and that the wire hash matches. Persist it in the immutable command identity and job. Creator preparation uses that exact deployment, and verifies its journal hold before the final fenced transaction. |
 
 The default full restart uses the latest deployment. A restart from a task uses
 the started deployment, and explicitly requesting the latest deployment for a
@@ -3103,10 +3108,12 @@ Detailed workflow errors stay in creator storage and authorized worker views.
 Metering remains trusted runtime infrastructure, never a customer-supplied result.
 
 Remote service transport uses authenticated TLS and validates the intended
-endpoint and audience. The native client accepts plaintext only for literal
-loopback development origins, rejects redirects, bounds streamed responses and
-returns closed failures. Body closure and response identity checks apply to nested
-metadata as well as top-level envelopes.
+endpoint and audience. The native client admits HTTPS, literal loopback, and the
+exact origins an operator lists in `plaintext_peers`, which is empty by default;
+it rejects redirects, bounds streamed responses and returns closed failures.
+Internal TLS is the end state that allowlist defers rather than replaces. Body
+closure and response identity checks apply to nested metadata as well as
+top-level envelopes.
 
 Crate boundaries make authority reviewable; database grants, network isolation,
 trusted runtime bindings and transaction predicates enforce it. The protocol
@@ -3241,19 +3248,23 @@ Deployment prerequisites belong to executable operations, with an optional nativ
 queue projection checked against the operation and immutable digest. Recovery
 keeps activation provenance without retaining its bundle; each pending duty job
 must decode as its recorded maintenance kind. Closed management commands carry
-the management revision and resolved restart policy. The native current-deployment reader,
-column-scoped platform grants and server readiness checks are composed into
-authoritative acceptance. Management request anchors, per-run ordering and
-provisional barriers share the queue transaction; barrier and command eligibility
-filters precede candidate limiting. Linked management settlement and creator
+the management revision and resolved restart policy. The deployment Control names
+on the wire, the queue hold that must already cover it and server readiness checks
+are composed into authoritative acceptance. Management request anchors, per-run
+ordering and provisional barriers share the queue transaction; barrier and
+command eligibility filters precede candidate limiting. Linked management
+settlement and creator
 management delivery and bounded payload collection are implemented.
 
-Native management contracts exercise source changes during hold acquisition,
-competing acceptance, original-request replay after catalog changes, damaged
-request anchors and pending barriers, ordered settlement and enrollment changes.
-Backlog cases cross native page boundaries under the normal queue transaction
-deadline. PostgreSQL lock observations verify that status waits behind acceptance
-before reading the linked command and job; SQLite exercises the same receipt and
+Native management contracts exercise frozen selection, refused acceptance, a
+refused wire deployment, deployment presence under the deploy policy and
+competing acceptance in
+`crates/zeroship-workflow-manager/tests/management/acceptance.rs`, and damaged
+request anchors, pending barriers and ordered settlement in its `barriers.rs`
+neighbour. Backlog cases cross native page boundaries under the normal queue
+transaction deadline. PostgreSQL lock observations verify that status waits
+behind acceptance before reading the linked command and job; SQLite exercises
+the same receipt and
 unknown-scope behavior. These tests live in
 `crates/zeroship-workflow-manager/tests/management.rs` and its companion modules.
 
@@ -3643,7 +3654,7 @@ archive and retains the last valid deployment when current sources fail to build
 | Decision | Fixed requirement and remaining choice |
 | --- | --- |
 | Placement eligibility and capacity provider | Decided: Control's frozen app and enroller zones, read under the placement locks, and a declarative per-zone target applied by an injected provider. Providers that start processes remain, pending the production orchestrator. |
-| Archive acknowledgement | The direct Control source provides bounded convergence under original observation validity. Define any stronger execution-quiescence evidence separately from calendar acknowledgement or lease expiry. |
+| Archive acknowledgement | Control's facts capability provides bounded convergence under original observation validity. Define any stronger execution-quiescence evidence separately from calendar acknowledgement or lease expiry. |
 | Complete job envelopes | Operation-specific deployment prerequisites, frozen manager restart targets and linked management outcomes are implemented. Collection, topic fanout and dependency propagation have durable pages, receipts and delivered consumers. |
 | Receipt retirement | Define admissibility fences and publication/settlement watermarks before deleting job deduplication state. Retain it until that proof exists. |
 | Dispatch fairness and persistent failure | Per-app dispatch tickets rotate successfully claimed jobs behind waiting work without changing due times. Define cross-app host fairness, management priority and observable parking/retry policy for failures before claim without deleting accepted work. |
