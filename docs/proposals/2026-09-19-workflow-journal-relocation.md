@@ -976,6 +976,22 @@ protocol. This extends a working client rather than inventing one.
    first claimant whose authority is asserted rather than recorded, in the one table an operator
    reads to answer which process is executing an app.
 
+   **And the ways around deciding it are each worse.** Issuing the service a placement means
+   widening a lane whose own header reads "Placement admits an app onto a worker only within
+   Control's zone and enrollment eligibility. Spare capacity is never authority"
+   (`crates/zeroship-workflow-manager/src/coordinator/placement.rs`), and admission reads a zone
+   match, a live instance, a ready registration and spare capacity - none of which a non-worker
+   claimant has for `eligible` to evaluate. Landing the sweeps and the flag together does not
+   collapse two bullets but the whole list, because the sweeps are what write the first `deploys`
+   row and every bullet below them needs one to verify against. And having the service claim
+   everything and hand execution outward is barred twice: `TaskTransport`'s only dispatcher is
+   `RunnerSlot`, which no production code constructs, and
+   `workflow_process_dependencies_follow_crate_ownership` (`xtask/tests/workflow_architecture.rs`)
+   forbids these processes the runner outright -
+   `!["zeroship-workflow-runner", "zeroship-storage"].contains(&dependency)` - so the service
+   cannot host a dispatcher at all. What is left is the authority question, and it wants an
+   answer rather than a route around it.
+
    **And the flag's second option removes the call that builds the backend.** Reaching the
    service over HTTP is not only a missing implementation. `AppWorkflows::into_backend`
    (`crates/zeroship-workflow/src/service/backend.rs`) is what produces the backend today, and it
@@ -1012,8 +1028,9 @@ protocol. This extends a working client rather than inventing one.
    only one of the journal's two sites can reach that diagnosis under an attempt", "One guard has
    no merged equivalent", and "And the merged reply has one validated half and one unvalidated
    one". The flag: "Then the worker stops holding a journal", "And the order needs a second
-   claimant, which nothing will issue", "Which moves the question from exclusivity to authority"
-   and "And the flag's second option removes the call that builds the backend".
+   claimant, which nothing will issue", "Which moves the question from exclusivity to authority",
+   "And the ways around deciding it are each worse" and "And the flag's second option removes the
+   call that builds the backend".
 
    **And the first piece is not the loop.** The sweeps split by what they need. `close_job`,
    `fanout_job`, `propagation_job` and `reconcile_job`'s publications phase are journal-only and
