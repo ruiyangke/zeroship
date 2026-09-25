@@ -550,6 +550,26 @@ protocol. This extends a working client rather than inventing one.
    `crates/zeroship-worker/src/workflow_creator.rs` constructs on `WorkerTasks`, whose `stage`
    opens journal transactions mid-execution with no manager call to merge into.
 
+   **That first one is not a line of wiring; it is a credential question.** `AppDeployments`
+   (`crates/zeroship-workflow/src/service/deployments.rs`) holds a `BlobStore`, a byte budget
+   and a map of hold clients - nothing the server could not have - so installing one compiles.
+   It would also do nothing. None of the four run calls the server serves reads
+   `self.deployments`, and no endpoint it serves reaches `record_verified`: every path to that
+   writer runs through the runner's delivery loop, which
+   `workflow_process_dependencies_follow_crate_ownership` forbids the server to reach. The
+   table therefore stays empty, and `__zeroship_workflow_run_deploy` is an `ON DELETE RESTRICT`
+   foreign key, so the journal cannot hold a run at all until something writes a deploy. That
+   is why `crates/zeroship-workflow-server/tests/http_runs.rs` seeds both by raw SQL.
+
+   **And the hold `restart` waits on belongs to another principal.** The journal holder is
+   `HoldScope::for_app`, while the server's `ControlHolds` takes `QueueDeploymentHolds`, whose
+   scope is the queue's. `crates/zeroship-core/src/service_identity.rs` grants `svc/workflow`
+   the queue hold pair and `svc/worker` the direct one, and
+   `crates/zeroship-workflow/src/deployment_holds/remote.rs` refuses any signer that is not an
+   enrolled worker instance. Letting the service take a journal hold means granting it an
+   endpoint only a worker may call today - the same credential question Open 3 carries, not a
+   `.with_deployments(...)` line.
+
    **Where the merged client lives: a port trait in the client, implemented in the runner.**
    The gate is not what decides this, and reading it as the constraint understates the problem.
    `crates/zeroship-workflow/Cargo.toml` declares `zeroship-workflow-client` in
