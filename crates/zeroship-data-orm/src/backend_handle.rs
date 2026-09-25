@@ -231,8 +231,46 @@ pub(crate) async fn read_raw_column_value(
         schema,
         route.sql_registration(),
     )?;
-    let rows = crate::exec::run_sql(route, &query.sql, &query.params).await?;
+    let rows = read_unmasked_on_route(route, &query.sql, &query.params).await?;
     Ok(native_scalar(rows, "_raw"))
+}
+
+/// Run the real-value SELECT on the caller's own route, under the authority the
+/// dialect says a `__zs_raw__` column needs.
+///
+/// This is [`crate::exec::run_sql`]'s routing with one substitution, and the
+/// routing is the half that must not change: the in-transaction arm takes the
+/// creator's parked lane, so the read sees writes the creator has not committed
+/// (`routed_read_tests::a_routed_raw_read_follows_the_transaction_lane_on_sqlite`),
+/// and a read moved to a pool lane would answer `NoRow` for a row that is
+/// there.
+///
+/// What it substitutes is `ScopedExecutor::read_unmasked` for
+/// `ScopedExecutor::query`. Neither capability role holds `SELECT` on the
+/// column this statement projects, so the ordinary read is refused `42501` by
+/// the server; the host answers what its own dialect requires instead of this
+/// function deciding, which is why there is no downcast here.
+async fn read_unmasked_on_route(
+    route: &TxRoute,
+    sql: &str,
+    params: &[Value],
+) -> Result<Vec<Value>, DbError> {
+    if route.in_tx() {
+        route.check_scope()?;
+        return crate::transaction::driver::execute_operation(&route.key(), async {
+            let lane = crate::exec::take_tx_lane(route)?;
+            route.backend().validate_session(lane.client())?;
+            route
+                .backend()
+                .read_unmasked(route.binding(), Some(lane.client()), sql, params)
+                .await
+        })
+        .await;
+    }
+    route
+        .backend()
+        .read_unmasked(route.binding(), None, sql, params)
+        .await
 }
 pub(crate) async fn read_raw_column_bytes(
     route: &TxRoute,

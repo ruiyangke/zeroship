@@ -18,7 +18,36 @@ pub(crate) async fn scoped_rows(
     sql: &str,
     params: &[Value],
 ) -> Result<Vec<compio_postgres::Row>, DbError> {
-    with_scoped_transaction(pool, binding, authority, async |tx| {
+    with_scoped_transaction(pool, binding, authority, None, async |tx| {
+        let bindings: Vec<_> = params.iter().map(super::params::Parameter).collect();
+        let refs: Vec<&(dyn compio_postgres::types::ToSql + Sync)> =
+            bindings.iter().map(|value| value as _).collect();
+        tx.query(sql, &refs)
+            .await
+            .map_err(|e| pg_error::classify(&e))
+    })
+    .await
+}
+
+/// Read a masked field's real value on a short transaction of this pool's own.
+///
+/// **There is no restore half here, and its absence is the point.** The setup
+/// batch narrows to the binding and this appends the assumption of the unmask
+/// role to it, so the elevated statement is the only one the transaction runs;
+/// `SET LOCAL` is discarded at the commit or rollback that ends it, and the
+/// lease is returned afterwards. Narrowing back would have nothing left to
+/// protect. The creator's OWN transaction is the case that does, and it is
+/// bracketed where it runs
+/// (`crate::backend::postgres::executor::read_unmasked_on_session`).
+pub(crate) async fn scoped_elevated_rows(
+    pool: &Rc<compio_postgres::Pool>,
+    binding: &DbBinding,
+    authority: SessionAuthority,
+    assume_role: Option<&str>,
+    sql: &str,
+    params: &[Value],
+) -> Result<Vec<compio_postgres::Row>, DbError> {
+    with_scoped_transaction(pool, binding, authority, assume_role, async |tx| {
         let bindings: Vec<_> = params.iter().map(super::params::Parameter).collect();
         let refs: Vec<&(dyn compio_postgres::types::ToSql + Sync)> =
             bindings.iter().map(|value| value as _).collect();
@@ -37,7 +66,7 @@ pub(crate) async fn scoped_execute(
     sql: &str,
     params: &[Value],
 ) -> Result<u64, DbError> {
-    with_scoped_transaction(pool, binding, authority, async |tx| {
+    with_scoped_transaction(pool, binding, authority, None, async |tx| {
         let bindings: Vec<_> = params.iter().map(super::params::Parameter).collect();
         let refs: Vec<&(dyn compio_postgres::types::ToSql + Sync)> =
             bindings.iter().map(|value| value as _).collect();
@@ -48,10 +77,18 @@ pub(crate) async fn scoped_execute(
     .await
 }
 
+/// Run one operation on a short transaction of this pool's own.
+///
+/// `assume_role` is appended to the setup batch, after the narrowing and the
+/// budgets, for the one caller whose statement needs a privilege the binding
+/// role does not carry. It rides the SAME batch so its failure is classified as
+/// a session-setup failure rather than as the statement's, and so PostgreSQL's
+/// abort-at-first-failure leaves the operation unreached.
 async fn with_scoped_transaction<T>(
     pool: &Rc<compio_postgres::Pool>,
     binding: &DbBinding,
     authority: SessionAuthority,
+    assume_role: Option<&str>,
     operation: impl for<'a, 'conn> AsyncFnOnce(
         &'a compio_postgres::Transaction<'conn>,
     ) -> Result<T, DbError>,
@@ -72,7 +109,11 @@ async fn with_scoped_transaction<T>(
         err
     })?;
 
-    let setup_sql = autocommit_local_session_setup_sql(binding, authority)?;
+    let mut setup_sql = autocommit_local_session_setup_sql(binding, authority)?;
+    if let Some(assume_role) = assume_role {
+        setup_sql.push_str("; ");
+        setup_sql.push_str(assume_role);
+    }
     tx.simple_query(&setup_sql).await.map_err(|e| {
         let mut classified = match authority {
             SessionAuthority::PerBindingRole => {

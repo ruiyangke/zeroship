@@ -206,6 +206,27 @@ pub fn database_capability_role_name(
     refuse_truncation(format!("zs_db_{database_id}_{}", capability.role_suffix()))
 }
 
+/// Compose the role that reaches a database's masked real-value columns.
+///
+/// It is the only role an apply grants `SELECT` on a `__zs_raw__` column to.
+/// Both capability roles are granted the mask-bearing column and withheld the
+/// sibling that holds the real value, so the plaintext of a classified field is
+/// reachable only by assuming this role for the statement that reads it - which
+/// is what keeps the audited unmask dispatcher the one path to that value
+/// rather than one path among several.
+///
+/// A binding is granted membership in it `WITH INHERIT FALSE`, so the privilege
+/// is never ambient on a narrowed session: a `SELECT *` under the binding role
+/// still fails on the withheld column.
+///
+/// # Errors
+///
+/// [`RoleNameTooLong`] rather than a truncated name. Truncation here would eat
+/// the suffix that tells this role from the database's other three.
+pub fn database_unmask_role_name(database_id: &str) -> Result<String, RoleNameTooLong> {
+    refuse_truncation(format!("zs_db_{database_id}_unmask"))
+}
+
 /// Compose the role one binding narrows to.
 ///
 /// One role per binding, and the binding id is last, which is exactly why this
@@ -302,20 +323,26 @@ mod tests {
             database_capability_role_name("dbs_demo", DatabaseCapability::ReadOnly).unwrap(),
             "zs_db_dbs_demo_ro"
         );
+        assert_eq!(
+            database_unmask_role_name("dbs_demo").unwrap(),
+            "zs_db_dbs_demo_unmask"
+        );
         assert_eq!(binding_role_name("bnd_demo").unwrap(), "zs_bind_bnd_demo");
     }
 
-    /// The four names one database and one binding produce are four roles.
+    /// The five names one database and one binding produce are five roles.
     ///
-    /// The migrator owns the schema and the two capability roles carry
-    /// different grants, so any pair collapsing onto one name would hand an
-    /// app authority the design withheld.
+    /// The migrator owns the schema, the two capability roles carry different
+    /// grants and the unmask role carries the real-value `SELECT` neither of
+    /// them holds, so any pair collapsing onto one name would hand an app
+    /// authority the design withheld.
     #[test]
-    fn one_database_produces_four_distinct_roles() {
+    fn one_database_produces_five_distinct_roles() {
         let names = [
             database_migrator_role_name("dbs_demo").unwrap(),
             database_capability_role_name("dbs_demo", DatabaseCapability::ReadWrite).unwrap(),
             database_capability_role_name("dbs_demo", DatabaseCapability::ReadOnly).unwrap(),
+            database_unmask_role_name("dbs_demo").unwrap(),
             binding_role_name("bnd_demo").unwrap(),
         ];
         let mut distinct = names.to_vec();
@@ -333,6 +360,10 @@ mod tests {
         assert_ne!(
             database_capability_role_name("dbs-demo", DatabaseCapability::ReadWrite).unwrap(),
             database_capability_role_name("dbs_demo", DatabaseCapability::ReadWrite).unwrap()
+        );
+        assert_ne!(
+            database_unmask_role_name("dbs-demo").unwrap(),
+            database_unmask_role_name("dbs_demo").unwrap()
         );
         assert_ne!(
             binding_role_name("bnd-demo").unwrap(),
@@ -421,6 +452,13 @@ mod tests {
                 "{capability:?} must be refused"
             );
         }
+        assert_eq!(
+            database_unmask_role_name(&database),
+            Err(RoleNameTooLong {
+                actual_bytes: "zs_db__unmask".len() + POSTGRES_IDENTIFIER_MAX_BYTES,
+                max_bytes: POSTGRES_IDENTIFIER_MAX_BYTES,
+            })
+        );
     }
 
     #[test]
