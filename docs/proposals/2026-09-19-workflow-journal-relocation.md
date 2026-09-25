@@ -933,16 +933,52 @@ protocol. This extends a working client rather than inventing one.
 
    Step 6 follows once that is green.
 
+   **And the order passes through a state the queue has no shape for.** Between the first bullet
+   and the sixth the service claims the sweeps from its own journal while the worker still claims
+   `Advance` for creator code. Both claims reach `bound`
+   (`crates/zeroship-workflow-manager/src/coordinator/placement.rs`), both need a placement on the
+   same app, and `admit` in that file will not issue a second one. So every intermediate state
+   this order produces before the flag needs two claimant identities on one app. Either placement
+   stops being exclusive, or the sweeps and the flag land together rather than at opposite ends of
+   this list - and the second reading makes the flag day larger than step 6 alone, not smaller.
+
+   **And the flag's second option removes the call that builds the backend.** Reaching the
+   service over HTTP is not only a missing implementation. `AppWorkflows::into_backend`
+   (`crates/zeroship-workflow/src/service/backend.rs`) is what produces the backend today, and it
+   takes the journal in order to refuse a mismatch - `if !self.binding.belongs_to(&journal.policies)`
+   - which `into_backend_refuses_a_journal_from_another_policy_registry`
+   (`crates/zeroship-workflow/src/service/tests/backend_journal.rs`) binds, with a control
+   differing only in the registry. A worker holding no journal has no `WorkflowService` to pass,
+   so that refusal loses its input rather than its implementation, and the pairing it enforces has
+   to be re-established across the wire or dropped on purpose. `CreatorRuntime`
+   (`crates/zeroship-workflow-runner/src/assignments.rs`) states the same requirement in prose:
+   the backend "must come from `app` itself, so it carries the same policy generation."
+
+   The V8 factory is ready for that arm even so. `SharedWorkflowBackend` is
+   `Arc<dyn WorkflowBackend>` (`crates/zeroship-workflow/src/backend.rs`) and the factory in
+   `crates/zeroship-workflow-v8/src/lib.rs` already resolves each arm to it. What is concrete
+   sits above it: `CreatorRuntime` carries `app: AppWorkflows` and `backend: AppBackend`, and
+   `WorkflowBinding::service` takes an `AppBackend` by value. The arm also has to pick a side of
+   an asymmetry - `bind_runtime_descriptor` checks the runtime's app identity against
+   `backend.app_id()` for the service arm and lets the ready arm through, because that one
+   selects its backend by the runtime's own identity.
+
    **Where each step's detail lives**, by heading rather than by position, since positions move.
    The sweeps: "And the first piece is not the loop", "And two of the nine cannot move at all as
    they stand", "Neither needs a store in the service", and for the claim set "And do not reach
-   for the classification that already exists". The grant: "That decision has a second half".
-   The registration: "And the fork resolves toward the pattern already in the tree". The reserve
-   and confirm: "One obligation is genuinely new". The backend: "An HTTP `WorkflowBackend`, which
-   is not the easy half" and the four bullets under it. The heartbeat: "The timeout budget does
-   not survive the merge", "And the mismatch pre-dates the merge", "One guard has no merged
-   equivalent", and "And the merged reply has one validated half and one unvalidated one". The
-   flag: "Then the worker stops holding a journal" carries its own.
+   for the classification that already exists", "The queue admits one claimant identity per app",
+   "And when it is written it cannot be an arm at the claim site" and "And `candidate` has a
+   second caller, which decides something else". The grant: "That first one is not a line of
+   wiring; it is a credential question" and "And the hold `restart` waits on belongs to another
+   principal". The registration: "And the fork resolves toward the pattern already in the tree".
+   The reserve and confirm: "One obligation is genuinely new". The backend: "An HTTP
+   `WorkflowBackend`, which is not the easy half" and the four bullets under it. The heartbeat:
+   "The timeout budget does not survive the merge", "And the mismatch pre-dates the merge", "And
+   the clock ceiling has a second copy", "And only one of the journal's two sites can reach that
+   diagnosis under an attempt", "One guard has no merged equivalent", and "And the merged reply
+   has one validated half and one unvalidated one". The flag: "Then the worker stops holding a
+   journal", "And the order passes through a state the queue has no shape for" and "And the
+   flag's second option removes the call that builds the backend".
 
    **And the first piece is not the loop.** The sweeps split by what they need. `close_job`,
    `fanout_job`, `propagation_job` and `reconcile_job`'s publications phase are journal-only and
