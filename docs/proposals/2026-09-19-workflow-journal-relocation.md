@@ -1484,7 +1484,8 @@ part that dates, not the verdict.
    close hands a run's work to is a typed platform-minted column that `finish_run` in the same
    file writes beside the terminal `RunState::ContinuedAsNew` in
    `crates/zeroship-core/src/workflow_coordination/lifecycle.rs`, and it reaches a caller as
-   `RunStatus.continued_as_new_run_id` in `crates/zeroship-workflow/src/operations.rs`. So
+   `RunStatus.continued_as_new_run_id` in
+   `crates/zeroship-core/src/workflow_coordination/lifecycle.rs`. So
    platform data on a generation needs no home inside a payload.
 
    **An empty list is not a payload-free journal.** The assertion matches a column's type or its
