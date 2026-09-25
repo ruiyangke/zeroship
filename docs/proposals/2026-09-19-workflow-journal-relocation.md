@@ -944,8 +944,42 @@ protocol. This extends a working client rather than inventing one.
    and `read` already answer: the journal decision crosses, the bytes stay with the process
    holding the store. What is genuinely unsettled is which process claims those two jobs once the
    worker no longer holds the journal, because the capability and the journal end up on opposite
-   sides. Settle it before the claim filter is written, since the filter is where the answer
-   shows up.
+   sides. The filter is not where the answer shows up, though, and the question ahead of it is
+   not about operations at all.
+
+   **The queue admits one claimant identity per app, so a filter presupposes what placement
+   refuses.** Every claim reaches `bound`
+   (`crates/zeroship-workflow-manager/src/coordinator/placement.rs`), which denies a claimant
+   holding no placement for the app - `let row = placement(tx, app, worker).await?.ok_or(Error::Denied)?;`
+   - and `admit` in the same file will not create a second one:
+   `if self.has_owner(&tx, app, true).await? { return Ok(None); }`. Nothing in the tree uses
+   `SKIP LOCKED`. Concurrent claimants serialize instead, on the per-app `queue_scopes` row
+   through `lock_scope` (`crates/zeroship-workflow-manager/src/queue.rs`), an update-as-lock
+   that requires `Output::Count(1)` and answers `Error::Denied` otherwise - so a second claimant
+   blocks rather than skipping to another row. A service that claims anything must therefore hold
+   the app's placement, which is the placement the worker needs in order to claim `Advance`.
+   Settle whether placement stops being exclusive BEFORE settling which process claims `Cron`
+   and `Collect`, because a filter dividing operations between two claimants describes a
+   concurrency the queue does not offer.
+
+   **And when it is written it cannot be an arm at the claim site.** `candidate`
+   (`crates/zeroship-workflow-manager/src/scheduling.rs`) answers `Result<Option<String>, Error>`
+   - one id, ordered by `dispatch_order`, with nothing that tries the next one - so an arm
+   refusing a row after it is loaded would head-of-line block, one unclaimable job at the front
+   stalling everything behind it. The filter belongs inside `candidate`'s own query, over the
+   `jobs::operation_kind` text column that `jobs_operation_idx` already indexes
+   (`crates/zeroship-workflow-manager/schema/schema.ts`). A string predicate loses the
+   exhaustiveness `maintenance_job` has, and the way back is to derive the admitted strings from
+   a total match over `JobOperation`, as `models::operation_kind`
+   (`crates/zeroship-workflow-manager/src/models.rs`) already does for the write side. A list
+   written by hand in the query cannot.
+
+   **And `candidate` has a second caller, which decides something else.** `Capacity::visit`
+   (`crates/zeroship-workflow-manager/src/capacity.rs`) asks it whether an app has claimable
+   work, passing no ceiling on purpose: "an app is due while any row remains claimable, and the
+   claim transaction decides deliverability." Narrow the claim without narrowing this and an app
+   whose queue holds only service-claimable jobs still reads as due, takes a worker placement,
+   and records demand for work that worker cannot claim.
 
    **Neither needs a store in the service, and they need different things.** `PayloadDeleter`
    (`crates/zeroship-workflow/src/service/payloads.rs`) is one method, `delete(app, id)` - ids
