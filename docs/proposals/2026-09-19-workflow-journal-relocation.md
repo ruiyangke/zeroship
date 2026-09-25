@@ -12,11 +12,14 @@ endpoints rows to operate on.
 
 Open 3 names three pieces behind a store of its own: splitting the corpus, severing the
 service's control-plane reads, and giving the service a deployment site. The first and third
-have landed, and the second is part done - the two tables the service owns have moved into
-`workflow_manager`, which deletes a cross-database write rather than transporting it, and what
-remains is the reads that stay. The transport fence that blocked reaching Control is decided and
-built - plaintext now reaches only peers an operator named - so what is left of that piece is
-the reads themselves, one of which is authentication and still a decision.
+have landed, and the second is nearly done. The two tables the service owns have moved into
+`workflow_manager`, which deletes a cross-database write rather than transporting it, and the
+policy inputs now arrive over `POST /v1/app-facts` rather than a binding on Control's schema.
+The transport fence that blocked reaching Control is decided and built - plaintext now reaches
+only peers an operator named. Two reaches into `zeroship` remain: placement eligibility in
+`crates/zeroship-workflow-server/src/coordinator.rs`, which stays deliberately because its two
+reads exist so they can disagree, and the worker registry lookup that authenticates every
+call, which is still a decision.
 
 The journal is installed into the creator's own schema today and written by the worker over the
 creator's own connection; this moves storage and the durable fold into the workflow service,
