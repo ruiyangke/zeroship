@@ -539,10 +539,43 @@ protocol. This extends a working client rather than inventing one.
    `release` as the control. No production caller reaches that refusal - `reclaim`
    (`crates/zeroship-workflow/src/service/delivery.rs`) defers the whole delivery unless it can
    expire the held task and null the column first, and `poll` expires it in place - so the test
-   reaches it directly through `claim_again`. What no test binds is the part the merge makes
-   reachable: both arms run inside ONE transaction under the app lock, so nothing says whether
-   two claimants on two connections are ordered at all, nor what the loser sees when it
-   re-evaluates the filter after the winner commits. Write that one; the filter has its test.
+   reaches it directly through `claim_again`. Both arms run inside ONE transaction under the app
+   lock, so neither says whether two claimants on two connections are ordered.
+
+   **The two-connection test exists and does not force its race.**
+   `postgres_independent_orm_hosts_serialize_admission_and_claims`
+   (`crates/zeroship-workflow/src/service/tests/orm.rs`) opens two stores and runs
+   `futures::join!(first.poll(..), second.poll(..))`, then asserts
+   `assert_ne!(a.is_some(), b.is_some())`. On a single-threaded executor the first poll may
+   finish before the second begins, and that assertion passes identically either way - so its
+   name claims a serialization it does not establish. Fixing it is the step's real work, not
+   writing a third test beside it.
+
+   **What such a test must carry, or it measures nothing.** Force the contention with a held
+   blocker rather than with `join!`: a third service takes the app-state row and two claimants
+   pile up behind it, as `postgres_concurrent_app_revocations_each_advance_the_signal_epoch`
+   (`crates/zeroship-workflow/src/service/tests/ingress_models.rs`) already does. Then observe
+   the wait positively through `pg_stat_activity`, with the term naming
+   `__zeroship_workflow_app_state` that
+   `postgres_collection_rechecks_references_after_waiting_for_completion`
+   (`crates/zeroship-workflow/src/service/tests/payloads.rs`) uses, because that term is what
+   separates a claimant blocked at the app lock from one blocked anywhere else. Without the
+   probe the test stays green under the one mutation that matters: turning `lock_app_state`'s
+   `$inc` update into a read leaves `assign` correct and simply stops ordering the claimants.
+
+   **Assert the production answer, which is not an error.** `poll_inner`
+   (`crates/zeroship-workflow/src/service/tasks.rs`) re-reads the run after `lock_run` and
+   commits out when `due_at` is still ahead of now, and the winner's `assign` set `due_at` to
+   its lease expiry - so the loser gets `Ok(None)`, and the candidate filter excludes the run on
+   the next sweep. The arm worth writing is the one that would go red if that gate were deleted:
+   the loser would reach the compare-and-swap and `poll` would hand a worker `Err(Conflict)`
+   where it owed it "no work".
+
+   Two facts bound how it is built. Two `begin()` calls on ONE `OrmStore` do not error, they
+   hang - admission is per lane set on the `OrmContext` the store owns - so a second claimant
+   needs a second store, which `crates/zeroship-workflow/src/service/tests/orm.rs` already
+   spells. And it is postgres-only: SQLite reserves its writer as the transaction opens, so its
+   loser blocks inside `begin` and a sqlite arm would silently measure a different thing.
 
    **And most of that filter cannot miss.** Under `lock_run` the `generation` and `lease_epoch`
    terms are read back from the row the lock pins, inside the same call, so only a non-null
