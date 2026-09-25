@@ -56,6 +56,16 @@ The workflow manager (`zeroship-workflow-server`, over
 `crates/zeroship-workflow-manager/`) owns calendar evaluation, the durable job
 queue, delivery attempts, placement and recovery responsibility. It reads the
 platform database under its own login and holds no creator database connection.
+Outside its own `workflow_manager` schema that login is column-scoped: named
+columns of `zeroship.apps` and `zeroship.worker_instances` for placement and
+worker identity, and the shared assertion replay store
+(`db/migrations-ts/20260911000050_workflow_platform_grants.ts` and
+`db/migrations-ts/20260914000600_placement_eligibility.ts`, whose union is the
+whole of it). Control-owned app and plan facts sit outside it. They arrive over
+Control's authenticated `POST /v1/app-facts` endpoint, behind the
+`AppFactsSource` capability in
+`crates/zeroship-workflow-manager/src/app_facts.rs`, so the manager holds no
+binding on Control's tables.
 
 A creator run is executed by the `zeroship-worker` that the manager placed the
 app on (`crates/zeroship-worker/src/workflow_host.rs`). That host owns the
@@ -73,9 +83,14 @@ transport through the gateway.
 The workflow manager's policy provider requires a provisioned global
 `source_validity_ms` and complete `plans.workflow_policy_json` values. Choose the
 finite validity as an operator bound on stale authority, then use native
-`ControlPolicyStore::set_rollout` and `set_plan_policy`, or explicit SQL
-provisioning. Either way the credential has to reach both the switches in
-`workflow_manager` and the plan rows in `zeroship`, which no service login does.
+`ControlPolicyStore::set_rollout` for the switches and
+`PlanPolicyStore::set_plan_policy` for the plan rows, or explicit SQL
+provisioning. Both writes are operator acts on separate credentials, and no
+service login covers either: `zeroship_workflow` holds only SELECT on
+`workflow_rollout_config`
+(`db/migrations-ts/20260911000060_workflow_policy_tables.ts`) and nothing at all
+on `zeroship.plans`
+(`db/migrations-ts/20260911000050_workflow_platform_grants.ts`).
 Plan policy follows the closed `AppPolicy` contract in
 `crates/zeroship-core/src/workflow_policy.rs`. Missing fields are not defaulted.
 The SQL placeholders below require that chosen validity when inserting the global
