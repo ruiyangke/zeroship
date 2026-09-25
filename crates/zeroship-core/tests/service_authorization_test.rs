@@ -97,8 +97,16 @@ fn assert_endpoint(
     assert_eq!(endpoint.path_template(), path_template);
 }
 
+/// Each operation's destination, method and path template, pinned by value.
+///
+/// The list is written out rather than derived, because a triple derived from
+/// the constant it checks would agree with whatever the constant says. What is
+/// derived is the POPULATION: the assertions after the loop bind this list to
+/// the grants the table hands out and to `CATALOG`, so an operation cannot be
+/// added to the platform and left here unpinned.
 #[test]
 fn endpoint_catalog_records_exact_measured_operations() {
+    let mut recorded: BTreeSet<ServiceEndpoint> = BTreeSet::new();
     for (endpoint, destination, method, path_template) in [
         (
             endpoints::WORKFLOW_VERIFY_ASSIGNMENT,
@@ -323,9 +331,61 @@ fn endpoint_catalog_records_exact_measured_operations() {
             "GET",
             "/logs/{app_id}",
         ),
+        (
+            endpoints::CDC_SUBSCRIBE,
+            "cdc",
+            "GET",
+            "/internal/v1/cdc/subscribe",
+        ),
+        (
+            endpoints::MIGRATE_SCHEMA_BUNDLE,
+            "migrate-server",
+            "POST",
+            "/v1/schema-bundles/apply",
+        ),
+        (
+            endpoints::WORKFLOW_JOURNAL_ENSURE,
+            "workflow",
+            "POST",
+            "/v1/journal/ensure",
+        ),
     ] {
         assert_endpoint(endpoint, destination, method, path_template);
+        recorded.insert(endpoint);
     }
+
+    // The population this test rules on is hand-written, so it cannot report
+    // the operation it forgot. Two bindings close that, and neither is a
+    // literal any edit to the lists can restate.
+    //
+    // The floor is derived from the table at runtime: an operation some
+    // principal is granted is a MEASURED operation, so it is one this test owes
+    // a destination, a method and a path template. Granting it without pinning
+    // it here now fails instead of passing silently.
+    let granted: BTreeSet<ServiceEndpoint> = service_allowlist()
+        .iter()
+        .flat_map(|row| row.endpoints().iter().copied())
+        .collect();
+    assert!(
+        !granted.is_empty(),
+        "the allowlist grants nothing, so the completeness floor below rules on no operation"
+    );
+    let unpinned: Vec<ServiceEndpoint> = granted.difference(&recorded).copied().collect();
+    assert!(
+        unpinned.is_empty(),
+        "granted operations carry no pinned destination, method or path template: {unpinned:?}"
+    );
+
+    // And `CATALOG`, which the table-wide guards measure over, must name the
+    // same operations: an entry in one list and not the other is either an
+    // operation with no pinned shape or one no principal is ruled against.
+    let catalog: BTreeSet<ServiceEndpoint> = CATALOG.iter().copied().collect();
+    let diverged: Vec<ServiceEndpoint> = recorded.symmetric_difference(&catalog).copied().collect();
+    assert!(
+        diverged.is_empty(),
+        "these operations are named by the pinned list or by CATALOG but not by both: \
+         {diverged:?}"
+    );
 }
 
 #[test]
