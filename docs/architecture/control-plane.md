@@ -60,9 +60,9 @@ audit.rs           audit logging helpers
 http_util.rs       shared HTTP helpers
 deploy.rs          re-exports `.zship` ingest limits/types from `zeroship_bundle`
 
-`rate_limit.rs` no longer exists: control-plane rate limiting is
-`zeroship_authn::rate_limit`, re-exported through `lib.rs`. The control crate
-has also grown modules the map above predates — organizations and billing
+Control-plane rate limiting is `zeroship_authn::rate_limit`, whose `Quota` and
+`RateLimiter` are re-exported through `lib.rs`. The control crate has also
+grown modules the map above predates - organizations and billing
 (`organizations.rs`, `billing_read.rs`, `cron/`, `pricing*.rs`, `spend.rs`,
 `openmeter_client.rs`, `tax.rs`), deploy publication (`publication/`,
 `deploy_inflight.rs`, `deployment_hold_api.rs`), worker instances
@@ -248,8 +248,7 @@ The blob-store ingest path is current. The older raw bundle upload path is gone.
 
 End-user auth does **not** terminate in control. The gateway is the OIDC
 RP of the native auth service (`crates/zeroship-auth`); control is a pure API
-resource server with no RP of its own — the bespoke `ConsoleOidcRp` +
-`console_sessions` surface was removed in the R5 cutover
+resource server with no RP and no session surface of its own
 (`crates/zeroship-control/src/lib.rs`).
 
 ```text
