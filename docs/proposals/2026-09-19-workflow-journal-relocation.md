@@ -824,6 +824,28 @@ protocol. This extends a working client rather than inventing one.
      `crates/zeroship-core/src/workflow_coordination/lifecycle.rs`, re-exported from where they
      were defined, so the client can name a start call.
 
+   **One more is worth binding before the move, and one should go.**
+   `PreparedExecution::stage`'s receipt check
+   (`crates/zeroship-workflow-runner/src/outputs.rs`, "workflow upload receipt changed") is the
+   same shape as the descriptor refusal and cannot fire today for the same reason: `stage_inner`
+   takes the reference BY VALUE and returns the caller's own struct, so the comparison is a
+   value against a clone of itself. Over a wire it becomes a decoded response body, and a retry
+   landing on another instance can answer with a different descriptor. One occurrence tree-wide,
+   on the hot path, since every execution stages through it.
+
+   The one to delete is `acknowledge`'s settlement-identity check
+   (`crates/zeroship-workflow-runner/src/delivery.rs`). `WorkerCoordinator::settle_job` already
+   checks a strict superset against the actual wire, and
+   `submission_and_settlement_receipts_cannot_substitute_metadata` substitutes each field in
+   turn against a fake peer. Both production transports reach it. An unreachable check that
+   stays unreachable is dead weight, not safety.
+
+   And one worry does NOT apply, written down so nobody builds for it. The `Heartbeat` reply
+   (`crates/zeroship-workflow/src/service/types.rs`) carries no task identity at all, and
+   `renew` feeds its `lease_ms` straight into a lease window. That would matter if
+   `TaskTransport` became the wire - but it has no production dispatcher, and step 4 concludes a
+   remote implementation of it would serve nobody. The reply that does cross carries `delivery`.
+
    One preparatory piece remains and it is contingent: bind what a prefetch would remove, a read
    driven after the lease is lost while an isolate is live. The outage test fakes an unavailable
    transport, which is a different mechanism. It earns its place only if the prefetch is built,
