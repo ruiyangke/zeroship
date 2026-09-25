@@ -621,6 +621,17 @@ protocol. This extends a working client rather than inventing one.
    enforces against the journal ceiling. Open 1 counts three numbers on the request path and
    does not notice that the first derives from the wrong one for this endpoint.
 
+   **And the merged reply has one validated half and one unvalidated one.** The settlement half
+   is checked: `WorkerCoordinator::settle_job` compares the receipt's `app_id`, `job_id`,
+   `attempt` and `outcome` against the request and refuses a mismatch. The journal half is not.
+   `CompletionReceipt` (`crates/zeroship-workflow/src/service/types.rs`) carries `task_id`,
+   `app_id`, `run_id` and `generation`, and `execute`
+   (`crates/zeroship-workflow-runner/src/delivery.rs`) returns what `complete_job` answered
+   without comparing any of them - on the direct path and on the `job_receipt` recovery path
+   alike. That costs nothing while the call is in-process and the answer is the caller's own
+   transaction. Merged, both halves arrive as one decoded body, and merging two calls merges
+   two replies: the half with no validation story is the one to give one.
+
    **The concurrency the merge introduces.** Today every accept for an app runs in the one worker
    process holding that app's binding. Served, accepts run in `RunService`, which is one per HTTP
    worker thread because its store is `!Send`, across every replica. `lock_app`
