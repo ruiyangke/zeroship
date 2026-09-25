@@ -947,6 +947,17 @@ protocol. This extends a working client rather than inventing one.
      the catalog stays Control's - "the holds it takes against that catalog go through Control's
      queue endpoint, under Control's credential and inside Control's row lock" - so what moves is
      the intent side, and that is why the worker needs endpoints for it once it holds no journal.
+     And the source itself is the wrong shape for a service as it stands. `AppDeployments`
+     (`crates/zeroship-workflow/src/service/deployments.rs`) carries
+     `clients: BTreeMap<AppId, Rc<dyn DeploymentHoldClient>>` and answers `client(app)` with
+     `PermissionDenied` when the app is absent, and `WorkflowService::with_deployments` is a
+     consuming builder, so one source is bound for every app the process serves. That suits the
+     worker, which resolves one app at a time and whose single-entry map IS the app scoping. It
+     does not suit a lane that sweeps many: `MaintenanceLane` holds one `RunService` and takes a
+     per-app engine from `runs.app(...)`, but the deployments source beneath it is shared. What
+     the map wants to become is a source that answers for any app this process may sweep, with
+     the worker's one-app case preserved as a source that refuses every other app - the refusal
+     is scoping, not an accident of how the map was filled.
    - **Then the payload reserve and confirm**, since `start` and `stage` share that one
      mechanism, and the confirm must gain the `state` and `expires_at` predicates it does not
      need while a lock is held across the write. Predicates alone do not make it a compare and
