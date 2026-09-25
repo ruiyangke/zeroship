@@ -1057,10 +1057,11 @@ protocol. This extends a working client rather than inventing one.
 
    **Where each step's detail lives**, by heading rather than by position, since positions move.
    The sweeps: "And the first piece is not the loop", "And two of the nine cannot move at all as
-   they stand", "Neither needs a store in the service", and for the claim set "And do not reach
-   for the classification that already exists", "A second claimant blocks rather than skipping",
-   "And when it is written it cannot be an arm at the claim site" and "And `candidate` has a
-   second caller, which decides something else". The grant: "That first one is not a line of
+   they stand", "Neither needs a store in the service", "And the lane has a seat on neither half
+   of the service", and for the claim set "And do not reach for the classification that already
+   exists", "A second claimant blocks rather than skipping", "And when it is written it cannot be
+   an arm at the claim site" and "And `candidate` has a second caller, which decides something
+   else". The grant: "That first one is not a line of
    wiring; it is a credential question" and "And the hold `restart` waits on belongs to another
    principal". The registration: "And the fork resolves toward the pattern already in the tree".
    The reserve and confirm: "One obligation is genuinely new". The backend: "An HTTP
@@ -1086,6 +1087,15 @@ protocol. This extends a working client rather than inventing one.
    (`crates/zeroship-workflow/src/service/hold_release.rs`) even though it writes no `deploys`
    row. The cheap group writes no `deploys` row at all, so a dispatch loop holding only it has
    dead arms and the foreign key stays shut.
+
+   **And the lane has a seat on neither half of the service.** `RunService` is built inside
+   `state_factory` (`crates/zeroship-workflow-server/src/server.rs`), one per HTTP worker thread,
+   and it is `!Send` by construction: it holds an `Rc<ServiceIngress>` map behind a `RefCell`. The
+   `Driver` (`crates/zeroship-workflow-manager/src/driver.rs`) runs on the main runtime and is
+   built from `Coordinator::connect`, so it holds the queue and no journal at all. A sweep lane
+   needs the queue to claim and the journal to run what it claimed, and nothing holds both today,
+   so it wants a journal opened on the driver's own runtime rather than a seat on either as they
+   stand.
 
    **And two of the nine cannot move at all as they stand.** `cron_job` takes an `InputStager`
    and `collect_job` a `PayloadDeleter`. The only production implementation of either is
