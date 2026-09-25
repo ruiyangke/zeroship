@@ -1662,6 +1662,16 @@ part that dates, not the verdict.
    `verify_authority` exists to check. That is the trust decision, stated as what it removes
    rather than as which line moves.
 
+   **And the journal already names the holder, which is why this follows the journal.** The row
+   `acquire_deployment_hold_checked` writes
+   (`crates/zeroship-workflow/src/service/deployment_retention.rs`) carries
+   `"holder_id":client.scope().holder()` beside a state that moves from `acquiring` to held. So
+   the journal is where a hold is decided and recorded, and Control is where it takes effect on
+   the catalog. One process does both today because it holds the journal. After the move the
+   service decides and cannot tell Control, so what the widening restores is that pairing rather
+   than granting a new reach: the holder the journal names stops being a worker, and Control has
+   to accept the name the journal now writes.
+
    **A gap this uncovered, unrelated to the move.** `workflow_rollout_config` has no production
    writer, and that is the stated posture rather than an omission:
    `db/migrations-ts/20260911000060_workflow_policy_tables.ts` says the service "never writes
