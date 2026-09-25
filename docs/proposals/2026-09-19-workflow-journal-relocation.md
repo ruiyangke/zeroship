@@ -633,7 +633,7 @@ part that dates, not the verdict.
 |---|---|---|
 | 1 | ANSWERED - payload is the gate, not latency | nothing; re-run the instrument rather than trusting the prose |
 | 2 | DECIDED - a ceiling governs both sides | nothing |
-| 3 | DECIDED - its own database | **what verifies a worker** once `active_key` goes; and whether the replay store moves |
+| 3 | DECIDED - its own database | **what verifies a worker** once `active_key` goes |
 | 4 | DECIDED - zone-local | nothing; the work it waits on is Open 3's |
 | 5 | pre-launch, no in-flight runs | the answer expires at launch |
 | 6 | ANSWERED as a description | nothing; the credential question it raised moved to Open 3 |
@@ -789,9 +789,12 @@ part that dates, not the verdict.
 
        SELECT id,execution_zone_id,deleted_at FROM zeroship.apps LIMIT 0;
 
-   which is the whole of what the workflow role is granted on `zeroship` - placement's columns
-   and the key it filters on. The deployment catalog is out of reach: the grants that fed the
-   deleted pointer read are dropped, and `deployment_catalog_is_out_of_reach` in
+   which is the whole of what the workflow role is granted on `zeroship.apps` - placement's
+   columns and the key it filters on. It is NOT the whole of its reach into `zeroship`:
+   `worker_instances` carries `(id,status,public_key)` from one grant file and
+   `(execution_zone_id,expires_at)` from another. The deployment catalog is out of reach: the
+   grants that fed the deleted pointer read are dropped, and
+   `deployment_catalog_is_out_of_reach` in
    `crates/zeroship-workflow-server/tests/platform_schema.rs` asserts `42501` on
    `zeroship.app_deploys` and on `apps.deploy_hash`, with the placement columns as its control.
 
@@ -799,8 +802,8 @@ part that dates, not the verdict.
    `crates/zeroship-workflow-server/src/auth.rs` answers every worker-authenticated call from
    `SELECT public_key FROM zeroship.worker_instances WHERE id=$1 AND status='active' AND
    expires_at > now()`, and `crates/zeroship-workflow-manager/src/policy/control/models.rs`
-   projects Control-owned policy inputs - `apps` and `plans` - which the manager reads to
-   compute an app's authority. The highest-frequency crossing is in
+   declares `plans` under the administrative credential `PlanPolicyStore` takes, beside the
+   publication tables this service owns. The highest-frequency crossing is in
    another schema entirely and a search for `zeroship.` cannot find it:
    `SharedClientReplayStore` (`crates/zeroship-authn/src/service_replay.rs`), constructed in
    `crates/zeroship-workflow-server/src/server.rs`, upserts
@@ -814,11 +817,12 @@ part that dates, not the verdict.
    `workflow_rollout_config` now live in `workflow_manager`, created by
    `db/migrations-ts/20260911000060_workflow_policy_tables.ts`, so the write a cache could never
    have answered is local rather than transported. `ControlPolicyStore` in
-   `crates/zeroship-workflow-manager/src/policy/control/store.rs` holds a handle each and keeps
-   the bracket: the ledger row's lock is taken before the inputs are read, on the other handle,
-   with the transaction still open. `service_authn.service_assertion_replay` is the same shape -
+   `crates/zeroship-workflow-manager/src/policy/control/store.rs` holds one publication handle
+   and keeps the bracket: the ledger row's lock is taken on it before the inputs are read over
+   the facts capability, with that transaction still open.
+   `service_authn.service_assertion_replay` is the same shape -
    the audience is checked before the store is consulted, so a per-service table keeps single
-   use - but whether it should move is the live disagreement recorded below.
+   use - and the split proposal reaches that same verdict, as recorded below.
 
    **The move made one thing depend on topology that nothing enforces.** The ledger's revision
    has to be monotonic PER APP, and it now lives in a store the deployment chooses, so the
@@ -832,11 +836,13 @@ part that dates, not the verdict.
    **`docs/proposals/2026-09-20-platform-service-database-split.md` already assigns an owner to
    every table in this set, and this document should not re-derive one.** Its table gives
    `workflow_policy_ledger` and `workflow_rollout_config` to workflow, which agrees with the
-   paragraph above. It **disagrees** about the replay store, which it lists under "Shared by
-   design, owned by nobody" - so whether a per-service instance is correct is a live
-   disagreement between two proposals rather than a settled question, and it should be settled
-   in that one. It also marks `app_deploys` CONTESTED, "workflow's DDL, control writes", which
-   is the same table Plan step 3 records `restart` as unable to resolve.
+   paragraph above, and its Open 3 settles the replay store by the same audience-ordering
+   argument: a per-service table suffices because validation rejects an assertion addressed
+   elsewhere before the store is ever consulted. Its section heading "Shared by design, owned by
+   nobody" is the part that has not caught up - the prose directly beneath that heading already
+   argues the opposite. Read the Open, not the heading. It also marks `app_deploys` CONTESTED,
+   "workflow's DDL, control writes", which is the same table Plan step 3 records `restart` as
+   unable to resolve.
 
    Some is Control's authority read on a path that is ALREADY eventual.
    `crates/zeroship-workflow-manager/src/eligibility.rs` says so itself - "THIS IS A LIVENESS
@@ -873,7 +879,7 @@ part that dates, not the verdict.
    `connect_lifecycle` nor the policy inputs binding exists there, and the grant is narrower to
    match:
    `db/migrations-ts/20260911000050_workflow_platform_grants.ts` drops `zeroship.plans` entirely
-   and keeps only `(id, deploy_hash)` on `apps`. The operator writers moved to a separate
+   and narrows `apps` to `(id)`. The operator writers moved to a separate
    `PlanPolicyStore` with no production constructor, so the serving path carries no
    administrative credential for an operation it never performs.
 
@@ -944,10 +950,15 @@ part that dates, not the verdict.
 
 
    **A gap this uncovered, unrelated to the move.** `workflow_rollout_config` has no production
-   writer: every caller of `set_rollout` and `set_plan_policy` in
-   `crates/zeroship-workflow-manager/src/policy/control/store.rs` is a test, and `read_source`
-   inner-joins that table, so a deployment with no row published by hand fails every policy
-   observation. Whether hand-provisioning is the intended posture is its own question.
+   writer, and that is the stated posture rather than an omission:
+   `db/migrations-ts/20260911000060_workflow_policy_tables.ts` says the service "never writes
+   the rollout config at all", and an operator publishes the row under an administrative
+   credential. Both setters still live in
+   `crates/zeroship-workflow-manager/src/policy/control/store.rs`, but on two types now -
+   `set_rollout` on `ControlPolicyStore` and `set_plan_policy` on `PlanPolicyStore` - and every
+   caller of either is a test. `read_rollout` reads that table alone, the other inputs having
+   left that database, so a deployment with no row published by hand fails every policy
+   observation.
 
    **The corpus is partitionable; role identity is what still binds it.** No migration writes
    into two databases' worth of schemas any more:
