@@ -833,6 +833,30 @@ protocol. This extends a working client rather than inventing one.
    Both decisions that gated the rest are settled. The byte-returning reads need no trait
    change, and the journal hold follows the journal. What is left is the cutover itself.
 
+   **The order the flag day has to take, and why it is forced.** The pieces are not
+   independent; each one below is what makes the next possible.
+
+   - **The sweeps move first.** Open 6 answers why they can: they run no creator code, so they
+     move with the fold. They are also what fills the service's journal - the manager enqueues
+     an activation, the service's own lane runs `activate_job`, and that is the path to
+     `record_verified`, the only writer of `deploys`. Until this moves, everything below
+     operates on an empty table and a `deploys` row is what `start`, `restart` and a served
+     claim each need first.
+   - **The grant and signer change lands with its reader**, not before it. `svc/workflow` gains
+     the journal hold endpoints and `RunService` gains its deployments source in one change,
+     because a capability this process has no reader for is one it must not hold - the rule
+     `db/migrations-ts/20260911000050_workflow_platform_grants.ts` already states.
+   - **Then the payload reserve and confirm**, since `start` and `stage` share that one
+     mechanism, and the confirm must gain the `state` and `expires_at` predicates it does not
+     need while a lock is held across the write.
+   - **Then the backend**, cheapest first: the three methods whose halves the wire-pair test
+     already binds, then `start`, then the two reads as two-phase.
+   - **Then the merged heartbeat**, which cannot land until its timeout budget is settled.
+   - **Then `JournalLocation::Service`**, which is the flag itself and is the last thing to
+     flip, not the first.
+
+   Step 6 follows once that is green.
+
 6. **Delete the creator-schema path**, and say where each piece lives, because they are not all
    in the workflow crates: `ensure_journal` and its route in
    `crates/zeroship-workflow-server/src/api.rs`, the journal bundle and `SCHEMA_PLACEHOLDER` in
