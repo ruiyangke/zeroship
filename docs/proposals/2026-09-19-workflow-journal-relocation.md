@@ -1649,6 +1649,19 @@ part that dates, not the verdict.
    that widened alone would be refused at the far end and a Control that widened alone would
    admit a caller nothing yet sends.
 
+   **And what widens is a placement check, not a spelling.** Control already serves two hold
+   shapes on one ledger (`crates/zeroship-control/src/deployment_hold_api.rs`). The queue pair
+   takes no worker at all - "Queue ownership is stable across manager replicas and has no worker
+   lease" - and acts on `HoldScope::for_queue`. The normal pair builds a `VerifyAssignment` from
+   the authenticated worker and the request's `assignment_revision`, passes it to
+   `verify_authority`, and only then acts on `HoldScope::for_app`. A journal hold is
+   `for_app`: `require_journal_hold` (`crates/zeroship-workflow/src/service/control/restart.rs`)
+   reaches `admission_generation` under `HoldScope::for_app`. So the service cannot borrow the
+   queue pair it already holds - a different scope is a different hold - and what it needs is
+   authority over a `for_app` hold with no placement to verify, which is the one input
+   `verify_authority` exists to check. That is the trust decision, stated as what it removes
+   rather than as which line moves.
+
    **A gap this uncovered, unrelated to the move.** `workflow_rollout_config` has no production
    writer, and that is the stated posture rather than an omission:
    `db/migrations-ts/20260911000060_workflow_policy_tables.ts` says the service "never writes
