@@ -814,7 +814,7 @@ protocol. This extends a working client rather than inventing one.
      is live. The outage test fakes an unavailable transport, which is a different mechanism, so
      nothing covers this today.
    - Move `StartOptions`, `StartedRun`, `ConflictPolicy` and `WorkflowOutputRef` into
-     `zeroship-core`. The twelve lifecycle types already made that move and `operations.rs`
+     `zeroship-core`. The lifecycle types already made that move and `operations.rs`
      re-exports them back, so the shape is settled; it changes no behaviour and it is what lets
      the client name a start call at all.
 
