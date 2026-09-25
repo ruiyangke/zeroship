@@ -19,7 +19,7 @@ The transport fence that blocked reaching Control is decided and built - plainte
 only peers an operator named. Two reaches into `zeroship` remain: placement eligibility in
 `crates/zeroship-workflow-server/src/coordinator.rs`, which stays deliberately because its two
 reads exist so they can disagree, and the worker registry lookup that authenticates every
-call, which is still a decision.
+call, which is deferred by decision.
 
 The journal is installed into the creator's own schema today and written by the worker over the
 creator's own connection; this moves storage and the durable fold into the workflow service,
@@ -1057,8 +1057,8 @@ part that dates, not the verdict.
    one query also answers liveness, since `status` and `expires_at` decide whether the instance
    is still enrolled, which is why it does not unpick into a pure identity lookup.
 
-   Severing it is therefore a trust-model decision rather than a plumbing one, and it is the
-   piece to decide before the rest. The shape that reuses what exists rather than adding a
+   Severing it is therefore a trust-model decision rather than a plumbing one, which is why it
+   is deferred rather than improvised. The shape that reuses what exists rather than adding a
    mechanism is a control-signed attestation: Control already knows the key because it enrolled
    it, so it can sign a short-lived statement binding instance, key thumbprint and zone, and the
    service verifies that against Control's ROLE key - which
@@ -1066,7 +1066,7 @@ part that dates, not the verdict.
    `crates/zeroship-workflow/src/service/capability.rs` already mints and verifies
    control-signed, audience-bound, short-lived capabilities with no production caller. What it
    costs is that revocation stops being immediate and becomes bounded by the attestation's
-   lifetime, because Control cannot un-say what it has signed. That is the decision.
+   lifetime, because Control cannot un-say what it has signed. That is the shape it should take.
 
    **And it is the load-bearing one, not a peer of the others.** `zeroship.worker_instances` is
    what keeps the Control database binding alive: `PostgresWorkerRegistry` in
@@ -1074,7 +1074,7 @@ part that dates, not the verdict.
    `active_key` - and `ControlEligibility` in
    `crates/zeroship-workflow-manager/src/eligibility.rs` projects its worker half for placement.
    Moving the `apps` reads thins the seam without cutting it, because that table outlives them.
-   So the order to settle these in is authentication first, and the rest afterwards.
+   The order is therefore the rest first, and authentication when its design lands.
 
    **DECIDED: defer the severing; the registry read stays.** A comprehensive credential design
    comes later, so `active_key` keeps reading `zeroship.worker_instances` and the service keeps
