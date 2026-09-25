@@ -515,6 +515,25 @@ protocol. This extends a working client rather than inventing one.
    what the caller will wait for. Deciding the merge's budget in isolation would set a number
    against an arithmetic that is already inconsistent one call earlier.
 
+   **And the clock ceiling has a second copy, which names the same stall differently.**
+   `CLOCK_CEILING` (`crates/zeroship-workflow/src/service/store.rs`) bounds
+   `clock.prepare_for_app` and `clock.query` and answers `clock_unavailable()`, an
+   `Unavailable`. `Clock::connect` and `Clock::sample`
+   (`crates/zeroship-workflow-manager/src/clock.rs`) bound those same two operations at the
+   manager's `transaction_timeout` and answer `Error::Timeout`. One stall of one clock is
+   therefore named two ways depending on which side observes it, and the merged reply carries
+   both sides. Settle that with the reply's shape rather than after it, since a caller
+   separating a timeout from an unavailable dependency would be reading which half stalled.
+
+   **And only one of the journal's two sites can reach that diagnosis under an attempt.**
+   `begin` arms its ceiling before the attempt has done any storage work, so the attempt's
+   deadline and this one can land in the same tick, which is the race the constant's own comment
+   describes. `now` arms later, leaving the attempt's deadline strictly earlier and `Timeout`
+   the answer. And the `begin` site cannot elapse on PostgreSQL at all - `prepare_for_app`
+   (`crates/zeroship-data-orm/src/backend/postgres/executor.rs`) returns `Ok(())` with no await
+   point - so the race is a SQLite one, where the call bounds an attachment rather than a clock
+   answer.
+
    **One guard has no merged equivalent.** `renew` re-reads the grant's remaining time BETWEEN
    the two calls, so a manager reply arriving after the old grant lapsed cannot be followed by
    a journal write. Merged, the journal half has already committed on the server before the
