@@ -425,18 +425,7 @@ impl<T: JobTransport> DeliverySlot<T> {
         let manager = bounded(self.options.operation_timeout, async {
             loop {
                 match self.transport.settle(&settlement).await {
-                    Ok(observed) => {
-                        if observed.job_id != settlement.delivery.job.id
-                            || observed.app_id != settlement.delivery.job.app_id
-                            || observed.attempt != settlement.delivery.attempt
-                            || observed.outcome != settlement.outcome
-                        {
-                            return Err(WorkflowServiceError::Unavailable(
-                                "workflow settlement identity changed".into(),
-                            ));
-                        }
-                        return Ok(observed);
-                    }
+                    Ok(observed) => return Ok(observed),
                     Err(error) if retryable(&error) => {
                         compio::time::sleep(self.options.retry_delay).await;
                     }
