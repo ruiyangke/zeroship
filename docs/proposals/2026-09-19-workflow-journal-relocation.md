@@ -1002,6 +1002,26 @@ protocol. This extends a working client rather than inventing one.
      that executes creator code, whose only tenant separation is an `app_id` column - so the flag
      has one arm rather than two, and the worker opening no journal is it.
 
+
+   **And the lane cannot start before the worker narrows, which folds two bullets into one.** The
+   contention between two claimants is safe at the mechanism - `lock_scope` serializes and one wins
+   - but it is not safe against the contracts already written. `crates/zeroship-workflow-server/tests/http.rs`
+   claims a `management` row over HTTP as `client.claim_job(&scope).await.unwrap().unwrap()`
+   immediately after `server.restart`, then asserts WHICH operation it got. A lane admitting that
+   same kind makes the assertion a race: driven, it answers `Refused(Unavailable)` at one site and
+   a null lease at another, because the lane took the row. `tests/driver.rs` survives only because
+   its app is absent from `zeroship.apps`, so the policy read fails and the lane never claims - an
+   accident of the fixture, not a property. The radius is wider than the two observed failures:
+   `tests/http_jobs.rs` provisions a policy and claims fanout, propagation, management and activate
+   rows the same way, and cargo stopped before reaching it.
+   Making those deterministic wants either `Claimant::Placed` narrowed so a worker stops taking
+   journal-only kinds, or those claim contracts rewritten to drop exclusivity. So the lane's start
+   and the worker's narrowing are one change, and that change is the flag. The consequence to
+   accept: the service's journal stays empty until then, so the intermediate verification this
+   order hoped for - filling `deploys` before the bullets below - is not available before the flag
+   either. The lane itself is built and bound on branch `workflow-sweep-lane-start`, its page bound
+   and deadline taken from `workflow.batch_limit` and `workflow.driver_lane_timeout_ms`, awaiting
+   that change rather than a fix of its own.
    Step 6 follows once that is green.
 
    **And the order needs a second claimant, which nothing will issue.** From the sweeps moving
@@ -1182,7 +1202,8 @@ protocol. This extends a working client rather than inventing one.
    (`crates/zeroship-workflow-manager/src/queue.rs`), an update-as-lock requiring
    `Output::Count(1)` that answers `Error::Denied` otherwise. So two lanes polling one app contend
    on every claim, heartbeat, settle and publish rather than dividing the work between them, and
-   the filter below is what stops them wanting the same rows. How the lane authorizes itself was
+   the filter below separates only the byte movers, NOT the journal-only kinds: both claimants
+   admit those seven, so both want the same rows and one is refused. How the lane authorizes itself was
    settled first, because the filter presumes that answer - see "And the order needs a second
    claimant, which nothing will issue", and `MaintenanceAuthority::asserted`
    (`crates/zeroship-workflow-manager/src/maintenance.rs`), which is the only place that states
