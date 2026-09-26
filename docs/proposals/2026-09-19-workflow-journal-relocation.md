@@ -1181,17 +1181,46 @@ protocol. This extends a working client rather than inventing one.
    arm of a total match, `(Self::Maintenance, Work::Payload)`, which is a compile-checked pairing
    rather than a filter to remember.
 
-   **And both halves want one mechanism, not two.** The split names two obligations - a reserve
-   and confirm for staging, a remote call for deletion - but neither is a call this service can
-   place. `stage_start_input` (`crates/zeroship-workflow/src/service/payloads.rs`, called from
-   `service/backend.rs` for `start` and from `service/cron.rs` for a firing) leaves the service
-   holding the VALUE and no store, so the object write has to cross. `collect_job` leaves it
-   holding an id and no store, so the delete has to cross. Nothing serves either, and the hosts
-   holding `PayloadObjects` are ones this service is called BY. So what is missing once is a way
-   for the journal to record a byte operation and have a store-holding host perform and confirm
-   it: staging and collection are that mechanism run in two directions, and the `deleted` tombstone
-   with its resweep deadline is already half of the collection one. Design it once. Two remote
-   capabilities pointing the wrong way is the shape to avoid.
+   **And the two directions do not share one mechanism, because staging is not asynchronous.** The
+   split names two obligations - a reserve and confirm for staging, a remote call for deletion - and
+   neither is a call this service can place. `stage_start_input`
+   (`crates/zeroship-workflow/src/service/payloads.rs`, called from `service/backend.rs` for `start`
+   and from `service/cron.rs` for a firing) leaves the service holding the VALUE and no store, so the
+   object write has to cross. `collect_job` leaves it holding an id and no store, so the delete has
+   to cross. Nothing serves either, and the hosts holding `PayloadObjects` are ones this service is
+   called BY.
+
+   Deletion takes the intent-and-reconcile shape this tree already builds. `fence_payload`
+   (`crates/zeroship-workflow/src/service/payloads/collection.rs`) commits `deleting` before the
+   deleter runs and the collection candidate re-selects `"uploading" | "staged" | "deleting" |
+   "deleted"` past its deadline, so a failed delete is retried rather than lost. `job_publications`
+   (`crates/zeroship-workflow/src/service/publication.rs`) is that pattern in full: intents written
+   before COMMIT, keyed by an id derived from the work so the primary key is the dedupe key, and
+   `confirmed_at` NULL until a receipt matches.
+
+   Staging cannot take that shape, and the reason is a commit boundary rather than a preference.
+   `insert_run` (`crates/zeroship-workflow/src/service/app.rs`) takes the input edge in the same
+   write as the generation row - "a run can never reach a committed generation whose input nothing
+   holds" - and the `promote` it calls reaches `owned_reference`
+   (`crates/zeroship-workflow/src/service/payloads.rs`), whose ownerless arm admits only
+   `state = "staged"` with `run_id IS NULL` and an unexpired `expires_at`. So the bytes must already
+   be committed as `staged` before the run is insertable, and an intent recording that they ought to
+   exist satisfies that arm not at all. `insert_run` writes `"state":"queued"` due now, so serving
+   staging asynchronously means a run in a state nothing dispatches plus a second phase to attach it.
+   One mechanism covers both directions only if it is a SYNCHRONOUS call from this service to a
+   store-holder, which is the arm with no transport: `zeroship-core/src/service_identity.rs` names no
+   payload endpoint, and the worker serves `[WORKER_DISPATCH, WORKER_APP_LOGS]` and nothing else,
+   neither addressable per app by this service.
+
+   So what this defers is not which mechanism but whether the byte sweeps need one. `Work::Payload`
+   already keeps `Cron` and `Collect` with the store-holder, and `Capacity::visit`
+   (`crates/zeroship-workflow-manager/src/capacity.rs`) asks
+   `candidate(&tx, app, now, Claimant::Placed, None)` because "an app is due while any row remains
+   claimable", so a pending firing already draws a placement. Leaving them there costs nothing to
+   build, and couples schedule firing and byte reclamation to a worker placement - the coupling this
+   relocation exists to break. OPEN: must a schedule fire for an app no worker is placed on? A yes
+   makes the synchronous crossing unavoidable and its transport the first cost; a no leaves
+   `Work::Payload` as the whole answer and this list carries no byte-crossing item at all.
 
    **A second claimant blocks rather than skipping, which is what puts authority first.** Two
    claimants on one app are representable and this order needs them; what they are not is free.
@@ -2116,9 +2145,10 @@ part that dates, not the verdict.
   `activate` and `management` on the asserted registration, and `close`, `fanout` and
   `propagation` on the journal alone. When a payload sweep looks stranded the tempting repair is a
   store here. Two entries decline it - "And the fork resolves toward the pattern already in the
-  tree" for artifacts, "And both halves want one mechanism, not two" for payload bytes - because
-  what is missing is a way for the journal to record a byte operation and have a store-holding
-  host perform and confirm it. Until that exists the refusals in
+  tree" for artifacts, "And the two directions do not share one mechanism, because staging is not
+  asynchronous" for payload bytes - because the deletion direction already records its intent in
+  the journal, and the staging direction wants a synchronous call this service cannot place. Until
+  one exists the refusals in
   `crates/zeroship-workflow-server/src/sweeps.rs` are the honest answer, and they are unreachable
   from the lane's own claims by construction.
 
