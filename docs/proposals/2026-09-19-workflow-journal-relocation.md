@@ -604,32 +604,46 @@ protocol. This extends a working client rather than inventing one.
    three `JobAcceptance` arms or it is lossy.
 
    **Three things no step owns yet, and this one cannot land without the first.** `RunService`
-   installs no deployments source - `crates/zeroship-workflow-server/src/runs.rs` opens the
-   journal without the `.with_deployments(...)` that `crates/zeroship-worker/src/workflow_creator.rs`
-   and `crates/zeroship-cli/src/workflow/host.rs` both pass - and `tasks::assign` opens with a
-   `deploys` lookup, so a merged claim on today's server can never return a task. The other two
-   belong to step 5: an HTTP `WorkflowBackend`, and the `TaskPayloads` seam that
-   `crates/zeroship-worker/src/workflow_creator.rs` constructs on `WorkerTasks` - where the
-   half that cannot merge is `read` rather than `stage`, as step 5 records.
+   installs a deployments source now - `crates/zeroship-workflow-server/src/server.rs` builds
+   `AppDeployments::holds_only(...)` with `.with_registrations(...)` in the per-thread state
+   factory and hands it to `RunService::connect` - but `tasks::assign` opens with a `deploys`
+   lookup and nothing wired writes that table here, so a merged claim on today's server still
+   cannot return a task. The other two belong to step 5: an HTTP `WorkflowBackend`, and the
+   `TaskPayloads` seam that `crates/zeroship-worker/src/workflow_creator.rs` constructs on
+   `WorkerTasks` - where the half that cannot merge is `read` rather than `stage`, as step 5
+   records.
 
-   **That first one is not a line of wiring; it is a credential question.** `AppDeployments`
-   (`crates/zeroship-workflow/src/service/deployments.rs`) holds a `BlobStore`, a byte budget
-   and a map of hold clients - nothing the server could not have - so installing one compiles.
-   It would also do nothing. None of the four run calls the server serves reads
-   `self.deployments`, and no endpoint it serves reaches `record_verified`: every path to that
-   writer runs through the runner's delivery loop, which
-   `workflow_process_dependencies_follow_crate_ownership` forbids the server to reach. The
-   table therefore stays empty, and `__zeroship_workflow_run_deploy` is an `ON DELETE RESTRICT`
-   foreign key, so the journal cannot hold a run at all until something writes a deploy. That
-   is why `crates/zeroship-workflow-server/tests/http_runs.rs` seeds both by raw SQL.
+   **What that source reaches, and what it does not.** `AppDeployments`
+   (`crates/zeroship-workflow/src/service/deployments.rs`) carries three capabilities -
+   `artifacts`, `registrations` and `holds` - and the server installs the last two, with no
+   artifact store, so `read` refuses by name. That buys nothing on the read path: none of the four
+   run calls reads `self.deployments`, because `active_deploy`
+   (`crates/zeroship-workflow/src/service/app.rs`) finds the `deploys` row directly. It buys the
+   WRITE side. `activate_job` and `management_job` need only `registrations`, and
+   `acquire_deployment_hold_checked` signs through `RemoteDeploymentHolds::asserted`
+   (`crates/zeroship-workflow/src/deployment_holds/remote.rs`) under `HoldScope::for_app` - the
+   same scope `require_journal_hold` reads. `cron_job` stays out of reach because it also needs an
+   `InputStager`, which is what `Work::Payload` records.
+   `the_activation_sweep_records_controls_asserted_registration`
+   (`crates/zeroship-control/tests/deployment_holds/journal.rs`) binds that pairing end to end on
+   this exact shape, against a real Control endpoint, with a `holds_only` arm that must refuse.
+
+   So what is missing is a claimant rather than a capability: the lane that would run those sweeps
+   is built and unstarted, and the worker's `AppWorkflows`
+   (`crates/zeroship-worker/src/workflow_creator.rs`) opens over the CREATOR database, so its rows
+   land in the creator journal. The table therefore stays empty here, and
+   `__zeroship_workflow_run_deploy` is an `ON DELETE RESTRICT` foreign key, so the journal cannot
+   hold a run until something writes a deploy. That is why
+   `crates/zeroship-workflow-server/tests/http_runs.rs` seeds by raw SQL.
 
    **And the hold `restart` waits on belongs to this service now too.** The journal holder is
    `HoldScope::for_app`, while the server's `ControlHolds` takes `QueueDeploymentHolds`, whose
    scope is the queue's. `crates/zeroship-core/src/service_identity.rs` grants `svc/workflow`
    both pairs, and `RemoteDeploymentHolds::asserted`
    (`crates/zeroship-workflow/src/deployment_holds/remote.rs`) signs for the journal pair as the
-   role itself, with no instance. So this is no longer a credential question: what `restart` waits
-   on is the `deploys` row, and that waits on the sweeps that write it.
+   role itself, with no instance. So this is no longer a credential question: the hold and the
+   `deploys` row are both rows this service can now create, and what they wait on is a claimant for
+   the sweeps that write them.
 
    **Where the merged client lives: a port trait in the client, implemented in the runner.**
    The gate is not what decides this, and reading it as the constraint understates the problem.
@@ -876,11 +890,12 @@ protocol. This extends a working client rather than inventing one.
    would confirm a prefetch and say nothing about the property the prefetch removes. That test
    comes first.
 
-   **And `RunService` installs no deployments source**, so `tasks::assign` finds no available
-   deploy and a served claim cannot return a task. Installing one is necessary and not
-   sufficient: `record_verified` in `crates/zeroship-workflow/src/service/deploys.rs` is the only
-   writer of that table, so the rows are absent too until something produces them. That is why
-   `start` having no endpoint is a sequencing fact and not a gap in step 3.
+   **And nothing writes `deploys` into this journal**, so `tasks::assign` finds no available
+   deploy and a served claim cannot return a task. The source is installed; the rows are what is
+   absent. `record_verified` in `crates/zeroship-workflow/src/service/deploys.rs` is the only path
+   that CREATES one - `activation::select` and `close_admission` update rows it already made - and
+   the sweeps that call it need a claimant this process does not run. That is why `start` having no
+   endpoint is a sequencing fact and not a gap in step 3.
 
    **What proceeds before the flag day, and what already has.** Steps 4 and 5 land together,
    but not everything in them waits for that. What is already in:
@@ -938,21 +953,23 @@ protocol. This extends a working client rather than inventing one.
    **The order the flag day has to take, and why it is forced.** The pieces are not
    independent; each one below is what makes the next possible.
 
-   - **The grant, the deployments source and the sweep lane are one change.** They cannot be
-     separated in either direction. The sweeps need the source: `RunService::connect`
-     (`crates/zeroship-workflow-server/src/runs.rs`) calls `WorkflowService::open` and attaches
-     none, and `with_deployments` appears nowhere in that crate, so until it lands the service
-     cannot reach `record_verified`. And the source has no reader without the sweeps: the served
+   - **The grant and the sweep lane are one change, and the source landed ahead of both.** The
+     sweeps need the source and now have it: `crates/zeroship-workflow-server/src/server.rs`
+     attaches `AppDeployments` to `RunService::connect`
+     (`crates/zeroship-workflow-server/src/runs.rs`), so the service can reach `record_verified`
+     through `activate_job` and `management_job` once something claims them. What has no reader is
+     the source itself, which is the half this order expected to arrive last: the served
      endpoints are `status`, `signal`, `transition` and `restart`, none of which reads
      `self.deployments` - `restart` wants a `deploys` ROW, through `retained_source`
      (`crates/zeroship-workflow/src/service/control/restart.rs`), which works "without loading an
      artifact or consulting the active deployment or a platform service" - and
-     `task_executable_inner`, which does read it, is served by no route. So installing the source
-     alone leaves this process holding a capability nothing reads, which is what the rule in
-     `db/migrations-ts/20260911000050_workflow_platform_grants.ts` forbids. The readers are
-     `activate_job`, `cron_job`, `management_job` through `management/target.rs`,
-     `release_hold_job`, and `reconcile_job`'s deployment-holds phase; the lane that claims them
-     is what makes the grant legitimate.
+     `task_executable_inner`, which does read it, is served by no route. So the source stands alone
+     here, and this process holds a capability nothing it serves reads - the state
+     `db/migrations-ts/20260911000050_workflow_platform_grants.ts` rules out in its own terms, "a
+     capability this process has no reader for is one it must not hold". That is a debt the lane's
+     start settles rather than a shape to keep: the readers are `activate_job`, `cron_job`,
+     `management_job` through `management/target.rs`, `release_hold_job`, and `reconcile_job`'s
+     deployment-holds phase, and the lane that claims them is what makes the grant legitimate.
      The holds in question are the journal's own, not Control's catalog.
      `admission_generation` (`crates/zeroship-workflow/src/service/deployment_retention.rs`)
      reads a hold INTENT row through `read_intent`, while the hold against the catalog is taken
