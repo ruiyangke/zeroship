@@ -35,8 +35,8 @@ use zeroship_core::{
     service_identity::endpoints,
     workflow_coordination::{
         AssignedScope, DeliveredSignal, RegisterWorker, RequestId, RestartOptions, RestartRun,
-        RunFailure, RunId, RunOperation, RunScope, RunState, RunStatus, SignalOptions, SignalRun,
-        TransitionRun, WorkerId, WorkerState, AUDIENCE,
+        RestartedRun, RunFailure, RunId, RunOperation, RunScope, RunState, RunStatus, SignalOptions,
+        SignalRun, TransitionRun, WorkerId, WorkerState, AUDIENCE,
     },
     workflow_jobs::DeploymentId,
     workflow_policy::AppPolicy,
@@ -220,6 +220,23 @@ impl Fixture {
                     signal_type: signal_type.to_owned(),
                     payload: serde_json::json!({}),
                 },
+            })
+    }
+
+    /// A restart over the wire, so two arms can differ in the journal alone.
+    ///
+    /// Every call mints its own request id: a second attempt is a new request
+    /// rather than a replay of the first, so the reply it gets is decided again
+    /// and not read back out of the request receipt.
+    fn restart_request(&self, run: &RunId) -> test::TestRequest {
+        test::TestRequest::post()
+            .uri(endpoints::WORKFLOW_RUN_RESTART.path_template())
+            .header("authorization", self.authorization())
+            .set_json(&RestartRun {
+                request_id: RequestId::mint(),
+                scope: self.scope.clone(),
+                run_id: run.clone(),
+                options: RestartOptions::default(),
             })
     }
 
@@ -429,26 +446,28 @@ async fn a_run_call_without_a_live_placement_is_refused() {
     assert_eq!(response.status(), StatusCode::OK);
 }
 
-/// The three mutating run calls split on what each of them needs.
+/// The three mutating run calls, and the one journal row that decides the third.
 ///
-/// This is the boundary written where it cannot go stale. `signal` and
-/// `transition` reach `require_open_epoch`, and the service now establishes an
-/// epoch to get past it: a first attempt fences, `AppWorkflows::accept`
-/// obtains an epoch above the refused one through this service's own
-/// `Recovery`, and the retry is served. Both therefore answer OK.
+/// `signal` and `transition` reach `require_open_epoch`, and the service
+/// establishes an epoch to get past it: a first attempt fences,
+/// `AppWorkflows::accept` obtains an epoch above the refused one through this
+/// service's own `Recovery`, and the retry is served.
 ///
-/// `restart` stops EARLIER, and that is what this test pins. It resolves the
-/// run's retained deployment source before it reaches the fence, and this
-/// service creates no deployment hold for the runs in its journal, so it
-/// refuses as unavailable without ever consulting the epoch. Establishing
-/// ingress made two of these three serveable and cannot make the third: the
-/// refusal that remains is a different prerequisite, not a lesser degree of
-/// the same one.
+/// `restart` asks for one thing more, and it is a ROW rather than a capability.
+/// It resolves the run's deployment before the fence and ends that resolution in
+/// `require_journal_hold`, which needs a `held` intent under
+/// `HoldScope::for_app`. `seed_run` already writes the active, available
+/// `deploys` row every other check on that path reads, so the two arms below are
+/// the same app, the same run, the same credential and the same deployment,
+/// differing in that intent alone: refused without it, served with it, and the
+/// reply's state and pinned deployment compared against the seeded row.
 ///
-/// The test flips again when that deployment source lands, which is what makes
-/// it a handoff rather than a record of a gap.
+/// Differing in exactly one row is what makes the served arm evidence.
+/// `RunFailure::Unavailable {}` names no cause, and `active_deploy`,
+/// `exact_target` and the hold all answer with it, so an arm that withheld
+/// anything else would refuse for a reason this test could not tell apart.
 #[ntex::test]
-async fn ingress_serves_signal_and_transition_while_restart_still_lacks_its_source() {
+async fn restart_is_served_only_with_the_journals_deployment_hold() {
     let fixture = Box::pin(Fixture::new()).await;
     let run = fixture.seed_run().await;
     fixture.ensure_recovery().await;
@@ -459,7 +478,8 @@ async fn ingress_serves_signal_and_transition_while_restart_still_lacks_its_sour
     )
     .await;
 
-    // Served: these two reach `require_open_epoch` and now get past it.
+    // Served by the established epoch alone: these two reach
+    // `require_open_epoch` and get past it.
     let accepted: [(&str, serde_json::Value); 2] = [
         (
             endpoints::WORKFLOW_RUN_SIGNAL.path_template(),
@@ -506,29 +526,48 @@ async fn ingress_serves_signal_and_transition_while_restart_still_lacks_its_sour
         );
     }
 
-    // Restart stops at its deployment source, before the fence, so the epoch
-    // this test established does not reach it.
-    let response = test::call_service(
-        &app,
-        test::TestRequest::post()
-            .uri(endpoints::WORKFLOW_RUN_RESTART.path_template())
-            .header("authorization", fixture.authorization())
-            .set_json(&RestartRun {
-                request_id: RequestId::mint(),
-                scope: fixture.scope.clone(),
-                run_id: run.clone(),
-                options: RestartOptions::default(),
-            })
-            .to_request(),
-    )
-    .await;
+    // The control arm: no hold intent exists yet, so restart refuses before the
+    // fence, with the epoch above it open and its deployment available.
+    let response = test::call_service(&app, fixture.restart_request(&run).to_request()).await;
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     let failure: RunFailure = serde_json::from_slice(&test::read_body(response).await).unwrap();
     assert!(matches!(failure, RunFailure::Unavailable {}), "{failure:?}");
 
-    // The control: the read that needs neither an epoch nor a deployment source
-    // is unaffected, so the split above is about those prerequisites and not
-    // about the binding or the placement.
+    // The served arm: the one row added, and the same request again.
+    let deploy = journal::seed_journal_hold(&fixture.platform, &fixture.app).await;
+    let response = test::call_service(&app, fixture.restart_request(&run).to_request()).await;
+    let status = response.status();
+    let body = test::read_body(response).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let restarted: RestartedRun = serde_json::from_slice(&body).unwrap();
+    assert_eq!(restarted.run_id, run.as_str());
+    assert_eq!(restarted.state, RunState::Queued);
+    assert!(
+        restarted.restarted_from_ordinal.is_none(),
+        "a restart that named no target retains no prefix: {:?}",
+        restarted.restarted_from_ordinal
+    );
+    assert_eq!(restarted.pinned_to.as_str(), deploy);
+
+    // The effect, not the code: the journal holds the generation the restart
+    // opened, pinned to the deployment the reply named.
+    let stored = fixture
+        .platform
+        .admin
+        .query_one(
+            "SELECT generation,state,deploy_id FROM workflow_manager.__zeroship_workflow_runs \
+             WHERE app_id=$1 AND id=$2",
+            &[&fixture.app.as_str(), &run.as_str()],
+        )
+        .await
+        .unwrap();
+    assert_eq!(stored.get::<_, i64>(0), 1);
+    assert_eq!(stored.get::<_, String>(1), "queued");
+    assert_eq!(stored.get::<_, String>(2), deploy);
+
+    // The control for the binding and the placement: the read that needs
+    // neither an epoch nor a hold answers throughout, so the arms above are
+    // about those prerequisites and not about either of these.
     let response = test::call_service(
         &app,
         test::TestRequest::post()
