@@ -5,10 +5,11 @@
 `workflow_manager` and grants it to the role already serving that schema, and
 `journal_is_installed_and_served_by_one_role` in
 `crates/zeroship-workflow-server/tests/platform_schema.rs` holds that posture. The service links
-the engine and answers `status`, `signal` and `transition` over its own journal, establishing
-its own ingress epoch; `restart` refuses, naming the prerequisite it still needs. Nothing in
-production writes this journal yet - there is no `start` endpoint - so step 5 is what gives the
-endpoints rows to operate on.
+the engine and answers `status`, `signal`, `transition` and `restart` over its own journal,
+establishing its own ingress epoch. `restart` needs one row the others do not, a held deployment
+intent under `HoldScope::for_app`, and refuses `Unavailable` without it. Nothing in production
+writes this journal yet - there is no `start` endpoint, and the sweeps that would write the rows
+have the capability but no claimant - so step 5 is what gives the endpoints rows to operate on.
 
 Step 5 has started. The claim predicate that lets two claimants share one queue is in
 `crates/zeroship-workflow-manager/src/scheduling.rs`, deriving its admitted kinds from the same
@@ -814,9 +815,10 @@ protocol. This extends a working client rather than inventing one.
    caller. That is the built half of this step sitting in the tree awaiting one, and supplying it
    is the small part.
 
-   **One is a service capability.** `restart` has its endpoint and handler and refuses
-   unconditionally, because `RunService` builds its service without deployments; see the
-   credential question under step 4.
+   **One is a service capability, and it is in place.** `restart` has its endpoint and handler and
+   serves once a held deployment intent exists under `HoldScope::for_app`; what it still lacks is a
+   claimant to write that intent, not a capability to write it. See "What that source reaches, and
+   what it does not" under step 4.
 
    **One waits on the payload seam, which already has its answer.** `start` needs no deployment
    input - `start_captured` in `crates/zeroship-workflow/src/service/app.rs` resolves it with
@@ -1167,9 +1169,9 @@ protocol. This extends a working client rather than inventing one.
    of the service", and for the claim set "And do not reach for the classification that already
    exists", "A second claimant blocks rather than skipping", "And it is in the query, not an arm
    at the claim site" and "And `candidate` has a second caller, which decides something else".
-   The grant: "That first one is not a line of
-   wiring; it is a credential question" and "And the hold `restart` waits on belongs to this
-   service now too". The registration: "And the fork resolves toward the pattern already in the tree".
+   The grant: "What that source reaches, and what it does not" and "And the hold `restart` waits
+   on belongs to this service now too". The registration: "And the fork resolves toward the
+   pattern already in the tree".
    The reserve and confirm: "One obligation is genuinely new". The backend: "An HTTP
    `WorkflowBackend`, which is not the easy half" and the four bullets under it. The heartbeat:
    "The timeout budget does not survive the merge", "And the mismatch pre-dates the merge", "And
