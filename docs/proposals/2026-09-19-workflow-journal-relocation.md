@@ -16,19 +16,14 @@ declaration that writes `jobs.operation_kind`; the service's maintenance lane an
 function that states how it claims are in `crates/zeroship-workflow-server/src/sweeps.rs` and
 `crates/zeroship-workflow-manager/src/maintenance.rs`. The lane is exercised end to end against
 the real journal and the real queue and has NO production caller, which is deliberate and has a
-do-not note of its own: it admits two operations wanting a payload store this service does not
-hold, and starting it before they have one would take those rows
-from the worker that can run them.
-The journal-hold authority is in - `svc/workflow` holds the journal pair, `ServiceHolds` signs as
-the role with no instance, and Control classifies the caller before decoding a body. What the
-first bullet still owes is the payload store, and only that. The deployment registration is in:
-`CONTROL_DEPLOY_REGISTRATION` (`POST /v1/deploy-registration`) is granted to `svc/workflow`
-alone, Control derives the summary from the `manifest_json` its own `deploys` row already stores,
-and `AppDeployments::registration` answers from artifacts on a host that holds them and from the
-assertion on one that does not - so `activate_job` and `management_job` run in the service now.
-Two do not. `cron_job` wants an `InputStager` to stage a schedule's inline input and `collect_job`
-a `PayloadDeleter`, and the lane passes `NoPayloadStore` for both, which refuses by name. Those
-are the reserve-and-confirm below and a one-method remote deleter. Then the lane can start.
+do-not note of its own. `Work::Payload` keeps `cron` and `collect` with the host holding the
+payload store, so the lane admits only what it can finish, and what remains of the first bullet is
+starting it. The journal-hold authority is in - `svc/workflow` holds the journal pair,
+`ServiceHolds` signs as the role with no instance, and Control classifies the caller before
+decoding a body. So is the deployment registration: `CONTROL_DEPLOY_REGISTRATION`
+(`POST /v1/deploy-registration`) is granted to `svc/workflow` alone, Control derives the summary
+from the `manifest_json` its own `deploys` row already stores, and `AppDeployments::registration`
+answers from artifacts on a host holding them and from the assertion on one that does not.
 
 Open 3 names three pieces behind a store of its own: splitting the corpus, severing the
 service's control-plane reads, and giving the service a deployment site. The first and third
@@ -1158,11 +1153,13 @@ protocol. This extends a working client rather than inventing one.
    transaction held on purpose - "A bounded upload holds this lock until the store finishes, so GC
    cannot race a live writer" (`crates/zeroship-workflow/src/service/payloads.rs`) - so what it
    wants is the reserve and confirm this list already carries, not a second mechanism. So both
-   capability halves are answerable, and they differ. What decides where they run is not
-   capability but claim authority, and the flag-day order answers that: the service claims them in
-   process, so `Collect` needs only its byte half and `Cron` the reserve and confirm
-   already on the list. See "And the service is already a claimant of this kind, which answers
-   it".
+   capability halves are answerable, and they differ. Where they run is settled for now by what a
+   host holds: `Work::Payload` (`crates/zeroship-workflow-manager/src/models.rs`) is its own class,
+   `Claimant::Maintenance` refuses it and `Claimant::Placed` takes it, so the two stay with the
+   store-holder and the service's lane never leases a row it cannot finish. That is a statement
+   about capability, not authority - and when a crossing mechanism lands, it flips at exactly one
+   arm of a total match, `(Self::Maintenance, Work::Payload)`, which is a compile-checked pairing
+   rather than a filter to remember.
 
    **And both halves want one mechanism, not two.** The split names two obligations - a reserve
    and confirm for staging, a remote call for deletion - but neither is a call this service can
@@ -2091,20 +2088,18 @@ part that dates, not the verdict.
   seam inviting a caller to pass something else. It survives for SQLite because that tier has a
   genuine reason.
 
-- **Do not start `MaintenanceLane` before it can run everything it admits.**
-  `Claimant::Maintenance` admits every kind `maintenance_job` dispatches, and two of them still
-  refuse. `cron_job` wants an `InputStager` for a schedule's inline input and `collect_job` a
-  `PayloadDeleter`; the lane passes `NoPayloadStore` for both, which answers
-  `Unavailable("workflow maintenance holds no payload store")`. A started lane would lease those
-  rows away from the worker that can run them and then refuse, holding each for a lease window on
-  every tick. The rest run: `release_hold` and `reconcile`'s holds phase on the journal hold
-  authority, `activate` and `management` on the asserted registration, and `close`, `fanout` and
-  `propagation` on the journal alone. The remedy is NOT an artifact store or a payload store in
-  this process - "And the fork resolves toward the pattern already in the tree" declines the
-  first, and the second is the reserve-and-confirm plus a one-method remote deleter. The lane is
-  built and exercised end to end (`crates/zeroship-workflow-server/src/sweeps.rs`) and has no
-  production caller on purpose. Built and unstarted is the correct state here, not an oversight to
-  repair.
+- **Do not give this process a payload store to widen what its lane claims.** `Work::Payload`
+  (`crates/zeroship-workflow-manager/src/models.rs`) keeps `cron` and `collect` with the host that
+  holds the store, and `Claimant::Maintenance` refuses that class, so the lane admits only what it
+  can finish: `release_hold` and `reconcile`'s holds phase on the journal hold authority,
+  `activate` and `management` on the asserted registration, and `close`, `fanout` and
+  `propagation` on the journal alone. When a payload sweep looks stranded the tempting repair is a
+  store here. Two entries decline it - "And the fork resolves toward the pattern already in the
+  tree" for artifacts, "And both halves want one mechanism, not two" for payload bytes - because
+  what is missing is a way for the journal to record a byte operation and have a store-holding
+  host perform and confirm it. Until that exists the refusals in
+  `crates/zeroship-workflow-server/src/sweeps.rs` are the honest answer, and they are unreachable
+  from the lane's own claims by construction.
 
 ---
 
