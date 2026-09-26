@@ -1213,7 +1213,16 @@ protocol. This extends a working client rather than inventing one.
    **Neither needs a store in the service, and they need different things.** `PayloadDeleter`
    (`crates/zeroship-workflow/src/service/payloads.rs`) is one method, `delete(app, id)` - ids
    only, no bytes - so the service can hold a remote implementation that asks whoever owns the
-   store to delete, and `collect_job` needs nothing further. `InputStager`
+   store to delete. But nothing serves such a call: there is no payload endpoint in
+   `crates/zeroship-core/src/service_identity.rs` at all, and the only production holders of
+   `PayloadObjects` are the worker and the CLI - processes the service is called BY rather than
+   calls. So the remote implementation has no one to ask. The journal half is already built: the
+   scan, the fence, and the `deleted` tombstone with its resweep deadline are journal work
+   (`crates/zeroship-workflow/src/service/payloads/collection.rs` marks `resweep` on that state,
+   and `closure` refuses while a tombstone is still owed one). Only the `delete` itself wants the
+   store. So what this wants is the reserve and confirm INVERTED - the journal records the intent
+   and a store-holding host confirms it - not a call the service makes outward. Settle that before
+   anyone writes a deleter. `InputStager`
    (`crates/zeroship-workflow/src/backend.rs`) is the harder one: `stage_input` takes the journal
    handle AND the value, so it does journal work and a byte write in one call. But the service
    holds the value already - a schedule's input is inline in the journal - so it can hash it and
