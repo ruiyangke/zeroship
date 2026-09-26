@@ -1019,9 +1019,16 @@ protocol. This extends a working client rather than inventing one.
    and the worker's narrowing are one change, and that change is the flag. The consequence to
    accept: the service's journal stays empty until then, so the intermediate verification this
    order hoped for - filling `deploys` before the bullets below - is not available before the flag
-   either. The lane itself is built and bound on branch `workflow-sweep-lane-start`, its page bound
-   and deadline taken from `workflow.batch_limit` and `workflow.driver_lane_timeout_ms`, awaiting
-   that change rather than a fix of its own.
+   either. The lane is built and bound here, its page bound and deadline taken from
+   `workflow.batch_limit` and `workflow.driver_lane_timeout_ms`, and nothing starts it:
+   `crates/zeroship-workflow-server/tests/maintenance_lane.rs` drives it directly rather than
+   through the process cadence, so the replacement is bound before it becomes the fallback and the
+   flag decides only when it takes over. What the flag still owes is the start itself and the one
+   case that belongs with it, which branch `workflow-sweep-lane-start` holds rather than this tree:
+   `the_drive_path_settles_a_due_maintenance_row_without_a_placement` binds that the cadence
+   REACHES the lane, and it reads `drive`
+   (`crates/zeroship-workflow-server/src/server.rs`), which is private here, so it cannot land
+   before the cadence it binds.
    Step 6 follows once that is green.
 
    **And the order needs a second claimant, which nothing will issue.** From the sweeps moving
