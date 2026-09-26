@@ -1,4 +1,11 @@
-//! Authenticated journal and queue retention; customer journals never enter Control.
+//! Authenticated Control operations over the app deployment catalog: journal and
+//! queue retention, and the manifest summary a journal records for a deployment.
+//! Customer journals never enter Control.
+//!
+//! The summary is here rather than in a module of its own because it answers out
+//! of the same catalog, under the same role check, through the same handle: the
+//! deployment catalog lives in the workflow store database, which this is the
+//! only Control surface holding open.
 
 #![expect(
     clippy::future_not_send,
@@ -29,6 +36,7 @@ use zeroship_core::{
 use zeroship_data_orm::{
     ConnectOptions, binding::DbBinding, encryption::ProjectKeySource, orm::Database,
 };
+use zeroship_workflow::service::{DeployRegistration, DeployRegistrationRequest};
 use zeroship_workflow_client::{self as coordination, ControlCoordinator, Options};
 use zeroship_workflow_manager::deployments::{self, DeploymentHolds, Error as DeploymentError};
 
@@ -114,6 +122,42 @@ impl DeploymentHoldApi {
         request: &HoldRequest,
     ) -> Result<HoldReceipt, DeploymentError> {
         self.change(worker, request, false).await
+    }
+
+    /// The workflow declarations of one deployment, for the journal holder.
+    ///
+    /// Derived on the read path from the manifest the catalog already stores,
+    /// not from a column written at publish. The manifest and its hash are one
+    /// row, so re-verifying them here re-checks the binding the publish checked
+    /// and cannot answer from a summary that has drifted from the catalog; and
+    /// every deployment ever published has an answer, because `manifest_json`
+    /// is the column publish has always written.
+    ///
+    /// # Errors
+    /// Refuses a deployment that is not the named app's, a stored manifest that
+    /// no longer verifies or parses, and unavailable storage.
+    pub async fn registration(
+        &self,
+        request: &DeployRegistrationRequest,
+    ) -> Result<DeployRegistration, DeploymentError> {
+        compio::time::timeout(REQUEST_TIMEOUT, async {
+            let record = self
+                .ledger
+                .manifest(&request.app_id, request.deploy_id.as_str())
+                .await?;
+            crate::publication::VerifiedDeployment::verify(
+                record.manifest_json,
+                record.deploy_hash,
+            )
+            .map(|deployment| deployment.deploy_registration(&request.deploy_id))
+            .map_err(|error| {
+                DeploymentError::Internal(format!(
+                    "stored deployment manifest no longer verifies: {error}"
+                ))
+            })
+        })
+        .await
+        .map_err(|_| DeploymentError::Timeout)?
     }
 
     /// The journal-scoped pair for a host whose authority is its own role.
@@ -374,7 +418,71 @@ pub fn configure(config: &mut web::ServiceConfig) {
             web::resource(endpoints::CONTROL_QUEUE_DEPLOYMENT_HOLD_RELEASE.path_template())
                 .state(web::types::JsonConfig::default().limit(MAX_REQUEST_BYTES))
                 .route(web::post().to(release_queue)),
+        )
+        .service(
+            web::resource(endpoints::CONTROL_DEPLOY_REGISTRATION.path_template())
+                .state(web::types::JsonConfig::default().limit(MAX_REQUEST_BYTES))
+                .route(web::post().to(deploy_registration)),
         );
+}
+
+async fn deploy_registration(
+    request: web::HttpRequest,
+    state: State<Arc<AppState>>,
+    api: State<Rc<DeploymentHoldApi>>,
+    body: web::types::Payload,
+) -> web::HttpResponse {
+    match handle_registration(request, state, api, body).await {
+        Ok(registration) => web::HttpResponse::Ok().json(&registration),
+        Err(code) => refusal(code),
+    }
+}
+
+async fn handle_registration(
+    request: web::HttpRequest,
+    state: State<Arc<AppState>>,
+    api: State<Rc<DeploymentHoldApi>>,
+    body: web::types::Payload,
+) -> Result<DeployRegistration, FailureCode> {
+    compio::time::timeout(REQUEST_TIMEOUT, async {
+        let authorization = request
+            .headers()
+            .get("authorization")
+            .and_then(|value| value.to_str().ok());
+        let issuer = presented_issuer(authorization).ok_or(FailureCode::Unauthenticated)?;
+        // Whole-issuer equality, as on the queue-scoped pair: this is a
+        // role-arity credential, so an instance-arity `svc/workflow/<id>` is
+        // refused. A worker is refused here too - it holds the artifacts and
+        // derives this from them, so it has no reason to ask.
+        let role = service_issuer(WORKFLOW_SERVICE_NAME).map_err(|_| FailureCode::Unavailable)?;
+        if issuer != role {
+            return Err(FailureCode::Unauthenticated);
+        }
+        crate::internal::verify_service_caller(
+            &state,
+            authorization,
+            endpoints::CONTROL_DEPLOY_REGISTRATION,
+        )
+        .await
+        .map_err(|error| match error {
+            AuthError::StoreUnavailable => FailureCode::Unavailable,
+            _ => FailureCode::Unauthenticated,
+        })?;
+        // Only the verified workflow role reaches body decoding.
+        let mut body = body.into_inner();
+        let query = <Json<DeployRegistrationRequest> as web::FromRequest<
+            web::error::DefaultError,
+        >>::from_request(&request, &mut body)
+        .await
+        .map_err(|error| match error {
+            web::error::JsonPayloadError::Overflow => FailureCode::RequestTooLarge,
+            _ => FailureCode::Invalid,
+        })?
+        .into_inner();
+        api.registration(&query).await.map_err(|error| failure(&error))
+    })
+    .await
+    .map_err(|_| FailureCode::Unavailable)?
 }
 
 async fn acquire_queue(
@@ -582,23 +690,27 @@ async fn handle(
 fn respond(result: Result<HoldReceipt, FailureCode>) -> web::HttpResponse {
     match result {
         Ok(receipt) => web::HttpResponse::Ok().json(&receipt),
-        Err(code) => {
-            let status = match code {
-                FailureCode::Invalid => 400,
-                FailureCode::Unauthenticated => 401,
-                FailureCode::Denied => 403,
-                FailureCode::Conflict => 409,
-                FailureCode::RequestTooLarge => 413,
-                FailureCode::Capacity => 429,
-                FailureCode::Unavailable => 503,
-            };
-            web::HttpResponse::build(
-                ntex::http::StatusCode::from_u16(status).expect("hold response status"),
-            )
-            .force_close()
-            .json(&Failure { code })
-        }
+        Err(code) => refusal(code),
     }
+}
+
+/// One refusal shape for every operation this module serves, so a caller reads
+/// the same status and the same body whichever one it asked for.
+fn refusal(code: FailureCode) -> web::HttpResponse {
+    let status = match code {
+        FailureCode::Invalid => 400,
+        FailureCode::Unauthenticated => 401,
+        FailureCode::Denied => 403,
+        FailureCode::Conflict => 409,
+        FailureCode::RequestTooLarge => 413,
+        FailureCode::Capacity => 429,
+        FailureCode::Unavailable => 503,
+    };
+    web::HttpResponse::build(
+        ntex::http::StatusCode::from_u16(status).expect("deployment catalog response status"),
+    )
+    .force_close()
+    .json(&Failure { code })
 }
 const fn failure(error: &DeploymentError) -> FailureCode {
     match error {

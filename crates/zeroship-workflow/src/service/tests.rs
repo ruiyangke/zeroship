@@ -81,6 +81,7 @@ pub(super) async fn drain(scope: &super::AppWorkflows) {
 }
 
 mod activation;
+mod asserted_registrations;
 mod backend_journal;
 mod background_scope;
 mod child_errors;

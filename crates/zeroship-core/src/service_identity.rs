@@ -460,6 +460,19 @@ pub mod endpoints {
     /// declaring GET here would name a method nothing performs.
     pub const CONTROL_APP_FACTS: ServiceEndpoint =
         ServiceEndpoint::new("control", "POST", "/v1/app-facts");
+    /// Control's workflow declarations for one deployment, asserted to the
+    /// workflow service.
+    ///
+    /// Control parses the bundle when it publishes, so the manifest summary the
+    /// journal stores is a value it already holds. Asserting it here is what
+    /// lets a journal holder record its own `deploys` row without a blob-store
+    /// client and without reading a creator artifact.
+    ///
+    /// POST for the same reason [`CONTROL_APP_FACTS`] is: `Transport` exchanges
+    /// a serialized request and has no GET, so declaring GET would name a
+    /// method nothing performs.
+    pub const CONTROL_DEPLOY_REGISTRATION: ServiceEndpoint =
+        ServiceEndpoint::new("control", "POST", "/v1/deploy-registration");
     pub const CONTROL_BILLING_RECONCILE: ServiceEndpoint =
         ServiceEndpoint::new("control", "POST", "/internal/billing/reconcile");
     pub const CONTROL_SPEND_RECONCILE: ServiceEndpoint =
@@ -651,6 +664,12 @@ pub fn service_allowlist() -> &'static [ServiceAuthorization] {
                     // them here instead, so the service holds no grant on
                     // `zeroship.apps` policy columns or on `zeroship.plans`.
                     endpoints::CONTROL_APP_FACTS,
+                    // The manifest summary a journal `deploys` row records. The
+                    // service holds no blob store, so the value it verifies
+                    // against comes from the process that parsed the bundle at
+                    // publish. Trusting Control for a manifest listing is
+                    // strictly less than the policy authority above it.
+                    endpoints::CONTROL_DEPLOY_REGISTRATION,
                     // The manager owns WHEN a journal must exist, so it is the
                     // one principal that may send a schema bundle. Routing this
                     // through Control would move the workflow artifacts into

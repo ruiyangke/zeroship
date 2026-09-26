@@ -278,6 +278,7 @@ The complete namespace matcher includes the
 `/v1/databases/{database_id}/migrations/apply` route. Control declares no
 creator-facing `/v1` route, so the rule shadows nothing a CLI deploy reaches.
 It does serve `/v1` paths for other platform processes: `/v1/deployment-holds/*`
+and `/v1/deploy-registration`
 (`crates/zeroship-control/src/deployment_hold_api.rs`) and `/v1/app-facts`
 (`crates/zeroship-control/src/app_facts_api.rs`). Those callers dial
 `control:9090` by service name on the internal network, so the edge never sees

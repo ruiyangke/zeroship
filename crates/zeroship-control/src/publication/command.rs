@@ -71,6 +71,10 @@ pub struct VerifiedDeployment {
     databases: Vec<zeroship_core::DatabaseId>,
     schedules: Vec<ScheduleDescriptor>,
     workflows: bool,
+    /// The creator declarations in full, including each schedule's inline
+    /// input. `schedules` above is the manager's input-free projection of the
+    /// same parse; the journal records this one.
+    declarations: zeroship_workflow::service::BundleDeclarations,
 }
 
 impl VerifiedDeployment {
@@ -110,7 +114,24 @@ impl VerifiedDeployment {
                 .collect(),
             schedules,
             workflows,
+            declarations,
         })
+    }
+
+    /// The manifest summary a workflow journal's `deploys` row records.
+    ///
+    /// Derived from the parse this verification already did, so the value
+    /// Control asserts to the workflow service and the value it validated at
+    /// publish cannot disagree - they are one parse of one hash-verified
+    /// manifest. The deployment identity is the host's, exactly as it is when a
+    /// host holding the artifacts derives the same summary from the bytes.
+    #[must_use]
+    pub fn deploy_registration(
+        &self,
+        deployment: &DeploymentId,
+    ) -> zeroship_workflow::service::DeployRegistration {
+        self.declarations
+            .registration(deployment.as_str().to_owned(), self.hash.clone())
     }
 
     #[must_use]

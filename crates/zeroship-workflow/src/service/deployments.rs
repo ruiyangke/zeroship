@@ -7,9 +7,10 @@
 
 use super::{
     app::lock_app, deployment_retention::admission_generation, deploys, tasks::authorized_task,
-    BundleExecutable, TaskToken, WorkerIdentity, WorkflowService,
+    BundleExecutable, DeployRegistration, TaskToken, WorkerIdentity, WorkflowService,
 };
 use crate::{
+    deploy_registrations::DeployRegistrationSource,
     deployment_holds::{DeploymentHoldAuthority, DeploymentHoldClient},
     WorkflowServiceError,
 };
@@ -17,7 +18,7 @@ use std::{rc::Rc, sync::Arc};
 use zeroship_bundle::{
     verify_deployment_manifest, BlobError, BlobStore, ExecutableError, LoadedWorker,
 };
-use zeroship_core::app_id::AppId;
+use zeroship_core::{app_id::AppId, workflow_jobs::DeploymentId};
 
 /// The normal app artifact store a host holds, with the budget it reads under.
 #[derive(Clone)]
@@ -36,15 +37,22 @@ struct Artifacts {
 /// with no store is refused BY NAME at the read rather than treated as a host
 /// with no deployments at all, so an operation that needs an artifact says what
 /// is missing and one that needs only a hold proceeds.
+///
+/// A third capability answers what most of those operations actually wanted:
+/// the manifest SUMMARY a `deploys` row records. A host holding the artifacts
+/// derives it from the bytes; a host holding neither store nor assertion is
+/// refused by name, as at the read.
 #[derive(Clone)]
 pub struct AppDeployments {
     artifacts: Option<Artifacts>,
+    registrations: Option<Rc<dyn DeployRegistrationSource>>,
     holds: Rc<dyn DeploymentHoldAuthority>,
 }
 impl std::fmt::Debug for AppDeployments {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AppDeployments")
             .field("artifacts", &self.artifacts.is_some())
+            .field("registrations", &self.registrations.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -69,6 +77,7 @@ impl AppDeployments {
                 source,
                 max_source_bytes,
             }),
+            registrations: None,
             holds,
         })
     }
@@ -79,8 +88,21 @@ impl AppDeployments {
     pub fn holds_only(holds: Rc<dyn DeploymentHoldAuthority>) -> Self {
         Self {
             artifacts: None,
+            registrations: None,
             holds,
         }
+    }
+
+    /// Add the asserted manifest summary, for a host that holds no artifacts.
+    ///
+    /// This is not a second route to the bytes: `source` answers with the
+    /// declarations alone, and [`Self::read`] still refuses by name. A host that
+    /// holds the artifacts derives the same summary from them and takes that arm
+    /// instead, so giving one both changes nothing.
+    #[must_use]
+    pub fn with_registrations(mut self, source: Rc<dyn DeployRegistrationSource>) -> Self {
+        self.registrations = Some(source);
+        self
     }
 
     pub(super) fn client(
@@ -119,6 +141,51 @@ impl AppDeployments {
         }
         let manifest = verify_deployment_manifest(&bytes, hash)?;
         BundleExecutable::load(&manifest, source, artifacts.max_source_bytes).await
+    }
+
+    /// The workflow declarations of `hash`, from whichever source this host
+    /// holds.
+    ///
+    /// The artifact arm wins when a host holds both, because the bytes are the
+    /// stronger evidence: they are verified against `hash` on the way in, and
+    /// the assertion is not. Nothing in the tree holds both.
+    ///
+    /// Whichever arm answers, the returned `id` and `hash` are the caller's own:
+    /// they come from the hold this operation already took, so an assertion
+    /// cannot move the deployment a `deploys` row is about. Only `workflows` and
+    /// `schedules` come from the source, which is what the row needs and what
+    /// the caller has no other way to learn.
+    ///
+    /// # Errors
+    /// Refuses a host holding neither capability by name, an assertion about
+    /// another deployment or hash, and whatever the source refuses.
+    pub(super) async fn registration(
+        &self,
+        app: &AppId,
+        deployment: &DeploymentId,
+        hash: &str,
+    ) -> Result<DeployRegistration, WorkflowServiceError> {
+        if self.artifacts.is_some() {
+            let executable = self.read(app, hash).await?;
+            return Ok(executable.registration(deployment.as_str().to_owned(), hash.to_owned()));
+        }
+        let source = self.registrations.as_ref().ok_or_else(|| {
+            WorkflowServiceError::Unavailable(
+                "this host holds neither an app deployment artifact store nor an asserted \
+                 registration source"
+                    .into(),
+            )
+        })?;
+        let registration = source.registration(app, deployment).await?;
+        // The hash this host already holds decides which deployment the row is
+        // about. An assertion naming another one is a disagreement between
+        // Control's catalog and the hold it issued, not a value to record.
+        if registration.hash != hash {
+            return Err(WorkflowServiceError::Conflict(
+                "asserted deployment registration names another deployment hash".into(),
+            ));
+        }
+        Ok(registration)
     }
 }
 

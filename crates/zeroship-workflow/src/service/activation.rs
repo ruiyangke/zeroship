@@ -95,10 +95,10 @@ impl AppWorkflows {
                     )
                     .await?;
                 authority.check(self)?;
-                let executable = source.read(self.app_id(), &held.deploy_hash).await?;
+                let deploy = source
+                    .registration(self.app_id(), deployment_id, &held.deploy_hash)
+                    .await?;
                 authority.check(self)?;
-                let deploy = executable
-                    .registration(deployment_id.as_str().to_owned(), held.deploy_hash.clone());
 
                 let mut tx = self.service.begin().await?;
                 let lock = lock_app_state(&mut tx, self.app_id()).await?;

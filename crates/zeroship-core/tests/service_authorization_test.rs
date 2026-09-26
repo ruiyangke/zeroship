@@ -16,6 +16,7 @@ const CATALOG: &[ServiceEndpoint] = &[
     endpoints::CONTROL_QUEUE_DEPLOYMENT_HOLD_ACQUIRE,
     endpoints::CONTROL_QUEUE_DEPLOYMENT_HOLD_RELEASE,
     endpoints::CONTROL_APP_FACTS,
+    endpoints::CONTROL_DEPLOY_REGISTRATION,
     endpoints::WORKFLOW_VERIFY_ASSIGNMENT,
     endpoints::WORKFLOW_MANAGE,
     endpoints::WORKFLOW_MANAGEMENT_STATUS,
@@ -139,6 +140,12 @@ fn endpoint_catalog_records_exact_measured_operations() {
             "/v1/deployment-holds/queue/release",
         ),
         (endpoints::CONTROL_APP_FACTS, "control", "POST", "/v1/app-facts"),
+        (
+            endpoints::CONTROL_DEPLOY_REGISTRATION,
+            "control",
+            "POST",
+            "/v1/deploy-registration",
+        ),
         (
             endpoints::WORKFLOW_MANAGE,
             "workflow",
@@ -431,6 +438,11 @@ fn measured_allowlist_is_encoded_and_enforced_row_by_row() {
             // Policy inputs and the deletion marker, so the workflow service
             // needs no grant on the Control columns that carry them.
             endpoints::CONTROL_APP_FACTS,
+            // The manifest summary a journal `deploys` row records, so this
+            // service records its own row with no blob store and no artifact
+            // read. The worker is NOT granted it: it holds the artifacts and
+            // derives the same summary from them.
+            endpoints::CONTROL_DEPLOY_REGISTRATION,
             // The manager is the ONE principal that may install a platform
             // schema in a creator database, because it is the one that owns the
             // artifacts.

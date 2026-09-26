@@ -245,10 +245,15 @@ impl AppWorkflows {
                     )
                     .await?;
                 authority.check(self)?;
-                let executable = source.read(self.app_id(), &held.deploy_hash).await?;
+                let deployment = source
+                    .registration(self.app_id(), cron.deployment_id, &held.deploy_hash)
+                    .await?;
                 authority.check(self)?;
-                let deployment =
-                    executable.registration(expected.id.clone(), held.deploy_hash.clone());
+                // The journal's own row is what this occurrence was admitted
+                // against, and the declarations it fires from have to be the
+                // same ones. The comparison stands whichever source answered:
+                // artifacts on a host that holds them, Control's assertion on
+                // one that does not.
                 if deployment != expected {
                     return Err(invalid());
                 }

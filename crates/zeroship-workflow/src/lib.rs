@@ -7,6 +7,7 @@
 extern crate self as zeroship_workflow;
 
 pub mod backend;
+pub mod deploy_registrations;
 pub mod deployment_holds;
 pub mod engine;
 pub mod errors;

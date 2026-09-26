@@ -47,6 +47,27 @@ struct DeploymentRecord {
     deploy_hash: String,
     retention_state: String,
 }
+
+#[derive(FromRow)]
+#[orm(entity = deploys)]
+struct ManifestRecord {
+    deploy_hash: String,
+    manifest_json: String,
+}
+
+/// The manifest bytes a deployment was accepted under, and the hash they were
+/// verified against when the catalog recorded them.
+///
+/// The catalog stores the manifest rather than a projection of it, so a reader
+/// re-derives whatever it needs under its own parser instead of inheriting a
+/// summary frozen at publish. Both halves come out of the same row, so a reader
+/// can re-check the binding the write already checked.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeploymentManifest {
+    pub deploy_hash: String,
+    pub manifest_json: String,
+}
+
 #[derive(FromRow)]
 #[orm(entity = holds)]
 struct HoldRecord {
@@ -154,6 +175,51 @@ impl DeploymentHolds {
             authorize,
         )
         .await
+    }
+
+    /// The manifest this app's deployment was accepted under.
+    ///
+    /// Read-only and lock-free: it takes no retention lock and asserts no
+    /// retention state, because it decides nothing about retention. A caller
+    /// that must not act on a reclaimed deployment holds a hold, and the hold
+    /// path is where that refusal already lives.
+    ///
+    /// # Errors
+    /// Rejects an invalid deployment identity, a deployment that is not this
+    /// app's, a row whose hash is malformed, and database failures.
+    pub async fn manifest(
+        &self,
+        app: &AppId,
+        deployment: &str,
+    ) -> Result<DeploymentManifest, Error> {
+        typed_id::parse_with_prefix(deployment, "dep")
+            .map_err(|_| Error::InvalidRequest("invalid deployment identity".into()))?;
+        let record = self
+            .database
+            .entity::<deploys::Entity>()?
+            .find::<ManifestRecord>(
+                deploys::app_id
+                    .eq(app.as_str())?
+                    .and(deploys::id.eq(deployment.to_owned())?),
+                FindOptions {
+                    limit: Some(1),
+                    ..Default::default()
+                },
+            )
+            .await?
+            .into_iter()
+            .next()
+            // The same refusal a hold gets for a deployment that is not this
+            // app's: absence and foreignness are one answer, so a caller cannot
+            // probe another app's catalog by the shape of the error.
+            .ok_or(Error::PermissionDenied)?;
+        if !zeroship_bundle::validate_hash_format(&record.deploy_hash) {
+            return Err(invalid_storage());
+        }
+        Ok(DeploymentManifest {
+            deploy_hash: record.deploy_hash,
+            manifest_json: record.manifest_json,
+        })
     }
 
     async fn change<F, Fut>(

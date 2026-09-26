@@ -26,8 +26,9 @@ use zeroship_data_orm::{
     value, ConnectOptions, Value,
 };
 use zeroship_workflow::{
+    deploy_registrations::DeployRegistrationSource,
     deployment_holds::{DeploymentHoldAuthority, DeploymentHoldClient},
-    service::{AppDeployments, DeployRegistration, WorkflowService},
+    service::{AppDeployments, BundleDeclarations, DeployRegistration, WorkflowService},
     WorkflowServiceError,
 };
 use zeroship_workflow_manager::deployments::{self as deployment_holds, DeploymentHolds};
@@ -141,6 +142,38 @@ impl Deployments {
                 .chain(client),
         );
         AppDeployments::new(self.source.clone(), 1024 * 1024, Rc::new(hosted)).unwrap()
+    }
+    /// A host holding the retention authority for `apps` and nothing else: no
+    /// artifact store and no asserted registration source.
+    ///
+    /// The control arm for the binding below. Every sweep that needs a manifest
+    /// summary must refuse here, or a green on the asserted arm would only be
+    /// saying the operation asks for nothing.
+    pub fn holds_binding(&self, apps: &[&AppId]) -> AppDeployments {
+        AppDeployments::holds_only(Rc::new(HostedApps::new(
+            apps.iter()
+                .map(|app| Rc::new(self.client(app)) as Rc<dyn DeploymentHoldClient>),
+        )))
+    }
+    /// The same host, plus the asserted manifest summary. Still no artifact
+    /// store: [`AppDeployments::read`] refuses on this binding by name.
+    pub fn asserted_binding(&self, apps: &[&AppId]) -> AppDeployments {
+        self.holds_binding(apps)
+            .with_registrations(Rc::new(self.registrations()))
+    }
+    /// A registration source over this catalog's own `app_deploys` rows.
+    ///
+    /// It derives the summary the way Control's endpoint does, from the stored
+    /// manifest and the hash beside it, so an engine test can exercise the
+    /// asserted arm without an HTTP Control. That the DEPLOYED derivation agrees
+    /// is a different claim, and `zeroship-control` asserts it against the real
+    /// endpoint.
+    #[must_use]
+    pub fn registrations(&self) -> CatalogRegistrations {
+        CatalogRegistrations {
+            database: self.database.clone(),
+            _directory: self.directory.clone(),
+        }
     }
     pub async fn publish(
         &self,
@@ -314,6 +347,70 @@ impl DeploymentHoldAuthority for HostedApps {
             .get(app)
             .cloned()
             .ok_or(WorkflowServiceError::PermissionDenied)
+    }
+}
+
+/// Control's half of the asserted registration, over this fixture's catalog.
+///
+/// It reads the stored manifest and the hash the row was accepted under,
+/// re-verifies the binding between them, and parses the declarations - the same
+/// three steps `DeploymentHoldApi::registration` takes. It reaches no blob
+/// store: the manifest it parses is the catalog column, not an artifact.
+#[derive(Clone)]
+pub struct CatalogRegistrations {
+    database: Database,
+    _directory: Arc<tempfile::TempDir>,
+}
+
+#[async_trait::async_trait(?Send)]
+impl DeployRegistrationSource for CatalogRegistrations {
+    async fn registration(
+        &self,
+        app: &AppId,
+        deployment: &zeroship_core::workflow_jobs::DeploymentId,
+    ) -> Result<DeployRegistration, WorkflowServiceError> {
+        let Output::Rows { rows, .. } = self
+            .database
+            .collection("app_deploys")
+            .unwrap()
+            .find(
+                value!({"app_id":app.as_str(), "id":deployment.as_str()}),
+                value!({}),
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("catalog rows");
+        };
+        let row = rows.first().ok_or(WorkflowServiceError::PermissionDenied)?;
+        let hash = row["deploy_hash"].as_str().unwrap().to_owned();
+        let manifest = zeroship_bundle::verify_deployment_manifest(
+            row["manifest_json"].as_str().unwrap().as_bytes(),
+            &hash,
+        )
+        .map_err(|_| WorkflowServiceError::Internal("catalog manifest".into()))?;
+        Ok(BundleDeclarations::parse(&manifest)
+            .map_err(|_| WorkflowServiceError::Internal("catalog declarations".into()))?
+            .registration(deployment.as_str().to_owned(), hash))
+    }
+}
+
+/// A source that answers about the right deployment under the WRONG hash.
+///
+/// The engine pins the hash from the hold it already took, so this is the arm
+/// that proves it compares rather than records what it was handed.
+pub struct RehashedRegistrations<T>(pub T, pub String);
+
+#[async_trait::async_trait(?Send)]
+impl<T: DeployRegistrationSource> DeployRegistrationSource for RehashedRegistrations<T> {
+    async fn registration(
+        &self,
+        app: &AppId,
+        deployment: &zeroship_core::workflow_jobs::DeploymentId,
+    ) -> Result<DeployRegistration, WorkflowServiceError> {
+        let mut registration = self.0.registration(app, deployment).await?;
+        registration.hash.clone_from(&self.1);
+        Ok(registration)
     }
 }
 

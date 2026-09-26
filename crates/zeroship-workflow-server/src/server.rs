@@ -27,7 +27,10 @@ use zeroship_core::{
     workflow_deployments::{HoldGeneration, HoldReceipt, QueueHoldRequest},
     workflow_jobs::DeploymentId,
 };
-use zeroship_workflow::{deployment_holds::ServiceHolds, service::AppDeployments};
+use zeroship_workflow::{
+    deploy_registrations::RemoteDeployRegistrations, deployment_holds::ServiceHolds,
+    service::AppDeployments,
+};
 use zeroship_workflow_client::{
     ControlAppFacts, Options as ClientOptions, QueueDeploymentHolds, Transport,
 };
@@ -256,11 +259,27 @@ pub async fn run(settings: WorkflowSettings, options: ServerOptions) -> Result<(
                     // this. It is the retention authority alone: the artifacts
                     // stay with the hosts that hold a blob store, and an
                     // operation needing one is refused by name.
+                    //
+                    // Beside it, the manifest SUMMARY those operations wanted
+                    // the artifacts for. Control parsed the bundle when it
+                    // published, so it asserts the declarations and this
+                    // process records its own `deploys` row from them - no blob
+                    // store, no artifact read, and a manifest listing is
+                    // strictly less than the policy this service already takes
+                    // from the same origin under the same role.
                     let deployments = AppDeployments::holds_only(Rc::new(ServiceHolds::new(
                         control_url.clone(),
                         outbound.clone(),
                         client_options(coordinator, &plaintext_peers),
-                    )));
+                    )))
+                    .with_registrations(Rc::new(
+                        RemoteDeployRegistrations::asserted(
+                            &control_url,
+                            outbound.clone(),
+                            client_options(coordinator, &plaintext_peers),
+                        )
+                        .map_err(|error| registration_error(&error))?,
+                    ));
                     // Absent when no migration-service origin is configured. The
                     // journal endpoint then refuses, rather than answering as
                     // though a journal had been provisioned.
@@ -469,6 +488,24 @@ fn client_options(options: Options, plaintext_peers: &PlaintextPeers) -> ClientO
         timeout: options.command_timeout,
         plaintext_peers: plaintext_peers.clone(),
         ..ClientOptions::default()
+    }
+}
+
+/// A registration client refuses only for reasons that are this process's own
+/// configuration: no signer, a signer that is not the workflow role, or an
+/// origin the transport fence rejects. Each maps to the class `retention_error`
+/// gives the same condition, so a misconfigured deployment fails to start with
+/// one vocabulary.
+///
+/// It adds no startup requirement: `ControlAppFacts` above already refuses a
+/// process holding no workflow-role signer, and refuses it before the server
+/// binds.
+fn registration_error(error: &zeroship_workflow::WorkflowServiceError) -> ManagerError {
+    use zeroship_workflow::WorkflowServiceError as ServiceError;
+    match error {
+        ServiceError::InvalidRequest(_) => ManagerError::Invalid,
+        ServiceError::Unauthenticated | ServiceError::PermissionDenied => ManagerError::Denied,
+        _ => ManagerError::Unavailable,
     }
 }
 

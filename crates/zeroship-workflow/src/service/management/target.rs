@@ -40,10 +40,12 @@ pub(super) async fn load(
         )
         .await?;
     authority.check(app)?;
-    let executable = source.read(app.app_id(), &held.deploy_hash).await?;
+    let registration = source
+        .registration(app.app_id(), deployment, &held.deploy_hash)
+        .await?;
     authority.check(app)?;
     Ok(Verified {
-        registration: executable.registration(deployment.as_str().to_owned(), held.deploy_hash),
+        registration,
         generation: held.generation,
         scope,
     })

@@ -67,6 +67,16 @@ Control's authenticated `POST /v1/app-facts` endpoint, behind the
 `crates/zeroship-workflow-manager/src/app_facts.rs`, so the manager holds no
 binding on Control's tables.
 
+It holds no creator artifact store either. The maintenance operations that
+record a journal `deploys` row need a deployment's workflow declarations, and
+they take them the same way: Control parsed the bundle when it published, and
+asserts that summary over `POST /v1/deploy-registration`
+(`crates/zeroship-control/src/deployment_hold_api.rs`), behind the
+`DeployRegistrationSource` capability in
+`crates/zeroship-workflow/src/deploy_registrations.rs`. A host that does hold the
+bundle derives the same summary from the bytes instead. Reading the artifacts is
+refused by name on this process, not silently skipped.
+
 A creator run is executed by the `zeroship-worker` that the manager placed the
 app on (`crates/zeroship-worker/src/workflow_host.rs`). That host owns the
 creator journal in the app database and its payloads in the app object store.
