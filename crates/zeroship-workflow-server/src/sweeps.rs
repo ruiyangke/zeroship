@@ -14,7 +14,11 @@
     reason = "the lane stays on the runtime that opened the journal and the queue"
 )]
 
-use std::rc::Rc;
+use std::{
+    future::Future,
+    rc::Rc,
+    time::{Duration, Instant},
+};
 
 use async_trait::async_trait;
 use zeroship_core::{
@@ -33,7 +37,7 @@ use zeroship_workflow::{
     WorkflowServiceError,
 };
 use zeroship_workflow_manager::{
-    maintenance::MaintenanceAuthority, policy::PolicySource, Error as ManagerError, Queue,
+    maintenance::MaintenanceAuthority, policy::PolicySource, Claimant, Error as ManagerError, Queue,
 };
 
 use crate::runs::RunService;
@@ -59,6 +63,12 @@ pub enum Swept {
 pub enum SweepError {
     Queue(ManagerError),
     Journal(WorkflowServiceError),
+    /// The turn's deadline cut the visit off before either side answered. It is
+    /// the host's own bound rather than a refusal, so no side is named; a row
+    /// the visit had leased keeps its lease until it lapses, and a later turn
+    /// takes it again. Only a turn reports this; [`MaintenanceLane::sweep`]
+    /// carries no deadline of its own.
+    Deadline,
 }
 
 /// Claims and runs this service's maintenance rows, one app at a time.
@@ -151,6 +161,214 @@ impl MaintenanceLane {
             .await
             .map(|receipt| Swept::Settled(Box::new(receipt)))
             .map_err(SweepError::Queue)
+    }
+}
+
+/// The bounds one turn of the lane runs under, from the host's configuration.
+///
+/// They are the manager driver's own lane bounds, because this lane takes its
+/// turn beside that driver's on one runtime: a page nobody bounds and a turn
+/// nobody times would spend the process's only thread on one busy app.
+#[derive(Clone, Copy, Debug)]
+pub struct LaneOptions {
+    /// Maximum claimable rows a turn's enumeration fetches, which bounds the
+    /// apps it visits: one app's rows are adjacent in that scan and collapse to
+    /// one visit, so a turn visits at most this many apps and often fewer.
+    pub page_limit: u32,
+    /// Shared deadline for a turn's enumeration and its entire page.
+    pub lane_timeout: Duration,
+}
+
+impl LaneOptions {
+    /// # Errors
+    /// Rejects an empty page, a page wider than one storage read, and a
+    /// deadline that is zero or beyond the portable clock's range.
+    pub fn validate(self) -> Result<(), WorkflowServiceError> {
+        if self.page_limit == 0
+            || i64::from(self.page_limit) > zeroship_data_orm::sql::MAX_ROW_LIMIT
+            || self.lane_timeout.is_zero()
+            || Instant::now().checked_add(self.lane_timeout).is_none()
+        {
+            return Err(WorkflowServiceError::InvalidRequest(
+                "workflow maintenance turn bounds are invalid".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// One app's visit that did not finish, and why.
+#[derive(Debug)]
+pub struct SweepFailure {
+    pub app: AppId,
+    pub error: SweepError,
+}
+
+/// What one turn did: what it swept, what it refused, and whether the pass
+/// finished or was cut off.
+#[derive(Debug, Default)]
+pub struct SweepReport {
+    /// Apps this turn visited.
+    pub visited: usize,
+    /// Visits that ran a row and recorded its settlement.
+    pub settled: usize,
+    /// Visits that claimed a fanout page whose predecessor has not finished.
+    pub deferred: usize,
+    /// Visits that found no row this lane can take, because another claimant
+    /// took it first or because the claim decided it is not deliverable yet.
+    pub idle: usize,
+    pub failures: Vec<SweepFailure>,
+    /// The enumeration itself failed, so the turn visited nothing.
+    pub scan_error: Option<ManagerError>,
+    pub timed_out: bool,
+    /// Listed apps left for a later turn when the deadline expired.
+    pub unvisited: usize,
+    /// The pass reached the upper bound it started against, so the next turn
+    /// begins a new one at the lowest app id again.
+    pub sweep_complete: bool,
+}
+
+/// Gives the lane bounded turns over the apps whose queue holds a row it takes.
+///
+/// It owns the bounds and the scan position; the lane owns the work, exactly as
+/// the manager's `Driver` owns the cursors and pages of the operations it
+/// drives. A turn enumerates apps, and the claim inside each visit is what
+/// decides whether the app really has a row for this lane: the enumeration reads
+/// no app lock, so it can list an app whose row another claimant takes first.
+#[derive(Debug)]
+pub struct MaintenanceDriver {
+    lane: MaintenanceLane,
+    options: LaneOptions,
+    cursor: Cursor,
+}
+
+/// A disposable scan position, not authority and not durable work. `upper` is
+/// the greatest app id the pass started against, so a pass over a queue that
+/// keeps gaining apps still terminates.
+#[derive(Debug, Default)]
+struct Cursor {
+    after: Option<String>,
+    upper: Option<String>,
+}
+
+impl MaintenanceDriver {
+    /// # Errors
+    /// Rejects invalid turn bounds.
+    pub fn new(lane: MaintenanceLane, options: LaneOptions) -> Result<Self, WorkflowServiceError> {
+        options.validate()?;
+        Ok(Self {
+            lane,
+            options,
+            cursor: Cursor::default(),
+        })
+    }
+
+    /// Visit one bounded page of the apps holding rows this lane takes.
+    ///
+    /// The deadline covers the enumeration and the whole page together. A visit
+    /// that refuses or is cut off is recorded and the turn goes on to the next
+    /// app: one app's failure never costs another its turn, and nothing here
+    /// retries within the turn. Dropping this future abandons the rest of the
+    /// page without deleting any durable work.
+    pub async fn tick(&mut self) -> SweepReport {
+        let deadline = Deadline(Instant::now() + self.options.lane_timeout);
+        let mut report = SweepReport::default();
+        let (page, fetched) = match self.page(deadline).await {
+            Ok(page) => page,
+            Err(error) => {
+                report.scan_error = Some(error);
+                report.timed_out = deadline.expired();
+                return report;
+            }
+        };
+        for app in &page {
+            if deadline.expired() {
+                report.timed_out = true;
+                break;
+            }
+            self.cursor.after = Some(app.as_str().to_owned());
+            report.visited += 1;
+            match deadline.run(self.lane.sweep(app)).await {
+                Some(Ok(Swept::Settled(_))) => report.settled += 1,
+                Some(Ok(Swept::Deferred)) => report.deferred += 1,
+                Some(Ok(Swept::Idle)) => report.idle += 1,
+                Some(Err(error)) => report.failures.push(SweepFailure {
+                    app: app.clone(),
+                    error,
+                }),
+                None => {
+                    report.timed_out = true;
+                    report.failures.push(SweepFailure {
+                        app: app.clone(),
+                        error: SweepError::Deadline,
+                    });
+                }
+            }
+        }
+        report.unvisited = page.len() - report.visited;
+        if !report.timed_out
+            && (fetched < self.options.page_limit as usize
+                || self.cursor.after == self.cursor.upper)
+        {
+            self.cursor = Cursor::default();
+            report.sweep_complete = true;
+        }
+        report
+    }
+
+    /// The apps this turn visits and the rows the scan fetched to name them,
+    /// under the deadline the turn shares.
+    ///
+    /// The upper bound is read once per pass and held across turns, so a queue
+    /// that gains apps while a pass runs does not extend it.
+    async fn page(&mut self, deadline: Deadline) -> Result<(Vec<AppId>, usize), ManagerError> {
+        if self.cursor.upper.is_none() {
+            let (highest, _) = deadline
+                .run(
+                    self.lane
+                        .queue
+                        .claimable_apps(Claimant::Maintenance, None, None, true, 1),
+                )
+                .await
+                .ok_or(ManagerError::Timeout)??;
+            self.cursor.upper = highest.first().map(|app| app.as_str().to_owned());
+        }
+        let Some(upper) = self.cursor.upper.as_deref() else {
+            return Ok((Vec::new(), 0));
+        };
+        deadline
+            .run(self.lane.queue.claimable_apps(
+                Claimant::Maintenance,
+                self.cursor.after.as_deref(),
+                Some(upper),
+                false,
+                self.options.page_limit,
+            ))
+            .await
+            .ok_or(ManagerError::Timeout)?
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Deadline(Instant);
+
+impl Deadline {
+    fn expired(self) -> bool {
+        Instant::now() >= self.0
+    }
+
+    /// What `future` answered, or `None` when the deadline cut it off.
+    ///
+    /// An answer that lands as the deadline passes is kept rather than
+    /// discarded: what it reports is already committed, and the turn records the
+    /// expiry itself before it visits anything else.
+    async fn run<T>(self, future: impl Future<Output = T>) -> Option<T> {
+        if self.expired() {
+            return None;
+        }
+        compio::time::timeout(self.0.saturating_duration_since(Instant::now()), future)
+            .await
+            .ok()
     }
 }
 

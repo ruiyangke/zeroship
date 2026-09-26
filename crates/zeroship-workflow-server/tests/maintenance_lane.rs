@@ -22,6 +22,7 @@ mod platform;
 
 use futures::future::LocalBoxFuture;
 use std::{
+    cell::RefCell,
     rc::Rc,
     time::{Duration, Instant},
 };
@@ -43,23 +44,42 @@ use zeroship_workflow_manager::{
 use zeroship_workflow_server::{
     coordinator::{connect_eligibility, Coordinator, Options},
     runs::RunService,
-    sweeps::{LanePublisher, MaintenanceLane, SweepError, Swept},
+    sweeps::{LaneOptions, LanePublisher, MaintenanceDriver, MaintenanceLane, SweepError, Swept},
 };
 
-/// One observation, so binding installs a real lease rather than a stub.
-#[derive(Debug)]
-struct Source(PolicyObservation);
+/// The observations journals are bound under, one per app the fixture has
+/// granted a policy.
+///
+/// It answers for those apps and refuses every other, so a visit to an app this
+/// fixture never seeded is refused rather than served by a stub that answers for
+/// anything the lane happens to enumerate.
+#[derive(Debug, Default)]
+struct Source(RefCell<Vec<PolicyObservation>>);
+impl Source {
+    fn grant(&self, app: &AppId) {
+        self.0.borrow_mut().push(
+            PolicyObservation::new(
+                app.clone(),
+                7.try_into().unwrap(),
+                AppPolicy::default(),
+                Instant::now() + Duration::from_mins(10),
+            )
+            .unwrap(),
+        );
+    }
+}
 impl PolicySource for Source {
     fn observe<'a>(
         &'a self,
         app: &'a AppId,
     ) -> LocalBoxFuture<'a, Result<PolicyObservation, ManagerError>> {
         Box::pin(async move {
-            if self.0.app_id() == app {
-                Ok(self.0.clone())
-            } else {
-                Err(ManagerError::Denied)
-            }
+            self.0
+                .borrow()
+                .iter()
+                .find(|observed| observed.app_id() == app)
+                .cloned()
+                .ok_or(ManagerError::Denied)
         })
     }
     fn revalidate(&self, observation: &PolicyObservation) -> Result<Instant, ManagerError> {
@@ -70,8 +90,22 @@ impl PolicySource for Source {
 struct Fixture {
     platform: platform::Platform,
     queue: Queue,
+    runs: Rc<RunService>,
+    policies: Rc<Source>,
     lane: MaintenanceLane,
     app: AppId,
+}
+
+/// A lane of this fixture's own, with an identity nothing else holds.
+fn lane(queue: &Queue, runs: &Rc<RunService>, policies: &Rc<Source>) -> MaintenanceLane {
+    MaintenanceLane::new(
+        queue.clone(),
+        Rc::clone(runs),
+        Rc::clone(policies) as Rc<dyn PolicySource>,
+        WorkerId::mint(),
+        MaintenanceOptions::default(),
+    )
+    .unwrap()
 }
 
 impl Fixture {
@@ -90,14 +124,7 @@ impl Fixture {
         )
         .await
         .unwrap();
-        let app = AppId::mint();
-        platform.seed_app(&app).await;
         let queue = service.manager.queue().clone();
-        queue.register_scope(&app).await.unwrap();
-        // The journal rows an app needs to exist at all. The lane's operation
-        // acts on what this does NOT seed: there is no pending publication, so
-        // the reconciliation page is empty and its phase advances.
-        journal::seed_run(&platform, &app).await;
         let runs = Rc::new(
             RunService::connect(
                 &platform.runtime_url,
@@ -106,29 +133,44 @@ impl Fixture {
             .await
             .unwrap(),
         );
-        let policies = Rc::new(Source(
-            PolicyObservation::new(
-                app.clone(),
-                7.try_into().unwrap(),
-                AppPolicy::default(),
-                Instant::now() + Duration::from_mins(10),
-            )
-            .unwrap(),
-        ));
-        let lane = MaintenanceLane::new(
-            queue.clone(),
-            runs,
-            policies as Rc<dyn PolicySource>,
-            WorkerId::mint(),
-            MaintenanceOptions::default(),
-        )
-        .unwrap();
-        Self {
+        let policies = Rc::new(Source::default());
+        let app = AppId::mint();
+        let fixture = Self {
+            lane: lane(&queue, &runs, &policies),
             platform,
             queue,
-            lane,
-            app,
-        }
+            runs,
+            policies,
+            app: app.clone(),
+        };
+        fixture.seed(&app).await;
+        fixture
+    }
+
+    /// Everything an app needs before the lane can sweep it: a live Control
+    /// row, a registered queue scope, the journal rows an app needs to exist at
+    /// all, and an observed policy to bind its journal under.
+    ///
+    /// The lane's operation acts on what this does NOT seed: there is no pending
+    /// publication, so the reconciliation page is empty and its phase advances.
+    async fn seed(&self, app: &AppId) {
+        self.platform.seed_app(app).await;
+        self.queue.register_scope(app).await.unwrap();
+        journal::seed_run(&self.platform, app).await;
+        self.policies.grant(app);
+    }
+
+    /// A second app this lane can sweep, for cases about which apps a turn
+    /// reaches.
+    async fn sweepable(&self) -> AppId {
+        let app = AppId::mint();
+        self.seed(&app).await;
+        app
+    }
+
+    /// Turns over this fixture's queue, under the bounds a host configures.
+    fn sweeps(&self, options: LaneOptions) -> MaintenanceDriver {
+        MaintenanceDriver::new(lane(&self.queue, &self.runs, &self.policies), options).unwrap()
     }
 
     async fn row(&self, job: &JobId) -> (String, Option<String>, Option<String>) {
@@ -315,4 +357,81 @@ async fn an_operation_without_an_artifact_source_is_refused_by_name() {
     );
     assert_eq!(outcome, None);
     assert_eq!(worker.as_deref(), Some(fixture.lane.identity().as_str()));
+}
+
+/// A turn visits at most its page limit, and the next turn continues from where
+/// it stopped.
+///
+/// Two apps each hold one maintenance row and the limit is one. Without the
+/// bound one turn would sweep both, so the second row still being `ready` is
+/// what the limit buys; the second turn settling it says the bound is a page
+/// rather than a ceiling on the work, and reports the pass as complete because
+/// it reached the upper bound the first turn started against.
+#[compio::test]
+async fn a_turn_visits_at_most_its_page_limit_and_the_next_resumes() {
+    let fixture = Box::pin(Fixture::new()).await;
+    let neighbour = fixture.sweepable().await;
+    let mut apps = [fixture.app.clone(), neighbour];
+    apps.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+    let rows = [sweep(&apps[0]), sweep(&apps[1])];
+    for row in &rows {
+        fixture.queue.submit(row).await.unwrap();
+    }
+
+    let mut sweeps = fixture.sweeps(LaneOptions {
+        page_limit: 1,
+        lane_timeout: Duration::from_secs(10),
+    });
+    let first = Box::pin(sweeps.tick()).await;
+    assert_eq!(first.visited, 1, "{first:?}");
+    assert_eq!(first.settled, 1, "{first:?}");
+    assert!(first.failures.is_empty(), "{first:?}");
+    assert!(!first.sweep_complete, "{first:?}");
+    assert_eq!(fixture.row(&rows[0].id).await.0, "settled");
+    assert_eq!(
+        fixture.row(&rows[1].id).await.0,
+        "ready",
+        "the page limit must leave the second app for a later turn"
+    );
+
+    let second = Box::pin(sweeps.tick()).await;
+    assert_eq!(second.visited, 1, "{second:?}");
+    assert_eq!(second.settled, 1, "{second:?}");
+    assert!(second.sweep_complete, "{second:?}");
+    assert_eq!(fixture.row(&rows[1].id).await.0, "settled");
+}
+
+/// A turn whose deadline is already spent visits nothing and reports why.
+///
+/// The control differs only in the deadline: the same turn over the same row,
+/// given a deadline it can meet, sweeps it. Without that arm an empty turn would
+/// read as a bound working when it could equally be a lane that sweeps nothing.
+#[compio::test]
+async fn a_turn_whose_deadline_is_spent_visits_nothing() {
+    let fixture = Box::pin(Fixture::new()).await;
+    let row = sweep(&fixture.app);
+    fixture.queue.submit(&row).await.unwrap();
+
+    let mut spent = fixture.sweeps(LaneOptions {
+        page_limit: 8,
+        lane_timeout: Duration::from_nanos(1),
+    });
+    let turn = Box::pin(spent.tick()).await;
+    assert_eq!(turn.visited, 0, "{turn:?}");
+    assert!(turn.timed_out, "{turn:?}");
+    assert_eq!(turn.scan_error, Some(ManagerError::Timeout), "{turn:?}");
+    assert_eq!(
+        fixture.row(&row.id).await.0,
+        "ready",
+        "a turn that never ran must leave the row for the next one"
+    );
+
+    let mut afforded = fixture.sweeps(LaneOptions {
+        page_limit: 8,
+        lane_timeout: Duration::from_secs(10),
+    });
+    let turn = Box::pin(afforded.tick()).await;
+    assert_eq!(turn.settled, 1, "{turn:?}");
+    assert!(!turn.timed_out, "{turn:?}");
+    assert_eq!(fixture.row(&row.id).await.0, "settled");
 }

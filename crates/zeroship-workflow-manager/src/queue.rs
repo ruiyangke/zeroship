@@ -207,6 +207,52 @@ impl Queue {
         self.options.lease
     }
 
+    /// The apps whose queue holds a row `claimant` may take, in app id order
+    /// after `after` and up to `upper`, and how many rows the scan fetched.
+    /// Passing `descending` with a limit of one reads a sweep's upper bound.
+    ///
+    /// `limit` bounds the ROWS, so the answer holds at most that many apps and
+    /// commonly fewer: one app's claimable rows are adjacent in this order and
+    /// collapse to one entry. A fetch that reached the limit is the caller's
+    /// signal that the scan has more to page through.
+    ///
+    /// The enumeration a host runs BEFORE claiming, so it reads only what needs
+    /// no app lock: row state, availability and the kinds this claimant
+    /// refuses. Occurrence gating, management barriers and the delivery ceiling
+    /// stay inside [`Self::claim_authorized`], which is where a claim is
+    /// decided; an app listed here can still have nothing that claimant takes,
+    /// and asking is the only way to find out.
+    ///
+    /// # Errors
+    /// Reports an unreachable clock, a stored app id this crate did not mint,
+    /// and failed transactions.
+    pub async fn claimable_apps(
+        &self,
+        claimant: Claimant,
+        after: Option<&str>,
+        upper: Option<&str>,
+        descending: bool,
+        limit: u32,
+    ) -> Result<(Vec<AppId>, usize), Error> {
+        self.transact(|tx| async move {
+            let now = self.clock.now().await?;
+            let rows = crate::scheduling::claimable_apps_in(
+                &tx, now, claimant, after, upper, descending, limit,
+            )
+            .await?;
+            let fetched = rows.len();
+            let mut apps: Vec<AppId> = Vec::with_capacity(fetched);
+            for row in rows {
+                let app = AppId::parse(&row).map_err(|_| Error::Storage)?;
+                if apps.last() != Some(&app) {
+                    apps.push(app);
+                }
+            }
+            Ok((apps, fetched))
+        })
+        .await
+    }
+
     /// Register an app selected by trusted platform configuration.
     ///
     /// # Errors

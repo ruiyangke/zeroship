@@ -22,7 +22,9 @@ use zeroship_core::{
         ActivateSchedules, DisableSchedules, RegisterSchedules, ScheduleDescriptor, ScheduleId,
     },
 };
-use zeroship_data_orm::orm::{Database, FindOptions, FromRow, Insertable};
+use zeroship_data_orm::orm::{
+    Database, EntityAlias, FindOptions, FromRow, Insertable, ReadPredicate,
+};
 use zeroship_workflow_calendar::{ScheduleCatchUp, ScheduleTiming};
 
 #[derive(Clone, Copy, Debug)]
@@ -1312,6 +1314,78 @@ struct Candidate {
     id: String,
 }
 
+/// The rows `claimant` could take: ready and available, or leased past a lapsed
+/// lease, of a kind that claimant does not refuse.
+///
+/// This is the part of claimability a caller can read without the app lock.
+/// Occurrence gating, management barriers and the delivery ceiling decide the
+/// rest, so a row this admits can still be undeliverable.
+fn claimable_rows(
+    job: &EntityAlias<crate::models::jobs::Entity>,
+    now: i64,
+    claimant: crate::models::Claimant,
+) -> Result<ReadPredicate, Error> {
+    use crate::models::jobs;
+    Ok(job
+        .column(jobs::state)
+        .eq("ready")?
+        .and(job.column(jobs::available_at).lte(now)?)
+        .or(job
+            .column(jobs::state)
+            .eq("leased")?
+            .and(job.column(jobs::lease_deadline).lte(Some(now))?))
+        .and(
+            job.column(jobs::operation_kind)
+                .not_in_values(claimant.denied())?,
+        ))
+}
+
+/// The claimable rows `claimant` could take, as the app id each one names, in
+/// app order.
+///
+/// `limit` bounds the ROWS this reads, not the apps they name: one app can hold
+/// many, and this order puts them next to each other, so a caller that wants
+/// apps deduplicates neighbours and learns from the row count whether the scan
+/// filled its page. `descending` with a limit of one reads a sweep's upper
+/// bound.
+pub(crate) async fn claimable_apps_in(
+    tx: &Database,
+    now: i64,
+    claimant: crate::models::Claimant,
+    after: Option<&str>,
+    upper: Option<&str>,
+    descending: bool,
+    limit: u32,
+) -> Result<Vec<String>, Error> {
+    use crate::models::jobs;
+    let job = tx.entity::<jobs::Entity>()?.alias("j")?;
+    let key = job.column(jobs::app_id);
+    let mut filter = claimable_rows(&job, now, claimant)?;
+    if let Some(after) = after {
+        filter = filter.and(key.gt(after)?);
+    }
+    if let Some(upper) = upper {
+        filter = filter.and(key.lte(upper)?);
+    }
+    Ok(tx
+        .from(&job)
+        .filter(filter)
+        .order_by(if descending { key.desc() } else { key.asc() })
+        .select(job.row::<ClaimableApp>())?
+        .limit(i64::from(limit))?
+        .all()
+        .await?
+        .into_iter()
+        .map(|row| row.app_id)
+        .collect())
+}
+
+#[derive(FromRow)]
+#[orm(entity = crate::models::jobs)]
+struct ClaimableApp {
+    app_id: String,
+}
+
 /// Filter readiness before limiting candidates, so blocked cron work cannot
 /// hide a deliverable activation or recovery job later in the app's queue.
 ///
@@ -1358,14 +1432,7 @@ pub(crate) async fn candidate(
                         .eq(activation.column(jobs::id))?,
                 ),
         )?;
-    let mut claimable = job
-        .column(jobs::state)
-        .eq("ready")?
-        .and(job.column(jobs::available_at).lte(now)?)
-        .or(job
-            .column(jobs::state)
-            .eq("leased")?
-            .and(job.column(jobs::lease_deadline).lte(Some(now))?));
+    let mut claimable = claimable_rows(&job, now, claimant)?;
     if let Some(ceiling) = ceiling {
         claimable = claimable.and(job.column(jobs::execution_attempts).lt(ceiling)?);
     }
@@ -1373,10 +1440,6 @@ pub(crate) async fn candidate(
         job.column(jobs::app_id)
             .eq(app.as_str())?
             .and(claimable)
-            .and(
-                job.column(jobs::operation_kind)
-                    .not_in_values(claimant.denied())?,
-            )
             .and(
                 occurrence
                     .column(schedule_occurrences::id)
