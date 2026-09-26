@@ -2197,7 +2197,7 @@ part that dates, not the verdict.
   holds the store, and `Claimant::Maintenance` refuses that class, so the lane admits only what it
   can finish: `release_hold` and `reconcile`'s holds phase on the journal hold authority,
   `activate` and `management` on the asserted registration, and `close`, `fanout` and
-  `propagation` on the journal alone. When a payload sweep looks stranded the tempting repair is a
+  `propagate` on the journal alone. When a payload sweep looks stranded the tempting repair is a
   store here. Two entries decline it - "And the fork resolves toward the pattern already in the
   tree" for artifacts, "And the two directions do not share one mechanism, because staging is not
   asynchronous" for payload bytes - because the deletion direction already records its intent in
