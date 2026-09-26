@@ -16,16 +16,19 @@ declaration that writes `jobs.operation_kind`; the service's maintenance lane an
 function that states how it claims are in `crates/zeroship-workflow-server/src/sweeps.rs` and
 `crates/zeroship-workflow-manager/src/maintenance.rs`. The lane is exercised end to end against
 the real journal and the real queue and has NO production caller, which is deliberate and has a
-do-not note of its own: it admits operations that read a deployment artifact, which this service
-does not and will not hold, and starting it before that read is replaced would take those rows
+do-not note of its own: it admits two operations wanting a payload store this service does not
+hold, and starting it before they have one would take those rows
 from the worker that can run them.
 The journal-hold authority is in - `svc/workflow` holds the journal pair, `ServiceHolds` signs as
 the role with no instance, and Control classifies the caller before decoding a body. What the
-first bullet still owes is the deployment registration. `activate`, `cron` and `management` read
-a deployment's executable today to check it against the journal's own row, and a hold-only host
-refuses that read by name. The remedy is settled against an artifact store by "And the fork
-resolves toward the pattern already in the tree": Control parses the bundle when it publishes, so
-it asserts the `DeployRegistration` and the service records its own row. Then the lane can start.
+first bullet still owes is the payload store, and only that. The deployment registration is in:
+`CONTROL_DEPLOY_REGISTRATION` (`POST /v1/deploy-registration`) is granted to `svc/workflow`
+alone, Control derives the summary from the `manifest_json` its own `deploys` row already stores,
+and `AppDeployments::registration` answers from artifacts on a host that holds them and from the
+assertion on one that does not - so `activate_job` and `management_job` run in the service now.
+Two do not. `cron_job` wants an `InputStager` to stage a schedule's inline input and `collect_job`
+a `PayloadDeleter`, and the lane passes `NoPayloadStore` for both, which refuses by name. Those
+are the reserve-and-confirm below and a one-method remote deleter. Then the lane can start.
 
 Open 3 names three pieces behind a store of its own: splitting the corpus, severing the
 service's control-plane reads, and giving the service a deployment site. The first and third
@@ -1119,7 +1122,7 @@ protocol. This extends a working client rather than inventing one.
    claim path. `activate_job`, `cron_job` and `management_job` are the ones that reach
    `record_verified` in production - the third through
    `crates/zeroship-workflow/src/service/management/target.rs` - and they are exactly the ones
-   needing an artifact source as they stand, a journal-class deployment hold and the
+   needing a deployment registration, a journal-class deployment hold and the
    authorization to take one. "And the fork resolves toward the pattern already in the tree" replaces
    that read with an asserted registration rather than giving this service the artifacts.
    `release_hold_job` belongs with those rather than with the cheap group: it reaches
@@ -2067,20 +2070,20 @@ part that dates, not the verdict.
   seam inviting a caller to pass something else. It survives for SQLite because that tier has a
   genuine reason.
 
-- **Do not start `MaintenanceLane` before it can run everything it admits, and do not unblock it
-  with a blob store.** `Claimant::Maintenance` admits every kind `maintenance_job` dispatches.
-  `RunService` attaches a hold-only source (`AppDeployments::holds_only`), so `release_hold` and
-  `reconcile`'s deployment-holds phase can run - they ask only for `client(app)`. Three cannot:
-  `activate`, `cron` and `management` through its `target.rs` reach `source.read` for the
-  executable they check the journal's row against, and a hold-only host refuses that by name.
-  `collect` is a fourth, wanting a `PayloadDeleter` rather than anything here. A started lane
-  would lease those rows away from the worker that can run them and then refuse, holding each for
-  a lease window on every tick. The remedy is NOT an artifact store: "And the fork resolves
-  toward the pattern already in the tree" settles that, and giving this process a way to read
-  creator bytes to unblock a sweep is the arm it declines. Control asserts the
-  `DeployRegistration` instead. The lane is built and exercised end
-  to end (`crates/zeroship-workflow-server/src/sweeps.rs`) and has no production caller on
-  purpose. Built and unstarted is the correct state here, not an oversight to repair.
+- **Do not start `MaintenanceLane` before it can run everything it admits.**
+  `Claimant::Maintenance` admits every kind `maintenance_job` dispatches, and two of them still
+  refuse. `cron_job` wants an `InputStager` for a schedule's inline input and `collect_job` a
+  `PayloadDeleter`; the lane passes `NoPayloadStore` for both, which answers
+  `Unavailable("workflow maintenance holds no payload store")`. A started lane would lease those
+  rows away from the worker that can run them and then refuse, holding each for a lease window on
+  every tick. The rest run: `release_hold` and `reconcile`'s holds phase on the journal hold
+  authority, `activate` and `management` on the asserted registration, and `close`, `fanout` and
+  `propagation` on the journal alone. The remedy is NOT an artifact store or a payload store in
+  this process - "And the fork resolves toward the pattern already in the tree" declines the
+  first, and the second is the reserve-and-confirm plus a one-method remote deleter. The lane is
+  built and exercised end to end (`crates/zeroship-workflow-server/src/sweeps.rs`) and has no
+  production caller on purpose. Built and unstarted is the correct state here, not an oversight to
+  repair.
 
 ---
 
