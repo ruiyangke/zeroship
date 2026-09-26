@@ -23,8 +23,12 @@ use zeroship_core::{app_id::AppId, workflow_coordination::RunId};
 /// about the write.
 pub async fn seed_run(platform: &platform::Platform, app: &AppId) -> RunId {
     let run = RunId::mint();
+    // One deploy per app, derived from the app so that repeated calls for one
+    // app reuse it and two apps never share it. The row is keyed by id alone,
+    // so a literal shared across apps inserts for the first and leaves the
+    // next app's run with no deploy of its own to reference.
+    let deploy = app.as_str().replacen("app_", "dep_", 1);
     let app = app.as_str().to_owned();
-    let deploy = "dep_0seed00000000000000000000";
     // The manifest a `DeployRegistration` decodes from. `restart` reads the
     // active deployment before it reaches the fence, so a stub here would
     // refuse as an invalid record rather than as fenced.
