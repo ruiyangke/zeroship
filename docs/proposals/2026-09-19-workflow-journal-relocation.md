@@ -371,9 +371,17 @@ The machinery to carry it exists. The worker already reaches the manager over HT
 `zeroship-workflow-client` with a validated `Transport`, so job delivery is already a remote
 protocol. This extends a working client rather than inventing one.
 
-1. **Install the journal into `workflow_manager` as a platform migration.** Nothing reads it
-   yet. Verify that the schema installs, that one stamp row covers the installation, and that
-   the creator-schema path is untouched.
+1. **DONE. The journal installs into `workflow_manager` as a platform migration.** Nothing in
+   production reads it yet. `db/migrations-ts/20260919000000_workflow_journal.ts` installs it, and
+   `journal_is_installed_and_served_by_one_role`
+   (`crates/zeroship-workflow-server/tests/platform_schema.rs`) binds the installation and the
+   stamp together - it asserts the stamp is "a single row" and that `zeroship_workflow` holds the
+   four DML privileges and nothing else, no TRUNCATE, REFERENCES, TRIGGER or DDL. Its own doc
+   records what that no longer catches: the service login and the journal's grantee are now one
+   role, so a stray grant made elsewhere reads identically to a deliberate one, and its green is
+   not evidence the grant is minimal. The creator-schema path is untouched -
+   `crates/zeroship-workflow-schema/schema/` still carries `postgres.sql`, `sqlite.sql` and its
+   `versions/` deltas - and step 6 is what deletes it.
 
 2. **DONE. `AppBackend` binds the store of the journal it is given.**
    `into_backend` in `crates/zeroship-workflow/src/service/backend.rs` takes the journal, checks
