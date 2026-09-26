@@ -142,8 +142,13 @@ pub struct ManagementScope {
 /// What running a queued row does, which decides who may claim it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Work {
-    /// A sweep of the journal. It runs no creator code.
+    /// A sweep of the journal. It runs no creator code, and the journal is the
+    /// whole of what it reads and writes.
     Maintenance,
+    /// A sweep of the journal that also moves creator bytes: it stages or
+    /// deletes payload objects, so running it needs the payload store as well
+    /// as the journal.
+    Payload,
     /// Creator code.
     Creator,
 }
@@ -151,10 +156,11 @@ enum Work {
 /// A host that takes rows off an app's queue.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Claimant {
-    /// A worker holding a placement on the app. It runs creator code and the
-    /// maintenance dispatch, so it takes every kind.
+    /// A worker holding a placement on the app. It runs creator code, holds the
+    /// payload store and runs the maintenance dispatch, so it takes every kind.
     Placed,
-    /// A lane that runs the maintenance dispatch and nothing else.
+    /// A lane that runs the journal-only sweeps. It holds no payload store, so
+    /// the sweeps that move creator bytes are not its to take.
     Maintenance,
 }
 
@@ -168,10 +174,15 @@ impl Claimant {
             .map(|(kind, _)| *kind)
     }
 
+    /// Every pairing is named, with no wildcard on either side: a `Work` class
+    /// or a claimant added to this file leaves this match non-exhaustive, so
+    /// whether that host takes that work is decided here rather than inherited
+    /// from an arm that happened to cover it.
     const fn admits(self, work: Work) -> bool {
         match (self, work) {
-            (Self::Placed, _) | (Self::Maintenance, Work::Maintenance) => true,
-            (Self::Maintenance, Work::Creator) => false,
+            (Self::Placed, Work::Maintenance | Work::Payload | Work::Creator)
+            | (Self::Maintenance, Work::Maintenance) => true,
+            (Self::Maintenance, Work::Payload | Work::Creator) => false,
         }
     }
 }
@@ -201,14 +212,14 @@ macro_rules! operations {
 operations! {
     Activate => "activate", Maintenance;
     Advance => "advance", Creator;
-    Cron => "cron", Maintenance;
+    Cron => "cron", Payload;
     Management => "management", Maintenance;
     Fanout => "fanout", Maintenance;
     Propagate => "propagate", Maintenance;
     ReleaseHold => "release_hold", Maintenance;
     Close => "close", Maintenance;
     Reconcile => "reconcile", Maintenance;
-    Collect => "collect", Maintenance;
+    Collect => "collect", Payload;
 }
 
 pub fn operation_run(operation: &zeroship_core::workflow_jobs::JobOperation) -> Option<&str> {

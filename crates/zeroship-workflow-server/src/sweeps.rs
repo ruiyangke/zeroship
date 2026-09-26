@@ -1,15 +1,14 @@
 //! This service's own lane over the maintenance rows of the queue it owns.
 //!
-//! The rows it takes are the ones `maintenance_job` dispatches, which is every
-//! operation but the one that executes creator code. A worker keeps taking
-//! that one under its placement, and the claim predicate is what keeps the two
-//! off each other's rows.
+//! The rows it takes are the journal-only sweeps `maintenance_job` dispatches.
+//! It takes neither the operation that executes creator code nor the sweeps
+//! that move creator bytes. A worker keeps taking those under its placement,
+//! and the claim predicate is what keeps the two hosts off each other's rows.
 //!
 //! The lane holds no payload store. Bytes belong to the process that holds the
 //! store, and `workflow_process_dependencies_follow_crate_ownership` forbids
 //! this crate both `zeroship-storage` and `zeroship-workflow-runner`, where the
-//! only production implementations live. The operations that ask for one are
-//! refused by name here rather than skipped.
+//! only production implementations live.
 #![allow(
     clippy::future_not_send,
     reason = "the lane stays on the runtime that opened the journal and the queue"
@@ -202,7 +201,13 @@ impl JobPublisher for LanePublisher<'_> {
 }
 
 /// The payload capabilities `maintenance_job` takes and this service does not
-/// hold. An operation that asks for one is told so.
+/// hold. An operation that asks for one is told so by name.
+///
+/// `Claimant::Maintenance` refuses every kind that asks, so no claim this lane
+/// makes reaches either method. They stay because the dispatch is total and the
+/// claim predicate is the only thing keeping those kinds away from it: if the
+/// two ever disagree about a kind, this answers it rather than a panic or a
+/// silent write the store never made.
 #[derive(Debug)]
 struct NoPayloadStore;
 

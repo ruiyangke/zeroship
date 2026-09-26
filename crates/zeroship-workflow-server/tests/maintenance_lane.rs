@@ -282,10 +282,10 @@ async fn the_lane_claims_and_settles_a_journal_only_maintenance_job() {
 /// A maintenance row whose operation needs an artifact source is claimed and
 /// then refused by name.
 ///
-/// The lane takes every kind the dispatch runs, and the ones reaching
-/// `self.service.deployments` have no source here. The refusal must reach the
-/// caller rather than be absorbed: the row stays unsettled and redeliverable,
-/// and what is missing is named.
+/// The lane takes every journal-only kind the dispatch runs, and the ones
+/// reaching `self.service.deployments` have no source here. The refusal must
+/// reach the caller rather than be absorbed: the row stays unsettled and
+/// redeliverable, and what is missing is named.
 #[compio::test]
 async fn an_operation_without_an_artifact_source_is_refused_by_name() {
     let fixture = Box::pin(Fixture::new()).await;

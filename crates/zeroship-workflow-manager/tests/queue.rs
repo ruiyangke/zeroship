@@ -83,6 +83,11 @@ case!(
     postgres_refused_kind_at_the_head_does_not_hide_the_rows_behind_it,
     refused_kind_at_the_head
 );
+case!(
+    sqlite_byte_moving_kind_is_left_to_a_claimant_holding_the_store,
+    postgres_byte_moving_kind_is_left_to_a_claimant_holding_the_store,
+    byte_moving_kind_is_left
+);
 
 async fn queue(fixture: &Fixture, options: Options) -> Queue {
     Queue::connect(
@@ -152,6 +157,17 @@ fn job(app: &AppId) -> JobSpec {
             generation: 0,
             revision: 1.try_into().unwrap(),
         },
+        available_at: 0.try_into().unwrap(),
+    }
+}
+
+/// A row whose sweep moves creator bytes: `collect_job` deletes retired payload
+/// objects, so running it needs the payload store as well as the journal.
+fn collection(app: &AppId) -> JobSpec {
+    JobSpec {
+        id: JobId::mint(),
+        app_id: app.clone(),
+        operation: JobOperation::Collect {},
         available_at: 0.try_into().unwrap(),
     }
 }
@@ -1474,6 +1490,93 @@ async fn refused_kind_at_the_head(fixture: &Fixture) {
             .delivery()
             .job,
         head
+    );
+}
+
+/// A claimant that holds no payload store leaves a sweep that moves creator
+/// bytes for one that holds it.
+///
+/// The collection row sits at the head of the dispatch order with a journal-only
+/// sweep behind it. The restricted claimant answers the row behind, and once
+/// that is settled it answers nothing while the collection row is still `ready`.
+/// The control differs only in the claimant, which takes that same row out of
+/// that same queue.
+///
+/// The refusal set is asserted at the end, against the kinds this file and its
+/// sibling cover: `cron` is the other byte-moving kind, and a hand-written cron
+/// row is deliverable to no claimant at all - it needs an occurrence bound to a
+/// settled activation - so its control belongs where that lifecycle is
+/// available, in `cron_left_to_store_holder` (`tests/scheduling.rs`).
+async fn byte_moving_kind_is_left(fixture: &Fixture) {
+    let queue = queue(fixture, Options::default()).await;
+    let app = AppId::mint();
+    queue.register_scope(&app).await.unwrap();
+    let bytes = collection(&app);
+    let behind = sweep(&app);
+    queue.submit(&bytes).await.unwrap();
+    queue.submit(&behind).await.unwrap();
+    assert!(
+        dispatch_order(fixture, &bytes.id).await < dispatch_order(fixture, &behind.id).await,
+        "the byte-moving row must sit at the head for this to measure anything"
+    );
+
+    let authority = assignment(fixture, &app).await;
+    let claimed = queue
+        .claim_authorized(
+            &identity(&authority),
+            Claimant::Maintenance,
+            Ok(support::delivery_ceiling()),
+            |_| ready(Ok(authority.clone())),
+        )
+        .await
+        .unwrap()
+        .expect("the journal-only row behind the head is claimable");
+    assert_eq!(claimed.delivery().job, behind);
+    queue
+        .settle(&authority, &settlement(claimed.delivery(), vec![]))
+        .await
+        .unwrap();
+    assert_eq!(
+        stored(fixture, &bytes.id).await.unwrap()["state"],
+        value!("ready"),
+        "the byte-moving row must still be waiting for a host that holds the store"
+    );
+    assert!(
+        queue
+            .claim_authorized(
+                &identity(&authority),
+                Claimant::Maintenance,
+                Ok(support::delivery_ceiling()),
+                |_| ready(Ok(authority.clone())),
+            )
+            .await
+            .unwrap()
+            .is_none(),
+        "the byte-moving row is all that is left and the restricted claimant answers nothing"
+    );
+
+    // The control: the same row, differing only in who claims it.
+    assert_eq!(
+        queue
+            .claim(&authority)
+            .await
+            .unwrap()
+            .expect("a placed host takes the byte-moving row")
+            .delivery()
+            .job,
+        bytes
+    );
+
+    // The population: the kinds the restricted claimant refuses are the creator
+    // one and the two byte-moving ones, both of which have a control. A third
+    // byte-moving operation classified without one fails here.
+    let mut refused: Vec<&str> = Claimant::Maintenance.denied().collect();
+    refused.sort_unstable();
+    assert_eq!(refused, ["advance", "collect", "cron"]);
+    assert_eq!(
+        Claimant::Placed.denied().count(),
+        0,
+        "a placed host takes every kind"
     );
 }
 

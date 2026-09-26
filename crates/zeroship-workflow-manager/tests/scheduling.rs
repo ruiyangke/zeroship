@@ -10,6 +10,7 @@
 )]
 mod support;
 
+use std::future::ready;
 use support::{Admin, Backend, Fixture};
 use zeroship_core::{
     app_id::AppId,
@@ -27,7 +28,7 @@ use zeroship_workflow_calendar::{
 use zeroship_workflow_manager::{
     recovery::{DutyKind, Options as RecoveryOptions, Recovery},
     scheduling::{Options, Scheduler},
-    Error, Queue,
+    Claimant, Error, Queue,
 };
 
 macro_rules! case {
@@ -124,6 +125,11 @@ case!(
     sqlite_selection_reports_the_current_activation_and_its_readiness,
     postgres_selection_reports_the_current_activation_and_its_readiness,
     selection
+);
+case!(
+    sqlite_cron_is_left_to_a_claimant_holding_the_store,
+    postgres_cron_is_left_to_a_claimant_holding_the_store,
+    cron_left_to_store_holder
 );
 
 async fn host(fixture: &Fixture) -> (Scheduler, Queue) {
@@ -1080,4 +1086,55 @@ async fn selection(fixture: &Fixture) {
     )
     .await;
     assert_eq!(scheduler.selection(&app).await, Err(Error::Storage));
+}
+
+/// A claimant that holds no payload store leaves a due cron row for one that
+/// holds it.
+///
+/// `cron_job` stages the schedule's inline input, so a cron row is the second
+/// kind whose sweep moves creator bytes; the other is collection, and its arm of
+/// this property is `byte_moving_kind_is_left_to_a_claimant_holding_the_store`
+/// in `tests/queue.rs`.
+///
+/// The row here is a dispatched one rather than a hand-written spec, because a
+/// cron row is deliverable only through its own lifecycle: an occurrence bound
+/// to an activation that has settled completed. That is what makes the control
+/// mean something - the placed claimant takes this row, so the restricted
+/// claimant's empty answer is about the kind and not about a prerequisite
+/// nothing satisfied.
+async fn cron_left_to_store_holder(fixture: &Fixture) {
+    let (scheduler, queue) = host(fixture).await;
+    let app = AppId::mint();
+    let metadata = registration(&app, vec![descriptor("nightly", ScheduleCatchUp::Skip)]);
+    let activation_job = prepare_activate(&scheduler, &metadata, 1).await;
+    let id = make_due(fixture, &app, "nightly").await;
+    let cron = scheduler.dispatch(&app, &id).await.unwrap().jobs.remove(0);
+    assert!(matches!(cron.operation, JobOperation::Cron { .. }));
+    let owner = assignment(&app);
+    let prerequisite = claim(&queue, &owner).await;
+    assert_eq!(prerequisite.job, activation_job);
+    settle(&queue, &owner, &prerequisite, JobOutcome::Completed {}).await;
+
+    assert!(
+        queue
+            .claim_authorized(
+                &(&owner).into(),
+                Claimant::Maintenance,
+                Ok(support::delivery_ceiling()),
+                |_| ready(Ok(owner.clone())),
+            )
+            .await
+            .unwrap()
+            .is_none(),
+        "the cron row is all that is left to claim, and a claimant without the \
+         payload store answers nothing rather than it"
+    );
+    assert_eq!(
+        rows(fixture, "jobs", value!({"id":cron.id.as_str()})).await[0]["state"],
+        value!("ready"),
+        "the refused cron row must still be waiting for a host that holds the store"
+    );
+
+    // The control: the same row, differing only in who claims it.
+    assert_eq!(claim(&queue, &owner).await.job, cron);
 }
