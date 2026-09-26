@@ -405,7 +405,7 @@ protocol. This extends a working client rather than inventing one.
    `WorkflowService` and `AppWorkflows` behind `RunService` in
    `crates/zeroship-workflow-server/src/runs.rs`.
 
-3. **PARTLY DONE - `status`, `signal` and `transition` are served; `restart` refuses.** The
+3. **DONE over the wire - all four run calls are served; production waits on rows, not code.** The
    endpoints, their `svc/worker` grants, the request envelopes, the `RunFailure` refusal
    envelope and the client methods are in; `RunService` in
    `crates/zeroship-workflow-server/src/runs.rs` binds an app per request from the server's own
@@ -430,28 +430,46 @@ protocol. This extends a working client rather than inventing one.
    transaction on every mutation, so a carried value is a claim rechecked at use time rather
    than a grant that keeps admitting.
 
-   **`restart` is the one still fenced, and for its own reason.** It resolves a deployment
-   before it reaches the epoch. Under `RestartOptions::default()` the effective policy is
-   `Latest`, so `active_deploy` and `exact_target` in
+   **`restart` serves, and what gated it was one row.** It resolves a deployment before it
+   reaches the epoch. Under `RestartOptions::default()` the effective policy is `Latest`, so
+   `active_deploy` and `exact_target` in
    `crates/zeroship-workflow/src/service/control/restart.rs` run first; `retained_source` is the
-   `Started` path rather than the default one, and both end at `require_journal_hold`. That
-   check is a READ - `admission_generation` in
-   `crates/zeroship-workflow/src/service/deployment_retention.rs` is one `find` - so what
-   restart lacks is not authority to create a hold, but a hold and a `deploys` row that
-   something else created.
-   `ingress_serves_signal_and_transition_while_restart_still_lacks_its_source` pins all of it:
-   the two that serve, the one that refuses, and a `status` control that needs neither.
+   `Started` path rather than the default one, and both end at `require_journal_hold`. That check
+   is a READ - `admission_generation` in
+   `crates/zeroship-workflow/src/service/deployment_retention.rs` is one `find` that refuses with
+   `conflict("deployment hold is missing")` - so what restart lacked was a held intent under
+   `HoldScope::for_app`, and nothing else: the `deploys` row it also reads is one the fixture
+   already seeded.
+   `restart_is_served_only_with_the_journals_deployment_hold`
+   (`crates/zeroship-workflow-server/tests/http_runs.rs`) pins it as a pair whose arms differ in
+   that row alone - served with the hold, `Unavailable` without it - beside the two that always
+   served and a `status` control that needs neither.
+
+   **A refusal that names no cause hides the prerequisite behind it.** Seeding the hold turned the
+   503 into a 500, `invalid workflow continuation journal`, because the fixture's generation row
+   was malformed: `journal_id`
+   (`crates/zeroship-workflow/src/service/continuations/records.rs`) is
+   `typed_id::parse_with_prefix(id, "wjr")`, and no `gen_`-prefixed literal parses. That is a
+   property of every run this service makes, not of restart - `insert_run` mints the generation
+   through `types::storage_id`, which is `typed_id::generate("wjr")`, and writes a continuation
+   head and member through `continuations::create` or `advance` in the same statement as the run,
+   so a row without them is one no code path could have produced. `continuations::member` is read
+   by `frontier.rs`, `journal.rs` and `propagation/application.rs` as well as by restart. The
+   lesson to carry into step 5: `RunFailure::Unavailable {}` carries no cause, so an assertion on
+   it cannot tell one missing prerequisite from two.
 
    **Nothing in production writes this journal, which is what step 5 is for.**
    `WorkflowBackend` (`crates/zeroship-workflow/src/backend.rs`) declares `start`, `status`,
    `signal`, `transition`, `restart`, `read_step_output` and `read_output`; `start`,
    `read_step_output` and `read_output` have no `ServiceEndpoint` in
    `crates/zeroship-core/src/service_identity.rs`. `record_verified` in
-   `crates/zeroship-workflow/src/service/deploys.rs` is the only writer of the deploys table and
-   every path to it needs an `AppDeployments` this service never installs. So the endpoints
-   above operate on rows nothing here produces, which is why
-   `crates/zeroship-workflow-server/tests/http_runs.rs` seeds by raw SQL. That is a sequencing
-   constraint on steps 4 and 5 rather than a gap in this step.
+   `crates/zeroship-workflow/src/service/deploys.rs` is the only path that CREATES a deploys row -
+   `activation::select` and `close_admission` update rows it already made - and every path to it
+   needs an `AppDeployments`, which this service now installs without an artifact store. So the
+   capability is here and the claimant is not: `activate` and `management` would write these rows,
+   and the lane that claims them is built and unstarted. That is why
+   `crates/zeroship-workflow-server/tests/http_runs.rs` seeds by raw SQL, and it stays a
+   sequencing constraint on steps 4 and 5 rather than a gap in this step.
 
 4. **Carry the three direct calls across, merged into the claims that already cross.** This is
    the step that earns its own review, and it is not "add a remote `TaskTransport`".
