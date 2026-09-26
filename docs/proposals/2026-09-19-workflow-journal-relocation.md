@@ -1160,9 +1160,21 @@ protocol. This extends a working client rather than inventing one.
    wants is the reserve and confirm this list already carries, not a second mechanism. So both
    capability halves are answerable, and they differ. What decides where they run is not
    capability but claim authority, and the flag-day order answers that: the service claims them in
-   process, so `Collect` needs only the remote deleter and `Cron` needs the reserve and confirm
+   process, so `Collect` needs only its byte half and `Cron` the reserve and confirm
    already on the list. See "And the service is already a claimant of this kind, which answers
    it".
+
+   **And both halves want one mechanism, not two.** The split names two obligations - a reserve
+   and confirm for staging, a remote call for deletion - but neither is a call this service can
+   place. `stage_start_input` (`crates/zeroship-workflow/src/service/payloads.rs`, called from
+   `service/backend.rs` for `start` and from `service/cron.rs` for a firing) leaves the service
+   holding the VALUE and no store, so the object write has to cross. `collect_job` leaves it
+   holding an id and no store, so the delete has to cross. Nothing serves either, and the hosts
+   holding `PayloadObjects` are ones this service is called BY. So what is missing once is a way
+   for the journal to record a byte operation and have a store-holding host perform and confirm
+   it: staging and collection are that mechanism run in two directions, and the `deleted` tombstone
+   with its resweep deadline is already half of the collection one. Design it once. Two remote
+   capabilities pointing the wrong way is the shape to avoid.
 
    **A second claimant blocks rather than skipping, which is what puts authority first.** Two
    claimants on one app are representable and this order needs them; what they are not is free.
