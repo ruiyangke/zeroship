@@ -2140,6 +2140,28 @@ part that dates, not the verdict.
    workflow-v8 crates and not in control, and control receives only the identity projection
    `manager_schedules` in `crates/zeroship-workflow/src/service/bundle.rs`.
 
+9. **Must a schedule fire for an app no worker is placed on?** This decides whether a byte-crossing
+   mechanism is needed at all, so it is worth asking before designing one.
+   Today the byte sweeps stay with the store-holder and cost nothing to build. `Work::Payload`
+   (`crates/zeroship-workflow-manager/src/models.rs`) keeps `Cron` and `Collect` there, and
+   `Capacity::visit` (`crates/zeroship-workflow-manager/src/capacity.rs`) asks
+   `candidate(&tx, app, now, Claimant::Placed, None)` because "an app is due while any row remains
+   claimable" - so a pending firing already draws a placement and the sweep already runs where the
+   store is.
+   What that costs is punctuality for an app that cannot be placed. With no eligible worker in its
+   zone, or a zone at capacity, `place` answers `Placed::Unplaced(zone)` and `visit` returns through
+   `record`, whose whole job is to "Record unplaced demand under the app lock" while the firing
+   waits. That is
+   platform maintenance gated on creator-side execution capacity, which is the coupling this
+   relocation exists to break - so the cheap answer is cheap in build cost and not in principle.
+   A yes makes a synchronous call from this service to a store-holder unavoidable, and its transport
+   the first cost: `crates/zeroship-core/src/service_identity.rs` names no payload endpoint, the
+   worker serves `WORKER_DISPATCH` and `WORKER_APP_LOGS` and nothing else, and the call inverts the
+   client/server direction every other pair here takes. A no leaves `Work::Payload` as the whole
+   answer and drops the byte-crossing item from the plan entirely. See "And the two directions do
+   not share one mechanism, because staging is not asynchronous" for why one mechanism cannot serve
+   both directions either way.
+
 ---
 
 ## Do-not notes
