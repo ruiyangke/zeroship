@@ -124,7 +124,7 @@ async fn exercise_journal_job(fixture: &Fixture, queue: &Queue, operation: JobOp
             .unwrap(),
         spec
     );
-    let granted = queue.claim(&authority).await.unwrap().unwrap();
+    let granted = claim_for(queue, &authority, &spec).await.unwrap().unwrap();
     assert_eq!(granted.delivery().job, spec);
     let renewed = queue
         .heartbeat(&authority, granted.delivery())
@@ -146,7 +146,7 @@ async fn exercise_journal_job(fixture: &Fixture, queue: &Queue, operation: JobOp
     );
     finish(queue, &authority, &successor).await;
     assert_eq!(queue.submit(&spec).await.unwrap(), spec);
-    assert!(queue.claim(&authority).await.unwrap().is_none());
+    assert!(claim_for(queue, &authority, &spec).await.unwrap().is_none());
     assert!(
         rows(fixture, "deployment_holds", value!({"app_id":app.as_str()}))
             .await
@@ -194,7 +194,7 @@ async fn journal_commands(fixture: &Fixture, queue: &Queue) {
         let pending = coordinator.manage(&actor, &request).await.unwrap();
         assert_eq!(coordinator.manage(&actor, &request).await.unwrap(), pending);
         let authority = assignment(&app);
-        let granted = queue.claim(&authority).await.unwrap().unwrap();
+        let granted = claim_as(queue, &authority, Claimant::Maintenance).await.unwrap().unwrap();
         assert_eq!(granted.delivery().job.deployment_id(), None);
         let renewed = queue
             .heartbeat(&authority, granted.delivery())
@@ -316,7 +316,7 @@ async fn reject_ready_projection(
     let before = rows(fixture, "jobs", value!({"app_id":app.as_str()})).await;
     let scope_before = rows(fixture, "queue_scopes", value!({"id":app.as_str()})).await;
     assert_eq!(queue.submit(spec).await, Err(Error::Storage));
-    assert!(matches!(queue.claim(authority).await, Err(Error::Storage)));
+    assert!(matches!(claim_for(queue, authority, spec).await, Err(Error::Storage)));
     if let Some(deployment) = spec.deployment_id() {
         assert_release_refused(fixture, queue, faults, app, deployment, Error::Storage).await;
     }
@@ -411,7 +411,7 @@ async fn projection_mismatch(fixture: &Fixture) {
             assert_release_refused(fixture, &queue, &faults, &app, deployment, Error::Conflict)
                 .await;
         }
-        let grant = queue.claim(&authority).await.unwrap().unwrap();
+        let grant = claim_for(&queue, &authority, &spec).await.unwrap().unwrap();
         let settlement = Settlement {
             delivery: grant.delivery().clone(),
             outcome: JobOutcome::Completed {},
@@ -537,7 +537,10 @@ async fn paged_dependencies(fixture: &Fixture) {
     for spec in &pending {
         finish(&queue, &authority, spec).await;
     }
-    assert!(queue.claim(&authority).await.unwrap().is_none());
+    // Both claimants are empty: the page held sweeps and one creator row.
+    for spec in [&pending[0], &dependency] {
+        assert!(claim_for(&queue, &authority, spec).await.unwrap().is_none());
+    }
     let released = faults.released.get();
     let receipt = queue
         .release_deployment(&app, &deployment.id)
@@ -593,7 +596,7 @@ async fn provenance_reclamation(fixture: &Fixture) {
         responsibility
     );
     let authority = assignment(&app);
-    let grant = queue.claim(&authority).await.unwrap().unwrap();
+    let grant = claim_for(&queue, &authority, &pending).await.unwrap().unwrap();
     assert_eq!(grant.delivery().job, pending);
     let renewed = queue.heartbeat(&authority, grant.delivery()).await.unwrap();
     queue

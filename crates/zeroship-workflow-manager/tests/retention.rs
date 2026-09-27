@@ -34,7 +34,7 @@ use zeroship_workflow_manager::{
     recovery::{Options as RecoveryOptions, Recovery},
     retention::HoldClient,
     scheduling::{Options as SchedulerOptions, Scheduler},
-    Error, Options, Queue,
+    Claimant, DeliveryGrant, Error, Options, Queue,
 };
 
 macro_rules! case {
@@ -202,8 +202,56 @@ fn assignment(app: &AppId) -> Assignment {
     }
 }
 
+/// Which host takes a row. Every operation is named, so a new one cannot
+/// inherit a claimant from a wildcard, and a claimant this disagrees with the
+/// model about delivers nothing rather than delivering to the wrong host.
+const fn claimant(operation: &JobOperation) -> Claimant {
+    match operation {
+        JobOperation::Advance { .. } => Claimant::Placed,
+        JobOperation::Activate { .. }
+        | JobOperation::Cron { .. }
+        | JobOperation::Management { .. }
+        | JobOperation::Fanout { .. }
+        | JobOperation::Propagate { .. }
+        | JobOperation::ReleaseHold { .. }
+        | JobOperation::Close { .. }
+        | JobOperation::Reconcile {}
+        | JobOperation::Collect {} => Claimant::Maintenance,
+    }
+}
+
+/// Claim as `claimant` on an authority the caller states. [`finish_sweep`]
+/// covers the whole discharge of a sweep; this form is for contracts that go on
+/// to heartbeat or settle the delivery themselves.
+async fn claim_as(
+    queue: &Queue,
+    authority: &Assignment,
+    claimant: Claimant,
+) -> Result<Option<DeliveryGrant>, Error> {
+    queue
+        .claim_authorized(
+            &authority.into(),
+            claimant,
+            Ok(support::delivery_ceiling()),
+            |_| std::future::ready(Ok(authority.clone())),
+        )
+        .await
+}
+
+/// Claim as the host that may take `spec`.
+async fn claim_for(
+    queue: &Queue,
+    authority: &Assignment,
+    spec: &JobSpec,
+) -> Result<Option<DeliveryGrant>, Error> {
+    claim_as(queue, authority, claimant(&spec.operation)).await
+}
+
+/// Discharge the app's next row through the host that may take it: a sweep is
+/// claimed as the lane and creator work under the placement `authority` states.
+/// Both settle on that same authority, so its caller can replay the receipt.
 async fn finish(queue: &Queue, authority: &Assignment, expected: &JobSpec) -> Settlement {
-    let delivery = queue.claim(authority).await.unwrap().unwrap();
+    let delivery = claim_for(queue, authority, expected).await.unwrap().unwrap();
     assert_eq!(delivery.delivery().job, *expected);
     let settlement = Settlement {
         delivery: delivery.delivery().clone(),
