@@ -9,8 +9,7 @@ use crate::{CancelOnDrop, ExecutionGuard, PayloadObjects, TaskExecution, TaskExe
 use zeroship_workflow::{
     service::{
         delivery::{
-            AcceptedJob, ClaimedTask, DeliveredTask, JobAcceptance, JobReceipt, RenewedTask,
-            ReportedExecution, TaskRenewal,
+            AppJournal, DeliveredTask, JobAcceptance, JobReceipt, ReportedExecution, TaskRenewal,
         },
         maintenance::{MaintenanceOptions, MaintenanceOutcome},
         publication::JobPublisher,
@@ -29,7 +28,7 @@ use zeroship_core::{
     workflow_coordination::{AssignedScope, FailureCode},
     workflow_jobs::{Delivery, JobLease, JobSpec, Settlement, SettlementReceipt, SubmitJob},
 };
-use zeroship_workflow_client::{JobJournal, LeasedJob, WorkerCoordinator};
+use zeroship_workflow_client::{LeasedJob, WorkerCoordinator};
 
 /// One delivery exchange, whose two halves are the manager's queue and the
 /// app's journal.
@@ -98,22 +97,6 @@ pub struct Renewed<L> {
 pub struct Completed {
     pub receipt: JobReceipt,
     pub settlement: SettlementReceipt,
-}
-
-/// The journal payloads [`AppWorkflows`] exchanges over the client's port.
-///
-/// The impl lives here rather than in the client because the client must not
-/// name these types, and it names a marker of this crate rather than
-/// `AppWorkflows` itself because the trait and that type are both foreign here.
-#[derive(Debug)]
-pub struct AppJournal;
-
-impl JobJournal for AppJournal {
-    type Claim = ClaimedTask;
-    type Acceptance = AcceptedJob;
-    type Renewal = RenewedTask;
-    type Execution = ReportedExecution;
-    type Receipt = JobReceipt;
 }
 
 impl JobTransport for WorkerCoordinator {

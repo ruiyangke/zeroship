@@ -17,6 +17,7 @@ use compio::io::{AsyncRead, AsyncWriteExt};
 use ntex::{client::Client, http::StatusCode};
 use serde_json::{json, Value};
 use std::time::Duration;
+use zeroship_workflow::service::delivery::AppJournal;
 use zeroship_core::{
     app_id::AppId,
     service_assertion::{ServiceAssertionMinter, ServiceIssuer, ServiceSigningKey},
@@ -164,7 +165,7 @@ async fn native_worker_client_uses_the_authenticated_coordinator_api() {
     // would tell the worker to retry a scope it can never hold.
     assert_eq!(
         client
-            .claim_job(&AssignedScope {
+            .claim_job::<AppJournal>(&AssignedScope {
                 app_id: AppId::mint(),
                 assignment_revision: scope.assignment_revision
             })
@@ -191,9 +192,9 @@ async fn native_worker_client_uses_the_authenticated_coordinator_api() {
     .await;
     assert_eq!(status, StatusCode::OK);
     server.restart(&http).await;
-    let grant = client.claim_job(&scope).await.unwrap().unwrap();
+    let grant = client.claim_job::<AppJournal>(&scope).await.unwrap().unwrap();
     assert_eq!(
-        grant.delivery().job.operation,
+        grant.lease.delivery().job.operation,
         JobOperation::Management {
             request_id: command.request_id.clone(),
             run_id: command.run_id.clone(),
@@ -203,9 +204,9 @@ async fn native_worker_client_uses_the_authenticated_coordinator_api() {
             },
         }
     );
-    assert!(client.claim_job(&scope).await.unwrap().is_none());
+    assert!(client.claim_job::<AppJournal>(&scope).await.unwrap().is_none());
     let settlement = Settlement {
-        delivery: grant.delivery().clone(),
+        delivery: grant.lease.delivery().clone(),
         outcome: JobOutcome::Management {
             outcome: ManagementOutcome::NotFound {},
         },
@@ -213,7 +214,7 @@ async fn native_worker_client_uses_the_authenticated_coordinator_api() {
     };
     let receipt = client.settle_job(&settlement).await.unwrap();
     assert_eq!(client.settle_job(&settlement).await.unwrap(), receipt);
-    assert!(client.claim_job(&scope).await.unwrap().is_none());
+    assert!(client.claim_job::<AppJournal>(&scope).await.unwrap().is_none());
     let (status, receipt) = post(
         &http,
         &server.url,
@@ -548,9 +549,9 @@ async fn verify_latest_management(
         .await,
         accepted
     );
-    let delivery = client.claim_job(scope).await.unwrap().unwrap();
+    let delivery = client.claim_job::<AppJournal>(scope).await.unwrap().unwrap();
     assert_eq!(
-        delivery.delivery().job.operation,
+        delivery.lease.delivery().job.operation,
         JobOperation::Management {
             request_id: command.request_id,
             run_id: command.run_id,
@@ -562,7 +563,7 @@ async fn verify_latest_management(
     );
     client
         .settle_job(&Settlement {
-            delivery: delivery.delivery().clone(),
+            delivery: delivery.lease.delivery().clone(),
             outcome: JobOutcome::Management {
                 outcome: ManagementOutcome::Denied {},
             },

@@ -87,7 +87,11 @@ pub struct SettleDelivery<C> {
     #[serde(default = "absent", skip_serializing_if = "Option::is_none")]
     pub outcome: Option<JobOutcome>,
     /// Successors the caller publishes with that outcome, in one transaction.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    ///
+    /// Always serialized, empty or not: with the outcome present this body is
+    /// exactly the `Settlement` it reports, which is one shape for a reader to
+    /// hold rather than two that differ by an absent list.
+    #[serde(default)]
     pub successors: Vec<JobSpec>,
     /// The execution to commit into the journal, whose outcome then settles the
     /// delivery.

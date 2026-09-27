@@ -58,7 +58,11 @@ impl JobTransport for Queue {
     ) -> Result<JobSpec, WorkflowServiceError> {
         panic!("advance fixture must not publish independently")
     }
-    async fn claim(&self, scope: &AssignedScope) -> Result<Option<Lease>, WorkflowServiceError> {
+    async fn claim(
+        &self,
+        journal: &AppWorkflows,
+        scope: &AssignedScope,
+    ) -> Result<Option<Claimed<Lease>>, WorkflowServiceError> {
         self.claims.borrow_mut().push(scope.clone());
         self.events.send(Event::Claimed).unwrap();
         let gate = self.claim_gate.borrow_mut().take();
@@ -68,14 +72,28 @@ impl JobTransport for Queue {
         if let Some(error) = self.claim_error.borrow_mut().take() {
             return Err(error);
         }
-        Ok(self
+        let Some(lease) = self
             .jobs
             .borrow_mut()
             .get_mut(&scope.app_id)
-            .and_then(VecDeque::pop_front))
+            .and_then(VecDeque::pop_front)
+        else {
+            return Ok(None);
+        };
+        let accepted = if lease.delivery().job.operation.accepts_execution() {
+            Some(journal.accept_job(&lease).await?)
+        } else {
+            None
+        };
+        Ok(Some(Claimed { lease, accepted }))
     }
-    async fn heartbeat(&self, lease: &Lease) -> Result<Lease, WorkflowServiceError> {
-        self.metadata.heartbeat(lease).await
+    async fn heartbeat(
+        &self,
+        journal: &AppWorkflows,
+        lease: &Lease,
+        task: &DeliveredTask,
+    ) -> Result<Renewed<Lease>, WorkflowServiceError> {
+        self.metadata.heartbeat(journal, lease, task).await
     }
     async fn settle(
         &self,
@@ -87,6 +105,20 @@ impl JobTransport for Queue {
             app_id: settlement.delivery.job.app_id.clone(),
             attempt: settlement.delivery.attempt,
             outcome: settlement.outcome.clone(),
+        })
+    }
+    async fn complete(
+        &self,
+        journal: &AppWorkflows,
+        lease: &Lease,
+        task: &DeliveredTask,
+        execution: WorkflowExecution,
+    ) -> Result<Completed, WorkflowServiceError> {
+        let receipt = journal.complete_job(task, lease, execution).await?;
+        let settlement = receipt.settlement(lease)?;
+        Ok(Completed {
+            settlement: JobTransport::settle(self, &settlement).await?,
+            receipt,
         })
     }
 }
@@ -705,20 +737,39 @@ impl JobTransport for NativeManager {
     }
     async fn claim(
         &self,
+        journal: &AppWorkflows,
         scope: &AssignedScope,
-    ) -> Result<Option<Self::Lease>, WorkflowServiceError> {
-        self.coordinator
+    ) -> Result<Option<Claimed<Self::Lease>>, WorkflowServiceError> {
+        let granted = self
+            .coordinator
             .claim_job(&self.worker, scope, Ok(AppPolicy::default().max_delivery_attempts), || async { Ok(self.worker.clone()) })
             .await
-            .map_err(manager_error)
+            .map_err(manager_error)?;
+        let Some(lease) = granted else {
+            return Ok(None);
+        };
+        let accepted = if lease.delivery().job.operation.accepts_execution() {
+            Some(journal.accept_job(&lease).await?)
+        } else {
+            None
+        };
+        Ok(Some(Claimed { lease, accepted }))
     }
-    async fn heartbeat(&self, lease: &Self::Lease) -> Result<Self::Lease, WorkflowServiceError> {
-        self.coordinator
+    async fn heartbeat(
+        &self,
+        journal: &AppWorkflows,
+        lease: &Self::Lease,
+        task: &DeliveredTask,
+    ) -> Result<Renewed<Self::Lease>, WorkflowServiceError> {
+        let lease = self
+            .coordinator
             .heartbeat_job(&self.worker, lease.delivery(), || async {
                 Ok(self.worker.clone())
             })
             .await
-            .map_err(manager_error)
+            .map_err(manager_error)?;
+        let renewal = journal.heartbeat_job(task, &lease).await?;
+        Ok(Renewed { lease, renewal })
     }
     async fn settle(
         &self,
@@ -735,6 +786,20 @@ impl JobTransport for NativeManager {
         }
         self.settled.send(()).unwrap();
         Ok(receipt)
+    }
+    async fn complete(
+        &self,
+        journal: &AppWorkflows,
+        lease: &Self::Lease,
+        task: &DeliveredTask,
+        execution: WorkflowExecution,
+    ) -> Result<Completed, WorkflowServiceError> {
+        let receipt = journal.complete_job(task, lease, execution).await?;
+        let settlement = receipt.settlement(lease)?;
+        Ok(Completed {
+            settlement: JobTransport::settle(self, &settlement).await?,
+            receipt,
+        })
     }
 }
 
@@ -797,7 +862,7 @@ async fn native_manager_delivery_and_lost_ack_finish_through_separate_orm_databa
         assert_eq!(requests.len(), 2);
         assert_eq!(requests[0], requests[1]);
     }
-    assert!(manager.claim(&manager.scope).await.unwrap().is_none());
+    assert!(manager.claim(&fixture.app, &manager.scope).await.unwrap().is_none());
     assert!(fixture.app.pending_jobs(None, 1).await.unwrap().is_empty());
 }
 
@@ -857,7 +922,7 @@ async fn manager_collect_duty_settles_without_publishing_or_executing_creator_wo
         fixture.app.pending_jobs(None, 1).await.unwrap(),
         std::slice::from_ref(&fixture.job)
     );
-    assert!(manager.claim(&manager.scope).await.unwrap().is_none());
+    assert!(manager.claim(&fixture.app, &manager.scope).await.unwrap().is_none());
     let requests = manager.requests.borrow();
     assert_eq!(requests.len(), 2);
     assert_eq!(requests[0], requests[1]);
@@ -905,7 +970,7 @@ async fn manager_delivers_committed_fanout_publication_without_executor() {
         fixture.app.pending_jobs(None, 1).await.unwrap(),
         std::slice::from_ref(&fixture.job)
     );
-    assert!(manager.claim(&manager.scope).await.unwrap().is_none());
+    assert!(manager.claim(&fixture.app, &manager.scope).await.unwrap().is_none());
     let requests = manager.requests.borrow();
     assert_eq!(requests.len(), 2);
     assert_eq!(requests[0], requests[1]);
@@ -955,7 +1020,7 @@ async fn manager_delivers_committed_propagation_page_without_executor() {
             |job| matches!(&job.operation, JobOperation::Advance { run_id, revision, .. }
             if run_id.as_str() == child && revision.get() == 2)
         ));
-    assert!(manager.claim(&manager.scope).await.unwrap().is_none());
+    assert!(manager.claim(&fixture.app, &manager.scope).await.unwrap().is_none());
     let requests = manager.requests.borrow();
     assert_eq!(requests.len(), 2);
     assert_eq!(requests[0], requests[1]);
@@ -1020,7 +1085,7 @@ async fn manager_reconciliation_publishes_creator_work_before_the_consumer_execu
         JobOutcome::Waiting {}
     );
     assert!(fixture.app.pending_jobs(None, 1).await.unwrap().is_empty());
-    assert!(manager.claim(&manager.scope).await.unwrap().is_none());
+    assert!(manager.claim(&fixture.app, &manager.scope).await.unwrap().is_none());
     let requests = manager.requests.borrow();
     assert_eq!(requests.len(), 3);
     assert_eq!(requests[0], requests[1]);
@@ -1174,9 +1239,9 @@ async fn closing_watermark_keeps_late_delivered_intents_across_separate_database
     assert!(fixture.app.pending_jobs(None, 1).await.unwrap().is_empty());
 
     let close = recovery.begin_close(&app).await.unwrap().unwrap();
-    let page_grant = manager.claim(&manager.scope).await.unwrap().unwrap();
+    let page_grant = manager.claim(&fixture.app, &manager.scope).await.unwrap().unwrap().lease;
     assert_eq!(page_grant.delivery().job, page);
-    let close_grant = manager.claim(&manager.scope).await.unwrap().unwrap();
+    let close_grant = manager.claim(&fixture.app, &manager.scope).await.unwrap().unwrap().lease;
     assert_eq!(close_grant.delivery().job, close);
     let closed = fixture.app.close_job(&close_grant).await.unwrap();
     assert_eq!(
@@ -1272,7 +1337,7 @@ async fn consumer_closes_retires_once_after_lost_ack_and_redelivery() {
     }
     let close = recovery.begin_close(&app).await.unwrap().unwrap();
     // A first worker commits the creator receipt, then crashes before settling.
-    let crashed = manager.claim(&manager.scope).await.unwrap().unwrap();
+    let crashed = manager.claim(&fixture.app, &manager.scope).await.unwrap().unwrap().lease;
     assert_eq!(crashed.delivery().job, close);
     let committed = fixture.app.close_job(&crashed).await.unwrap();
     assert_eq!(committed.outcome, JobOutcome::Closed { drained: true });
@@ -1315,7 +1380,7 @@ async fn consumer_closes_retires_once_after_lost_ack_and_redelivery() {
     let retired = recovery.responsibility(&app).await.unwrap().unwrap();
     assert_eq!(retired.state, ScopeState::Retired);
     assert_eq!(retired.ingress_epoch, Revision::try_from(1).unwrap());
-    assert!(manager.claim(&manager.scope).await.unwrap().is_none());
+    assert!(manager.claim(&fixture.app, &manager.scope).await.unwrap().is_none());
 }
 
 /// Archive masks admission, dispatch and ingress. The manager refuses to
@@ -1490,11 +1555,11 @@ async fn retention_release_duty_dispatches_to_the_creator_hold_release() {
     }
 
     let grant = manager
-        .claim(&manager.scope)
+        .claim(&fixture.app, &manager.scope)
         .await
         .unwrap()
         .expect("the retention lane published a deliverable release duty");
-    let job = grant.delivery().job.clone();
+    let job = grant.lease.delivery().job.clone();
     assert_eq!(
         job.operation,
         JobOperation::ReleaseHold {

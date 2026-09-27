@@ -1,8 +1,10 @@
 use super::*;
 use crate::deployment_fixture::Deployments;
+use crate::delivery::{Claimed, Completed, Renewed};
 use zeroship_workflow::{
     operations::StartOptions,
-    service::{DeployRegistration, RequestId},
+    service::{delivery::DeliveredTask, AppWorkflows, DeployRegistration, RequestId},
+    WorkflowExecution,
 };
 use compio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use std::{collections::VecDeque, path::Path};
@@ -709,8 +711,9 @@ impl JobTransport for Probe {
     type Lease = LeasedJob;
     async fn claim(
         &self,
+        _: &AppWorkflows,
         scope: &AssignedScope,
-    ) -> Result<Option<Self::Lease>, WorkflowServiceError> {
+    ) -> Result<Option<Claimed<Self::Lease>>, WorkflowServiceError> {
         self.claims.borrow_mut().push(scope.clone());
         futures::future::pending().await
     }
@@ -721,10 +724,24 @@ impl JobTransport for Probe {
     ) -> Result<JobSpec, WorkflowServiceError> {
         panic!("no delivered job")
     }
-    async fn heartbeat(&self, _: &Self::Lease) -> Result<Self::Lease, WorkflowServiceError> {
+    async fn heartbeat(
+        &self,
+        _: &AppWorkflows,
+        _: &Self::Lease,
+        _: &DeliveredTask,
+    ) -> Result<Renewed<Self::Lease>, WorkflowServiceError> {
         panic!("no delivered job")
     }
     async fn settle(&self, _: &Settlement) -> Result<SettlementReceipt, WorkflowServiceError> {
+        panic!("no delivered job")
+    }
+    async fn complete(
+        &self,
+        _: &AppWorkflows,
+        _: &Self::Lease,
+        _: &DeliveredTask,
+        _: WorkflowExecution,
+    ) -> Result<Completed, WorkflowServiceError> {
         panic!("no delivered job")
     }
 }

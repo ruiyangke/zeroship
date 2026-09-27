@@ -14,7 +14,8 @@ use zeroship_workflow::{
     WorkflowServiceError,
 };
 use zeroship_workflow_runner::{
-    delivery::JobTransport, ExecutionBudget, TaskExecution, TaskExecutor,
+    delivery::{Claimed, Completed, JobTransport, Renewed},
+    ExecutionBudget, TaskExecution, TaskExecutor,
 };
 use zeroship_workflow_manager::{
     local::LocalPlatform,
@@ -840,9 +841,10 @@ impl JobTransport for LossyTransport {
 
     async fn claim(
         &self,
+        journal: &zeroship_workflow::service::AppWorkflows,
         scope: &zeroship_core::workflow_coordination::AssignedScope,
-    ) -> Result<Option<DeliveryGrant>, WorkflowServiceError> {
-        self.inner.claim(scope).await
+    ) -> Result<Option<Claimed<DeliveryGrant>>, WorkflowServiceError> {
+        self.inner.claim(journal, scope).await
     }
 
     async fn submit(
@@ -855,9 +857,11 @@ impl JobTransport for LossyTransport {
 
     async fn heartbeat(
         &self,
+        journal: &zeroship_workflow::service::AppWorkflows,
         lease: &DeliveryGrant,
-    ) -> Result<DeliveryGrant, WorkflowServiceError> {
-        self.inner.heartbeat(lease).await
+        task: &zeroship_workflow::service::delivery::DeliveredTask,
+    ) -> Result<Renewed<DeliveryGrant>, WorkflowServiceError> {
+        self.inner.heartbeat(journal, lease, task).await
     }
 
     async fn settle(
@@ -887,6 +891,24 @@ impl JobTransport for LossyTransport {
             }
         }
         self.inner.settle(settlement).await
+    }
+
+    /// The journal commits first, then the acknowledgement this fixture loses.
+    /// That is the partial commit the merge preserves rather than removes: a
+    /// receipt the journal holds whose delivery the queue never settled.
+    async fn complete(
+        &self,
+        journal: &zeroship_workflow::service::AppWorkflows,
+        lease: &DeliveryGrant,
+        task: &zeroship_workflow::service::delivery::DeliveredTask,
+        execution: zeroship_workflow::WorkflowExecution,
+    ) -> Result<Completed, WorkflowServiceError> {
+        let receipt = journal.complete_job(task, lease, execution).await?;
+        let settlement = receipt.settlement(lease)?;
+        Ok(Completed {
+            settlement: JobTransport::settle(self, &settlement).await?,
+            receipt,
+        })
     }
 }
 

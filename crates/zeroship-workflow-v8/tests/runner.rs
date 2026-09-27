@@ -1243,12 +1243,23 @@ impl zeroship_workflow_runner::delivery::JobTransport for Manager {
 
     async fn claim(
         &self,
+        journal: &zeroship_workflow::service::AppWorkflows,
         scope: &zeroship_core::workflow_coordination::AssignedScope,
-    ) -> Result<Option<Self::Lease>, WorkflowServiceError> {
-        self.coordinator
+    ) -> Result<Option<zeroship_workflow_runner::delivery::Claimed<Self::Lease>>, WorkflowServiceError> {
+        let granted = self
+            .coordinator
             .claim_job(&self.worker, scope, Ok(AppPolicy::default().max_delivery_attempts), || async { Ok(self.worker.clone()) })
             .await
-            .map_err(manager_error)
+            .map_err(manager_error)?;
+        let Some(lease) = granted else {
+            return Ok(None);
+        };
+        let accepted = if lease.delivery().job.operation.accepts_execution() {
+            Some(journal.accept_job(&lease).await?)
+        } else {
+            None
+        };
+        Ok(Some(zeroship_workflow_runner::delivery::Claimed { lease, accepted }))
     }
 
     async fn submit(
@@ -1269,13 +1280,21 @@ impl zeroship_workflow_runner::delivery::JobTransport for Manager {
             .map_err(manager_error)
     }
 
-    async fn heartbeat(&self, lease: &Self::Lease) -> Result<Self::Lease, WorkflowServiceError> {
-        self.coordinator
+    async fn heartbeat(
+        &self,
+        journal: &zeroship_workflow::service::AppWorkflows,
+        lease: &Self::Lease,
+        task: &zeroship_workflow::service::delivery::DeliveredTask,
+    ) -> Result<zeroship_workflow_runner::delivery::Renewed<Self::Lease>, WorkflowServiceError> {
+        let lease = self
+            .coordinator
             .heartbeat_job(&self.worker, lease.delivery(), || async {
                 Ok(self.worker.clone())
             })
             .await
-            .map_err(manager_error)
+            .map_err(manager_error)?;
+        let renewal = journal.heartbeat_job(task, &lease).await?;
+        Ok(zeroship_workflow_runner::delivery::Renewed { lease, renewal })
     }
 
     async fn settle(
@@ -1288,6 +1307,22 @@ impl zeroship_workflow_runner::delivery::JobTransport for Manager {
             })
             .await
             .map_err(manager_error)
+    }
+
+    async fn complete(
+        &self,
+        journal: &zeroship_workflow::service::AppWorkflows,
+        lease: &Self::Lease,
+        task: &zeroship_workflow::service::delivery::DeliveredTask,
+        execution: zeroship_workflow::WorkflowExecution,
+    ) -> Result<zeroship_workflow_runner::delivery::Completed, WorkflowServiceError> {
+        let receipt = journal.complete_job(task, lease, execution).await?;
+        let settlement = receipt.settlement(lease)?;
+        Ok(zeroship_workflow_runner::delivery::Completed {
+            settlement: zeroship_workflow_runner::delivery::JobTransport::settle(self, &settlement)
+                .await?,
+            receipt,
+        })
     }
 }
 

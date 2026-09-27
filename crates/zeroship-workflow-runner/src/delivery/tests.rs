@@ -37,6 +37,20 @@ use crate::{deployment_fixture as deployments, service_binding::ServiceFixture};
 /// their bound from it rather than restating it.
 const MANAGER_LEASE: Duration = Duration::from_secs(20);
 
+/// The claim a transport would have answered for this lease.
+///
+/// A slot receives both halves of one exchange, so a test handing it a lease has
+/// to hand it the acceptance the same exchange would have carried -- and for a
+/// maintenance operation, the absence of one.
+async fn claimed<L: JobLease + Clone>(app: &AppWorkflows, lease: L) -> Claimed<L> {
+    let accepted = if lease.delivery().job.operation.accepts_execution() {
+        Some(app.accept_job(&lease).await.expect("journal acceptance"))
+    } else {
+        None
+    };
+    Claimed { lease, accepted }
+}
+
 #[derive(Clone)]
 struct Lease {
     delivery: Delivery,
@@ -73,10 +87,28 @@ impl JobTransport for Metadata {
     ) -> Result<JobSpec, WorkflowServiceError> {
         panic!("advance fixture must not publish independently")
     }
-    async fn claim(&self, _: &AssignedScope) -> Result<Option<Lease>, WorkflowServiceError> {
+    async fn claim(
+        &self,
+        _: &AppWorkflows,
+        _: &AssignedScope,
+    ) -> Result<Option<Claimed<Lease>>, WorkflowServiceError> {
         panic!("a delivered slot must not claim or discover work")
     }
-    async fn heartbeat(&self, lease: &Lease) -> Result<Lease, WorkflowServiceError> {
+    /// Both halves, in the order a served renewal keeps: the queue's lease
+    /// first, then the journal task under it.
+    ///
+    /// A SUBSTITUTED DELIVERY IS SUBSTITUTED IN THE REPLY, not in the journal
+    /// call. The journal half runs under the delivery this attempt really holds,
+    /// so what the caller then sees is a reply naming a delivery it never asked
+    /// about -- which is the case its own comparison exists to refuse. Renewing
+    /// the journal under the substituted one instead would make the journal
+    /// refuse first and leave that comparison unmeasured.
+    async fn heartbeat(
+        &self,
+        journal: &AppWorkflows,
+        lease: &Lease,
+        task: &DeliveredTask,
+    ) -> Result<Renewed<Lease>, WorkflowServiceError> {
         self.renewals.set(self.renewals.get() + 1);
         if self
             .renewal_deadline
@@ -90,10 +122,14 @@ impl JobTransport for Metadata {
         }
         let mut renewed = lease.clone();
         renewed.expires = Instant::now() + MANAGER_LEASE;
+        let renewal = journal.heartbeat_job(task, &renewed).await?;
         if self.substitute_renewal.get() {
             renewed.delivery.worker_id = WorkerId::mint();
         }
-        Ok(renewed)
+        Ok(Renewed {
+            lease: renewed,
+            renewal,
+        })
     }
     async fn settle(
         &self,
@@ -116,6 +152,23 @@ impl JobTransport for Metadata {
             app_id: settlement.delivery.job.app_id.clone(),
             attempt: settlement.delivery.attempt,
             outcome: settlement.outcome.clone(),
+        })
+    }
+    /// The journal commits first, because its commit is what decides the outcome
+    /// the queue is then settled with. Routed through `settle` so a lost ACK and
+    /// the immutable-metadata assertion still observe the merged path.
+    async fn complete(
+        &self,
+        journal: &AppWorkflows,
+        lease: &Lease,
+        task: &DeliveredTask,
+        execution: WorkflowExecution,
+    ) -> Result<Completed, WorkflowServiceError> {
+        let receipt = journal.complete_job(task, lease, execution).await?;
+        let settlement = receipt.settlement(lease)?;
+        Ok(Completed {
+            settlement: JobTransport::settle(self, &settlement).await?,
+            receipt,
         })
     }
 }
@@ -487,7 +540,7 @@ async fn revoked_authority_discards_a_resolved_frontier_instead_of_publishing_it
     fixture.probe.revoke.replace(Some(binding));
     fixture.probe.mode.set(Mode::RevokedFrontier);
     let mut slot = fixture.slot(Duration::from_secs(5));
-    assert!(Box::pin(slot.run(&fixture.app, fixture.lease.clone()))
+    assert!(Box::pin(slot.run(&fixture.app, claimed(&fixture.app, fixture.lease.clone()).await))
         .await
         .is_err());
     assert_eq!(fixture.probe.starts.get(), 1);
@@ -504,7 +557,7 @@ async fn corrupted_management_outcome_cannot_reexecute_or_acknowledge_advance() 
     let fixture = Fixture::new(AppPolicy::default()).await;
     let mut slot = fixture.slot(Duration::from_secs(5));
     let DeliveryOutcome::Settled { creator, .. } =
-        Box::pin(slot.run(&fixture.app, fixture.lease.clone()))
+        Box::pin(slot.run(&fixture.app, claimed(&fixture.app, fixture.lease.clone()).await))
             .await
             .unwrap()
     else {
@@ -519,7 +572,7 @@ async fn corrupted_management_outcome_cannot_reexecute_or_acknowledge_advance() 
     ).await.unwrap();
     tx.commit().await.unwrap();
     assert!(matches!(
-        Box::pin(slot.run(&fixture.app, fixture.lease.clone())).await,
+        Box::pin(slot.run(&fixture.app, claimed(&fixture.app, fixture.lease.clone()).await)).await,
         Err(WorkflowServiceError::Internal(_))
     ));
     assert_eq!(fixture.probe.starts.get(), 1);
@@ -538,7 +591,7 @@ async fn corrupted_management_outcome_cannot_reexecute_or_acknowledge_advance() 
     tx.commit().await.unwrap();
     let DeliveryOutcome::Settled {
         creator: replay, ..
-    } = Box::pin(slot.run(&fixture.app, fixture.lease.clone()))
+    } = Box::pin(slot.run(&fixture.app, claimed(&fixture.app, fixture.lease.clone()).await))
         .await
         .unwrap()
     else {
@@ -558,7 +611,7 @@ async fn lost_ack_and_new_attempt_replay_without_executing_again() {
     fixture.metadata.lose_ack.set(true);
     let mut slot = fixture.slot(Duration::from_secs(5));
     let DeliveryOutcome::Settled { creator, manager } =
-        slot.run(&fixture.app, fixture.lease.clone()).await.unwrap()
+        slot.run(&fixture.app, claimed(&fixture.app, fixture.lease.clone()).await).await.unwrap()
     else {
         panic!("expected committed settlement")
     };
@@ -570,7 +623,7 @@ async fn lost_ack_and_new_attempt_replay_without_executing_again() {
     let mut redelivery = fixture.lease.clone();
     redelivery.delivery.attempt = Revision::try_from(2).unwrap();
     assert!(matches!(
-        slot.run(&fixture.app, redelivery).await.unwrap(),
+        slot.run(&fixture.app, claimed(&fixture.app, redelivery).await).await.unwrap(),
         DeliveryOutcome::Settled { .. }
     ));
     assert_eq!(fixture.probe.starts.get(), 1);
@@ -591,7 +644,7 @@ async fn paired_renewal_reaches_creator_before_execution_continues() {
     fixture.probe.mode.set(Mode::AfterCreatorRenewal);
     let mut slot = fixture.slot(Duration::from_secs(5));
     assert!(matches!(
-        slot.run(&fixture.app, fixture.lease.clone()).await.unwrap(),
+        slot.run(&fixture.app, claimed(&fixture.app, fixture.lease.clone()).await).await.unwrap(),
         DeliveryOutcome::Settled { .. }
     ));
     assert!(fixture.metadata.renewals.get() > 0);
@@ -615,7 +668,7 @@ async fn an_execution_bound_below_the_lease_still_renews_inside_the_attempt() {
     // put the first renewal, and below the creator task lease as well.
     let mut slot = fixture.slot(MANAGER_LEASE / 32);
     assert_eq!(
-        slot.run(&fixture.app, fixture.lease.clone())
+        slot.run(&fixture.app, claimed(&fixture.app, fixture.lease.clone()).await)
             .await
             .unwrap_err(),
         WorkflowServiceError::Timeout
@@ -637,7 +690,7 @@ async fn an_attempt_resolved_before_its_renewal_delay_reports_no_renewal() {
     fixture.probe.mode.set(Mode::Complete);
     let mut slot = fixture.slot(MANAGER_LEASE / 32);
     assert!(matches!(
-        slot.run(&fixture.app, fixture.lease.clone()).await.unwrap(),
+        slot.run(&fixture.app, claimed(&fixture.app, fixture.lease.clone()).await).await.unwrap(),
         DeliveryOutcome::Settled { .. }
     ));
     assert_eq!(fixture.metadata.renewals.get(), 0);
@@ -662,7 +715,7 @@ async fn authority_ending_before_the_lease_still_renews_inside_the_attempt() {
     fixture.shorten_authority(window);
     let mut slot = fixture.slot(MANAGER_LEASE);
     let started = Instant::now();
-    slot.run(&fixture.app, fixture.lease.clone())
+    slot.run(&fixture.app, claimed(&fixture.app, fixture.lease.clone()).await)
         .await
         .unwrap_err();
     // An execution that never resolves on its own ends on the authority window
@@ -691,7 +744,7 @@ async fn authority_shortened_attempt_resolved_first_reports_no_renewal() {
     fixture.shorten_authority(MANAGER_LEASE / 8);
     let mut slot = fixture.slot(MANAGER_LEASE);
     assert!(matches!(
-        slot.run(&fixture.app, fixture.lease.clone()).await.unwrap(),
+        slot.run(&fixture.app, claimed(&fixture.app, fixture.lease.clone()).await).await.unwrap(),
         DeliveryOutcome::Settled { .. }
     ));
     assert_eq!(fixture.metadata.renewals.get(), 0);
@@ -707,7 +760,7 @@ async fn renewed_authority_does_not_extend_hard_execution_budget() {
     fixture.probe.mode.set(Mode::HardTimeout);
     let mut slot = fixture.slot(Duration::from_secs(2));
     assert!(matches!(
-        slot.run(&fixture.app, fixture.lease.clone()).await,
+        slot.run(&fixture.app, claimed(&fixture.app, fixture.lease.clone()).await).await,
         Err(WorkflowServiceError::Timeout)
     ));
     assert!(fixture.metadata.renewals.get() > 0);
@@ -733,7 +786,7 @@ async fn cancellation_retains_slot_until_stop_joins_before_release() {
     *fixture.probe.stopping.borrow_mut() = Some(stopping);
     *fixture.probe.stop_gate.borrow_mut() = Some(gate);
     let mut slot = fixture.slot(Duration::from_secs(10));
-    let run = slot.run(&fixture.app, fixture.lease.clone()).boxed_local();
+    let run = slot.run(&fixture.app, claimed(&fixture.app, fixture.lease.clone()).await).boxed_local();
     let Either::Left((Ok(()), run)) = futures::future::select(observed_start, run).await else {
         panic!("execution must start")
     };
@@ -765,7 +818,7 @@ async fn substituted_renewal_stops_without_ack_or_checkpoint() {
     fixture.metadata.substitute_renewal.set(true);
     let mut slot = fixture.slot(Duration::from_secs(5));
     assert!(matches!(
-        slot.run(&fixture.app, fixture.lease.clone()).await,
+        slot.run(&fixture.app, claimed(&fixture.app, fixture.lease.clone()).await).await,
         Err(WorkflowServiceError::PermissionDenied)
     ));
     assert!(fixture.metadata.renewals.get() > 0);
@@ -803,7 +856,7 @@ async fn stalled_native_stop_exhausts_renewal_budget_without_reusing_slot() {
         let mut slot = fixture.slot(Duration::from_secs(10));
         let finalization = Duration::from_millis(800);
         slot.options.operation_timeout = finalization;
-        let run = slot.run(&fixture.app, fixture.lease.clone()).boxed_local();
+        let run = slot.run(&fixture.app, claimed(&fixture.app, fixture.lease.clone()).await).boxed_local();
         let Either::Left((Ok(()), run)) = futures::future::select(observed_stop, run).await else {
             panic!("native shutdown must reach its explicit barrier")
         };

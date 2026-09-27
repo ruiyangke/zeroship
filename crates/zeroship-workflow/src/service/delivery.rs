@@ -191,6 +191,24 @@ impl DeliveredTask {
     }
 }
 
+/// A boxed grant grants what the grant does. `JobAcceptance::Execute` hands its
+/// task out boxed, so a holder that keeps it that way needs no unboxing to reach
+/// the journal.
+impl<T: TaskGrant + ?Sized> TaskGrant for Box<T> {
+    fn task_id(&self) -> &str {
+        (**self).task_id()
+    }
+    fn task_token(&self) -> &TaskToken {
+        (**self).task_token()
+    }
+    fn delivery(&self) -> &Delivery {
+        (**self).delivery()
+    }
+    fn granted(&self) -> Result<Duration, WorkflowServiceError> {
+        (**self).granted()
+    }
+}
+
 impl TaskGrant for DeliveredTask {
     fn task_id(&self) -> &str {
         &self.assignment.id
@@ -506,6 +524,23 @@ impl JobLease for ReportedGrant {
             .checked_duration_since(Instant::now())
             .filter(|duration| !duration.is_zero())
     }
+}
+
+/// The journal payloads a merged job exchange carries for this engine.
+///
+/// The client declares the port and cannot name these types; this crate owns
+/// them and already depends on the client, so the mapping lives here, once, and
+/// every host that speaks the merged exchange reads it from the same place
+/// rather than restating which type answers which half.
+#[derive(Debug)]
+pub struct AppJournal;
+
+impl zeroship_workflow_client::JobJournal for AppJournal {
+    type Claim = ClaimedTask;
+    type Acceptance = AcceptedJob;
+    type Renewal = RenewedTask;
+    type Execution = ReportedExecution;
+    type Receipt = JobReceipt;
 }
 
 /// Re-anchor a remaining duration onto this process's monotonic clock.

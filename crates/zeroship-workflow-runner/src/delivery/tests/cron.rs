@@ -56,7 +56,7 @@ async fn cron_lost_ack_and_redelivery_publish_once_without_starting_executor() {
     fixture.metadata.lose_ack.set(true);
     let mut slot = fixture.slot(Duration::from_secs(5));
     let DeliveryOutcome::Settled { creator, manager } =
-        Box::pin(slot.run(&fixture.app, lease.clone()))
+        Box::pin(slot.run(&fixture.app, claimed(&fixture.app, lease.clone()).await))
             .await
             .unwrap()
     else {
@@ -85,7 +85,7 @@ async fn cron_lost_ack_and_redelivery_publish_once_without_starting_executor() {
     let mut slot = fixture.slot(Duration::from_secs(5));
     let DeliveryOutcome::Settled {
         creator: replayed, ..
-    } = Box::pin(slot.run(&fixture.app, lease)).await.unwrap()
+    } = Box::pin(slot.run(&fixture.app, claimed(&fixture.app, lease).await)).await.unwrap()
     else {
         panic!("lost cron ACK must replay the retained outcome");
     };

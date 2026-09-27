@@ -35,7 +35,7 @@ async fn activation_lost_ack_and_redelivery_never_start_the_executor() {
     fixture.metadata.lose_ack.set(true);
     let mut slot = fixture.slot(Duration::from_secs(5));
     let DeliveryOutcome::Settled { creator, manager } =
-        Box::pin(slot.run(&fixture.app, lease.clone()))
+        Box::pin(slot.run(&fixture.app, claimed(&fixture.app, lease.clone()).await))
             .await
             .unwrap()
     else {
@@ -68,7 +68,7 @@ async fn activation_lost_ack_and_redelivery_never_start_the_executor() {
     let DeliveryOutcome::Settled {
         creator: replayed,
         manager,
-    } = Box::pin(restarted.run(&fixture.app, lease.clone()))
+    } = Box::pin(restarted.run(&fixture.app, claimed(&fixture.app, lease.clone()).await))
         .await
         .unwrap()
     else {

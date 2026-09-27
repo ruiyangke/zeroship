@@ -23,7 +23,7 @@ async fn management_lost_ack_replays_without_executing_app_code() {
     fixture.metadata.lose_ack.set(true);
     let mut slot = fixture.slot(Duration::from_secs(5));
     let DeliveryOutcome::Settled { creator, manager } =
-        Box::pin(slot.run(&fixture.app, lease.clone()))
+        Box::pin(slot.run(&fixture.app, claimed(&fixture.app, lease.clone()).await))
             .await
             .unwrap()
     else {
@@ -46,7 +46,7 @@ async fn management_lost_ack_replays_without_executing_app_code() {
     let DeliveryOutcome::Settled {
         creator: replay,
         manager,
-    } = Box::pin(slot.run(&fixture.app, lease.clone()))
+    } = Box::pin(slot.run(&fixture.app, claimed(&fixture.app, lease.clone()).await))
         .await
         .unwrap()
     else {
@@ -100,7 +100,7 @@ async fn management_denial_settles_without_executor_or_lifecycle_mutation() {
     };
     let mut slot = fixture.slot(Duration::from_secs(5));
     let DeliveryOutcome::Settled { creator, manager } =
-        Box::pin(slot.run(&fixture.app, lease)).await.unwrap()
+        Box::pin(slot.run(&fixture.app, claimed(&fixture.app, lease).await)).await.unwrap()
     else {
         panic!("denial must settle");
     };
