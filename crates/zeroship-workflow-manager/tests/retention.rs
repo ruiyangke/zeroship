@@ -30,6 +30,7 @@ use zeroship_workflow_calendar::{
     IntervalAnchor, ScheduleCatchUp, ScheduleOverlap, ScheduleTiming,
 };
 use zeroship_workflow_manager::{
+    maintenance::MaintenanceAuthority,
     recovery::{Options as RecoveryOptions, Recovery},
     retention::HoldClient,
     scheduling::{Options as SchedulerOptions, Scheduler},
@@ -210,6 +211,28 @@ async fn finish(queue: &Queue, authority: &Assignment, expected: &JobSpec) -> Se
         successors: vec![],
     };
     queue.settle(authority, &settlement).await.unwrap();
+    settlement
+}
+
+/// Discharge a journal sweep the way its own host does. `finish` above is the
+/// placed host, which takes creator work alone: a sweep is claimed by the lane
+/// in the process that owns the queue, and that lane asserts its authority
+/// rather than reading a placement.
+#[expect(dead_code, reason = "used by the submodules this file declares")]
+async fn finish_sweep(queue: &Queue, app: &AppId, expected: &JobSpec) -> Settlement {
+    let authority = MaintenanceAuthority::new(app.clone(), WorkerId::mint());
+    let granted = authority
+        .claim(queue, Ok(support::delivery_ceiling()))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(granted.delivery().job, *expected);
+    let settlement = Settlement {
+        delivery: granted.delivery().clone(),
+        outcome: JobOutcome::Completed {},
+        successors: vec![],
+    };
+    authority.settle(queue, &settlement).await.unwrap();
     settlement
 }
 
