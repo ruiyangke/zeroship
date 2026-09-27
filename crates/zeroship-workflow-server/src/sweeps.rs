@@ -65,9 +65,11 @@ pub enum SweepError {
     Journal(WorkflowServiceError),
     /// The turn's deadline cut the visit off before either side answered. It is
     /// the host's own bound rather than a refusal, so no side is named; a row
-    /// the visit had leased keeps its lease until it lapses, and a later turn
-    /// takes it again. Only a turn reports this; [`MaintenanceLane::sweep`]
-    /// carries no deadline of its own.
+    /// the visit had leased keeps its lease until it lapses. The scan position
+    /// advances before the visit, so the rest of this pass skips that app and
+    /// the next PASS reaches it again - unlike the apps a turn never reached,
+    /// which its successor takes. Only a turn reports this;
+    /// [`MaintenanceLane::sweep`] carries no deadline of its own.
     Deadline,
 }
 
