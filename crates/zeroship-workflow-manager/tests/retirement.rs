@@ -23,7 +23,7 @@ use support::{Admin, Backend, Fixture};
 use zeroship_core::{
     app_id::AppId,
     workflow_coordination::{
-        AssignedScope, RegisterWorker, Revision, WorkerId, WorkerState,
+        AssignedScope, RegisterWorker, Revision, RunId, WorkerId, WorkerState,
     },
     workflow_jobs::{
         BroadcastId, DeploymentId, JobId, JobOperation, JobOutcome, JobSpec, Settlement,
@@ -37,6 +37,7 @@ use zeroship_data_orm::{
 };
 use zeroship_workflow_manager::{
     coordinator::{self, Coordinator, Placed},
+    maintenance::MaintenanceAuthority,
     policy::{PolicyObservation, PolicySource},
     recovery::{self, DutyKind, Recovery, Responsibility, ScopeState},
     DeliveryGrant, Error, Queue,
@@ -185,6 +186,10 @@ struct Host {
     app: AppId,
     worker: WorkerId,
     scope: AssignedScope,
+    /// The lane of the process that owns this queue. Every sweep the manager
+    /// enqueues - closure, reconciliation, collection, fanout - is claimed
+    /// through it, because a placed worker takes creator work alone.
+    lane: MaintenanceAuthority,
 }
 
 async fn host(fixture: &Fixture) -> Host {
@@ -218,6 +223,7 @@ async fn host_with(fixture: &Fixture, app: AppId) -> Host {
         .await
         .unwrap();
     Host {
+        lane: MaintenanceAuthority::new(app.clone(), WorkerId::mint()),
         queue,
         recovery,
         coordinator,
@@ -296,6 +302,43 @@ impl Host {
         self.claim_as(&self.worker, &self.scope).await
     }
 
+    /// Take the next sweep off this app's queue as the lane, which needs no
+    /// placement and no registration.
+    async fn claim_sweep(&self) -> Option<DeliveryGrant> {
+        self.claim_sweep_as(&self.lane).await
+    }
+
+    async fn claim_sweep_as(&self, lane: &MaintenanceAuthority) -> Option<DeliveryGrant> {
+        lane.claim(&self.queue, Ok(support::delivery_ceiling()))
+            .await
+            .unwrap()
+    }
+
+    async fn settle_sweep(
+        &self,
+        grant: &DeliveryGrant,
+        outcome: JobOutcome,
+    ) -> Result<SettlementReceipt, Error> {
+        self.settle_sweep_as(&self.lane, grant, outcome).await
+    }
+
+    async fn settle_sweep_as(
+        &self,
+        lane: &MaintenanceAuthority,
+        grant: &DeliveryGrant,
+        outcome: JobOutcome,
+    ) -> Result<SettlementReceipt, Error> {
+        lane.settle(
+            &self.queue,
+            &Settlement {
+                delivery: grant.delivery().clone(),
+                outcome,
+                successors: Vec::new(),
+            },
+        )
+        .await
+    }
+
     async fn settle_as(
         &self,
         worker: &WorkerId,
@@ -339,15 +382,30 @@ impl Host {
     /// Close the open scope with drained evidence and no competing work.
     async fn retire(&self) -> Revision {
         let close = self.recovery.begin_close(&self.app).await.unwrap().unwrap();
-        let grant = self.claim().await.expect("closure is delivered");
+        let grant = self.claim_sweep().await.expect("closure is delivered");
         assert_eq!(grant.delivery().job, close);
-        self.settle(&grant, JobOutcome::Closed { drained: true })
+        self.settle_sweep(&grant, JobOutcome::Closed { drained: true })
             .await
             .unwrap();
         let retired = self.state().await;
         assert_eq!(retired.state, ScopeState::Retired);
         assert!(retired.close_job.is_none() && retired.closing_watermark.is_none());
         retired.ingress_epoch
+    }
+}
+
+/// Creator work: the only kind a placed worker claims, and intent-producing.
+fn advance(app: &AppId, available_at: i64) -> JobSpec {
+    JobSpec {
+        id: JobId::mint(),
+        app_id: app.clone(),
+        operation: JobOperation::Advance {
+            deployment_id: DeploymentId::mint(),
+            run_id: RunId::mint(),
+            generation: 0,
+            revision: revision(1),
+        },
+        available_at: available_at.try_into().unwrap(),
     }
 }
 
@@ -466,9 +524,9 @@ async fn establishment(fixture: &Fixture) {
     assert_eq!(cancelled.state, ScopeState::Open);
     assert_eq!(cancelled.ingress_epoch, revision(3));
     assert!(cancelled.close_job.is_none() && cancelled.closing_watermark.is_none());
-    let grant = host.claim().await.unwrap();
+    let grant = host.claim_sweep().await.unwrap();
     assert_eq!(grant.delivery().job, stale);
-    host.settle(&grant, JobOutcome::Closed { drained: true })
+    host.settle_sweep(&grant, JobOutcome::Closed { drained: true })
         .await
         .unwrap();
     assert_eq!(host.state().await, cancelled);
@@ -519,9 +577,12 @@ async fn archived(fixture: &Fixture) {
     assert_eq!(host.lease(&source, Some(1), false).await, Err(Error::Denied));
     let closing = host.state().await;
     assert_eq!(closing.state, ScopeState::Closing);
-    let grant = host.claim().await.expect("closure is delivered under archive");
+    let grant = host
+        .claim_sweep()
+        .await
+        .expect("closure is delivered under archive");
     assert_eq!(grant.delivery().job, close);
-    host.settle(&grant, JobOutcome::Closed { drained: true })
+    host.settle_sweep(&grant, JobOutcome::Closed { drained: true })
         .await
         .unwrap();
     assert_eq!(host.state().await.state, ScopeState::Retired);
@@ -542,6 +603,10 @@ async fn archived(fixture: &Fixture) {
 /// maintenance and closure claims do not, and a rolled-back claim leaves none.
 /// The jobs were published before retirement and fall due after it, like a
 /// sleeping run's timer, so unsettled ready jobs do not block retirement.
+///
+/// The reopen hook is the claimed operation's own `produces_intents`, not the
+/// host that claimed it, so the lane's two claims differ in exactly that: a
+/// fanout it takes reopens the scope and a reconciliation it takes does not.
 async fn claim_rearm(fixture: &Fixture) {
     let host = host(fixture).await;
     let due = soon();
@@ -551,19 +616,36 @@ async fn claim_rearm(fixture: &Fixture) {
         operation: JobOperation::Reconcile {},
         available_at: due.try_into().unwrap(),
     };
-    let first = fanout(&host.app, due);
-    let second = fanout(&host.app, due);
+    let swept = fanout(&host.app, due);
+    let first = advance(&host.app, due);
+    let second = advance(&host.app, due);
     host.queue.submit(&maintenance).await.unwrap();
+    host.publish(&swept).await.unwrap();
     host.publish(&first).await.unwrap();
     host.publish(&second).await.unwrap();
     assert_eq!(host.retire().await, revision(1));
     fall_due(due).await;
 
     // Control: a maintenance claim cannot produce intents and does not reopen.
-    let grant = host.claim().await.unwrap();
+    let grant = host.claim_sweep().await.unwrap();
     assert_eq!(grant.delivery().job, maintenance);
     assert_eq!(host.state().await.state, ScopeState::Retired);
-    host.settle(&grant, JobOutcome::Completed {}).await.unwrap();
+    host.settle_sweep(&grant, JobOutcome::Completed {})
+        .await
+        .unwrap();
+    assert!(duties(fixture, &host.app).await.is_empty());
+
+    // The same lane claiming an intent-producing sweep does reopen, and the
+    // reopened scope is retired again for the claims below.
+    let grant = host.claim_sweep().await.unwrap();
+    assert_eq!(grant.delivery().job, swept);
+    let reopened = host.state().await;
+    assert_eq!(reopened.state, ScopeState::Open);
+    assert_eq!(reopened.ingress_epoch, revision(2));
+    host.settle_sweep(&grant, JobOutcome::Completed {})
+        .await
+        .unwrap();
+    assert_eq!(host.retire().await, revision(2));
     assert!(duties(fixture, &host.app).await.is_empty());
 
     // A claim that fails its final authorization rolls its reopen back.
@@ -588,7 +670,7 @@ async fn claim_rearm(fixture: &Fixture) {
     assert_eq!(grant.delivery().job, first);
     let reopened = host.state().await;
     assert_eq!(reopened.state, ScopeState::Open);
-    assert_eq!(reopened.ingress_epoch, revision(2));
+    assert_eq!(reopened.ingress_epoch, revision(3));
     assert_eq!(duties(fixture, &host.app).await.len(), 2);
     host.settle(&grant, JobOutcome::Completed {}).await.unwrap();
 
@@ -659,13 +741,13 @@ async fn settlement(fixture: &Fixture) {
     let closing = host.state().await;
     assert_eq!(closing.state, ScopeState::Closing);
     assert_eq!(closing.close_job, Some(close.id.clone()));
-    let grant = host.claim().await.unwrap();
+    let grant = host.claim_sweep().await.unwrap();
     assert_eq!(
-        host.settle(&grant, JobOutcome::Completed {}).await,
+        host.settle_sweep(&grant, JobOutcome::Completed {}).await,
         Err(Error::Invalid),
         "closure settles only with closed evidence"
     );
-    host.settle(&grant, JobOutcome::Closed { drained: false })
+    host.settle_sweep(&grant, JobOutcome::Closed { drained: false })
         .await
         .unwrap();
     let reopened = host.state().await;
@@ -694,12 +776,12 @@ async fn settlement(fixture: &Fixture) {
 async fn watermark(fixture: &Fixture) {
     // Claimed after closing began, settled before the Close settles.
     let host = host(fixture).await;
-    let delivered = fanout(&host.app, 0);
+    let delivered = advance(&host.app, 0);
     host.publish(&delivered).await.unwrap();
     let close = host.recovery.begin_close(&host.app).await.unwrap().unwrap();
     let job = host.claim().await.unwrap();
     assert_eq!(job.delivery().job, delivered);
-    let grant = host.claim().await.unwrap();
+    let grant = host.claim_sweep().await.unwrap();
     assert_eq!(grant.delivery().job, close);
     assert_eq!(
         host.state().await.state,
@@ -707,7 +789,7 @@ async fn watermark(fixture: &Fixture) {
         "a claim during closing leaves the attempt to its watermark"
     );
     host.settle(&job, JobOutcome::Completed {}).await.unwrap();
-    host.settle(&grant, JobOutcome::Closed { drained: true })
+    host.settle_sweep(&grant, JobOutcome::Closed { drained: true })
         .await
         .unwrap();
     let kept = host.state().await;
@@ -722,11 +804,11 @@ async fn watermark(fixture: &Fixture) {
 async fn published_watermark(fixture: &Fixture) {
     let host = host(fixture).await;
     let close = host.recovery.begin_close(&host.app).await.unwrap().unwrap();
-    let grant = host.claim().await.unwrap();
+    let grant = host.claim_sweep().await.unwrap();
     assert_eq!(grant.delivery().job, close);
     host.publish(&fanout(&host.app, FUTURE)).await.unwrap();
     assert_eq!(host.state().await.state, ScopeState::Closing);
-    host.settle(&grant, JobOutcome::Closed { drained: true })
+    host.settle_sweep(&grant, JobOutcome::Closed { drained: true })
         .await
         .unwrap();
     assert_eq!(
@@ -749,7 +831,7 @@ async fn retire_without_later_work(fixture: &Fixture) {
 /// earlier attempt's unsettled Close.
 async fn preconditions(fixture: &Fixture) {
     let host = host(fixture).await;
-    host.publish(&fanout(&host.app, 0)).await.unwrap();
+    host.publish(&advance(&host.app, 0)).await.unwrap();
     let leased = host.claim().await.unwrap();
     assert!(host.recovery.begin_close(&host.app).await.unwrap().is_none());
     assert_eq!(host.state().await.state, ScopeState::Open);
@@ -762,9 +844,11 @@ async fn preconditions(fixture: &Fixture) {
         .unwrap()
         .unwrap();
     assert!(host.recovery.begin_close(&host.app).await.unwrap().is_none());
-    let grant = host.claim().await.unwrap();
+    let grant = host.claim_sweep().await.unwrap();
     assert_eq!(grant.delivery().job, pending);
-    host.settle(&grant, JobOutcome::Completed {}).await.unwrap();
+    host.settle_sweep(&grant, JobOutcome::Completed {})
+        .await
+        .unwrap();
 
     let stale = host.recovery.begin_close(&host.app).await.unwrap().unwrap();
     patch(
@@ -779,23 +863,27 @@ async fn preconditions(fixture: &Fixture) {
         host.recovery.begin_close(&host.app).await.unwrap().is_none(),
         "an unsettled earlier Close blocks another attempt"
     );
-    let grant = host.claim().await.unwrap();
+    let grant = host.claim_sweep().await.unwrap();
     assert_eq!(grant.delivery().job, stale);
-    host.settle(&grant, JobOutcome::Closed { drained: true })
+    host.settle_sweep(&grant, JobOutcome::Closed { drained: true })
         .await
         .unwrap();
     assert_eq!(host.state().await.state, ScopeState::Open);
     assert_eq!(host.retire().await, revision(1));
 }
 
-/// A lost Close acknowledgement, a crash with redelivery to another worker and
-/// a lost settlement reply all converge on one retirement.
+/// A lost Close acknowledgement, a crash with redelivery to another lane holder
+/// and a lost settlement reply all converge on one retirement.
+///
+/// Closure is a sweep, so the identity that takes it is a lane holder rather
+/// than a placement: a restart is another holder of the same lane, and it is
+/// the lapsed lease alone that lets the redelivery move between them.
 async fn lost_replies(fixture: &Fixture) {
     let host = host(fixture).await;
     let close = host.recovery.begin_close(&host.app).await.unwrap().unwrap();
-    let crashed = host.claim().await.unwrap();
+    let crashed = host.claim_sweep().await.unwrap();
     assert_eq!(crashed.delivery().job, close);
-    // The first worker committed its creator receipt, then crashed before
+    // The first holder committed its creator receipt, then crashed before
     // settling. Its manager lease lapses and the job is redelivered.
     patch(
         fixture,
@@ -804,39 +892,27 @@ async fn lost_replies(fixture: &Fixture) {
         value!({"lease_deadline":0}),
     )
     .await;
-    // The crashed instance stops taking placements, so the manager gives the
-    // app an owner that can take the redelivery over.
-    host.coordinator
-        .register(
-            &host.worker,
-            &RegisterWorker {
-                capacity: NonZeroU32::new(4).unwrap(),
-                state: WorkerState::Draining,
-            },
-        )
-        .await
-        .unwrap();
-    let (other, other_scope) = place(&host.coordinator, &host.app).await;
-    assert_ne!(other, host.worker);
-    let redelivered = host.claim_as(&other, &other_scope).await.unwrap();
+    let other = MaintenanceAuthority::new(host.app.clone(), WorkerId::mint());
+    assert_ne!(other.identity(), host.lane.identity());
+    let redelivered = host.claim_sweep_as(&other).await.unwrap();
     assert_eq!(redelivered.delivery().job, close);
     assert_eq!(redelivered.delivery().attempt.get(), 2);
     let receipt = host
-        .settle_as(&other, &redelivered, JobOutcome::Closed { drained: true })
+        .settle_sweep_as(&other, &redelivered, JobOutcome::Closed { drained: true })
         .await
         .unwrap();
     let retired = host.state().await;
     assert_eq!(retired.state, ScopeState::Retired);
     // The lost settlement reply replays the receipt without a second effect.
     assert_eq!(
-        host.settle_as(&other, &redelivered, JobOutcome::Closed { drained: true })
+        host.settle_sweep_as(&other, &redelivered, JobOutcome::Closed { drained: true })
             .await,
         Ok(receipt)
     );
     assert_eq!(host.state().await, retired);
     // The crashed attempt cannot settle a second time.
     assert_eq!(
-        host.settle(&crashed, JobOutcome::Closed { drained: true })
+        host.settle_sweep(&crashed, JobOutcome::Closed { drained: true })
             .await,
         Err(Error::Conflict)
     );
@@ -853,9 +929,9 @@ async fn no_starvation(fixture: &Fixture) {
         assert!(host.recovery.due(kind, None).await.unwrap().is_empty());
         assert!(host.recovery.dispatch(&host.app, kind).await.unwrap().is_none());
     }
-    let grant = host.claim().await.unwrap();
+    let grant = host.claim_sweep().await.unwrap();
     assert_eq!(grant.delivery().job, close);
-    host.settle(&grant, JobOutcome::Closed { drained: true })
+    host.settle_sweep(&grant, JobOutcome::Closed { drained: true })
         .await
         .unwrap();
     assert_eq!(host.state().await.state, ScopeState::Retired);
@@ -893,9 +969,9 @@ async fn no_starvation(fixture: &Fixture) {
         .expect("the reopened duty dispatches");
     assert_eq!(duty.operation, JobOperation::Reconcile {});
     // The timed-out Close settles without touching the reopened scope.
-    let first = host.claim().await.unwrap();
+    let first = host.claim_sweep().await.unwrap();
     assert_eq!(first.delivery().job, close);
-    host.settle(&first, JobOutcome::Closed { drained: true })
+    host.settle_sweep(&first, JobOutcome::Closed { drained: true })
         .await
         .unwrap();
     assert_eq!(host.state().await, reopened);
@@ -929,7 +1005,7 @@ async fn worker_denial(fixture: &Fixture) {
         available_at: 0.try_into().unwrap(),
     };
     assert_eq!(host.queue.submit(&close).await, Err(Error::Invalid));
-    let job = fanout(&host.app, 0);
+    let job = advance(&host.app, 0);
     host.publish(&job).await.unwrap();
     let grant = host.claim().await.unwrap();
     let settlement = Settlement {
@@ -994,7 +1070,7 @@ async fn postgres_claim_and_establishment_share_the_app_lock_and_reopen_once() {
     let fixture = Fixture::new(Backend::Postgres).await;
     let host = host(&fixture).await;
     let due = soon();
-    let job = fanout(&host.app, due);
+    let job = advance(&host.app, due);
     host.publish(&job).await.unwrap();
     assert_eq!(host.retire().await, revision(1));
     fall_due(due).await;
@@ -1082,7 +1158,7 @@ async fn postgres_establishment_and_close_settlement_serialize_in_both_orders() 
         let host = host(&fixture).await;
         let source = Source::new(&host.app, AppPolicy::default());
         host.recovery.begin_close(&host.app).await.unwrap().unwrap();
-        let grant = host.claim().await.unwrap();
+        let grant = host.claim_sweep().await.unwrap();
         admin.batch_execute("BEGIN").await.unwrap();
         admin
             .query(
@@ -1101,12 +1177,12 @@ async fn postgres_establishment_and_close_settlement_serialize_in_both_orders() 
                 futures::join!(host.lease(&source, Some(1), false), release);
             assert_eq!(established, Ok(Some(revision(2))));
             first.set(Some("establishment"));
-            host.settle(&grant, JobOutcome::Closed { drained: true })
+            host.settle_sweep(&grant, JobOutcome::Closed { drained: true })
                 .await
                 .unwrap();
         } else {
             let (settled, ()) = futures::join!(
-                host.settle(&grant, JobOutcome::Closed { drained: true }),
+                host.settle_sweep(&grant, JobOutcome::Closed { drained: true }),
                 release
             );
             settled.unwrap();
