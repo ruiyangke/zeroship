@@ -17,9 +17,9 @@ declaration that writes `jobs.operation_kind`; the service's maintenance lane an
 function that states how it claims are in `crates/zeroship-workflow-server/src/sweeps.rs` and
 `crates/zeroship-workflow-manager/src/maintenance.rs`. The lane is exercised end to end against
 the real journal and the real queue and has NO production caller, which is deliberate and has a
-do-not note of its own. `Work::Payload` keeps `cron` and `collect` with the host holding the
-payload store, so the lane admits only what it can finish, and what remains of the first bullet is
-starting it. The journal-hold authority is in - `svc/workflow` holds the journal pair,
+do-not note of its own. The lane claims every sweep, `cron` and `collect` included, because the
+host that owns the journal owns the store their bytes live in, so what remains of the first bullet
+is starting it. The journal-hold authority is in - `svc/workflow` holds the journal pair,
 `ServiceHolds` signs as the role with no instance, and Control classifies the caller before
 decoding a body. So is the deployment registration: `CONTROL_DEPLOY_REGISTRATION`
 (`POST /v1/deploy-registration`) is granted to `svc/workflow` alone, Control derives the summary
@@ -649,8 +649,9 @@ protocol. This extends a working client rather than inventing one.
    WRITE side. `activate_job` and `management_job` need only `registrations`, and
    `acquire_deployment_hold_checked` signs through `RemoteDeploymentHolds::asserted`
    (`crates/zeroship-workflow/src/deployment_holds/remote.rs`) under `HoldScope::for_app` - the
-   same scope `require_journal_hold` reads. `cron_job` stays out of reach because it also needs an
-   `InputStager`, which is what `Work::Payload` records.
+   same scope `require_journal_hold` reads. `cron_job` is in reach too: it also needs an
+   `InputStager`, and `ServicePayloads`
+   (`crates/zeroship-workflow-server/src/payloads.rs`) supplies one.
    `the_activation_sweep_records_controls_asserted_registration`
    (`crates/zeroship-control/tests/deployment_holds/journal.rs`) binds that pairing end to end on
    this exact shape, against a real Control endpoint, with a `holds_only` arm that must refuse.
@@ -1164,8 +1165,9 @@ protocol. This extends a working client rather than inventing one.
    selects its backend by the runtime's own identity.
 
    **Where each step's detail lives**, by heading rather than by position, since positions move.
-   The sweeps: "And the first piece is not the loop", "And two of the nine cannot move at all as
-   they stand", "Neither needs a store in the service", "And the lane has a seat on neither half
+   The sweeps: "And the first piece is not the loop", "And all nine move, because the host that owns
+   the journal owns the store", "Both belong where the journal is, and their shapes say why",
+   "And the lane has a seat on neither half
    of the service", and for the claim set "And do not reach for the classification that already
    exists", "A second claimant blocks rather than skipping", "And it is in the query, not an arm
    at the claim site" and "And `candidate` has a second caller, which decides something else".
@@ -1207,72 +1209,36 @@ protocol. This extends a working client rather than inventing one.
    so it wants a journal opened on the driver's own runtime rather than a seat on either as they
    stand.
 
-   **And two of the nine cannot move at all as they stand.** `cron_job` takes an `InputStager`
-   and `collect_job` a `PayloadDeleter`. The only production implementation of either is
-   `PayloadObjects` (`crates/zeroship-workflow-runner/src/payloads/objects.rs`) - everything else
-   in the tree is a test fake - and that crate is the one the service may not reach, under the
-   same gate arm that makes lifting the dispatch necessary in the first place. So seven of the
-   nine move no creator bytes and these two cannot - but moving no bytes is not the same as
-   wanting only the journal, and the group needing only a claim path is the four named above. The
-   rest want the deployments source, which the grant supplies in the same change.
+   **And all nine move, because the host that owns the journal owns the store.** `cron_job` takes an
+   `InputStager` and `collect_job` a `PayloadDeleter`, and `ServicePayloads`
+   (`crates/zeroship-workflow-server/src/payloads.rs`) is both: a `zeroship_storage::Storage` bound
+   to `Namespace::platform`, opened from `workflow.storage_url` before the listener binds, so an
+   unopenable store stops startup rather than turning claimed rows into failures.
+   `MaintenanceLane::sweep` passes it twice into `maintenance_job`, as the writer and as the deleter
+   - the argument pattern the engine already required, which is why `zeroship-workflow` links no
+   storage of its own and its gate arm is untouched.
+   Blob storage is how the store behind a journal keeps large objects out of the database, so
+   holding it separates no claimants: `Work` (`crates/zeroship-workflow-manager/src/models.rs`) is
+   `Maintenance | Creator`, and the axis is journal work against creator code. The group needing
+   only a claim path is the four named above; the rest want the deployments source, which the grant
+   supplies in the same change.
 
-   That is not an argument for giving the service a payload store. It is the same split `stage`
-   and `read` already answer: the journal decision crosses, the bytes stay with the process
-   holding the store. `Collect` settles to the service. `collect_payload_checked`
-   (`crates/zeroship-workflow/src/service/payloads/collection.rs`) calls the deleter between a
-   committed fence and the next `begin`, holding no transaction, so a remote one-method deleter is
-   the whole of what it needs. `Cron` does not settle that way, because its byte write sits inside a
-   transaction held on purpose - "A bounded upload holds this lock until the store finishes, so GC
-   cannot race a live writer" (`crates/zeroship-workflow/src/service/payloads.rs`) - so what it
-   wants is the reserve and confirm this list already carries, not a second mechanism. So both
-   capability halves are answerable, and they differ. Where they run is settled for now by what a
-   host holds: `Work::Payload` (`crates/zeroship-workflow-manager/src/models.rs`) is its own class,
-   `Claimant::Maintenance` refuses it and `Claimant::Placed` takes it, so the two stay with the
-   store-holder and the service's lane never leases a row it cannot finish. That is a statement
-   about capability, not authority - and when a crossing mechanism lands, it flips at exactly one
-   arm of a total match, `(Self::Maintenance, Work::Payload)`, which is a compile-checked pairing
-   rather than a filter to remember.
-
-   **And the two directions do not share one mechanism, because staging is not asynchronous.** The
-   split names two obligations - a reserve and confirm for staging, a remote call for deletion - and
-   neither is a call this service can place. `stage_start_input`
-   (`crates/zeroship-workflow/src/service/payloads.rs`, called from `service/backend.rs` for `start`
-   and from `service/cron.rs` for a firing) leaves the service holding the VALUE and no store, so the
-   object write has to cross. `collect_job` leaves it holding an id and no store, so the delete has
-   to cross. Nothing serves either, and the hosts holding `PayloadObjects` are ones this service is
-   called BY.
-
-   Deletion takes the intent-and-reconcile shape this tree already builds. `fence_payload`
+   **And the two halves are ordered differently, which is why one host doing both is the simple
+   answer.** Deletion is the looser half and says so: `fence_payload`
    (`crates/zeroship-workflow/src/service/payloads/collection.rs`) commits `deleting` before the
-   deleter runs and the collection candidate re-selects `"uploading" | "staged" | "deleting" |
-   "deleted"` past its deadline, so a failed delete is retried rather than lost. `job_publications`
-   (`crates/zeroship-workflow/src/service/publication.rs`) is that pattern in full: intents written
-   before COMMIT, keyed by an id derived from the work so the primary key is the dedupe key, and
-   `confirmed_at` NULL until a receipt matches.
+   deleter runs, and the collection candidate re-selects `"uploading" | "staged" | "deleting" |
+   "deleted"` past its deadline, so a failed delete is retried rather than lost.
 
-   Staging cannot take that shape, and the reason is a commit boundary rather than a preference.
+   Staging is the tighter half, and the constraint is a commit boundary rather than a preference.
    `insert_run` (`crates/zeroship-workflow/src/service/app.rs`) takes the input edge in the same
    write as the generation row - "a run can never reach a committed generation whose input nothing
    holds" - and the `promote` it calls reaches `owned_reference`
    (`crates/zeroship-workflow/src/service/payloads.rs`), whose ownerless arm admits only
-   `state = "staged"` with `run_id IS NULL` and an unexpired `expires_at`. So the bytes must already
-   be committed as `staged` before the run is insertable, and an intent recording that they ought to
-   exist satisfies that arm not at all. `insert_run` writes `"state":"queued"` due now, so serving
-   staging asynchronously means a run in a state nothing dispatches plus a second phase to attach it.
-   One mechanism covers both directions only if it is a SYNCHRONOUS call from this service to a
-   store-holder, which is the arm with no transport: `zeroship-core/src/service_identity.rs` names no
-   payload endpoint, and the worker serves `[WORKER_DISPATCH, WORKER_APP_LOGS]` and nothing else,
-   neither addressable per app by this service.
-
-   So what this defers is not which mechanism but whether the byte sweeps need one. `Work::Payload`
-   already keeps `Cron` and `Collect` with the store-holder, and `Capacity::visit`
-   (`crates/zeroship-workflow-manager/src/capacity.rs`) asks
-   `candidate(&tx, app, now, Claimant::Placed, None)` because "an app is due while any row remains
-   claimable", so a pending firing already draws a placement. Leaving them there costs nothing to
-   build, and couples schedule firing and byte reclamation to a worker placement - the coupling this
-   relocation exists to break. OPEN: must a schedule fire for an app no worker is placed on? A yes
-   makes the synchronous crossing unavoidable and its transport the first cost; a no leaves
-   `Work::Payload` as the whole answer and this list carries no byte-crossing item at all.
+   `state = "staged"` with `run_id IS NULL` and an unexpired `expires_at`. So the bytes are committed
+   as `staged` before the run is insertable, and nothing that merely recorded an intention to write
+   them would satisfy that arm. The lane stages and inserts in one process, so that ordering is a
+   local commit rather than a protocol - which is the whole reason no byte-crossing item appears in
+   this list.
 
    **A second claimant blocks rather than skipping, which is what puts authority first.** Two
    claimants on one app are representable and this order needs them; what they are not is free.
@@ -1321,27 +1287,19 @@ protocol. This extends a working client rather than inventing one.
    whose queue holds only service-claimable jobs still reads as due, takes a worker placement,
    and records demand for work that worker cannot claim.
 
-   **Neither needs a store in the service, and they need different things.** `PayloadDeleter`
-   (`crates/zeroship-workflow/src/service/payloads.rs`) is one method, `delete(app, id)` - ids
-   only, no bytes - so the service can hold a remote implementation that asks whoever owns the
-   store to delete. But nothing serves such a call: there is no payload endpoint in
-   `crates/zeroship-core/src/service_identity.rs` at all, and the only production holders of
-   `PayloadObjects` are the worker and the CLI - processes the service is called BY rather than
-   calls. So the remote implementation has no one to ask. The journal half is already built: the
-   scan, the fence, and the `deleted` tombstone with its resweep deadline are journal work
-   (`crates/zeroship-workflow/src/service/payloads/collection.rs` marks `resweep` on that state,
-   and `closure` refuses while a tombstone is still owed one). Only the `delete` itself wants the
-   store. So what this wants is the reserve and confirm INVERTED - the journal records the intent
-   and a store-holding host confirms it - not a call the service makes outward. Settle that before
-   anyone writes a deleter. `InputStager`
-   (`crates/zeroship-workflow/src/backend.rs`) is the harder one: `stage_input` takes the journal
-   handle AND the value, so it does journal work and a byte write in one call. But the service
-   holds the value already - a schedule's input is inline in the journal - so it can hash it and
-   record ownership itself and only the object write crosses. That is the reserve-and-confirm
-   split `stage` already needs, not a second mechanism.
-
-   So the blocker is smaller than "two sweeps cannot move": one wants a one-method remote
-   capability, the other reuses a split already on the list.
+   **Both belong where the journal is, and their shapes say why.** `PayloadDeleter`
+   (`crates/zeroship-workflow/src/service/payloads.rs`) is one method, `delete(app, id)` - ids only,
+   no bytes - and everything around it is already journal work: the scan, the fence, and the
+   `deleted` tombstone with its resweep deadline
+   (`crates/zeroship-workflow/src/service/payloads/collection.rs` marks `resweep` on that state, and
+   `closure` refuses while a tombstone is still owed one). Only the `delete` itself reaches the
+   store, and the host that owns the journal owns that store.
+   `InputStager` (`crates/zeroship-workflow/src/backend.rs`) is the tighter one: `stage_input` takes
+   the journal handle AND the value, so it does journal work and a byte write in one call. The
+   service holds both - a schedule's input is inline in the journal it owns - so that call has no
+   seam to cross at all. `ServicePayloads`
+   (`crates/zeroship-workflow-server/src/payloads.rs`) implements both, and the engine still links no
+   storage: they arrive as arguments.
 
    **And do not reach for the classification that already exists; it splits on a different
    axis.** `worker_operation` (`crates/zeroship-workflow-manager/src/coordinator/jobs.rs`)
@@ -2160,27 +2118,23 @@ part that dates, not the verdict.
    workflow-v8 crates and not in control, and control receives only the identity projection
    `manager_schedules` in `crates/zeroship-workflow/src/service/bundle.rs`.
 
-9. **Must a schedule fire for an app no worker is placed on?** This decides whether a byte-crossing
-   mechanism is needed at all, so it is worth asking before designing one.
-   Today the byte sweeps stay with the store-holder and cost nothing to build. `Work::Payload`
-   (`crates/zeroship-workflow-manager/src/models.rs`) keeps `Cron` and `Collect` there, and
-   `Capacity::visit` (`crates/zeroship-workflow-manager/src/capacity.rs`) asks
-   `candidate(&tx, app, now, Claimant::Placed, None)` because "an app is due while any row remains
-   claimable" - so a pending firing already draws a placement and the sweep already runs where the
-   store is.
-   What that costs is punctuality for an app that cannot be placed. With no eligible worker in its
-   zone, or a zone at capacity, `place` answers `Placed::Unplaced(zone)` and `visit` returns through
-   `record`, whose whole job is to "Record unplaced demand under the app lock" while the firing
-   waits. That is
-   platform maintenance gated on creator-side execution capacity, which is the coupling this
-   relocation exists to break - so the cheap answer is cheap in build cost and not in principle.
-   A yes makes a synchronous call from this service to a store-holder unavoidable, and its transport
-   the first cost: `crates/zeroship-core/src/service_identity.rs` names no payload endpoint, the
-   worker serves `WORKER_DISPATCH` and `WORKER_APP_LOGS` and nothing else, and the call inverts the
-   client/server direction every other pair here takes. A no leaves `Work::Payload` as the whole
-   answer and drops the byte-crossing item from the plan entirely. See "And the two directions do
-   not share one mechanism, because staging is not asynchronous" for why one mechanism cannot serve
-   both directions either way.
+9. **ANSWERED - yes, and no crossing is needed to do it.** A schedule fires for an app no worker is
+   placed on, because the lane claims the firing. Blob storage keeps large objects out of the
+   database, so the process that owns the journal owns the store: `ServicePayloads`
+   (`crates/zeroship-workflow-server/src/payloads.rs`) binds `Namespace::platform` and supplies the
+   writer and the deleter as arguments, and `MaintenanceLane::sweep` passes them into
+   `maintenance_job`. `cron` and `collect` are journal sweeps like the rest.
+   So the question this item was asked to decide - which mechanism carries bytes across a boundary -
+   has no subject: there is no boundary between the journal and the store behind it. The transport a
+   yes would have required is not built and is not needed; `crates/zeroship-core/src/service_identity.rs`
+   still names no payload endpoint and does not need to.
+   What this removes is the coupling the relocation exists to break. A firing no longer waits on
+   `place` answering `Placed::Unplaced(zone)`, because it never asks for a placement: platform
+   maintenance stopped depending on creator-side execution capacity.
+   One invariant arrives with it, and nothing checks it at runtime: `workflow.storage_url` and
+   `worker.storage_url` must name the same backend, because a cron-started run's input is staged by
+   the service and read back by the worker while the run executes. Step 5 removes the question by
+   moving that read over the wire.
 
 ---
 
@@ -2212,19 +2166,19 @@ part that dates, not the verdict.
   seam inviting a caller to pass something else. It survives for SQLite because that tier has a
   genuine reason.
 
-- **Do not give this process a payload store to widen what its lane claims.** `Work::Payload`
-  (`crates/zeroship-workflow-manager/src/models.rs`) keeps `cron` and `collect` with the host that
-  holds the store, and `Claimant::Maintenance` refuses that class, so the lane admits only what it
-  can finish: `release_hold` and `reconcile`'s holds phase on the journal hold authority,
-  `activate` and `management` on the asserted registration, and `close`, `fanout` and
-  `propagate` on the journal alone. When a payload sweep looks stranded the tempting repair is a
-  store here. Two entries decline it - "And the fork resolves toward the pattern already in the
-  tree" for artifacts, "And the two directions do not share one mechanism, because staging is not
-  asynchronous" for payload bytes - because the deletion direction already records its intent in
-  the journal, and the staging direction wants a synchronous call this service cannot place. Until
-  one exists the refusals in
-  `crates/zeroship-workflow-server/src/sweeps.rs` are the honest answer, and they are unreachable
-  from the lane's own claims by construction.
+- **Do not split claimants by which host holds the payload store.** Blob storage keeps large
+  objects out of the database, so the process that owns the journal owns the store those objects
+  live in: `ServicePayloads` (`crates/zeroship-workflow-server/src/payloads.rs`) binds
+  `Namespace::platform` and supplies the writer and the deleter as arguments, which is what the
+  engine requires of any host - it links no storage itself. Store-holding therefore separates
+  nothing, and the only axis left is journal work against creator code. `Work`
+  (`crates/zeroship-workflow-manager/src/models.rs`) is `Maintenance | Creator`;
+  `Claimant::Placed.denied()` is the nine sweeps and `Claimant::Maintenance.denied()` is
+  `["advance"]`, asserted as whole sets in `crates/zeroship-workflow-manager/tests/queue.rs` so a
+  kind classified as neither, or a tenth operation added without a class, fails there rather than
+  landing on whichever host asked first.
+  What a host running creator code must not hold is the JOURNAL. That is the privilege the
+  relocation moves, and the reason the sweeps belong beside the rows they touch.
 
 ---
 
