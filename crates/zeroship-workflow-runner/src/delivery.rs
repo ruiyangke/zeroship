@@ -196,10 +196,7 @@ impl JobTransport for WorkerCoordinator {
         let settled = self
             .settle_execution::<AppJournal>(
                 lease.delivery(),
-                &ReportedExecution {
-                    task: task.reported()?,
-                    execution,
-                },
+                &ReportedExecution::of(lease, task, execution)?,
             )
             .await
             .map_err(metadata_error)?;

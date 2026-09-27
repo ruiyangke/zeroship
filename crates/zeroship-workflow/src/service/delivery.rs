@@ -431,12 +431,81 @@ impl RenewedTask {
 }
 
 /// What a holder reports for the journal half of a merged settlement: the task
-/// it held and the batch its executor produced.
+/// it held, the delivery authority it still measures, and the batch its executor
+/// produced.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ReportedExecution {
+    /// Delivery authority the holder still measures.
+    ///
+    /// Absent when its grant has expired, which a completion may still be
+    /// answered under: an exact retry reads the receipt the journal already
+    /// holds without any live authority at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_ms: Option<NonZeroU64>,
     pub task: ClaimedTask,
     pub execution: WorkflowExecution,
+}
+
+impl ReportedExecution {
+    /// # Errors
+    /// Refuses a task whose creator authority has already expired.
+    pub fn of(
+        lease: &impl JobLease,
+        task: &DeliveredTask,
+        execution: WorkflowExecution,
+    ) -> Result<Self, WorkflowServiceError> {
+        Ok(Self {
+            grant_ms: lease.remaining().and_then(|remaining| millis(remaining).ok()),
+            task: task.reported()?,
+            execution,
+        })
+    }
+}
+
+/// A delivery grant as its holder reported it, for a journal that is not in the
+/// holder's process.
+///
+/// WHAT THE HOLDER ASSERTS AND WHAT IT CANNOT. The remaining authority is the
+/// holder's own measurement, and it bounds only how long the journal will spend
+/// on the holder's behalf and how much of its captured policy window one attempt
+/// may consume. Whether the holder may act at all is decided against the stored
+/// task row inside the transaction, and the policy the attempt runs under is the
+/// journal's own binding. The same reasoning as [`TaskClaim`], one authority up.
+#[derive(Debug, Clone)]
+pub struct ReportedGrant {
+    delivery: Delivery,
+    expires: Option<Instant>,
+}
+
+impl ReportedGrant {
+    /// Bind a reported delivery to the authority its holder measured.
+    ///
+    /// # Errors
+    /// Refuses an expiration outside the representable monotonic range.
+    pub fn resume(
+        delivery: Delivery,
+        remaining_ms: Option<NonZeroU64>,
+        started: Instant,
+    ) -> Result<Self, WorkflowServiceError> {
+        Ok(Self {
+            delivery,
+            expires: remaining_ms
+                .map(|remaining| anchor(remaining, started))
+                .transpose()?,
+        })
+    }
+}
+
+impl JobLease for ReportedGrant {
+    fn delivery(&self) -> &Delivery {
+        &self.delivery
+    }
+    fn remaining(&self) -> Option<Duration> {
+        self.expires?
+            .checked_duration_since(Instant::now())
+            .filter(|duration| !duration.is_zero())
+    }
 }
 
 /// Re-anchor a remaining duration onto this process's monotonic clock.
