@@ -8,6 +8,8 @@
 mod platform;
 #[path = "support/app_facts.rs"]
 mod app_facts;
+#[path = "support/holds.rs"]
+mod holds;
 #[path = "support/policy.rs"]
 mod policy_fixture;
 #[path = "support/server_process.rs"]
@@ -17,10 +19,14 @@ use compio::io::{AsyncRead, AsyncWriteExt};
 use ntex::{client::Client, http::StatusCode};
 use serde_json::{json, Value};
 use std::time::Duration;
-use zeroship_workflow::service::delivery::{AcceptedJob, AppJournal};
-use zeroship_workflow_client::ClaimedDelivery;
+use zeroship_data_orm::binding::DbBinding;
+use zeroship_workflow::service::delivery::AppJournal;
+use zeroship_workflow_manager::{
+    maintenance::MaintenanceAuthority, Options as QueueOptions, Queue,
+};
 use zeroship_core::{
     app_id::AppId,
+    schema_name::SchemaName,
     service_assertion::{ServiceAssertionMinter, ServiceIssuer, ServiceSigningKey},
     service_identity::endpoints,
     service_peers::{service_issuer, CONTROL_SERVICE_NAME},
@@ -28,9 +34,61 @@ use zeroship_core::{
         Assignment, ManageRun, ManagementOperation, ManagementOutcome, RequestId, RunId,
         RunOperation, WorkerId, AUDIENCE,
     },
-    workflow_jobs::{JobOperation, JobOutcome, ManagementCommand, Settlement},
+    workflow_jobs::{Delivery, JobOperation, JobOutcome, ManagementCommand, Settlement},
     workflow_policy::AppPolicy,
 };
+
+/// The queue the spawned services own, opened a second time in this process so a
+/// sweep can be claimed the way the service's own maintenance lane claims one.
+async fn queue(url: &str) -> Queue {
+    Queue::connect(
+        DbBinding::platform(
+            "workflow_manager",
+            "workflow_manager",
+            SchemaName::new("workflow_manager").unwrap(),
+        ),
+        url,
+        QueueOptions::default(),
+        holds::client(),
+    )
+    .await
+    .unwrap()
+}
+
+/// Take the next sweep off this app's queue, in process, under the authority the
+/// service's own maintenance lane asserts.
+///
+/// THERE IS NO WIRE CLAIM FOR A SWEEP. `WORKFLOW_JOB_CLAIM` claims as
+/// `Claimant::Placed` (`Coordinator::claim_job`), and that claimant admits
+/// `advance` alone, so a management row is the lane's. What the cases below
+/// measure is the protocol from the settlement onwards, and `Queue::settle` is
+/// not claimant-scoped: it authorizes on the assignment and on
+/// `settlement.delivery.worker_id`. So the lease is taken here and discharged
+/// over the protocol.
+///
+/// The authority carries the placed worker's own id, because that is the
+/// identity the settle route authenticates. Its asserted revision is `1`, which
+/// is the revision `seed_placement` records, so the placement read behind that
+/// route resolves the same authority this lease names.
+async fn sweep(
+    queue: &Queue,
+    lane: &MaintenanceAuthority,
+    scope: &zeroship_core::workflow_coordination::AssignedScope,
+) -> Delivery {
+    let delivery = claimed_sweep(queue, lane)
+        .await
+        .expect("the queue holds a sweep for the lane to claim");
+    assert_eq!(delivery.job.app_id, scope.app_id);
+    assert_eq!(delivery.assignment_revision, scope.assignment_revision);
+    delivery
+}
+
+async fn claimed_sweep(queue: &Queue, lane: &MaintenanceAuthority) -> Option<Delivery> {
+    lane.claim(queue, Ok(AppPolicy::default().max_delivery_attempts))
+        .await
+        .unwrap()
+        .map(|grant| grant.delivery().clone())
+}
 
 fn assertion(issuer: &ServiceIssuer, key: &ServiceSigningKey) -> String {
     format!(
@@ -193,9 +251,11 @@ async fn native_worker_client_uses_the_authenticated_coordinator_api() {
     .await;
     assert_eq!(status, StatusCode::OK);
     server.restart(&http).await;
-    let grant = client.claim_job::<AppJournal>(&scope).await.unwrap().unwrap();
+    let queue = queue(&fixture.runtime_url).await;
+    let lane = MaintenanceAuthority::new(scope.app_id.clone(), worker.clone());
+    let delivery = sweep(&queue, &lane, &scope).await;
     assert_eq!(
-        grant.lease.delivery().job.operation,
+        delivery.job.operation,
         JobOperation::Management {
             request_id: command.request_id.clone(),
             run_id: command.run_id.clone(),
@@ -205,9 +265,12 @@ async fn native_worker_client_uses_the_authenticated_coordinator_api() {
             },
         }
     );
+    // The client claims creator work, and this queue holds none. The leased
+    // sweep is not redelivered to the lane that holds it either.
     assert!(client.claim_job::<AppJournal>(&scope).await.unwrap().is_none());
+    assert!(claimed_sweep(&queue, &lane).await.is_none());
     let settlement = Settlement {
-        delivery: grant.lease.delivery().clone(),
+        delivery,
         outcome: JobOutcome::Management {
             outcome: ManagementOutcome::NotFound {},
         },
@@ -550,9 +613,14 @@ async fn verify_latest_management(
         .await,
         accepted
     );
-    let delivery = client.claim_job::<AppJournal>(scope).await.unwrap().unwrap();
+    // Management is a sweep: the lane claims it, and the client settles it over
+    // the protocol. The lane asserts the placed worker's own identity, which is
+    // the identity `settle_job` authenticates.
+    let queue = queue(&fixture.runtime_url).await;
+    let lane = MaintenanceAuthority::new(scope.app_id.clone(), client.worker_id().clone());
+    let delivery = sweep(&queue, &lane, scope).await;
     assert_eq!(
-        delivery.lease.delivery().job.operation,
+        delivery.job.operation,
         JobOperation::Management {
             request_id: command.request_id,
             run_id: command.run_id,
@@ -564,7 +632,7 @@ async fn verify_latest_management(
     );
     client
         .settle_job(&Settlement {
-            delivery: delivery.lease.delivery().clone(),
+            delivery,
             outcome: JobOutcome::Management {
                 outcome: ManagementOutcome::Denied {},
             },
@@ -898,22 +966,29 @@ async fn replicas_authenticate_metadata_and_keep_customer_execution_off_the_prot
         StatusCode::OK
     );
     first.restart(&client).await;
-    let (status, pending) = post(
-        &client,
-        &first.url,
-        endpoints::WORKFLOW_JOB_CLAIM.path_template(),
-        &assertion(&worker_issuer, &worker_key),
-        &scope,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    // A management claim carries no journal acceptance: the journal settles that
-    // kind from the delivery alone, with no task and no executor.
-    let claimed: ClaimedDelivery<AcceptedJob> = serde_json::from_value(pending).unwrap();
-    assert!(claimed.accepted.is_none());
-    let lease = claimed.lease;
+    // Management is a sweep, so the lane claims it; the wire claim offers this
+    // placed worker nothing. What the replicas are measured on starts at the
+    // settle route below, which either of them serves for the same delivery.
     assert_eq!(
-        lease.delivery.job.operation,
+        post(
+            &client,
+            &first.url,
+            endpoints::WORKFLOW_JOB_CLAIM.path_template(),
+            &assertion(&worker_issuer, &worker_key),
+            &scope,
+        )
+        .await,
+        (StatusCode::OK, Value::Null)
+    );
+    let assigned = zeroship_core::workflow_coordination::AssignedScope {
+        app_id: app.clone(),
+        assignment_revision: assignment.revision,
+    };
+    let queue = queue(&fixture.runtime_url).await;
+    let lane = MaintenanceAuthority::new(app.clone(), worker.clone());
+    let delivery = sweep(&queue, &lane, &assigned).await;
+    assert_eq!(
+        delivery.job.operation,
         JobOperation::Management {
             request_id: request.request_id.clone(),
             run_id: request.run_id.clone(),
@@ -924,7 +999,7 @@ async fn replicas_authenticate_metadata_and_keep_customer_execution_off_the_prot
         }
     );
     let settlement = serde_json::to_value(Settlement {
-        delivery: lease.delivery,
+        delivery,
         outcome: JobOutcome::Management {
             outcome: ManagementOutcome::Applied {
                 state: zeroship_core::workflow_coordination::RunState::Paused,
