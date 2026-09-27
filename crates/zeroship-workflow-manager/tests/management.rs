@@ -40,7 +40,7 @@ use zeroship_data_orm::{
 use zeroship_workflow_manager::{
     coordinator::{Coordinator, Options as CoordinatorOptions},
     retention::{CatalogClient, HoldClient, HoldFuture},
-    Error, Options, Queue,
+    Claimant, Error, Options, Queue,
 };
 
 macro_rules! case {
@@ -210,6 +210,24 @@ fn assignment(app: &AppId) -> Assignment {
         expires_at: i64::MAX.try_into().unwrap(),
     }
 }
+/// Take the next sweep off the app's queue. A management command is a sweep, so
+/// the claimant is the lane of the process that owns the journal; these
+/// contracts run no placement lane, so the authority it asserts is stated here
+/// the way `assignment` states a placement, and the settlement paths below
+/// compare against the same identity.
+async fn claim_sweep(
+    host: &Host,
+    authority: &Assignment,
+) -> Result<Option<zeroship_workflow_manager::DeliveryGrant>, Error> {
+    host.queue
+        .claim_authorized(
+            &authority.into(),
+            Claimant::Maintenance,
+            Ok(support::delivery_ceiling()),
+            |_| ready(Ok(authority.clone())),
+        )
+        .await
+}
 fn ordinary(app: &AppId) -> JobSpec {
     JobSpec {
         id: JobId::mint(),
@@ -264,6 +282,19 @@ async fn patch(database: &Database, table: &str, id: &str, changes: Value) {
         .unwrap();
     assert!(matches!(result, Output::Count(1)));
 }
+/// Neither claimant has a deliverable row: the lane's next command waits on an
+/// unsettled earlier one, and the barrier holds every advance back from the
+/// placed worker.
+async fn nothing_deliverable(host: &Host, authority: &Assignment) {
+    assert!(
+        claim_sweep(host, authority).await.unwrap().is_none(),
+        "the lane has no sweep to take"
+    );
+    assert!(
+        host.queue.claim(authority).await.unwrap().is_none(),
+        "a placed worker has no creator work to take"
+    );
+}
 async fn snapshot(host: &Host) -> BTreeMap<&'static str, Vec<Value>> {
     let mut snapshot = BTreeMap::new();
     for table in [
@@ -283,9 +314,7 @@ async fn settle(
     expected: &JobSpec,
     outcome: ManagementOutcome,
 ) -> Settlement {
-    let delivery = host
-        .queue
-        .claim(authority)
+    let delivery = claim_sweep(host, authority)
         .await
         .unwrap()
         .unwrap()
