@@ -16,7 +16,7 @@ use std::{
 use zeroship_core::{
     app_id::AppId,
     workflow_coordination::{RegisterWorker, Revision, RunId, WorkerId, WorkerState},
-    workflow_jobs::{DeploymentId, JobId, JobOperation, JobSpec},
+    workflow_jobs::{BroadcastId, DeploymentId, JobId, JobOperation, JobSpec},
 };
 use zeroship_workflow_manager::{
     capacity::{self, CapacityFuture, CapacityProvider, CapacityReply, CapacityRequest, Refusal},
@@ -155,6 +155,20 @@ pub fn options(retry: Duration) -> driver::Options {
             ..capacity::Options::default()
         },
         ..driver::Options::default()
+    }
+}
+
+/// A sweep of the journal: claimable work that needs no placement, because the
+/// lane that owns the journal discharges it.
+pub fn fanout(app: &AppId) -> JobSpec {
+    JobSpec {
+        id: JobId::mint(),
+        app_id: app.clone(),
+        operation: JobOperation::Fanout {
+            broadcast_id: BroadcastId::mint(),
+            revision: revision(1),
+        },
+        available_at: 0.try_into().unwrap(),
     }
 }
 

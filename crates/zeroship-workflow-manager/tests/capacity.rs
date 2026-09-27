@@ -13,14 +13,15 @@ mod placement_support;
 
 use futures::{channel::oneshot, future::ready};
 use placement_support::{
-    blocked_manager, options, Counted, Facts, Host, Pool, Recorder, Starter, Step,
+    advance, blocked_manager, fanout, options, Counted, Facts, Host, Pool, Recorder, Starter, Step,
     LONG,
 };
 use std::{rc::Rc, time::Duration};
 use support::{Admin, Backend, Fixture};
 use zeroship_core::{
     app_id::AppId,
-    workflow_coordination::{AssignedScope, ReleaseReason, ReleaseScope, RequestId},
+    workflow_coordination::{AssignedScope, ReleaseReason, ReleaseScope, RequestId, WorkerId},
+    workflow_jobs::JobSpec,
 };
 use zeroship_data_orm::{
     orm::{Operation, Output},
@@ -31,6 +32,7 @@ use zeroship_workflow_manager::{
         self, Capacity, CapacityProvider, Exchange, Refusal, StaticPool, TargetState, Visit,
     },
     eligibility::ZoneId,
+    maintenance::MaintenanceAuthority,
 };
 
 macro_rules! case {
@@ -85,6 +87,11 @@ case!(
     sqlite_racing_replicas_start_no_more_workers_than_unabsorbable_placements,
     postgres_racing_replicas_start_no_more_workers_than_unabsorbable_placements,
     coalesced_starts
+);
+case!(
+    sqlite_a_sweep_only_queue_is_neither_placed_nor_demand,
+    postgres_a_sweep_only_queue_is_neither_placed_nor_demand,
+    sweep_only_queue
 );
 
 fn capacity(host: &Host, provider: Rc<dyn CapacityProvider>, retry: Duration) -> Capacity {
@@ -213,6 +220,87 @@ async fn scale_from_zero(fixture: &Fixture) {
                 .is_empty());
         }
     }
+}
+
+/// A queue holding only sweeps is not unabsorbed demand and is not placed. The
+/// lane that owns the journal discharges those rows without a worker, so the
+/// visit clears the app, records no demand and names no zone, and a ready
+/// eligible worker is left holding nothing.
+///
+/// The control differs in exactly one thing: the row submitted. The same
+/// fixture, facts, zone and worker with creator work instead is demand first and
+/// a placement second, which is what makes the sweep arm a statement about the
+/// claimant rather than about an app nothing could place.
+///
+/// Both arms then claim the row through the claimant it belongs to, so neither
+/// can pass over a queue that was simply empty.
+async fn sweep_only_queue(fixture: &Fixture) {
+    for creator in [false, true] {
+        let host = Host::new(fixture, Rc::new(Facts::default())).await;
+        let zone = ZoneId::mint();
+        let app = AppId::mint();
+        host.facts.app(&app, &zone);
+        host.queue.register_scope(&app).await.unwrap();
+        let job = if creator { advance(&app) } else { fanout(&app) };
+        assert_eq!(host.queue.submit(&job).await.unwrap(), job);
+        let lane = capacity(&host, Recorder::new(), LONG);
+
+        // No capacity anywhere yet: only work a placement would run is demand.
+        let unowned = lane.visit(&app).await.unwrap();
+        let demands = lane.demands(&zone).await.unwrap();
+        let named = lane.target(&zone).await.unwrap();
+        // The same zone then gains a ready eligible worker with spare capacity.
+        let worker = host.worker(&zone, 4).await;
+        let offered = lane.visit(&app).await.unwrap();
+        let held = host.placed(&worker).await;
+        if creator {
+            assert_eq!(unowned, Visit::Unplaced(zone.clone()));
+            assert_eq!(demands, vec![app.clone()]);
+            assert!(named.is_some(), "demand names its zone");
+            assert!(matches!(offered, Visit::Placed(_)), "{offered:?}");
+            assert_eq!(held, vec![app.clone()]);
+        } else {
+            assert_eq!(unowned, Visit::Idle);
+            assert!(demands.is_empty(), "{demands:?}");
+            assert!(named.is_none(), "a sweep-only queue names no zone");
+            assert_eq!(offered, Visit::Idle);
+            assert!(held.is_empty(), "{held:?}");
+        }
+        assert_eq!(claimed(&host, &app, &worker, creator).await, job);
+    }
+}
+
+/// The row `sweep_only_queue` submitted, taken by the claimant it belongs to:
+/// the lane for a sweep, and the placed worker for creator work.
+async fn claimed(host: &Host, app: &AppId, worker: &WorkerId, creator: bool) -> JobSpec {
+    if creator {
+        let assignment = host.coordinator.assignments(worker, None).await.unwrap()[0].clone();
+        return host
+            .coordinator
+            .claim_job(
+                worker,
+                &AssignedScope {
+                    app_id: app.clone(),
+                    assignment_revision: assignment.revision,
+                },
+                Ok(support::delivery_ceiling()),
+                || ready(Ok(worker.clone())),
+            )
+            .await
+            .unwrap()
+            .expect("the placed worker takes the creator row")
+            .delivery()
+            .job
+            .clone();
+    }
+    MaintenanceAuthority::new(app.clone(), WorkerId::mint())
+        .claim(&host.queue, Ok(support::delivery_ceiling()))
+        .await
+        .unwrap()
+        .expect("the lane takes the sweep")
+        .delivery()
+        .job
+        .clone()
 }
 
 /// A static pool's refusal is durable. Racing replicas send no request while
