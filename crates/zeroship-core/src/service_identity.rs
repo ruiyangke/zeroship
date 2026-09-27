@@ -534,6 +534,15 @@ pub mod endpoints {
         ServiceEndpoint::new("workflow", "POST", "/v1/jobs/heartbeat");
     pub const WORKFLOW_JOB_SETTLE: ServiceEndpoint =
         ServiceEndpoint::new("workflow", "POST", "/v1/jobs/settle");
+    /// Admit a run from a creator's own value.
+    ///
+    /// The value crosses and the payload descriptor does not: the service stages
+    /// the value into the object store it owns and names the object itself, so
+    /// no caller can point a run at an object it did not supply the bytes for.
+    /// The request identity is the caller's, because it is the idempotency of
+    /// the start and of the staging under it.
+    pub const WORKFLOW_RUN_START: ServiceEndpoint =
+        ServiceEndpoint::new("workflow", "POST", "/v1/runs/start");
     /// The creator-facing run calls, answered from the service own journal.
     ///
     /// Addressed by body, like every other endpoint on this service. The body
@@ -550,6 +559,16 @@ pub mod endpoints {
         ServiceEndpoint::new("workflow", "POST", "/v1/runs/transition");
     pub const WORKFLOW_RUN_RESTART: ServiceEndpoint =
         ServiceEndpoint::new("workflow", "POST", "/v1/runs/restart");
+    /// Locate a completed step's recorded output, and a settled run's output.
+    ///
+    /// These answer with a descriptor and a payload key, never with payload
+    /// bytes. A single payload's ceiling is larger than a reply's, and a caller
+    /// holding the same object store opens the object itself once the journal
+    /// has proven which one the step owns.
+    pub const WORKFLOW_RUN_STEP_OUTPUT: ServiceEndpoint =
+        ServiceEndpoint::new("workflow", "POST", "/v1/runs/step-output");
+    pub const WORKFLOW_RUN_OUTPUT: ServiceEndpoint =
+        ServiceEndpoint::new("workflow", "POST", "/v1/runs/output");
     pub const WORKER_DISPATCH: ServiceEndpoint =
         ServiceEndpoint::new("worker", "POST", "/dispatch/{app_id}");
     pub const WORKER_APP_LOGS: ServiceEndpoint =
@@ -702,10 +721,13 @@ pub fn service_allowlist() -> &'static [ServiceAuthorization] {
                     // Creator calls the worker makes on behalf of app code.
                     // The app they may act for is decided by the placement the
                     // manager holds for THIS worker, never by the body.
+                    endpoints::WORKFLOW_RUN_START,
                     endpoints::WORKFLOW_RUN_STATUS,
                     endpoints::WORKFLOW_RUN_SIGNAL,
                     endpoints::WORKFLOW_RUN_TRANSITION,
                     endpoints::WORKFLOW_RUN_RESTART,
+                    endpoints::WORKFLOW_RUN_STEP_OUTPUT,
+                    endpoints::WORKFLOW_RUN_OUTPUT,
                     endpoints::CDC_SUBSCRIBE,
                     // Host app reads are role-scoped: an authenticated worker
                     // may request any app's version, environment, and project

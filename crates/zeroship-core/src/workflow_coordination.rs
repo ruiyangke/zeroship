@@ -11,8 +11,9 @@ pub use zeroship_id::workflow::{DeploymentId, RequestId, RunId, WorkerId};
 
 mod lifecycle;
 pub use lifecycle::{
-    ConflictPolicy, DeliveredSignal, InvalidRestart, RestartDeploy, RestartOptions, RestartTarget,
-    RestartedRun, RunOperation, RunState, RunStatus, SignalOptions, StartOptions, StartedRun,
+    ConflictPolicy, CreatorStartOptions, DeliveredSignal, InvalidRestart, InvalidStart,
+    PayloadLocation, RestartDeploy, RestartOptions, RestartTarget, RestartedRun, RunOperation,
+    RunState, RunStatus, SignalOptions, StartOptions, StartedRun, StepOutputLocation,
     TransitionedRun, WorkflowOutputRef,
 };
 
@@ -310,6 +311,44 @@ pub struct ManagementReceipt {
 pub struct RunScope {
     pub scope: AssignedScope,
     pub run_id: RunId,
+}
+
+/// Start a run of one workflow of one app, from the value the caller supplied.
+///
+/// `request_id` is minted by the CALLER rather than by the service, because it is
+/// the idempotency of the whole start: the object the value is staged into is
+/// keyed by it too, so a retried start restages to the same object and replays
+/// the same receipt.
+///
+/// NO DEPLOYMENT CROSSES. The service resolves a run's deploy from its own rows,
+/// so naming one here would let a body select the code a run replays against.
+///
+/// `input` is the creator's own value and answers to `AppPolicy::max_input_bytes`,
+/// the same bound `SignalRun::options` answers to. `options` is a
+/// [`CreatorStartOptions`], which has no field for a payload descriptor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StartRun {
+    pub request_id: RequestId,
+    pub scope: AssignedScope,
+    pub workflow_name: String,
+    #[serde(default)]
+    pub input: serde_json::Value,
+    #[serde(default)]
+    pub options: CreatorStartOptions,
+}
+
+/// Locate what one completed step of a run recorded.
+///
+/// The reply is a [`StepOutputLocation`], never the bytes: a payload's ceiling is
+/// larger than a reply's, and this transport has no byte-stream path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReadStepOutput {
+    pub scope: AssignedScope,
+    pub run_id: RunId,
+    pub name: String,
+    pub occurrence: u32,
 }
 
 /// Deliver a signal to a waiting run.
