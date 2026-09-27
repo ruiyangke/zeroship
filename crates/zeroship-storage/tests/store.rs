@@ -229,10 +229,10 @@ fn local_scoped_storage_contract() {
 #[cfg(feature = "s3")]
 #[test]
 fn s3_scoped_storage_contract() {
-    let minio = s3_fixture::Minio::start();
+    let server = s3_fixture::S3Server::start();
     let backend = zeroship_storage::S3::with_tuning(
-        minio.config("scoped"),
-        minio.credentials(),
+        server.config("scoped"),
+        server.credentials(),
         zeroship_storage::S3UploadTuning::DEFAULTS,
     );
     let store = StorageStore::from_backend(Arc::new(backend));

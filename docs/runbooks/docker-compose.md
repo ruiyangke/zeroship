@@ -208,7 +208,7 @@ creator-facing `env.storage` namespace.
 
 The compose file already sets the current service names and keys. Use it as the source of truth before copying flags into ad-hoc commands.
 
-### Production object storage (S3 / R2 / MinIO)
+### Production object storage (S3 / R2 / self-hosted)
 
 The local-volume defaults above are the dev path. For a production-like
 multi-node run - or to exercise the real S3 code path locally - point both the
@@ -241,19 +241,20 @@ Provider-specific URL parameters:
 | --- | --- |
 | **AWS S3** | `?region=us-east-1` (endpoint inferred; virtual-host style) |
 | **Cloudflare R2** | `?provider=r2&endpoint=https://<acct>.r2.cloudflarestorage.com&region=auto&style=path` |
-| **MinIO** (local) | `?provider=minio&endpoint=http://minio:9000&region=us-east-1&style=path&dev_http=true` |
+| **Self-hosted S3-compatible** (local) | `?provider=generic&endpoint=http://s3:7070&region=us-east-1&style=path&dev_http=true` |
 
 `dev_http=true` is loopback/localhost-only (plain HTTP is rejected for any
 non-loopback host). R2 must use `region=auto` and `checksum=none` (it rejects
 the AWS checksum headers); the parser enforces these.
 
 The example-owned suites in `examples/storage-gallery/tests/` and
-`examples/storage-probe/tests/` provision MinIO, Postgres and their test issuer
-through Testcontainers. They boot control, gateway and worker with S3-backed
-deploy blobs and object storage, deploy the built examples, and check browser
-loading, RPC operations, multipart transfers and LocalFs/S3 parity. Docker is
-required; unavailable dependencies fail setup. Run `cargo xtask test storage`
-for the Rust suites and the examples' Vitest/Playwright tests.
+`examples/storage-probe/tests/` provision the Versity S3 gateway, Postgres and
+their test issuer through Testcontainers. They boot control, gateway and
+worker with S3-backed deploy blobs and object storage, deploy the built
+examples, and check browser loading, RPC operations, multipart transfers and
+LocalFs/S3 parity. Docker is required; unavailable dependencies fail setup.
+Run `cargo xtask test storage` for the Rust suites and the examples'
+Vitest/Playwright tests.
 
 ### Console / AI builder
 

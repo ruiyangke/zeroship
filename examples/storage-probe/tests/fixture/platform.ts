@@ -153,20 +153,14 @@ export class Platform {
     } } }));
     await processes.run("migrate", process.execPath, [join(root, "packages/zero-migrate-cli/dist/cli-bin.js"), "apply", "--config", migration, "--env", "platform", "--approve"], root);
 
-    const minio = await this.container(new GenericContainer("quay.io/minio/minio:latest")
-      .withExposedPorts(9000)
-      .withEnvironment({ MINIO_ROOT_USER: "minioadmin", MINIO_ROOT_PASSWORD: "minioadmin" })
-      .withCommand(["server", "/data"])
-      .withWaitStrategy(Wait.forLogMessage("API:")));
-    for (const command of [
-      ["mc", "alias", "set", "fixture", "http://127.0.0.1:9000", "minioadmin", "minioadmin"],
-      ["mc", "mb", "fixture/storage-fixture"],
-    ]) {
-      const result = await minio.exec(command);
-      assert.equal(result.exitCode, 0, result.output);
-    }
-    const endpoint = "http://" + minio.getHost() + ":" + minio.getMappedPort(9000);
-    const storeUrl = (prefix: string) => "s3://storage-fixture/" + prefix + "?provider=minio&endpoint=" + endpoint + "&region=us-east-1&style=path&dev_http=true&checksum=none";
+    const s3 = await this.container(new GenericContainer("ghcr.io/versity/versitygw:v1.3.0")
+      .withExposedPorts(7070)
+      .withEntrypoint(["/bin/sh"])
+      .withCommand(["-c", "mkdir -p /data/storage-fixture && exec /usr/local/bin/versitygw --port :7070 posix /data"])
+      .withEnvironment({ ROOT_ACCESS_KEY_ID: "zeroship-fixture", ROOT_SECRET_ACCESS_KEY: "zeroship-fixture-secret" })
+      .withWaitStrategy(Wait.forLogMessage("VersityGW")));
+    const endpoint = "http://" + s3.getHost() + ":" + s3.getMappedPort(7070);
+    const storeUrl = (prefix: string) => "s3://storage-fixture/" + prefix + "?provider=generic&endpoint=" + endpoint + "&region=us-east-1&style=path&dev_http=true&checksum=none";
     const identity = issuer();
     const jwks = await this.container(identity.container);
     const issuerUrl = `http://${jwks.getHost()}:${jwks.getMappedPort(80)}`;
@@ -203,7 +197,7 @@ export class Platform {
     const masterKey = randomBytes(32).toString("hex");
     const broker = await this.secret("broker", masterKey);
     const shared = {
-      AWS_ACCESS_KEY_ID: "minioadmin", AWS_SECRET_ACCESS_KEY: "minioadmin",
+      AWS_ACCESS_KEY_ID: "zeroship-fixture", AWS_SECRET_ACCESS_KEY: "zeroship-fixture-secret",
       ZEROSHIP_CONTROL_KEY: randomBytes(16).toString("hex"),
       ZEROSHIP_PAIRWISE_SALT: randomBytes(16).toString("hex"),
       ZEROSHIP_ORIGIN_SCHEME: "http", ZEROSHIP_AUTH_PLATFORM_ISSUER: issuerUrl,
@@ -273,7 +267,7 @@ export class Platform {
     assert.equal(plan.output.trim(), id, "Operator must assign the streaming test plan");
     await processes.run("deploy", binary("zeroship"), ["deploy", bundle, `--app=${id}`, `--control=${control.url}`, `--token=${bearer}`], work, { HOME: work });
 
-    const storedBlobs = await minio.exec(["mc", "ls", "--recursive", "--json", "fixture/storage-fixture/deploy/blobs/"]);
+    const storedBlobs = await s3.exec(["/bin/sh", "-c", "find /data/storage-fixture/deploy/blobs -type f"]);
     assert.equal(storedBlobs.exitCode, 0, storedBlobs.output);
     assert(storedBlobs.output.trim(), "Deploy must write blobs into S3");
     assert(workerProcess.child.pid, "Worker process must have a PID");

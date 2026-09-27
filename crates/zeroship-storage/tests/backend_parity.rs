@@ -1,11 +1,11 @@
-//! Backend-parity integration tests: `LocalFs` vs `S3` (MinIO).
+//! Backend-parity integration tests: `LocalFs` vs `S3`.
 //!
 //! Both backends are driven through the *same* `Backend` trait sequence —
 //! buffered put/get, streaming put/get, list, delete — and asserted to
 //! produce identical observable results. A large streaming put → get →
 //! byte-compare exercises the S3 multipart path end to end.
 //!
-//! `LocalFs` always runs (temp dir). The `S3` leg starts its own MinIO
+//! `LocalFs` always runs (temp dir). The `S3` leg starts its own S3 server
 //! container and **FAILS** when Docker is unavailable: skipping it would let a
 //! machine without Docker report the same green as a machine that had actually
 //! compared the two backends, and comparing them is the entire point of the
@@ -577,31 +577,31 @@ fn localfs_parity_and_large_stream() {
 }
 
 // ---------------------------------------------------------------------------
-// S3 (MinIO) leg — Docker-gated, self-contained container
+// S3 leg — Docker-gated, self-contained container
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "s3")]
-fn make_s3(minio: &s3_fixture::Minio) -> zeroship_storage::S3 {
-    make_s3_tuned(minio, zeroship_storage::S3UploadTuning::DEFAULTS)
+fn make_s3(server: &s3_fixture::S3Server) -> zeroship_storage::S3 {
+    make_s3_tuned(server, zeroship_storage::S3UploadTuning::DEFAULTS)
 }
 
-/// The same MinIO-backed backend with the upload knobs stated at the call
+/// The same S3-backed backend with the upload knobs stated at the call
 /// site. Tests that need a non-default concurrency or stream ceiling pass one
 /// here; nothing plants a process-global environment variable to do it.
 #[cfg(feature = "s3")]
 fn make_s3_tuned(
-    minio: &s3_fixture::Minio,
+    server: &s3_fixture::S3Server,
     tuning: zeroship_storage::S3UploadTuning,
 ) -> zeroship_storage::S3 {
-    zeroship_storage::S3::with_tuning(minio.config("it"), minio.credentials(), tuning)
+    zeroship_storage::S3::with_tuning(server.config("it"), server.credentials(), tuning)
 }
 
 #[cfg(feature = "s3")]
 #[test]
 fn s3_parity_and_large_stream() {
-    let minio = s3_fixture::Minio::start();
+    let server = s3_fixture::S3Server::start();
 
-    let backend = make_s3(&minio);
+    let backend = make_s3(&server);
     compio::runtime::Runtime::new()
         .expect("compio runtime")
         .block_on(async {
@@ -610,22 +610,22 @@ fn s3_parity_and_large_stream() {
             run_list_pagination_parity(&backend, "s3").await;
             run_large_stream(&backend, "s3").await;
             // Concurrent parts must be ordered correctly at completion.
-            run_s3_parallel_many_parts(&minio).await;
+            run_s3_parallel_many_parts(&server).await;
             // A slow producer must not starve the in-flight upload futures.
-            run_s3_slow_producer_overlap(&minio).await;
+            run_s3_slow_producer_overlap(&server).await;
             // Producer errors must abort uploads without leaving orphaned parts.
-            run_s3_mid_upload_abort(&backend, &minio).await;
-            run_s3_parallel_mid_upload_abort(&minio).await;
+            run_s3_mid_upload_abort(&backend, &server).await;
+            run_s3_parallel_mid_upload_abort(&server).await;
             // Size and part-count limits must also abort incomplete uploads.
-            run_s3_part_limit_fast_fail(&minio).await;
+            run_s3_part_limit_fast_fail(&server).await;
         });
 }
 
-/// A raw `compio_s3::S3Client` over the same MinIO bucket, for asserting that an
+/// A raw `compio_s3::S3Client` over the same S3 bucket, for asserting that an
 /// aborted multipart leaves no orphaned upload.
 #[cfg(feature = "s3")]
-fn s3_raw_client(minio: &s3_fixture::Minio) -> compio_s3::S3Client {
-    compio_s3::S3Client::new(minio.config("it"), minio.credentials())
+fn s3_raw_client(server: &s3_fixture::S3Server) -> compio_s3::S3Client {
+    compio_s3::S3Client::new(server.config("it"), server.credentials())
 }
 
 /// A `ChunkSource` that yields `before_err` bytes (in 64 KiB chunks) and then
@@ -700,12 +700,12 @@ impl ChunkSource for SlowChunks {
 /// drives the producer and the in-flight PUTs concurrently so a
 /// slow-but-progressing source finishes.
 #[cfg(feature = "s3")]
-async fn run_s3_slow_producer_overlap(minio: &s3_fixture::Minio) {
+async fn run_s3_slow_producer_overlap(server: &s3_fixture::S3Server) {
     use zeroship_storage::S3UploadTuning;
     const PART_SIZE: usize = 8 * 1024 * 1024;
 
     // Concurrency 4 so multiple PUTs are in flight while the producer stalls.
-    let backend = make_s3_tuned(minio, S3UploadTuning {
+    let backend = make_s3_tuned(server, S3UploadTuning {
         concurrency: 4,
         ..S3UploadTuning::DEFAULTS
     });
@@ -753,17 +753,17 @@ async fn run_s3_slow_producer_overlap(minio: &s3_fixture::Minio) {
 /// C1 regression (plugin-storage `S3::put_stream`): a mid-upload error must
 /// abort the multipart explicitly — no panic/process-abort, no orphaned upload.
 #[cfg(feature = "s3")]
-async fn run_s3_mid_upload_abort(backend: &zeroship_storage::S3, minio: &s3_fixture::Minio) {
+async fn run_s3_mid_upload_abort(backend: &zeroship_storage::S3, server: &s3_fixture::S3Server) {
     // 8 MiB part size; yield 1.25 parts then error → create_multipart + ≥1
     // upload_part have run before the failure.
     const PART_SIZE: usize = 8 * 1024 * 1024;
     let obj_key = "c1-aborted.bin";
-    // Exact stored-key prefix: MinIO's ListMultipartUploads only surfaces an
-    // upload when the prefix reaches the key, not a parent directory prefix.
+    // The exact stored key, so the listing assertion can only be satisfied by
+    // this upload, not by a neighbour's under a parent prefix.
     let key_prefix = format!("{APP}/{BUCKET}/{obj_key}");
 
     // Precondition: the listing path is non-vacuous (it can see a live upload).
-    let raw = s3_raw_client(minio);
+    let raw = s3_raw_client(server);
     {
         let up = raw
             .create_multipart(&key_prefix, "application/octet-stream")
@@ -793,14 +793,14 @@ async fn run_s3_mid_upload_abort(backend: &zeroship_storage::S3, minio: &s3_fixt
 /// H2 regression: a stream that would exceed the configured max object size
 /// fails fast (and the C1-style abort leaves no orphaned upload).
 #[cfg(feature = "s3")]
-async fn run_s3_part_limit_fast_fail(minio: &s3_fixture::Minio) {
+async fn run_s3_part_limit_fast_fail(server: &s3_fixture::S3Server) {
     use zeroship_storage::S3UploadTuning;
     // Cap at 12 MiB so the first full 8 MiB part is flushed (creating a real
     // multipart upload) before the running total trips the cap - exercising the
     // fast-fail AND the C1 abort of an already-started upload. The ceiling is
     // an argument to this backend, so it binds THIS upload and nothing else in
     // the process.
-    let backend = make_s3_tuned(minio, S3UploadTuning {
+    let backend = make_s3_tuned(server, S3UploadTuning {
         max_stream_bytes: 12 * 1024 * 1024,
         ..S3UploadTuning::DEFAULTS
     });
@@ -818,7 +818,7 @@ async fn run_s3_part_limit_fast_fail(minio: &s3_fixture::Minio) {
     );
 
     // The fast-fail must still abort any started multipart upload (C1 path).
-    let raw = s3_raw_client(minio);
+    let raw = s3_raw_client(server);
     let key_prefix = format!("{APP}/{BUCKET}/{obj_key}");
     let uploads = raw
         .list_multipart_uploads(&key_prefix)
@@ -836,13 +836,13 @@ async fn run_s3_part_limit_fast_fail(minio: &s3_fixture::Minio) {
 /// mis-sorted or duplicated list makes `complete_multipart` reject the upload.
 /// (Pre-change this path was strictly sequential, so the sort line is new.)
 #[cfg(feature = "s3")]
-async fn run_s3_parallel_many_parts(minio: &s3_fixture::Minio) {
+async fn run_s3_parallel_many_parts(server: &s3_fixture::S3Server) {
     use zeroship_storage::S3UploadTuning;
     const PART_SIZE: usize = 8 * 1024 * 1024;
 
     // Force 4-way concurrency explicitly so the test does not depend on the
     // default.
-    let backend = make_s3_tuned(minio, S3UploadTuning {
+    let backend = make_s3_tuned(server, S3UploadTuning {
         concurrency: 4,
         ..S3UploadTuning::DEFAULTS
     });
@@ -892,11 +892,11 @@ async fn run_s3_parallel_many_parts(minio: &s3_fixture::Minio) {
 /// other in-flight uploads are dropped/cancelled and no orphaned (billed)
 /// multipart upload remains listable.
 #[cfg(feature = "s3")]
-async fn run_s3_parallel_mid_upload_abort(minio: &s3_fixture::Minio) {
+async fn run_s3_parallel_mid_upload_abort(server: &s3_fixture::S3Server) {
     use zeroship_storage::S3UploadTuning;
     const PART_SIZE: usize = 8 * 1024 * 1024;
 
-    let backend = make_s3_tuned(minio, S3UploadTuning {
+    let backend = make_s3_tuned(server, S3UploadTuning {
         concurrency: 4,
         ..S3UploadTuning::DEFAULTS
     });
@@ -905,7 +905,7 @@ async fn run_s3_parallel_mid_upload_abort(minio: &s3_fixture::Minio) {
     let key_prefix = format!("{APP}/{BUCKET}/{obj_key}");
 
     // Precondition: the listing path can see a live upload (non-vacuous check).
-    let raw = s3_raw_client(minio);
+    let raw = s3_raw_client(server);
     {
         let up = raw
             .create_multipart(&key_prefix, "application/octet-stream")
