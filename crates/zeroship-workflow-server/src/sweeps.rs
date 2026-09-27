@@ -265,6 +265,13 @@ impl MaintenanceDriver {
         })
     }
 
+    /// The lane this driver gives turns to, so a caller that composed the driver
+    /// can read the identity every row it leases carries.
+    #[must_use]
+    pub const fn lane(&self) -> &MaintenanceLane {
+        &self.lane
+    }
+
     /// Visit one bounded page of the apps holding rows this lane takes.
     ///
     /// The deadline covers the enumeration and the whole page together. A visit

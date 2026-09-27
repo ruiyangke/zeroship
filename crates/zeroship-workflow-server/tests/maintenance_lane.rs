@@ -20,7 +20,10 @@ mod journal;
 #[path = "support/platform.rs"]
 mod platform;
 
-use futures::future::LocalBoxFuture;
+use futures::{
+    channel::oneshot,
+    future::{select, Either, LocalBoxFuture},
+};
 use std::{
     cell::RefCell,
     rc::Rc,
@@ -37,6 +40,9 @@ use zeroship_workflow::{
     WorkflowServiceError,
 };
 use zeroship_workflow_manager::{
+    capacity::StaticPool,
+    driver::{Driver, Options as DriverOptions},
+    lifecycle::Undeletable,
     policy::{PolicyObservation, PolicySource},
     recovery::Options as RecoveryOptions,
     Error as ManagerError, Queue,
@@ -44,6 +50,7 @@ use zeroship_workflow_manager::{
 use zeroship_workflow_server::{
     coordinator::{connect_eligibility, Coordinator, Options},
     runs::RunService,
+    server::drive,
     sweeps::{LaneOptions, LanePublisher, MaintenanceDriver, MaintenanceLane, SweepError, Swept},
 };
 
@@ -89,6 +96,7 @@ impl PolicySource for Source {
 
 struct Fixture {
     platform: platform::Platform,
+    service: Coordinator,
     queue: Queue,
     runs: Rc<RunService>,
     policies: Rc<Source>,
@@ -138,6 +146,7 @@ impl Fixture {
         let fixture = Self {
             lane: lane(&queue, &runs, &policies),
             platform,
+            service,
             queue,
             runs,
             policies,
@@ -171,6 +180,28 @@ impl Fixture {
     /// Turns over this fixture's queue, under the bounds a host configures.
     fn sweeps(&self, options: LaneOptions) -> MaintenanceDriver {
         MaintenanceDriver::new(lane(&self.queue, &self.runs, &self.policies), options).unwrap()
+    }
+
+    /// The manager driver this process composes beside the lane.
+    fn driver(&self) -> Driver {
+        Driver::new(
+            self.service.manager.clone(),
+            DriverOptions::default(),
+            Rc::new(Undeletable),
+            Rc::new(StaticPool),
+        )
+        .unwrap()
+    }
+
+    /// Placements recorded for any app. The lane asserts its own authority, so
+    /// this stays empty however long the drive path runs.
+    async fn placements(&self) -> i64 {
+        self.platform
+            .admin
+            .query_one("SELECT COUNT(*) FROM workflow_manager.assignments", &[])
+            .await
+            .unwrap()
+            .get(0)
     }
 
     async fn row(&self, job: &JobId) -> (String, Option<String>, Option<String>) {
@@ -357,6 +388,92 @@ async fn an_operation_without_an_artifact_source_is_refused_by_name() {
     );
     assert_eq!(outcome, None);
     assert_eq!(worker.as_deref(), Some(fixture.lane.identity().as_str()));
+}
+
+/// Wait for `probe` to answer, or fail the case.
+///
+/// A lane the drive path never reaches never settles the row, so the expiry
+/// here is the failure the cases below are built to see.
+async fn until<T>(description: &str, mut probe: impl std::ops::AsyncFnMut() -> Option<T>) -> T {
+    compio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if let Some(answer) = probe().await {
+                return answer;
+            }
+            compio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("the drive path did not {description}"))
+}
+
+/// The running service settles a due maintenance row on its own, and no worker
+/// is ever placed for it.
+///
+/// This drives `drive`, the cadence the process itself runs, rather than calling
+/// the lane: what it binds is that the drive path REACHES the lane. The manager
+/// driver handed to it is the real one the process composes beside the lane, so
+/// the pass this observes is the pass production performs.
+///
+/// The creator row submitted beside the maintenance one is the control for the
+/// claim: it sits ahead in the dispatch order and stays `ready`, so what the
+/// drive path swept was chosen rather than whatever came first.
+#[compio::test]
+async fn the_drive_path_settles_a_due_maintenance_row_without_a_placement() {
+    let fixture = Box::pin(Fixture::new()).await;
+    let creator = creator_work(&fixture.app);
+    let maintenance = sweep(&fixture.app);
+    fixture.queue.submit(&creator).await.unwrap();
+    fixture.queue.submit(&maintenance).await.unwrap();
+    assert_eq!(fixture.row(&maintenance.id).await.0, "ready");
+    assert_eq!(fixture.placements().await, 0);
+
+    let sweeps = fixture.sweeps(LaneOptions {
+        page_limit: 8,
+        lane_timeout: Duration::from_secs(10),
+    });
+    let identity = sweeps.lane().identity().clone();
+    // Held for the whole case: a dropped sender reads as a stop, and the drive
+    // path would then return before taking a single turn.
+    let (_stop, stopped) = oneshot::channel();
+    let driven = select(
+        Box::pin(drive(
+            fixture.driver(),
+            sweeps,
+            Duration::from_millis(20),
+            stopped,
+        )),
+        Box::pin(until("settle the maintenance row", async || {
+            (fixture.row(&maintenance.id).await.0 == "settled").then_some(())
+        })),
+    )
+    .await;
+    assert!(
+        matches!(driven, Either::Right(_)),
+        "the drive path returned before the lane settled anything"
+    );
+
+    let (state, outcome, worker) = fixture.row(&maintenance.id).await;
+    assert_eq!(state, "settled");
+    assert_eq!(
+        outcome,
+        Some(serde_json::to_string(&JobOutcome::Waiting {}).unwrap())
+    );
+    assert_eq!(
+        worker.as_deref(),
+        Some(identity.as_str()),
+        "the row must carry the identity of the lane the drive path drove"
+    );
+    assert_eq!(
+        fixture.row(&creator.id).await.0,
+        "ready",
+        "creator work stays for the claimant that runs it"
+    );
+    assert_eq!(
+        fixture.placements().await,
+        0,
+        "the lane asserts its own authority, so nothing may have placed a worker"
+    );
 }
 
 /// A turn visits at most its page limit, and the next turn continues from where
