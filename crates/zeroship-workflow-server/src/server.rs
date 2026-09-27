@@ -60,8 +60,9 @@ pub struct ServerOptions {
     pub max_request_bytes: usize,
     pub coordinator: Options,
     /// Where this service's payload objects live. Validated by
-    /// `--check-config`, which opens nothing; the store itself is opened when
-    /// the sweep lane is composed.
+    /// `--check-config`, which opens nothing; the store itself is opened once
+    /// where the sweep lane is composed and once per HTTP thread, because a
+    /// store's connections belong to the runtime that opened them.
     pub storage: StorageBackendConfig,
     /// Origins this process may reach over plaintext HTTP. Empty by default.
     pub plaintext_peers: PlaintextPeers,
@@ -249,6 +250,7 @@ pub async fn run(settings: WorkflowSettings, options: ServerOptions) -> Result<(
     let coordinator = options.coordinator;
     let recovery = options.driver.recovery;
     let max_request_bytes = options.max_request_bytes;
+    let storage = options.storage.clone();
     let server = web::HttpServer::new(move || {
         let url = url.clone();
         let auth = auth.clone();
@@ -257,6 +259,7 @@ pub async fn run(settings: WorkflowSettings, options: ServerOptions) -> Result<(
         let migrate_url = migrate_url.clone();
         let plaintext_peers = plaintext_peers.clone();
         let observations = observations.clone();
+        let storage = storage.clone();
         async move {
             web::App::new()
                 .state_factory(async move || {
@@ -314,6 +317,14 @@ pub async fn run(settings: WorkflowSettings, options: ServerOptions) -> Result<(
                             connect_policies(facts, &url, coordinator, observations).await?,
                         )),
                         runs,
+                        // The same store the sweep lane binds, opened again on
+                        // this thread: a store's connections belong to the
+                        // runtime that opened them, and the namespace both bind
+                        // is declared once by the engine, so the object a
+                        // creator's start writes here is the object a worker
+                        // reads back.
+                        payloads: ServicePayloads::open(&storage)
+                            .map_err(|_| crate::coordinator::Error::Unavailable)?,
                         journal,
                     }))
                 })

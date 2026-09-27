@@ -353,10 +353,14 @@ impl Fixture {
         let url = self.platform.runtime_url.clone();
         let catalog_url = self.control_url.clone();
         let control = self.state.service_auth.clone();
+        // Under the platform fixture's own work directory, which outlives the
+        // server this composes.
+        let objects = self.platform.work.path().join("payloads");
         test::server(move || {
             let url = url.clone();
             let catalog_url = catalog_url.clone();
             let control = control.clone();
+            let objects = objects.clone();
             async move {
                 let registry = Arc::new(platform::connect(&url).await);
                 let replay = Arc::new(SharedClientReplayStore::new(registry.clone()));
@@ -403,6 +407,12 @@ impl Fixture {
                     journal: None,
                     service,
                     runs,
+                    // The store `start` stages a run input into. Nothing here
+                    // starts a run, so this is composed and never written.
+                    payloads: zeroship_workflow_server::payloads::ServicePayloads::open(
+                        &zeroship_storage::StorageBackendConfig::Local(objects.clone()),
+                    )
+                    .expect("open the payload store this service composes"),
                     auth: Arc::new(WorkflowAuth::new(
                         Arc::new(ServiceAssertionVerifier::new(peers, replay.clone())),
                         Arc::new(PostgresWorkerRegistry::new(registry)),

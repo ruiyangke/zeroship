@@ -25,6 +25,17 @@ pub struct WorkflowHttpState {
     /// Per thread, because the store it holds is bound to the runtime that
     /// opened it.
     pub runs: Rc<runs::RunService>,
+    /// The object store a started run's input becomes an object in.
+    ///
+    /// A creator's start value crosses as a VALUE, so the process that admits the
+    /// start is the process that stages it -- which is this one, because it owns
+    /// both the journal row that names the object and the store the object lands
+    /// in. Required rather than optional: the store is configured for every
+    /// deployment, the sweep lane already refuses to start without it, and a
+    /// `start` served without one would admit a run whose input nothing holds.
+    ///
+    /// Per thread, because the store is bound to the runtime that opened it.
+    pub payloads: payloads::ServicePayloads,
     /// Sends the journal bundle to the migration service.
     ///
     /// Absent when no migration-service origin is configured, which refuses the

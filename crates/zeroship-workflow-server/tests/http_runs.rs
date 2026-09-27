@@ -41,6 +41,7 @@ use zeroship_core::{
     workflow_jobs::DeploymentId,
     workflow_policy::AppPolicy,
 };
+use zeroship_storage::StorageBackendConfig;
 use zeroship_workflow_manager::{
     coordinator::Placed,
     policy::{PolicyObservation, PolicySource},
@@ -50,6 +51,7 @@ use zeroship_workflow_manager::{
 use zeroship_workflow_server::{
     auth::{PostgresWorkerRegistry, WorkflowAuth},
     coordinator::{connect_eligibility, Coordinator, Options},
+    payloads::ServicePayloads,
     runs::RunService,
     SharedState, WorkflowHttpState,
 };
@@ -155,11 +157,18 @@ impl Fixture {
             .await
             .unwrap(),
         );
+        // The real store, on the platform fixture's own work directory, so a
+        // started run's input becomes a real object this case can read back.
+        let payloads = ServicePayloads::open(&StorageBackendConfig::Local(
+            platform.work.path().join("payloads"),
+        ))
+        .unwrap();
         let state = Rc::new(WorkflowHttpState {
             service,
             auth,
             policy_source: Some(source as Rc<dyn PolicySource>),
             runs,
+            payloads,
             journal: None,
         });
         Self {
