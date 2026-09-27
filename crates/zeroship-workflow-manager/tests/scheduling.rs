@@ -28,7 +28,7 @@ use zeroship_workflow_calendar::{
 use zeroship_workflow_manager::{
     recovery::{DutyKind, Options as RecoveryOptions, Recovery},
     scheduling::{Options, Scheduler},
-    Claimant, Error, Queue,
+    Claimant, DeliveryGrant, Error, Queue,
 };
 
 macro_rules! case {
@@ -263,20 +263,13 @@ fn instants(jobs: &[JobSpec]) -> Vec<i64> {
         .collect()
 }
 
-async fn claim(queue: &Queue, owner: &Assignment) -> Delivery {
-    queue
-        .claim(owner)
-        .await
-        .unwrap()
-        .expect("expected deliverable job")
-        .delivery()
-        .clone()
-}
-
-/// Claim as the lane in the process that owns the journal, which is the host
-/// every sweep belongs to. `claim` above is the placed host, and it takes
-/// creator work alone.
-async fn claim_sweep(queue: &Queue, owner: &Assignment) -> Delivery {
+/// Ask as the lane in the process that owns the journal. Activation and calendar
+/// jobs are sweeps, so the lane is the only host they are delivered to; a placed
+/// worker takes creator work alone, and this suite enqueues none.
+async fn try_claim_sweep(
+    queue: &Queue,
+    owner: &Assignment,
+) -> Result<Option<DeliveryGrant>, Error> {
     queue
         .claim_authorized(
             &owner.into(),
@@ -285,10 +278,20 @@ async fn claim_sweep(queue: &Queue, owner: &Assignment) -> Delivery {
             |_| ready(Ok(owner.clone())),
         )
         .await
+}
+
+async fn claim_sweep(queue: &Queue, owner: &Assignment) -> Delivery {
+    try_claim_sweep(queue, owner)
+        .await
         .unwrap()
         .expect("expected deliverable sweep")
         .delivery()
         .clone()
+}
+
+/// The lane has nothing left to take.
+async fn no_sweep(queue: &Queue, owner: &Assignment) {
+    assert!(try_claim_sweep(queue, owner).await.unwrap().is_none());
 }
 
 async fn settle(queue: &Queue, owner: &Assignment, delivery: &Delivery, outcome: JobOutcome) {
@@ -385,7 +388,7 @@ async fn activations(fixture: &Fixture) {
         .jobs
         .remove(0);
     let owner = assignment(&app);
-    let old_delivery = claim(&queue, &owner).await;
+    let old_delivery = claim_sweep(&queue, &owner).await;
     assert_eq!(old_delivery.job, first_activation);
 
     let next = registration(&app, vec![descriptor("kept", ScheduleCatchUp::Skip)]);
@@ -432,17 +435,17 @@ async fn activations(fixture: &Fixture) {
         next_activation
     );
 
-    let next_delivery = claim(&queue, &owner).await;
+    let next_delivery = claim_sweep(&queue, &owner).await;
     assert_eq!(next_delivery.job, next_activation);
     settle(&queue, &owner, &next_delivery, JobOutcome::Completed {}).await;
-    let new_delivery = claim(&queue, &owner).await;
+    let new_delivery = claim_sweep(&queue, &owner).await;
     assert_eq!(new_delivery.job, new_job);
     settle(&queue, &owner, &new_delivery, JobOutcome::Completed {}).await;
-    assert!(queue.claim(&owner).await.unwrap().is_none());
+    no_sweep(&queue, &owner).await;
     settle(&queue, &owner, &old_delivery, JobOutcome::Completed {}).await;
     let mut remaining = vec![old_kept, old_removed];
     for _ in 0..remaining.len() {
-        let delivery = claim(&queue, &owner).await;
+        let delivery = claim_sweep(&queue, &owner).await;
         let index = remaining
             .iter()
             .position(|job| *job == delivery.job)
@@ -452,7 +455,7 @@ async fn activations(fixture: &Fixture) {
         settle(&queue, &owner, &delivery, JobOutcome::Completed {}).await;
     }
     assert!(remaining.is_empty());
-    assert!(queue.claim(&owner).await.unwrap().is_none());
+    no_sweep(&queue, &owner).await;
 }
 
 async fn activation_gate(fixture: &Fixture) {
@@ -473,13 +476,13 @@ async fn activation_gate(fixture: &Fixture) {
             .unwrap()
             .unwrap();
         let owner = assignment(&app);
-        let delivery = claim(&queue, &owner).await;
+        let delivery = claim_sweep(&queue, &owner).await;
         assert_eq!(delivery.job, activation_job);
         settle(&queue, &owner, &delivery, outcome).await;
-        let delivery = claim(&queue, &owner).await;
+        let delivery = claim_sweep(&queue, &owner).await;
         assert_eq!(delivery.job, recovery_job);
         settle(&queue, &owner, &delivery, JobOutcome::Completed {}).await;
-        assert!(queue.claim(&owner).await.unwrap().is_none());
+        no_sweep(&queue, &owner).await;
         assert_eq!(
             scoped_rows(fixture, "schedule_occurrences", &app)
                 .await
@@ -511,13 +514,13 @@ async fn disabled_schedules(fixture: &Fixture) {
         1
     );
     let owner = assignment(&app);
-    let delivery = claim(&queue, &owner).await;
+    let delivery = claim_sweep(&queue, &owner).await;
     assert_eq!(delivery.job, original_activation);
     settle(&queue, &owner, &delivery, JobOutcome::Completed {}).await;
-    let delivery = claim(&queue, &owner).await;
+    let delivery = claim_sweep(&queue, &owner).await;
     assert_eq!(delivery.job, pending);
     settle(&queue, &owner, &delivery, JobOutcome::Completed {}).await;
-    assert_eq!(claim(&queue, &owner).await.job, disabled_activation);
+    assert_eq!(claim_sweep(&queue, &owner).await.job, disabled_activation);
 }
 
 async fn replicas(fixture: &Fixture) {
@@ -564,16 +567,16 @@ async fn replicas(fixture: &Fixture) {
         jobs.len()
     );
     let owner = assignment(&app);
-    let delivery = claim(&queue, &owner).await;
+    let delivery = claim_sweep(&queue, &owner).await;
     assert_eq!(delivery.job, activation_job);
     settle(&queue, &owner, &delivery, JobOutcome::Completed {}).await;
     jobs.sort_by_key(|job| job.available_at.get());
     for expected in jobs {
-        let delivery = claim(&queue, &owner).await;
+        let delivery = claim_sweep(&queue, &owner).await;
         assert_eq!(delivery.job, expected);
         settle(&queue, &owner, &delivery, JobOutcome::Completed {}).await;
     }
-    assert!(queue.claim(&owner).await.unwrap().is_none());
+    no_sweep(&queue, &owner).await;
 }
 
 async fn catch_up(fixture: &Fixture) {
@@ -1001,11 +1004,11 @@ async fn orphan_cron(fixture: &Fixture) {
         .unwrap();
     assert!(matches!(deleted, Output::Count(1)));
     let owner = assignment(&app);
-    let activation_delivery = match queue.claim(&owner).await {
+    let activation_delivery = match try_claim_sweep(&queue, &owner).await {
         Err(Error::Storage) => None,
         Ok(Some(grant)) => {
             assert_eq!(grant.delivery().job, activation_job);
-            match queue.claim(&owner).await {
+            match try_claim_sweep(&queue, &owner).await {
                 Err(Error::Storage) | Ok(None) => {}
                 other => panic!("unactivated orphan cron was deliverable: {other:?}"),
             }
@@ -1025,7 +1028,7 @@ async fn orphan_cron(fixture: &Fixture) {
     let activation_delivery = if let Some(delivery) = activation_delivery {
         delivery
     } else {
-        claim(&queue, &owner).await
+        claim_sweep(&queue, &owner).await
     };
     assert_eq!(activation_delivery.job, activation_job);
     settle(
@@ -1035,7 +1038,7 @@ async fn orphan_cron(fixture: &Fixture) {
         JobOutcome::Completed {},
     )
     .await;
-    assert_eq!(claim(&queue, &owner).await.job, cron);
+    assert_eq!(claim_sweep(&queue, &owner).await.job, cron);
 }
 
 async fn selection(fixture: &Fixture) {
@@ -1060,7 +1063,7 @@ async fn selection(fixture: &Fixture) {
     );
 
     let owner = assignment(&app);
-    let delivery = claim(&queue, &owner).await;
+    let delivery = claim_sweep(&queue, &owner).await;
     assert_eq!(delivery.job, first_job);
     settle(&queue, &owner, &delivery, JobOutcome::Completed {}).await;
     assert!(

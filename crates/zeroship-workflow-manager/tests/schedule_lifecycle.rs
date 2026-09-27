@@ -38,7 +38,7 @@ use zeroship_workflow_manager::{
     recovery::{DutyKind, Options as RecoveryOptions, Recovery},
     retention::HoldClient,
     scheduling::{Options, Scheduler},
-    Error, Queue,
+    Claimant, Error, Queue,
 };
 
 macro_rules! case {
@@ -308,10 +308,18 @@ async fn history(fixture: &Fixture) {
     assert_eq!(snapshot(&db).await, stopped_again);
 }
 
+/// Discharge sweeps until `target` is one of them. Activation and calendar jobs
+/// are sweeps, so the host taking them is the lane of the process that owns the
+/// journal rather than a placed worker.
 async fn settle_until(queue: &Queue, assignment: &Assignment, target: &JobId, blocked: &[JobSpec]) {
     for _ in 0..16 {
         let grant = queue
-            .claim(assignment)
+            .claim_authorized(
+                &assignment.into(),
+                Claimant::Maintenance,
+                Ok(support::delivery_ceiling()),
+                |_| std::future::ready(Ok(assignment.clone())),
+            )
             .await
             .unwrap()
             .expect("expected retained delivery");
