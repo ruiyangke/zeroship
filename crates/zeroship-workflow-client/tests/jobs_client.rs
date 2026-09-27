@@ -177,7 +177,6 @@ impl JobJournal for AnyJournal {
     type Acceptance = Value;
     type Renewal = Value;
     type Execution = Value;
-    type Receipt = Value;
 }
 
 struct Exchange {
@@ -199,19 +198,29 @@ impl Exchange {
         }
     }
 
-    /// A claim or renewal reply carrying the queue's lease and no journal half.
+    /// A renewal reply carrying the queue lease alone, which is what a renewal
+    /// that named no journal task answers.
     fn granted(endpoint: ServiceEndpoint, request: &impl serde::Serialize, lease: Value) -> Self {
         Self::new(endpoint, request, json!({"lease": lease}))
     }
 
-    /// A settlement reply carrying the queue's receipt and no journal receipt,
-    /// which is every settlement of an outcome the caller's journal committed.
+    /// A claim reply: the queue lease, and the journal acceptance the same
+    /// exchange carries for the one operation that hands out a task. Derived from
+    /// the lease rather than passed in, so a case that alters the operation in a
+    /// reply body alters which halves that reply is allowed to carry.
+    fn claimed(request: &impl serde::Serialize, lease: Value) -> Self {
+        let mut body = json!({"lease": lease});
+        if body["lease"]["delivery"]["job"]["operation"]["kind"] == json!("advance") {
+            body["accepted"] = json!({"kind": "deferred"});
+        }
+        Self::new(endpoints::WORKFLOW_JOB_CLAIM, request, body)
+    }
+
+    /// A settlement reply. It carries the queue receipt alone, whichever half
+    /// produced the outcome, because the journal receipt would repeat the job the
+    /// caller sent and the outcome this receipt already names.
     fn settled(request: &impl serde::Serialize, receipt: Value) -> Self {
-        Self::new(
-            endpoints::WORKFLOW_JOB_SETTLE,
-            request,
-            json!({"settlement": receipt}),
-        )
+        Self::new(endpoints::WORKFLOW_JOB_SETTLE, request, receipt)
     }
 }
 
@@ -356,7 +365,7 @@ async fn exercise_job_methods(fixture: &Fixture, successors: Vec<JobSpec>) {
         fixture,
         vec![
             Exchange::new(endpoints::WORKFLOW_JOB_SUBMIT, &submit, json!(fixture.spec)),
-            Exchange::granted(endpoints::WORKFLOW_JOB_CLAIM, &fixture.scope, lease(&fixture.delivery, 60_000)),
+            Exchange::claimed(&fixture.scope, lease(&fixture.delivery, 60_000)),
             Exchange::granted(endpoints::WORKFLOW_JOB_HEARTBEAT, &renewal(&fixture.delivery), lease(&renewed, 60_000)),
             Exchange::settled(&settlement, json!(settled)),
             Exchange::settled(&settlement, json!(settled)),
@@ -441,7 +450,7 @@ async fn manager_dispatched_jobs_can_be_claimed_and_settled() {
         peer(
             &fixture,
             vec![
-                Exchange::granted(endpoints::WORKFLOW_JOB_CLAIM, &fixture.scope, lease(&fixture.delivery, 60_000)),
+                Exchange::claimed(&fixture.scope, lease(&fixture.delivery, 60_000)),
                 Exchange::settled(&command, json!(settled)),
             ],
             async |client| {
@@ -705,7 +714,7 @@ async fn claim_rejects_foreign_and_malformed_lease_metadata() {
     for body in cases {
         peer(
             &fixture,
-            vec![Exchange::granted(endpoints::WORKFLOW_JOB_CLAIM, &fixture.scope, body)],
+            vec![Exchange::claimed(&fixture.scope, body)],
             async |client| {
                 assert_eq!(
                     client.claim_job::<AnyJournal>(&fixture.scope).await.unwrap_err(),
@@ -750,7 +759,7 @@ async fn heartbeat_preserves_the_full_immutable_delivery() {
         peer(
             &fixture,
             vec![
-                Exchange::granted(endpoints::WORKFLOW_JOB_CLAIM, &fixture.scope, valid.clone()),
+                Exchange::claimed(&fixture.scope, valid.clone()),
                 Exchange::granted(endpoints::WORKFLOW_JOB_HEARTBEAT, &renewal(&fixture.delivery), body),
             ],
             async |client| {
@@ -798,7 +807,7 @@ async fn forbidden_publication_is_rejected_without_http() {
 #[compio::test]
 async fn delayed_claim_reply_cannot_reset_the_grant_clock() {
     let fixture = Fixture::new();
-    let mut exchange = Exchange::granted(endpoints::WORKFLOW_JOB_CLAIM, &fixture.scope, lease(&fixture.delivery, 50));
+    let mut exchange = Exchange::claimed(&fixture.scope, lease(&fixture.delivery, 50));
     exchange.delay = Duration::from_millis(100);
     peer(&fixture, vec![exchange], async |client| {
         assert_eq!(
@@ -817,7 +826,7 @@ async fn heartbeat_reply_cannot_revive_expired_local_authority() {
     peer(
         &fixture,
         vec![
-            Exchange::granted(endpoints::WORKFLOW_JOB_CLAIM, &fixture.scope, lease(&fixture.delivery, 500)),
+            Exchange::claimed(&fixture.scope, lease(&fixture.delivery, 500)),
             heartbeat,
         ],
         async |client| {
@@ -840,7 +849,7 @@ async fn expired_handle_refuses_heartbeat_but_allows_receipt_replay() {
     peer(
         &fixture,
         vec![
-            Exchange::granted(endpoints::WORKFLOW_JOB_CLAIM, &fixture.scope, lease(&fixture.delivery, 200)),
+            Exchange::claimed(&fixture.scope, lease(&fixture.delivery, 200)),
             Exchange::settled(&command, json!(settled)),
         ],
         async |client| {
@@ -873,7 +882,8 @@ async fn job_refusals_keep_the_closed_error_contract() {
             Error::InvalidResponse,
         ),
     ] {
-        let mut exchange = Exchange::granted(endpoints::WORKFLOW_JOB_CLAIM, &fixture.scope, body);
+        // A refusal body is not a reply envelope: it is read by status and code.
+        let mut exchange = Exchange::new(endpoints::WORKFLOW_JOB_CLAIM, &fixture.scope, body);
         exchange.status = 503;
         peer(&fixture, vec![exchange], async |client| {
             assert_eq!(
@@ -930,7 +940,7 @@ async fn fanout_replies_cannot_substitute_broadcast_or_revision() {
             }),
         ));
     }
-    exchanges.push(Exchange::granted(endpoints::WORKFLOW_JOB_CLAIM, &fixture.scope, lease(&fixture.delivery, 60_000)));
+    exchanges.push(Exchange::claimed(&fixture.scope, lease(&fixture.delivery, 60_000)));
     for operation in &changes {
         let changed = Delivery {
             job: JobSpec {

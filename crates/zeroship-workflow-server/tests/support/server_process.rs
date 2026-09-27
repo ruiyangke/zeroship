@@ -8,6 +8,11 @@ use std::{
     time::Duration,
 };
 
+/// The request-body budget this fixture configures, FAR below the production
+/// default on purpose: a boundary probed against a small cap costs one small
+/// body, and a route that answers to a larger one has to say so.
+pub const MAX_REQUEST_BYTES: usize = 1024;
+
 pub struct ServerProcess {
     child: Child,
     _control: queue_control::Control,
@@ -40,7 +45,7 @@ impl ServerProcess {
             toml::to_string(&serde_json::json!({"workflow":{
                 "listen":address.to_string(),"database_url":database,"service_peers_file":peers,
                 "control_url":control.url(),"service_key_file":control.key_file,
-                "http_threads":2,"max_request_bytes":1024,
+                "http_threads":2,"max_request_bytes":MAX_REQUEST_BYTES,
             }}))
             .unwrap(),
         );
