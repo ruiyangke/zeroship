@@ -218,7 +218,6 @@ async fn finish(queue: &Queue, authority: &Assignment, expected: &JobSpec) -> Se
 /// placed host, which takes creator work alone: a sweep is claimed by the lane
 /// in the process that owns the queue, and that lane asserts its authority
 /// rather than reading a placement.
-#[expect(dead_code, reason = "used by the submodules this file declares")]
 async fn finish_sweep(queue: &Queue, app: &AppId, expected: &JobSpec) -> Settlement {
     let authority = MaintenanceAuthority::new(app.clone(), WorkerId::mint());
     let granted = authority
