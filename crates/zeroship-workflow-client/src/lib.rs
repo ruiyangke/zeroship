@@ -27,10 +27,12 @@ pub use schema_bundles::{SchemaBundles, MAX_BUNDLE_BYTES};
 pub use transport::Transport;
 
 use std::{sync::Arc, time::Duration};
+use zeroship_core::workflow_coordination::RunId;
 use zeroship_core::workflow_coordination::{
-    AssignedScope, Assignment, DeliveredSignal, FailureCode, RegisterWorker, RegisteredWorker,
-    ReleaseScope, RestartRun, RestartedRun, RunFailure, RunScope, RunStatus, ScopePage, SignalRun,
-    TransitionRun, TransitionedRun, WorkerId, AUDIENCE,
+    AssignedScope, Assignment, DeliveredSignal, FailureCode, PayloadLocation, ReadStepOutput,
+    RegisterWorker, RegisteredWorker, ReleaseScope, RestartRun, RestartedRun, RunFailure, RunScope,
+    RunStatus, ScopePage, SignalRun, StartRun, StartedRun, StepOutputLocation, TransitionRun,
+    TransitionedRun, WorkerId, AUDIENCE,
 };
 use zeroship_core::{
     config::PlaintextPeers,
@@ -38,6 +40,7 @@ use zeroship_core::{
     service_assertion::ServiceIssuer,
     service_identity::endpoints,
     service_peers::{service_issuer, ServiceAuth, WORKER_SERVICE_NAME},
+    typed_id,
     workflow_policy::{MAX_INPUT_BYTES_CEILING, MAX_JOURNAL_BYTES_CEILING},
 };
 
@@ -260,6 +263,35 @@ impl WorkerCoordinator {
             .await
     }
 
+    /// Admit a run of one workflow from the value a creator supplied.
+    ///
+    /// The VALUE crosses and no descriptor does: the service stages the value
+    /// into the object store it owns and names the object itself, which is what
+    /// stops a caller pointing a run at bytes it never supplied.
+    /// [`StartRun::options`] has no field for one, so this client cannot send one
+    /// even by mistake.
+    ///
+    /// The request identity is the caller's, because it is the idempotency of the
+    /// start: a retry after an uncertain reply sends the same one and replays the
+    /// receipt the first attempt stored.
+    ///
+    /// # Errors
+    /// Refuses failed exchanges, the engine own refusals, and a receipt naming an
+    /// id that is not a workflow run.
+    pub async fn start_run(&self, request: &StartRun) -> Result<StartedRun, RunError> {
+        let started: StartedRun = self
+            .transport
+            .post_run(endpoints::WORKFLOW_RUN_START, request)
+            .await?;
+        // A reply's id becomes the run every later call of this creator names, so
+        // it is parsed against the one prefix a run may carry rather than taken
+        // as text. A peer answering another entity's id is refused here.
+        if RunId::parse(&started.id).is_err() {
+            return Err(RunError::Transport(Error::InvalidResponse));
+        }
+        Ok(started)
+    }
+
     /// Read a run current state and, once it has settled, what it left behind.
     ///
     /// The reply LOCATES a run output rather than carrying it, so this exchange
@@ -311,4 +343,58 @@ impl WorkerCoordinator {
         }
         Ok(restarted)
     }
+
+    /// Locate what one completed step of a run recorded.
+    ///
+    /// The reply LOCATES the output. A payload answers to the platform's payload
+    /// ceiling and a reply to its journal ceiling, which is smaller, and this
+    /// transport buffers JSON with no byte-stream path -- so an object's bytes
+    /// cannot cross here at all, and the caller opens the object itself from the
+    /// store it holds. An output the journal kept inline is journal content and
+    /// comes back as the value.
+    ///
+    /// # Errors
+    /// Refuses failed exchanges, the engine own refusals, and a location whose
+    /// payload key is not a workflow payload id.
+    pub async fn read_step_output(
+        &self,
+        request: &ReadStepOutput,
+    ) -> Result<StepOutputLocation, RunError> {
+        let located: StepOutputLocation = self
+            .transport
+            .post_run(endpoints::WORKFLOW_RUN_STEP_OUTPUT, request)
+            .await?;
+        if let StepOutputLocation::Object { payload } = &located {
+            validate_payload_key(payload)?;
+        }
+        Ok(located)
+    }
+
+    /// Locate what a settled run returned.
+    ///
+    /// Same shape as [`Self::read_step_output`] and for the same reason, minus the
+    /// inline arm: a run's own output is always an object, so a run that returned
+    /// nothing has no location to answer with and is refused as missing.
+    ///
+    /// # Errors
+    /// Refuses failed exchanges, the engine own refusals, and a location whose
+    /// payload key is not a workflow payload id.
+    pub async fn read_run_output(&self, request: &RunScope) -> Result<PayloadLocation, RunError> {
+        let located: PayloadLocation = self
+            .transport
+            .post_run(endpoints::WORKFLOW_RUN_OUTPUT, request)
+            .await?;
+        validate_payload_key(&located)?;
+        Ok(located)
+    }
+}
+
+/// A payload key addresses an object store, so it is parsed against the one
+/// prefix a payload may carry before any caller uses it as a key. A peer naming
+/// another entity's id, or free text, is refused here rather than reaching the
+/// store.
+fn validate_payload_key(located: &PayloadLocation) -> Result<(), RunError> {
+    typed_id::parse_with_prefix(&located.payload_id, typed_id::WORKFLOW_PAYLOAD_PREFIX)
+        .map(|_| ())
+        .map_err(|_| RunError::Transport(Error::InvalidResponse))
 }
