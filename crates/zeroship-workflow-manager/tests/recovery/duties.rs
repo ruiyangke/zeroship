@@ -163,34 +163,34 @@ async fn independent_receipts(fixture: &Fixture, kind: DutyKind) {
     set_deadline(fixture, &app, kind, i64::MAX).await;
     set_deadline(fixture, &app, other(kind), i64::MAX).await;
     let other_duty = snapshot(fixture, &app, other(kind)).await;
-    let owner = assignment(&app);
-    let delivery = queue.claim(&owner).await.unwrap().unwrap();
+    let owner = lane(&app);
+    let delivery = claim(&queue, &owner).await;
     assert_eq!(delivery.delivery().job, first);
     let waiting = Settlement {
         delivery: delivery.delivery().clone(),
         outcome: JobOutcome::Waiting {},
         successors: vec![],
     };
-    let receipt = queue.settle(&owner, &waiting).await.unwrap();
+    let receipt = owner.settle(&queue, &waiting).await.unwrap();
     assert_eq!(snapshot(fixture, &app, other(kind)).await, other_duty);
     assert!(recovery.due(other(kind), None).await.unwrap().is_empty());
     let next = recovery.dispatch(&app, kind).await.unwrap().unwrap();
     assert_ne!(next.id, first.id);
     let next_duty = snapshot(fixture, &app, kind).await;
-    assert_eq!(queue.settle(&owner, &waiting).await.unwrap(), receipt);
+    assert_eq!(owner.settle(&queue, &waiting).await.unwrap(), receipt);
     assert_eq!(snapshot(fixture, &app, kind).await, next_duty);
     assert_eq!(snapshot(fixture, &app, other(kind)).await, other_duty);
-    let delivery = queue.claim(&owner).await.unwrap().unwrap();
+    let delivery = claim(&queue, &owner).await;
     assert_eq!(delivery.delivery().job, second);
     let completion = Settlement {
         delivery: delivery.delivery().clone(),
         outcome: JobOutcome::Completed {},
         successors: vec![],
     };
-    queue.settle(&owner, &completion).await.unwrap();
+    owner.settle(&queue, &completion).await.unwrap();
     assert_eq!(snapshot(fixture, &app, kind).await, next_duty);
     assert_eq!(snapshot(fixture, &app, other(kind)).await, other_duty);
-    queue.settle(&owner, &completion).await.unwrap();
+    owner.settle(&queue, &completion).await.unwrap();
     assert_eq!(snapshot(fixture, &app, kind).await, next_duty);
     assert_eq!(snapshot(fixture, &app, other(kind)).await, other_duty);
 }
@@ -327,11 +327,11 @@ async fn settled_pending(fixture: &Fixture, kind: DutyKind) {
     assert_eq!(recovery.dispatch(&app, kind).await, Err(Error::Storage));
     assert_eq!(snapshot(fixture, &app, kind).await, duty);
     patch_job(fixture, &pending, "state", &value!("ready")).await;
-    let owner = assignment(&app);
-    let delivery = queue.claim(&owner).await.unwrap().unwrap();
-    queue
+    let owner = lane(&app);
+    let delivery = claim(&queue, &owner).await;
+    owner
         .settle(
-            &owner,
+            &queue,
             &Settlement {
                 delivery: delivery.delivery().clone(),
                 outcome: JobOutcome::Rejected {},
@@ -428,10 +428,10 @@ async fn page_receipts(fixture: &Fixture, kind: DutyKind) {
         .ensure(&app, &DeploymentId::mint(), 1.try_into().unwrap())
         .await
         .unwrap();
-    let owner = assignment(&app);
+    let owner = lane(&app);
     for duty in [kind, other(kind)] {
         let pending = recovery.dispatch(&app, duty).await.unwrap().unwrap();
-        let leased = queue.claim(&owner).await.unwrap().unwrap();
+        let leased = claim(&queue, &owner).await;
         assert_eq!(leased.delivery().job, pending);
         set_deadline(fixture, &app, duty, i64::MAX).await;
     }
@@ -454,15 +454,15 @@ async fn page_receipts(fixture: &Fixture, kind: DutyKind) {
             available_at: 0.try_into().unwrap(),
         };
         queue.submit(&job).await.unwrap();
-        let delivery = queue.claim(&owner).await.unwrap().unwrap();
+        let delivery = claim(&queue, &owner).await;
         assert_eq!(delivery.delivery().job, job);
         let command = Settlement {
             delivery: delivery.delivery().clone(),
             outcome: JobOutcome::Waiting {},
             successors: vec![],
         };
-        let receipt = queue.settle(&owner, &command).await.unwrap();
-        assert_eq!(queue.settle(&owner, &command).await.unwrap(), receipt);
+        let receipt = owner.settle(&queue, &command).await.unwrap();
+        assert_eq!(owner.settle(&queue, &command).await.unwrap(), receipt);
         assert_eq!(snapshot(fixture, &app, kind).await, selected);
         assert_eq!(snapshot(fixture, &app, other(kind)).await, opposite);
     }
