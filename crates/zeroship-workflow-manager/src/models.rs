@@ -156,8 +156,11 @@ enum Work {
 /// A host that takes rows off an app's queue.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Claimant {
-    /// A worker holding a placement on the app. It runs creator code, holds the
-    /// payload store and runs the maintenance dispatch, so it takes every kind.
+    /// A worker holding a placement on the app. It runs creator code and holds
+    /// the payload store, so the creator operation and the sweeps that move
+    /// creator bytes are its to take. The journal-only sweeps are not: they need
+    /// no placement and no store, and a host that runs creator code is the
+    /// wrong privilege for them.
     Placed,
     /// A lane that runs the journal-only sweeps. It holds no payload store, so
     /// the sweeps that move creator bytes are not its to take.
@@ -166,7 +169,8 @@ pub enum Claimant {
 
 impl Claimant {
     /// The kinds this claimant refuses, for a predicate over
-    /// `jobs.operation_kind`. An empty answer refuses nothing.
+    /// `jobs.operation_kind`. Every claimant refuses some kind, because each
+    /// `Work` class admits exactly one of them.
     pub fn denied(self) -> impl Iterator<Item = &'static str> {
         OPERATIONS
             .iter()
@@ -178,11 +182,16 @@ impl Claimant {
     /// or a claimant added to this file leaves this match non-exhaustive, so
     /// whether that host takes that work is decided here rather than inherited
     /// from an arm that happened to cover it.
+    ///
+    /// Each `Work` class has exactly one claimant here, so which host runs a
+    /// kind is a compiler-checked property of this match rather than whichever
+    /// host asked first.
     const fn admits(self, work: Work) -> bool {
         match (self, work) {
-            (Self::Placed, Work::Maintenance | Work::Payload | Work::Creator)
+            (Self::Placed, Work::Payload | Work::Creator)
             | (Self::Maintenance, Work::Maintenance) => true,
-            (Self::Maintenance, Work::Payload | Work::Creator) => false,
+            (Self::Placed, Work::Maintenance)
+            | (Self::Maintenance, Work::Payload | Work::Creator) => false,
         }
     }
 }

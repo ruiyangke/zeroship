@@ -8,6 +8,7 @@ use crate::{
     auth::{PostgresWorkerRegistry, WorkflowAuth},
     config::WorkflowSettings,
     coordinator::{connect_eligibility, Coordinator, Options},
+    sweeps::{LaneOptions, MaintenanceDriver, MaintenanceLane, SweepReport},
     WorkflowHttpState,
 };
 use futures::future::{select, Either};
@@ -23,13 +24,14 @@ use zeroship_core::{
     service_peers::{
         service_issuer, ServiceAuth, ServiceKeyring, CONTROL_SERVICE_NAME, WORKFLOW_SERVICE_NAME,
     },
-    workflow_coordination::FailureCode,
+    workflow_coordination::{FailureCode, WorkerId},
     workflow_deployments::{HoldGeneration, HoldReceipt, QueueHoldRequest},
     workflow_jobs::DeploymentId,
 };
 use zeroship_workflow::{
-    deploy_registrations::RemoteDeployRegistrations, deployment_holds::ServiceHolds,
-    service::AppDeployments,
+    deploy_registrations::RemoteDeployRegistrations,
+    deployment_holds::ServiceHolds,
+    service::{maintenance::MaintenanceOptions, AppDeployments},
 };
 use zeroship_workflow_client::{
     ControlAppFacts, Options as ClientOptions, QueueDeploymentHolds, Transport,
@@ -207,7 +209,20 @@ pub async fn run(settings: WorkflowSettings, options: ServerOptions) -> Result<(
     let observations = PolicyObservations::new(options.policy_cache_entries);
     // Verify migration readiness before accepting connections. Each HTTP thread
     // constructs its own bounded pool and retention transport in the state factory.
-    let driver = driver(&url, &options, holds, Rc::new(facts), observations.clone()).await?;
+    let (driver, sweeps) = maintenance(
+        &url,
+        &options,
+        holds,
+        Rc::new(facts),
+        observations.clone(),
+        deployments(
+            &control_url,
+            &outbound,
+            options.coordinator,
+            &plaintext_peers,
+        )?,
+    )
+    .await?;
     compio::time::timeout(options.coordinator.command_timeout, replay.purge_expired()).await??;
     let auth = Arc::new(WorkflowAuth::new(
         verifier,
@@ -215,7 +230,7 @@ pub async fn run(settings: WorkflowSettings, options: ServerOptions) -> Result<(
         replay.clone(),
     ));
     compio::time::timeout(options.coordinator.command_timeout, auth.ready()).await??;
-    let maintenance = compio::runtime::spawn(sweep_assertions(
+    let assertion_sweep = compio::runtime::spawn(sweep_assertions(
         replay,
         options.coordinator.command_timeout,
         options.replay_sweep,
@@ -251,35 +266,8 @@ pub async fn run(settings: WorkflowSettings, options: ServerOptions) -> Result<(
                         coordinator,
                         &plaintext_peers,
                     )?);
-                    // The journal's OWN deployment holds, on the same Control
-                    // origin and the same signer as the queue-scoped ones
-                    // above. A journal hold is decided beside the runs it
-                    // protects and applied to the deploy catalog by Control, so
-                    // the process holding the journal is the one that carries
-                    // this. It is the retention authority alone: the artifacts
-                    // stay with the hosts that hold a blob store, and an
-                    // operation needing one is refused by name.
-                    //
-                    // Beside it, the manifest SUMMARY those operations wanted
-                    // the artifacts for. Control parsed the bundle when it
-                    // published, so it asserts the declarations and this
-                    // process records its own `deploys` row from them - no blob
-                    // store, no artifact read, and a manifest listing is
-                    // strictly less than the policy this service already takes
-                    // from the same origin under the same role.
-                    let deployments = AppDeployments::holds_only(Rc::new(ServiceHolds::new(
-                        control_url.clone(),
-                        outbound.clone(),
-                        client_options(coordinator, &plaintext_peers),
-                    )))
-                    .with_registrations(Rc::new(
-                        RemoteDeployRegistrations::asserted(
-                            &control_url,
-                            outbound.clone(),
-                            client_options(coordinator, &plaintext_peers),
-                        )
-                        .map_err(|error| registration_error(&error))?,
-                    ));
+                    let deployments =
+                        deployments(&control_url, &outbound, coordinator, &plaintext_peers)?;
                     // Absent when no migration-service origin is configured. The
                     // journal endpoint then refuses, rather than answering as
                     // though a journal had been provisioned.
@@ -335,7 +323,7 @@ pub async fn run(settings: WorkflowSettings, options: ServerOptions) -> Result<(
         }
     };
     let (stop, stopped) = futures::channel::oneshot::channel();
-    let driving = drive(driver, options.driver_interval, stopped);
+    let driving = drive(driver, sweeps, options.driver_interval, stopped);
     let result = match select(Box::pin(serving), Box::pin(driving)).await {
         Either::Left((result, driving)) => {
             let _ = stop.send(());
@@ -346,20 +334,27 @@ pub async fn run(settings: WorkflowSettings, options: ServerOptions) -> Result<(
         }
         Either::Right(_) => Err("workflow manager driver stopped".into()),
     };
-    let _ = maintenance.cancel().await;
+    let _ = assertion_sweep.cancel().await;
     result
 }
 
 /// Verify migration readiness before accepting connections, then compose the
-/// maintenance driver. Each HTTP thread constructs its own bounded pool and
+/// manager's maintenance driver and this process's own sweep lane over one
+/// startup coordinator. Each HTTP thread constructs its own bounded pool and
 /// retention transport in the state factory.
-async fn driver(
+///
+/// The lane opens a journal of its own here, on the runtime that drives it,
+/// because the journals the state factory opens belong to their HTTP threads.
+/// Opening it before the listener binds also means a process whose journal is
+/// not installed fails to start rather than refusing sweeps once it is serving.
+async fn maintenance(
     url: &str,
     options: &ServerOptions,
     holds: ControlHolds,
     facts: Rc<dyn AppFactsSource>,
     observations: PolicyObservations,
-) -> Result<Driver, Error> {
+    deployments: AppDeployments,
+) -> Result<(Driver, MaintenanceDriver), Error> {
     let startup = Coordinator::connect(
         url,
         options.coordinator,
@@ -367,20 +362,86 @@ async fn driver(
         Rc::new(connect_eligibility(url, options.coordinator).await?),
     )
     .await?;
-    connect_policies(facts.clone(), url, options.coordinator, observations).await?;
+    // ONE policy ledger for the lane and for the readiness check the lane's
+    // startup owes: the lane needs an app's observed policy for the delivery
+    // ceiling it claims under, and reading it from anywhere else would grant a
+    // second authority over the same rows.
+    let policies =
+        Rc::new(connect_policies(facts.clone(), url, options.coordinator, observations).await?);
     // The closing lane reads Control's deletion marker over the same capability
     // the policy ledger reads its inputs through. There is no second binding
     // and no second credential: one exchange answers both.
     let lifecycle = FactsLifecycle::new(facts);
+    let runs = Rc::new(
+        crate::runs::RunService::connect(url, startup.recovery(options.driver.recovery)?)
+            .await?
+            .with_deployments(deployments),
+    );
+    let lane = MaintenanceLane::new(
+        startup.manager.queue().clone(),
+        runs,
+        policies,
+        // This process's own identity, minted once: every row the lane leases
+        // carries it, and a restart is a different holder of the same lane.
+        WorkerId::mint(),
+        MaintenanceOptions::default(),
+    )?;
+    let sweeps = MaintenanceDriver::new(
+        lane,
+        LaneOptions {
+            page_limit: options.driver.page_limit,
+            lane_timeout: options.driver.lane_timeout,
+        },
+    )?;
     // A deployment that starts workers itself (compose replicas, a single
     // host) is a static pool: the manager never starts processes and reports
     // exhaustion durably. Adapters that start processes need an orchestrator.
-    Ok(Driver::new(
-        startup.manager.clone(),
-        options.driver,
-        Rc::new(lifecycle),
-        Rc::new(StaticPool),
-    )?)
+    Ok((
+        Driver::new(
+            startup.manager.clone(),
+            options.driver,
+            Rc::new(lifecycle),
+            Rc::new(StaticPool),
+        )?,
+        sweeps,
+    ))
+}
+
+/// The journal's OWN deployment holds, on the same Control origin and the same
+/// signer as the queue-scoped ones. A journal hold is decided beside the runs it
+/// protects and applied to the deploy catalog by Control, so the process holding
+/// the journal is the one that carries this. It is the retention authority
+/// alone: the artifacts stay with the hosts that hold a blob store, and an
+/// operation needing one is refused by name.
+///
+/// Beside it, the manifest SUMMARY those operations wanted the artifacts for.
+/// Control parsed the bundle when it published, so it asserts the declarations
+/// and this process records its own `deploys` row from them - no blob store, no
+/// artifact read, and a manifest listing is strictly less than the policy this
+/// service already takes from the same origin under the same role.
+///
+/// One per journal: the sweep lane and every HTTP thread's journal each take
+/// their own, because a transport's pooled connections belong to the runtime
+/// that opened them.
+fn deployments(
+    control_url: &str,
+    outbound: &Arc<ServiceAuth>,
+    options: Options,
+    plaintext_peers: &PlaintextPeers,
+) -> Result<AppDeployments, ManagerError> {
+    Ok(AppDeployments::holds_only(Rc::new(ServiceHolds::new(
+        control_url.to_owned(),
+        outbound.clone(),
+        client_options(options, plaintext_peers),
+    )))
+    .with_registrations(Rc::new(
+        RemoteDeployRegistrations::asserted(
+            control_url,
+            outbound.clone(),
+            client_options(options, plaintext_peers),
+        )
+        .map_err(|error| registration_error(&error))?,
+    )))
 }
 
 async fn connect_policies(
@@ -439,8 +500,16 @@ async fn sweep_assertions(
     }
 }
 
-async fn drive(
+/// This process's whole maintenance cadence: one bounded pass of the manager's
+/// lanes, then one of this service's own sweep lane, every `interval` until
+/// `stopped` or until the future is dropped.
+///
+/// Each pass reports what it did and propagates nothing, so a lane that refuses
+/// never costs the next lane its turn or ends the cadence. The two share the
+/// runtime, so they take their turns in order rather than at once.
+pub async fn drive(
     mut driver: Driver,
+    mut sweeps: MaintenanceDriver,
     interval: Duration,
     mut stopped: futures::channel::oneshot::Receiver<()>,
 ) {
@@ -449,6 +518,7 @@ async fn drive(
             return;
         }
         report_tick(driver.tick().await);
+        report_sweep(&sweeps.tick().await);
         if matches!(
             select(Box::pin(compio::time::sleep(interval)), &mut stopped).await,
             Either::Right(_)
@@ -480,6 +550,33 @@ fn report_tick(report: TickReport) {
         if progress.visited != 0 {
             tracing::debug!(lane, ?progress, "workflow manager pass completed");
         }
+    }
+}
+
+/// The sweep lane's turn, in the same records and under the same lane field as
+/// every other lane's, so one query over a deployment's logs answers what this
+/// process's maintenance did.
+fn report_sweep(report: &SweepReport) {
+    const LANE: &str = "maintenance";
+    if let Some(error) = report.scan_error {
+        tracing::warn!(lane = LANE, %error, "workflow manager scan unavailable");
+    }
+    if report.timed_out {
+        tracing::warn!(
+            lane = LANE,
+            unvisited = report.unvisited,
+            "workflow manager lane deadline exhausted"
+        );
+    }
+    for failure in &report.failures {
+        tracing::warn!(
+            lane = LANE,
+            ?failure,
+            "workflow manager candidate retained for retry"
+        );
+    }
+    if report.visited != 0 {
+        tracing::debug!(lane = LANE, ?report, "workflow manager pass completed");
     }
 }
 
