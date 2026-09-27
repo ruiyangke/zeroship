@@ -33,8 +33,8 @@ pub mod propagation;
 pub mod publication;
 pub mod reconciliation;
 pub use payloads::{
-    validate_reference, PayloadDeleter, PayloadOpener, PayloadSlot, PayloadTarget, PayloadWriter,
-    StagedPayload, StepOutput,
+    input_object, validate_reference, PayloadDeleter, PayloadOpener, PayloadSlot, PayloadTarget,
+    PayloadWriter, StagedPayload, StepOutput, PAYLOAD_NAMESPACE,
 };
 pub use policy::{
     AssignedPolicies, HostPolicies, IngressEpochs, PolicyAuthority, PolicyBinding, PolicyRefresh,

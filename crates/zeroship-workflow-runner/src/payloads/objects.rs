@@ -15,7 +15,7 @@ use zeroship_storage::{
 use zeroship_workflow::{
     engine::WorkflowOutputRef,
     service::{
-        validate_reference, AppWorkflows, PayloadDeleter, PayloadOpener, PayloadSlot,
+        input_object, validate_reference, AppWorkflows, PayloadDeleter, PayloadOpener, PayloadSlot,
         PayloadTarget, PayloadWriter, PolicyAuthority, RequestId, StagedPayload, StepOutput,
         TaskToken, WorkerIdentity, WorkflowService,
     },
@@ -34,7 +34,8 @@ impl PayloadObjects {
     /// Reports a store that refuses the platform namespace.
     pub fn open(store: StorageStore) -> Result<Self, WorkflowServiceError> {
         Ok(Self(store.namespace(
-            Namespace::platform("workflow").map_err(storage_error)?,
+            Namespace::platform(zeroship_workflow::service::PAYLOAD_NAMESPACE)
+                .map_err(storage_error)?,
         )))
     }
 }
@@ -148,15 +149,7 @@ impl InputStager for PayloadObjects {
         request: &RequestId,
         input: &serde_json::Value,
     ) -> Result<WorkflowOutputRef, WorkflowServiceError> {
-        let bytes = serde_json::to_vec(input).map_err(|_| {
-            WorkflowServiceError::InvalidRequest("invalid workflow run input".into())
-        })?;
-        let reference = WorkflowOutputRef {
-            hash: zeroship_workflow::service::hash(&bytes),
-            size: i64::try_from(bytes.len()).map_err(|_| WorkflowServiceError::PayloadTooLarge)?,
-            content_type: Some("application/json".into()),
-        };
-        validate_reference(&reference)?;
+        let (bytes, reference) = input_object(input)?;
         api.stage_input(
             request,
             reference.clone(),

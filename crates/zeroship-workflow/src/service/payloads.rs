@@ -47,6 +47,38 @@ impl PayloadSlot {
     }
 }
 
+/// The storage namespace payload objects live under.
+///
+/// Two hosts bind it: the one that stages and collects objects, and the one
+/// that reads them back while a run executes. The name is the whole of what
+/// makes those two agree about where an object is, so it is declared once here
+/// and neither host spells it. This crate holds no store and binds nothing; it
+/// owns the name because it owns the record that names the object.
+pub const PAYLOAD_NAMESPACE: &str = "workflow";
+
+/// The bytes a start value becomes and the descriptor that names them.
+///
+/// Turning a value into an object is the store-holder's work; what the
+/// descriptor SAYS is this crate's, because the descriptor is what the journal
+/// records and what every later read is verified against. Two hosts stage run
+/// inputs, and a descriptor derived twice is a descriptor that can disagree.
+///
+/// # Errors
+/// Reports an unserializable value and a body no descriptor can carry.
+pub fn input_object(
+    input: &serde_json::Value,
+) -> Result<(Vec<u8>, WorkflowOutputRef), WorkflowServiceError> {
+    let bytes = serde_json::to_vec(input)
+        .map_err(|_| WorkflowServiceError::InvalidRequest("invalid workflow run input".into()))?;
+    let reference = WorkflowOutputRef {
+        hash: super::hash(&bytes),
+        size: i64::try_from(bytes.len()).map_err(|_| WorkflowServiceError::PayloadTooLarge)?,
+        content_type: Some("application/json".into()),
+    };
+    validate_reference(&reference)?;
+    Ok((bytes, reference))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StagedPayload {
