@@ -2176,6 +2176,25 @@ part that dates, not the verdict.
 
 ## Do-not notes
 
+- **Do not narrow a claimant without giving EVERY host the claimant it loses.** Narrowing
+  `Claimant::Placed` off the sweeps silently broke the local dev host, which is not the worker:
+  `zeroship-cli` hosts the whole platform in one process and claimed everything through
+  `Claimant::Placed`, so after the narrowing nothing could claim any sweep there. The visible
+  symptom was not "schedules stop firing" - it was `zeroship serve` failing to start at all, because
+  `activate` is a sweep and `crates/zeroship-cli/src/workflow.rs` waits on its receipt before it
+  will serve. The fix is a lane of its own: `LocalManager::maintenance` and the `sweep` loop in
+  `crates/zeroship-cli/src/workflow/host.rs`, claiming through `MaintenanceAuthority` against the
+  journal it already holds - locally it IS the service, so it is entitled to.
+  Reusing `MaintenanceLane` there is not possible rather than merely unwise: that type wants its
+  queue and journal on ONE runtime, and in the CLI the queue lives on the manager thread while the
+  journal lives on the host thread, both `Rc`-bound. And routing sweeps through `DeliverySlot`
+  instead would re-derive "is this maintenance?" from `JobOperation` - a second, non-compiler-checked
+  copy of the `Work` table - and settle through a path that verifies the PLACEMENT revision, which a
+  maintenance grant does not carry.
+  The general rule: `Claimant` is a property of a HOST, and the set of hosts is larger than the set
+  of crates the relocation touches. Enumerate them before narrowing, and remember a host that
+  refuses every kind fails silently - nothing errors, work simply stops.
+
 - **Do not give the worker a DSN to the journal database.** It is the one process that executes
   creator code, and the journal's only tenant separation is its `app_id` columns. A shared
   journal reachable by SQL from that process is a cross-tenant surface with no fence, and
