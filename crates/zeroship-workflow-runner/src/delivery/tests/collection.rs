@@ -28,7 +28,7 @@ async fn collect_lost_ack_replays_without_executor_or_artifacts() {
     fixture.metadata.lose_ack.set(true);
     let mut slot = fixture.slot(Duration::from_secs(5));
     let DeliveryOutcome::Settled { creator, manager } =
-        Box::pin(slot.run(&fixture.app, claimed(&fixture.app, lease.clone()).await))
+        Box::pin(slot.run(&fixture.app, claimed(&fixture.app, lease.clone()).await.unwrap()))
             .await
             .unwrap()
     else {
@@ -45,7 +45,7 @@ async fn collect_lost_ack_replays_without_executor_or_artifacts() {
     lease.expires = Instant::now();
     let DeliveryOutcome::Settled {
         creator: replay, ..
-    } = Box::pin(slot.run(&fixture.app, claimed(&fixture.app, lease.clone()).await))
+    } = Box::pin(slot.run(&fixture.app, claimed(&fixture.app, lease.clone()).await.unwrap()))
         .await
         .unwrap()
     else {

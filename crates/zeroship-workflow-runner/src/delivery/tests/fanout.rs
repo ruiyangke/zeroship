@@ -25,7 +25,7 @@ async fn fanout_lost_ack_replays_without_executor_or_storage() {
     fixture.metadata.lose_ack.set(true);
     let mut slot = fixture.slot(Duration::from_secs(5));
     let DeliveryOutcome::Settled { creator, manager } =
-        Box::pin(slot.run(&fixture.app, claimed(&fixture.app, lease.clone()).await))
+        Box::pin(slot.run(&fixture.app, claimed(&fixture.app, lease.clone()).await.unwrap()))
             .await
             .unwrap()
     else {
@@ -42,7 +42,7 @@ async fn fanout_lost_ack_replays_without_executor_or_storage() {
     lease.expires = Instant::now();
     let DeliveryOutcome::Settled {
         creator: replay, ..
-    } = Box::pin(slot.run(&fixture.app, claimed(&fixture.app, lease).await)).await.unwrap()
+    } = Box::pin(slot.run(&fixture.app, claimed(&fixture.app, lease).await.unwrap())).await.unwrap()
     else {
         panic!("committed fanout replay")
     };
@@ -68,7 +68,7 @@ async fn fanout_later_broadcast_defers_without_settlement() {
     lease.delivery.job = accepted(&fixture).await;
     let mut slot = fixture.slot(Duration::from_secs(5));
     assert!(matches!(
-        Box::pin(slot.run(&fixture.app, claimed(&fixture.app, lease.clone()).await))
+        Box::pin(slot.run(&fixture.app, claimed(&fixture.app, lease.clone()).await.unwrap()))
             .await
             .unwrap(),
         DeliveryOutcome::Deferred
@@ -92,7 +92,7 @@ async fn fanout_later_broadcast_defers_without_settlement() {
         .unwrap()
         .unwrap();
     assert!(matches!(
-        Box::pin(slot.run(&fixture.app, claimed(&fixture.app, lease).await)).await.unwrap(),
+        Box::pin(slot.run(&fixture.app, claimed(&fixture.app, lease).await.unwrap())).await.unwrap(),
         DeliveryOutcome::Settled { .. }
     ));
     assert_eq!(fixture.probe.starts.get(), 0);

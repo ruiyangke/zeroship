@@ -106,7 +106,7 @@ async fn propagation_lost_ack_replays_without_executor_or_storage() {
     fixture.metadata.lose_ack.set(true);
     let mut slot = fixture.slot(Duration::from_secs(5));
     let DeliveryOutcome::Settled { creator, manager } =
-        Box::pin(slot.run(&fixture.app, claimed(&fixture.app, lease.clone()).await))
+        Box::pin(slot.run(&fixture.app, claimed(&fixture.app, lease.clone()).await.unwrap()))
             .await
             .unwrap()
     else {
@@ -125,7 +125,7 @@ async fn propagation_lost_ack_replays_without_executor_or_storage() {
     lease.expires = Instant::now();
     let DeliveryOutcome::Settled {
         creator: replay, ..
-    } = Box::pin(slot.run(&fixture.app, claimed(&fixture.app, lease).await)).await.unwrap()
+    } = Box::pin(slot.run(&fixture.app, claimed(&fixture.app, lease).await.unwrap())).await.unwrap()
     else {
         panic!("committed propagation replay")
     };
