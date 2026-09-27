@@ -14,12 +14,14 @@ use zeroship_core::{
     workflow_coordination::{AssignedScope, WorkerId, AUDIENCE},
     workflow_deployments::{HoldGeneration, HoldReceipt},
     workflow_jobs::{
-        Delivery, DeliveryLease, DeploymentId, JobId, JobOperation, JobOutcome, JobSpec,
+        Delivery, DeploymentId, JobId, JobOperation, JobOutcome, JobSpec,
         Settlement, SettlementReceipt,
     },
     workflow_policy::AppPolicy,
 };
 use zeroship_data_orm::binding::DbBinding;
+use zeroship_workflow::service::delivery::AcceptedJob;
+use zeroship_workflow_client::ClaimedDelivery;
 use zeroship_workflow_manager::{
     recovery::{DutyKind, Options as RecoveryOptions, Recovery},
     retention::HoldClient,
@@ -145,9 +147,13 @@ async fn enroll(
 }
 
 async fn claim(http: &Client, url: &str, actor: &Actor, scope: &AssignedScope) -> Delivery {
-    let lease: DeliveryLease =
+    // Collection is a maintenance kind, so the claim reply carries the queue
+    // lease and no journal acceptance.
+    let claimed: ClaimedDelivery<AcceptedJob> =
         serde_json::from_value(post(http, url, actor, endpoints::WORKFLOW_JOB_CLAIM, scope).await)
             .unwrap();
+    assert!(claimed.accepted.is_none());
+    let lease = claimed.lease;
     assert_eq!(lease.delivery.job.app_id, scope.app_id);
     assert_eq!(
         lease.delivery.assignment_revision,

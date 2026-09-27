@@ -693,12 +693,14 @@ async fn execute<T: JobTransport>(
     guard.finish();
     execution.stop().await;
     let outcome = result?;
-    // ONE BOUND, BECAUSE ONE CALL. The split path spent `operation_timeout` on
-    // the journal completion and then a second one on the manager settlement;
-    // merged there is a single exchange, so the phase deadline that `finalize`
-    // just set to `operation_timeout` bounds the whole of it. A retry that finds
-    // the journal already holds this attempt's receipt still has a manager half
-    // left to settle, and `acknowledge` is what carries that one on its own.
+    // ONE BOUND, BECAUSE ONE CALL: the phase deadline `finalize` just set to
+    // `operation_timeout` covers committing the execution and settling the
+    // delivery with what that commit decided, retries included.
+    //
+    // THE RETRY READS THE JOURNAL BEFORE SLEEPING, because an uncertain reply
+    // may have committed. A receipt already held for this attempt leaves only
+    // the manager half open, and settling it under the same bound is the whole
+    // of the recovery.
     bounded(phase.remaining()?, async {
         loop {
             let (task, lease) = snapshot(claims);

@@ -17,7 +17,8 @@ use compio::io::{AsyncRead, AsyncWriteExt};
 use ntex::{client::Client, http::StatusCode};
 use serde_json::{json, Value};
 use std::time::Duration;
-use zeroship_workflow::service::delivery::AppJournal;
+use zeroship_workflow::service::delivery::{AcceptedJob, AppJournal};
+use zeroship_workflow_client::ClaimedDelivery;
 use zeroship_core::{
     app_id::AppId,
     service_assertion::{ServiceAssertionMinter, ServiceIssuer, ServiceSigningKey},
@@ -27,7 +28,7 @@ use zeroship_core::{
         Assignment, ManageRun, ManagementOperation, ManagementOutcome, RequestId, RunId,
         RunOperation, WorkerId, AUDIENCE,
     },
-    workflow_jobs::{DeliveryLease, JobOperation, JobOutcome, ManagementCommand, Settlement},
+    workflow_jobs::{JobOperation, JobOutcome, ManagementCommand, Settlement},
     workflow_policy::AppPolicy,
 };
 
@@ -906,7 +907,11 @@ async fn replicas_authenticate_metadata_and_keep_customer_execution_off_the_prot
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    let lease: DeliveryLease = serde_json::from_value(pending).unwrap();
+    // A management claim carries no journal acceptance: the journal settles that
+    // kind from the delivery alone, with no task and no executor.
+    let claimed: ClaimedDelivery<AcceptedJob> = serde_json::from_value(pending).unwrap();
+    assert!(claimed.accepted.is_none());
+    let lease = claimed.lease;
     assert_eq!(
         lease.delivery.job.operation,
         JobOperation::Management {
