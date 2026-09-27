@@ -2,7 +2,7 @@ use super::{manager::LocalTransport, *};
 use serde_json::json;
 use std::sync::Mutex;
 use zeroship_core::workflow_jobs::{
-    JobId, JobOperation, JobOutcome, Settlement, SettlementReceipt,
+    JobId, JobOperation, JobOutcome, JobSpec, Settlement, SettlementReceipt,
 };
 use zeroship_workflow::{
     backend::WorkflowBackend,
@@ -21,7 +21,7 @@ use zeroship_workflow_manager::{
     local::LocalPlatform,
     recovery::{DutyKind, Options as RecoveryOptions, Recovery, Responsibility, ScopeState},
     scheduling::{Options as SchedulingOptions, Scheduler, Selection},
-    DeliveryGrant, Options as QueueOptions,
+    Claimant, DeliveryGrant, Options as QueueOptions,
 };
 
 #[test]
@@ -994,4 +994,127 @@ async fn lost_acknowledgement_replays_the_committed_turn_without_executing_again
         "{starts:?}"
     );
     drop(host);
+}
+
+/// Register a queue scope and submit a manager-origin sweep row into it,
+/// through a second binding to the platform file. The host publishes a sweep
+/// only on its own recovery deadline, so this is how a test puts a claimable
+/// maintenance row in front of it.
+async fn submit_sweep(root: &Path, job: &JobSpec) {
+    Box::pin(retry(async || {
+        let platform = LocalPlatform::open(&root.join(".zeroship/platform/metadata.sqlite"))
+            .await
+            .map_err(manager::catalog_error)?;
+        let queue = platform
+            .queue(QueueOptions::default())
+            .await
+            .map_err(manager::manager_error)?;
+        queue
+            .register_scope(&job.app_id)
+            .await
+            .map_err(manager::manager_error)?;
+        queue.submit(job).await.map_err(manager::manager_error)
+    }))
+    .await;
+}
+
+/// The apps whose queue holds a maintenance row no claimant has settled, read
+/// through a second binding to the platform file. A settled row never returns
+/// to this list; a row leased by a claimant that never settles it does, as soon
+/// as its lease lapses.
+async fn sweepable(root: &Path) -> Vec<AppId> {
+    Box::pin(retry(async || {
+        let platform = LocalPlatform::open(&root.join(".zeroship/platform/metadata.sqlite"))
+            .await
+            .map_err(manager::catalog_error)?;
+        platform
+            .queue(QueueOptions::default())
+            .await
+            .map_err(manager::manager_error)?
+            .claimable_apps(Claimant::Maintenance, None, None, false, 16)
+            .await
+            .map(|(apps, _)| apps)
+            .map_err(manager::manager_error)
+    }))
+    .await
+}
+
+/// The local host owns the journal its sweeps maintain, so it claims them as
+/// `Claimant::Maintenance` itself. Nothing else can: the consumer beside that
+/// lane claims as `Claimant::Placed`, which admits only `advance`.
+///
+/// No archive is published, so this host holds no creator code at all. The
+/// journal receipt therefore cannot have come from an executing task, and the
+/// consumer never sees the row.
+///
+/// Both halves of one exchange are asserted, because either alone is satisfied
+/// by a broken lane. The journal receipt says a claimant ran the operation and
+/// committed its outcome; a lane that claimed and never settled would still
+/// leave that receipt behind. So the queue row is read afterwards - but only
+/// once the host has stopped and a lease short enough to have lapsed by then
+/// has: a settled row is no longer a candidate for any maintenance claimant,
+/// while a row a live lane keeps re-leasing and never settles is one the moment
+/// that lane goes away. Reading it while the host still runs measures whichever
+/// lease happened to be live, which is why the host is dropped first.
+///
+/// A second app's sweep row is the probe's nonempty control, and it does not
+/// race the lane the way reading this app's row before the lane wakes would.
+/// This host sweeps the one app it holds, so that row stays claimable for as
+/// long as the test runs - which is what makes the hosted app's absence from
+/// the same answer mean something.
+#[compio::test]
+async fn the_local_host_claims_runs_and_settles_its_own_journal_sweeps() {
+    let root = tempfile::tempdir().unwrap();
+    let app = AppId::mint();
+    let config = LocalConfig {
+        manager: ManagerConfig {
+            // Short enough that the wait below outlasts any lease the lane took,
+            // so a row it never settled is a candidate again by then.
+            lease_ms: 2_000,
+            // The recovery lane must publish no sweep of its own, so that the
+            // rows this test reads back are the rows it submitted.
+            recovery_interval_ms: 3_600_000,
+            ..ManagerConfig::default()
+        },
+        ..LocalConfig::default()
+    };
+    let lease = Duration::from_millis(config.manager.lease_ms);
+    let host = start(root.path(), &app, config, None);
+    let sweep = JobSpec {
+        id: JobId::mint(),
+        app_id: app.clone(),
+        operation: JobOperation::Reconcile {},
+        available_at: 0.try_into().unwrap(),
+    };
+    let unhosted = JobSpec {
+        id: JobId::mint(),
+        app_id: AppId::mint(),
+        operation: JobOperation::Reconcile {},
+        available_at: 0.try_into().unwrap(),
+    };
+    submit_sweep(root.path(), &unhosted).await;
+    submit_sweep(root.path(), &sweep).await;
+
+    let creator = client(root.path(), &app).await;
+    let receipt = until(async || match creator.job_receipt(&sweep).await {
+        Ok(receipt) => receipt,
+        Err(WorkflowServiceError::Unavailable(_)) => None,
+        Err(error) => panic!("{error:?}"),
+    })
+    .await;
+    assert_eq!(receipt.job, sweep);
+    assert!(
+        matches!(
+            receipt.outcome,
+            JobOutcome::Completed {} | JobOutcome::Waiting {}
+        ),
+        "{:?}",
+        receipt.outcome
+    );
+
+    // Nothing competes for the row once the lane has stopped, so what the queue
+    // offers after the lease window is what the lane left behind.
+    drop(host);
+    compio::time::sleep(lease * 2).await;
+    assert_eq!(sweepable(root.path()).await, vec![unhosted.app_id]);
 }

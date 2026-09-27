@@ -42,6 +42,7 @@ use zeroship_workflow_manager::{
     eligibility::{SoleWorker, ZoneId},
     lifecycle::Undeletable,
     local::LocalPlatform,
+    maintenance::MaintenanceAuthority,
     recovery::{Options as RecoveryOptions, Recovery},
     scheduling::{Options as SchedulingOptions, Scheduler, SelectedActivation},
     DeliveryGrant, Error, Options as QueueOptions,
@@ -359,6 +360,18 @@ impl LocalManager {
             .await
             .map_err(manager_error)
     }
+
+    /// The authority this process asserts over the maintenance rows of `app`'s
+    /// queue.
+    ///
+    /// The identity is this process's own worker id rather than a second minted
+    /// one: the local host is both the placed worker and the service that owns
+    /// the journal, so one process leaves one identity on every row it leases.
+    /// The two lanes stay apart by the kinds their claimants admit, not by whose
+    /// name is on the row.
+    fn maintenance(&self, app: &AppId) -> MaintenanceAuthority {
+        MaintenanceAuthority::new(app.clone(), self.worker.clone())
+    }
 }
 
 pub fn recovery_options(options: ManagerOptions) -> RecoveryOptions {
@@ -642,6 +655,17 @@ impl ManagerClient {
         }
     }
 
+    /// The queue half of this process's journal maintenance, for `app`. The
+    /// ceiling is the host's own configured policy, exactly as for delivery.
+    #[must_use]
+    pub fn sweeps(&self, app: AppId, max_delivery_attempts: i64) -> LocalSweeps {
+        LocalSweeps {
+            client: self.clone(),
+            app,
+            max_delivery_attempts,
+        }
+    }
+
     /// Submission of committed creator intents under one placement revision.
     #[must_use]
     pub const fn publisher(&self, scope: AssignedScope) -> LocalPublisher<'_> {
@@ -658,6 +682,72 @@ impl ManagerClient {
             client: self.clone(),
             scope: HoldScope::for_app(app.clone()),
         }
+    }
+}
+
+/// The queue half of the local host's journal maintenance lane.
+///
+/// `Claimant::Placed` admits only `advance`, so the consumer's transport below
+/// never sees a sweep. This process holds the journal those sweeps maintain and
+/// the payload store behind it, so it asserts maintenance authority over its own
+/// queue exactly as the workflow service's lane does.
+///
+/// It is a pair of calls rather than that service's `MaintenanceLane` because
+/// the lane holds the queue and the journal on one runtime, and this process
+/// keeps them on two threads: the queue is the manager thread's, the journal is
+/// the host thread's, and the exchange crosses between them the way delivery
+/// already does.
+#[derive(Debug, Clone)]
+pub struct LocalSweeps {
+    client: ManagerClient,
+    app: AppId,
+    max_delivery_attempts: i64,
+}
+
+impl LocalSweeps {
+    /// Take the next maintenance row of this app's queue, if it has one.
+    ///
+    /// # Errors
+    /// Reports a refused claim, exhausted attempt numbering and unavailable
+    /// manager storage.
+    pub async fn claim(&self) -> Result<Option<DeliveryGrant>, WorkflowServiceError> {
+        let (app, ceiling) = (self.app.clone(), self.max_delivery_attempts);
+        self.client
+            .call(move |manager| {
+                async move {
+                    manager
+                        .maintenance(&app)
+                        .claim(manager.coordinator.queue(), Ok(ceiling))
+                        .await
+                        .map_err(manager_error)
+                }
+                .boxed_local()
+            })
+            .await
+    }
+
+    /// Discharge a delivery this lane claimed, with what its operation committed.
+    ///
+    /// # Errors
+    /// Refuses a lapsed lease and a conflicting settlement, and reports
+    /// unavailable manager storage.
+    pub async fn settle(
+        &self,
+        settlement: &Settlement,
+    ) -> Result<SettlementReceipt, WorkflowServiceError> {
+        let (app, settlement) = (self.app.clone(), settlement.clone());
+        self.client
+            .call(move |manager| {
+                async move {
+                    manager
+                        .maintenance(&app)
+                        .settle(manager.coordinator.queue(), &settlement)
+                        .await
+                        .map_err(manager_error)
+                }
+                .boxed_local()
+            })
+            .await
     }
 }
 
