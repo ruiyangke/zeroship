@@ -55,9 +55,9 @@ use zeroship_core::{
     },
     service_peers::{service_issuer, ServiceAuth, ServiceKeyring, CONTROL_SERVICE_NAME},
     workflow_coordination::{
-        AssignedScope, RegisterWorker, RequestId, RestartOptions, RestartRun, RunFailure, RunId,
-        RunOperation, RunScope, RunState, SignalOptions, SignalRun, TransitionRun, WorkerId,
-        WorkerState,
+        AssignedScope, ConflictPolicy, CreatorStartOptions, ReadStepOutput, RegisterWorker,
+        RequestId, RestartOptions, RestartRun, RunFailure, RunId, RunOperation, RunScope, RunState,
+        SignalOptions, SignalRun, StartRun, TransitionRun, WorkerId, WorkerState,
     },
     workflow_jobs::DeploymentId,
     workflow_policy::AppPolicy,
@@ -325,4 +325,77 @@ async fn the_client_and_the_service_agree_on_every_run_call() {
         .await
         .expect_err("restart was served, so this journal now holds its deployment");
     assert_eq!(refused, RunError::Refused(RunFailure::Unavailable {}));
+
+    // WRITE, carrying a creator VALUE and no descriptor. The run the reply names
+    // must be one the journal holds, and the object the service staged for that
+    // value must be the one the run's input edge owns -- so the descriptor came
+    // from the bytes rather than from anything the client could have sent.
+    let started = fixture
+        .client
+        .start_run(&StartRun {
+            request_id: RequestId::mint(),
+            scope: scope(),
+            workflow_name: "demo".to_owned(),
+            input: json!({"order": 7}),
+            options: CreatorStartOptions {
+                key: Some("order-7".to_owned()),
+                on_conflict: ConflictPolicy::Reject,
+            },
+        })
+        .await
+        .unwrap();
+    assert_eq!(started.state, RunState::Queued);
+    let staged = fixture
+        .platform
+        .admin
+        .query_one(
+            "SELECT p.hash = encode(sha256($3::bytea),'hex'), p.state FROM \
+             workflow_manager.__zeroship_workflow_payload_refs e \
+             JOIN workflow_manager.__zeroship_workflow_payloads p \
+               ON p.app_id=e.app_id AND p.id=e.payload_id \
+             WHERE e.app_id=$1 AND e.run_id=$2 AND e.slot='input'",
+            &[
+                &fixture.app.as_str(),
+                &started.id,
+                &serde_json::to_vec(&json!({"order": 7})).unwrap(),
+            ],
+        )
+        .await
+        .unwrap();
+    assert!(
+        staged.get::<_, bool>(0),
+        "the staged input's digest is not over the value the client sent"
+    );
+    assert_eq!(staged.get::<_, String>(1), "referenced");
+
+    // READ, located rather than carried. The run the start admitted returned
+    // nothing, so it owns no output object -- the same absence `status` reports
+    // by carrying no descriptor, and the refusal a located read answers with.
+    let started_run = RunId::parse(&started.id).unwrap();
+    let absent = fixture
+        .client
+        .read_run_output(&RunScope {
+            scope: scope(),
+            run_id: started_run.clone(),
+        })
+        .await
+        .expect_err("a run that returned nothing was answered with a location");
+    assert!(
+        matches!(absent, RunError::Refused(RunFailure::NotFound { .. })),
+        "{absent:?}"
+    );
+    let unrecorded = fixture
+        .client
+        .read_step_output(&ReadStepOutput {
+            scope: scope(),
+            run_id: started_run,
+            name: "charge".to_owned(),
+            occurrence: 0,
+        })
+        .await
+        .expect_err("a step this run never recorded was answered");
+    assert!(
+        matches!(unrecorded, RunError::Refused(RunFailure::NotFound { .. })),
+        "{unrecorded:?}"
+    );
 }
