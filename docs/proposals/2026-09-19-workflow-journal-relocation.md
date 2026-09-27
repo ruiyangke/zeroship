@@ -823,33 +823,48 @@ protocol. This extends a working client rather than inventing one.
    `crates/zeroship-workflow-v8/src/lib.rs` takes a third arm cleanly. Counting methods says
    mechanical; counting decisions says otherwise, and the seven do not divide evenly.
 
-   **Three are wiring, and the wire already exists on both ends.**
+   **Three were wiring, and they now have a caller.**
    `WorkerCoordinator::run_status`, `signal_run` and `transition_run` in
    `crates/zeroship-workflow-client/src/lib.rs` are written and their endpoints are served, and
    `the_client_and_the_service_agree_on_every_run_call`
    (`crates/zeroship-workflow-server/tests/run_wire_pair.rs`) drives each of the three against its
-   served route, so the two halves are bound to each other. What none of them has is a production
-   caller. That is the built half of this step sitting in the tree awaiting one, and supplying it
-   is the small part.
+   served route, so the two halves are bound to each other. `RemoteBackend`
+   (`crates/zeroship-workflow-runner/src/remote.rs`) calls them: it implements `WorkflowBackend` over
+   a `WorkerCoordinator`, and the V8 factory in `crates/zeroship-workflow-v8/src/lib.rs` selects it
+   through a third arm. Its own doc records why it cannot live in the client - the engine declares
+   `zeroship-workflow-client` in `[dependencies]`, so a client naming `WorkflowBackend` is a Cargo
+   CYCLE before it is a crate-ownership violation.
+   What `RemoteBackend` itself still lacks is a production caller, and that is the worker's journal
+   removal below rather than anything missing here.
 
    **One is a service capability, and it is in place.** `restart` has its endpoint and handler and
    serves once a held deployment intent exists under `HoldScope::for_app`; what it still lacks is a
    claimant to write that intent, not a capability to write it. See "What that source reaches, and
    what it does not" under step 4.
 
-   **One waits on the payload seam, which already has its answer.** `start` needs no deployment
+   **DONE. `start` crosses as a VALUE, and no descriptor crosses at all.** It needs no deployment
    input - `start_captured` in `crates/zeroship-workflow/src/service/app.rs` resolves it with
-   `active_deploy` against the journal's own rows - but it must mint a `RequestId` on the wire
-   rather than internally, and it stages the creator's input into a payload store the server may
-   not reach. That last part is the same split `stage` has: `stage_input`
-   (`crates/zeroship-workflow-runner/src/payloads/objects.rs`) computes the descriptor from the
-   bytes itself and records ownership through the journal handle it is given, so the worker
-   writes the bytes and only the ownership record crosses. `start` therefore needs no new
-   mechanism, only the one the reserve already defines. `StartOptions`, `StartedRun`,
-   `ConflictPolicy` and `WorkflowOutputRef` already live in
-   `crates/zeroship-core/src/workflow_coordination/lifecycle.rs`, so the client can name the call
-   today. What it still needs is a request type that is a creator-safe subset of `StartOptions`,
-   since `input_ref` is a descriptor a creator must never supply.
+   `active_deploy` against the journal's own rows - and it mints its `RequestId` on the wire rather
+   than internally.
+   The staging half turned out simpler than this step expected, because the host that owns the
+   journal owns the store: `ServicePayloads`
+   (`crates/zeroship-workflow-server/src/payloads.rs`) already implements `InputStager` for the cron
+   sweep, so `StartRun` carries the creator's `input` as a `serde_json::Value` and the SERVICE
+   stages it. Nothing hands a descriptor across in either direction, which is strictly narrower than
+   having the worker write the bytes and cross an ownership record - and it needs none of the
+   reserve-and-confirm split this step once sequenced ahead of itself.
+   `CreatorStartOptions` (`crates/zeroship-core/src/workflow_coordination/lifecycle.rs`) is the
+   creator-safe subset: `key` and `on_conflict`, `deny_unknown_fields`, and no field a descriptor
+   could occupy. `StartOptions::creator_subset` REFUSES with `InvalidStart::SuppliedInputRef` rather
+   than dropping one silently. Three assertions bind it, each mutation-proven -
+   `a_creator_start_cannot_name_a_payload_descriptor`
+   (`crates/zeroship-core/tests/workflow_jobs_test.rs`) refuses both spellings at the body root and
+   inside `options`; `a_remote_start_refuses_a_creator_supplied_payload_descriptor`
+   (`crates/zeroship-workflow-runner/src/remote/tests.rs`) additionally asserts the peer saw no
+   request at all; and `start_stages_the_creator_value_and_refuses_a_named_payload_object`
+   (`crates/zeroship-workflow-server/tests/http_runs.rs`) answers 400 at the real endpoint with the
+   run count unchanged, against a served control whose staged digest is compared to the body's own
+   value.
 
    **And two carry bytes the transport cannot.** `read_step_output` and `read_output` return
    `Vec<u8>`. A single payload answers to `MAX_PAYLOAD_BYTES_CEILING` while the client's reply
@@ -859,13 +874,18 @@ protocol. This extends a working client rather than inventing one.
    `AppWorkflows::read_step_output` already splits `Inline` from `Object`. So the journal lookup
    crosses and the bytes do not.
 
-   **That does not change the trait, though it looks like it must.** The HTTP implementation's
-   legal home is `zeroship-workflow-runner`, and `PayloadObjects` and `ObjectOpener` already
-   live there (`crates/zeroship-workflow-runner/src/payloads/objects.rs`). So it can ask the
-   service for the descriptor and open the object from the store it already holds, behind an
-   unchanged `Vec<u8>` signature. The method stays what it is and becomes two-phase inside.
-   Changing the trait instead would push an opener into every implementor, including the
-   in-process one that needs none.
+   **DONE, and the trait did not change.** The HTTP implementation's legal home is
+   `zeroship-workflow-runner`, where `PayloadObjects` and `ObjectOpener` already live
+   (`crates/zeroship-workflow-runner/src/payloads/objects.rs`). `WORKFLOW_RUN_STEP_OUTPUT` and
+   `WORKFLOW_RUN_OUTPUT` answer a `StepOutputLocation` - `Inline { value }` or `Object { payload }` -
+   and a `PayloadLocation`, so the run lock, the row lookup and the descriptor comparison all happen
+   on the service; the runner then opens the located object and reads it under its own limit, and the
+   verified stream checks the digest. `WorkerCoordinator` parses every returned key against
+   `WORKFLOW_PAYLOAD_PREFIX` before it reaches the store, so a reply cannot steer the opener.
+   The method stayed `Vec<u8>` and became two-phase inside. Changing the trait instead would have
+   pushed an opener into every implementor, including the in-process one that needs none.
+   `a_remote_step_output_read_opens_the_located_object` binds that the bytes come from the store: the
+   same peer reply against a store missing the object refuses.
 
    **The journal calls that are not the three.** `DeliverySlot::run` in
    `crates/zeroship-workflow-runner/src/delivery.rs` reaches `activate_job`, `reconcile_job`,
