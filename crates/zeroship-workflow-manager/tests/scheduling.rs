@@ -127,9 +127,9 @@ case!(
     selection
 );
 case!(
-    sqlite_cron_is_left_to_a_claimant_holding_the_store,
-    postgres_cron_is_left_to_a_claimant_holding_the_store,
-    cron_left_to_store_holder
+    sqlite_cron_is_left_to_the_claimant_owning_the_journal,
+    postgres_cron_is_left_to_the_claimant_owning_the_journal,
+    cron_left_to_the_journal_lane
 );
 
 async fn host(fixture: &Fixture) -> (Scheduler, Queue) {
@@ -269,6 +269,24 @@ async fn claim(queue: &Queue, owner: &Assignment) -> Delivery {
         .await
         .unwrap()
         .expect("expected deliverable job")
+        .delivery()
+        .clone()
+}
+
+/// Claim as the lane in the process that owns the journal, which is the host
+/// every sweep belongs to. `claim` above is the placed host, and it takes
+/// creator work alone.
+async fn claim_sweep(queue: &Queue, owner: &Assignment) -> Delivery {
+    queue
+        .claim_authorized(
+            &owner.into(),
+            Claimant::Maintenance,
+            Ok(support::delivery_ceiling()),
+            |_| ready(Ok(owner.clone())),
+        )
+        .await
+        .unwrap()
+        .expect("expected deliverable sweep")
         .delivery()
         .clone()
 }
@@ -1088,21 +1106,20 @@ async fn selection(fixture: &Fixture) {
     assert_eq!(scheduler.selection(&app).await, Err(Error::Storage));
 }
 
-/// A claimant that holds no payload store leaves a due cron row for one that
-/// holds it.
+/// A placed host leaves a due cron row for the lane that owns the journal.
 ///
-/// `cron_job` stages the schedule's inline input, so a cron row is the second
-/// kind whose sweep moves creator bytes; the other is collection, and its arm of
-/// this property is `byte_moving_kind_is_left_to_a_claimant_holding_the_store`
-/// in `tests/queue.rs`.
+/// `cron_job` stages the schedule's inline input, so a cron row is one of the
+/// two sweeps that write payload objects; the other is collection, and its arm
+/// of this property is
+/// `journal_sweep_is_left_to_the_claimant_owning_the_journal` in
+/// `tests/queue.rs`.
 ///
 /// The row here is a dispatched one rather than a hand-written spec, because a
 /// cron row is deliverable only through its own lifecycle: an occurrence bound
 /// to an activation that has settled completed. That is what makes the control
-/// mean something - the placed claimant takes this row, so the restricted
-/// claimant's empty answer is about the kind and not about a prerequisite
-/// nothing satisfied.
-async fn cron_left_to_store_holder(fixture: &Fixture) {
+/// mean something - the lane takes this row, so the placed claimant's empty
+/// answer is about the kind and not about a prerequisite nothing satisfied.
+async fn cron_left_to_the_journal_lane(fixture: &Fixture) {
     let (scheduler, queue) = host(fixture).await;
     let app = AppId::mint();
     let metadata = registration(&app, vec![descriptor("nightly", ScheduleCatchUp::Skip)]);
@@ -1111,30 +1128,23 @@ async fn cron_left_to_store_holder(fixture: &Fixture) {
     let cron = scheduler.dispatch(&app, &id).await.unwrap().jobs.remove(0);
     assert!(matches!(cron.operation, JobOperation::Cron { .. }));
     let owner = assignment(&app);
-    let prerequisite = claim(&queue, &owner).await;
+    // The activation is a sweep too, so the lane is what clears it out of the
+    // way before the cron row becomes the only thing left to claim.
+    let prerequisite = claim_sweep(&queue, &owner).await;
     assert_eq!(prerequisite.job, activation_job);
     settle(&queue, &owner, &prerequisite, JobOutcome::Completed {}).await;
 
     assert!(
-        queue
-            .claim_authorized(
-                &(&owner).into(),
-                Claimant::Maintenance,
-                Ok(support::delivery_ceiling()),
-                |_| ready(Ok(owner.clone())),
-            )
-            .await
-            .unwrap()
-            .is_none(),
-        "the cron row is all that is left to claim, and a claimant without the \
-         payload store answers nothing rather than it"
+        queue.claim(&owner).await.unwrap().is_none(),
+        "the cron row is all that is left to claim, and a placed host answers \
+         nothing rather than it"
     );
     assert_eq!(
         rows(fixture, "jobs", value!({"id":cron.id.as_str()})).await[0]["state"],
         value!("ready"),
-        "the refused cron row must still be waiting for a host that holds the store"
+        "the refused cron row must still be waiting for the host that owns the journal"
     );
 
     // The control: the same row, differing only in who claims it.
-    assert_eq!(claim(&queue, &owner).await.job, cron);
+    assert_eq!(claim_sweep(&queue, &owner).await.job, cron);
 }
