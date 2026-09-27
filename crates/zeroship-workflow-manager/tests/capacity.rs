@@ -13,7 +13,7 @@ mod placement_support;
 
 use futures::{channel::oneshot, future::ready};
 use placement_support::{
-    blocked_manager, options, revision, Counted, Facts, Host, Pool, Recorder, Starter, Step,
+    blocked_manager, options, Counted, Facts, Host, Pool, Recorder, Starter, Step,
     LONG,
 };
 use std::{rc::Rc, time::Duration};
@@ -21,7 +21,6 @@ use support::{Admin, Backend, Fixture};
 use zeroship_core::{
     app_id::AppId,
     workflow_coordination::{AssignedScope, ReleaseReason, ReleaseScope, RequestId},
-    workflow_jobs::{DeploymentId, JobOperation},
 };
 use zeroship_data_orm::{
     orm::{Operation, Output},
@@ -32,7 +31,6 @@ use zeroship_workflow_manager::{
         self, Capacity, CapacityProvider, Exchange, Refusal, StaticPool, TargetState, Visit,
     },
     eligibility::ZoneId,
-    recovery::Recovery,
 };
 
 macro_rules! case {
@@ -49,8 +47,8 @@ macro_rules! case {
 }
 
 case!(
-    sqlite_a_due_duty_scales_from_zero_and_its_job_reaches_the_started_worker,
-    postgres_a_due_duty_scales_from_zero_and_its_job_reaches_the_started_worker,
+    sqlite_due_creator_work_scales_from_zero_and_reaches_the_started_worker,
+    postgres_due_creator_work_scales_from_zero_and_reaches_the_started_worker,
     scale_from_zero
 );
 case!(
@@ -137,23 +135,22 @@ async fn replicas(fixture: &Fixture) -> (Host, Host) {
     (first, second)
 }
 
-/// An app with a due recovery duty and a zone with no workers. The lane
-/// records demand, the provider starts an enrolled worker, the lane places
-/// the app on it, and that worker claims the Reconcile job. The control
-/// differs only in the provider: a static pool starts nothing, records a
-/// durable `pool_exhausted` refusal and leaves the job pending.
+/// An app holding creator work and a zone with no workers. The lane records
+/// demand, the provider starts an enrolled worker, the lane places the app on
+/// it, and that worker claims the work. The control differs only in the
+/// provider: a static pool starts nothing, records a durable `pool_exhausted`
+/// refusal and leaves the job pending.
+///
+/// The demand is creator work because that is what a placement is for. A queue
+/// holding only sweeps is not unabsorbed demand: the lane that owns the journal
+/// discharges those without a worker, so a zone is never scaled for them.
 async fn scale_from_zero(fixture: &Fixture) {
     for started in [true, false] {
         let facts = Rc::new(Facts::default());
         let host = Host::new(fixture, facts.clone()).await;
         let zone = ZoneId::mint();
         let app = AppId::mint();
-        facts.app(&app, &zone);
-        Recovery::new(host.queue.clone(), options(LONG).recovery)
-            .unwrap()
-            .ensure(&app, &DeploymentId::mint(), revision(1))
-            .await
-            .unwrap();
+        let work = host.due(&app, &zone).await;
         let pool = Pool::new(Starter::new(host.clone(), 4));
         let provider: Rc<dyn CapacityProvider> = if started {
             pool.clone()
@@ -187,8 +184,8 @@ async fn scale_from_zero(fixture: &Fixture) {
                 )
                 .await
                 .unwrap()
-                .expect("the started worker receives the recovery job");
-            assert_eq!(grant.delivery().job.operation, JobOperation::Reconcile {});
+                .expect("the started worker receives the queued work");
+            assert_eq!(grant.delivery().job, work);
             assert!(driver.capacity().demands(&zone).await.unwrap().is_empty());
             // Placing the app moved it from unplaced demand to a live
             // placement; the target did not change.
@@ -206,7 +203,7 @@ async fn scale_from_zero(fixture: &Fixture) {
             let pending = rows(
                 fixture,
                 "jobs",
-                value!({"app_id":app.as_str(),"operation_kind":"reconcile"}),
+                value!({"app_id":app.as_str(),"operation_kind":"advance"}),
             )
             .await;
             assert_eq!(pending.len(), 1);
