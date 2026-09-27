@@ -8,12 +8,14 @@
 //!
 //! # Where this lives, and why
 //!
-//! [`WorkflowBackend`] is declared in `zeroship-workflow`, and
+//! [`WorkflowBackend`] is declared in `zeroship-workflow`, which itself declares
+//! `zeroship-workflow-client` in `[dependencies]` -- so the client naming that
+//! trait is a Cargo CYCLE before it is anything else, and
 //! `workflow_process_dependencies_follow_crate_ownership`
-//! (`xtask/tests/workflow_architecture.rs`) forbids `zeroship-workflow-client`
-//! that crate, so the client cannot implement the trait -- the orphan rule and
-//! the gate say the same thing here. This crate depends on both, and it already
-//! holds the payload object store, which the two read methods need.
+//! (`xtask/tests/workflow_architecture.rs`) additionally forbids the client that
+//! edge in the dev and transitive spellings Cargo would tolerate. Three reasons,
+//! one answer. This crate depends on both, and it already holds the payload
+//! object store the two reads open.
 //!
 //! # The two reads are two-phase, and the trait is unchanged
 //!
@@ -26,6 +28,14 @@
 //! store it already holds and verifies the stream against that descriptor. The
 //! method keeps its signature and becomes two-phase inside, which is what stops
 //! an opener being pushed into the in-process implementor that needs none.
+
+#![allow(
+    clippy::future_not_send,
+    reason = "the coordinator client and the payload store stay on one compio runtime"
+)]
+
+#[cfg(test)]
+mod tests;
 
 use crate::payloads::{PayloadObjects, PayloadRead};
 use async_trait::async_trait;
@@ -54,6 +64,18 @@ use zeroship_workflow_client::{RunError, WorkerCoordinator};
 /// [`AppBackend`](zeroship_workflow::service::AppBackend)'s policy binding is:
 /// an assignment whose revision moves is a different generation, and the host
 /// replaces the entry rather than retargeting it.
+///
+/// # No local policy binding, and that is the decision
+///
+/// `AppWorkflows::into_backend` pairs a backend with the journal it will reach
+/// and refuses a journal from another policy registry. There is no journal here
+/// to pair with, and the binding a host holds is not the authority over a call
+/// this service serves: `RunService::app` observes the app's policy and installs
+/// it into the SERVICE's own registry on every request, and `require_open_epoch`
+/// rechecks the journal's closed epoch inside the caller's transaction. So the
+/// generation a call is admitted under is decided at the far end, and carrying a
+/// second one here would be a claim nothing rechecks. What this side does carry
+/// is the placement the far end authorizes against, which is `scope`.
 #[derive(Clone, Debug)]
 pub struct RemoteBackend {
     client: WorkerCoordinator,
@@ -101,7 +123,7 @@ impl RemoteBackend {
         &self.scope
     }
 
-    fn run(&self, run_id: &str) -> Result<RunId, WorkflowServiceError> {
+    fn run(run_id: &str) -> Result<RunId, WorkflowServiceError> {
         RunId::parse(run_id)
             .map_err(|_| WorkflowServiceError::InvalidRequest("invalid workflow run id".into()))
     }
@@ -109,7 +131,7 @@ impl RemoteBackend {
     fn scoped(&self, run_id: &str) -> Result<RunScope, WorkflowServiceError> {
         Ok(RunScope {
             scope: self.scope.clone(),
-            run_id: self.run(run_id)?,
+            run_id: Self::run(run_id)?,
         })
     }
 
@@ -240,7 +262,7 @@ impl WorkflowBackend for RemoteBackend {
             .signal_run(&SignalRun {
                 request_id: RequestId::mint(),
                 scope: self.scope.clone(),
-                run_id: self.run(&run_id)?,
+                run_id: Self::run(&run_id)?,
                 options,
             })
             .await
@@ -256,7 +278,7 @@ impl WorkflowBackend for RemoteBackend {
             .transition_run(&TransitionRun {
                 request_id: RequestId::mint(),
                 scope: self.scope.clone(),
-                run_id: self.run(&run_id)?,
+                run_id: Self::run(&run_id)?,
                 operation: op,
             })
             .await
@@ -272,7 +294,7 @@ impl WorkflowBackend for RemoteBackend {
             .restart_run(&RestartRun {
                 request_id: RequestId::mint(),
                 scope: self.scope.clone(),
-                run_id: self.run(&run_id)?,
+                run_id: Self::run(&run_id)?,
                 options,
             })
             .await
@@ -295,7 +317,7 @@ impl WorkflowBackend for RemoteBackend {
             .client
             .read_step_output(&ReadStepOutput {
                 scope: self.scope.clone(),
-                run_id: self.run(&run_id)?,
+                run_id: Self::run(&run_id)?,
                 name,
                 occurrence,
             })

@@ -85,6 +85,25 @@ impl PayloadObjects {
 
 #[cfg(test)]
 impl PayloadObjects {
+    /// Put `bytes` at the key `id` for `app`, where staging's writer would.
+    pub(crate) async fn put(
+        &self,
+        app: &AppId,
+        id: &str,
+        bytes: &[u8],
+        content_type: Option<&str>,
+    ) {
+        self.0
+            .put_stream(
+                app.as_str(),
+                id,
+                Box::new(OnceChunk::new(bytes.to_vec().into())),
+                content_type,
+            )
+            .await
+            .unwrap();
+    }
+
     /// A store on a directory that lives as long as the returned guard.
     pub(crate) fn temporary() -> (Self, tempfile::TempDir) {
         let directory = tempfile::tempdir().unwrap();
