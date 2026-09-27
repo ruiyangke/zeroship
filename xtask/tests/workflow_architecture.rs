@@ -217,13 +217,24 @@ fn workflow_process_dependencies_follow_crate_ownership() {
                     "{name} reaches payload storage through {dependency}"
                 );
             }
-            if matches!(
-                name,
-                "zeroship-workflow-manager" | "zeroship-workflow-server"
-            ) {
+            // The manager decides which host takes a row and never runs one, so
+            // it reaches neither execution nor the bytes a row moves.
+            if name == "zeroship-workflow-manager" {
                 assert!(
                     !["zeroship-workflow-runner", "zeroship-storage"].contains(&dependency),
                     "{name} reaches workflow execution or payload storage through {dependency}"
+                );
+            }
+            // The server owns the journal, and blob storage is how the store
+            // behind that journal keeps large objects out of the database, so it
+            // holds the store and supplies the writer and the deleter its sweeps
+            // take as arguments. Execution stays out: a host that runs creator
+            // code is the wrong privilege for a journal, which is the whole
+            // reason the sweeps moved here.
+            if name == "zeroship-workflow-server" {
+                assert!(
+                    dependency != "zeroship-workflow-runner",
+                    "{name} reaches workflow execution through {dependency}"
                 );
             }
             if name == "zeroship-workflow-client" {
