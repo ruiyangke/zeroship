@@ -815,7 +815,7 @@ pub(crate) struct RunGeneration<'a> {
 ///
 /// # Errors
 /// Reports an unserializable value and every refusal staging reports.
-pub(crate) async fn stage_start_input(
+pub async fn stage_start_input(
     stager: &dyn crate::backend::InputStager,
     api: &AppWorkflows,
     request: &RequestId,
