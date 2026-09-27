@@ -42,6 +42,47 @@ impl PayloadObjects {
     }
 }
 
+impl PayloadObjects {
+    /// Open the object a journal read already located, under `reference` as its
+    /// contract.
+    ///
+    /// NO OWNERSHIP IS PROVEN HERE, because the journal proved it before it
+    /// answered with this key: the run lock was held across the lookup, the row's
+    /// descriptor was compared against the step's recorded one, and the reply
+    /// carries the pair. This is the second half of a read whose first half ran
+    /// somewhere else, so the caller owes that first half; nothing on this path
+    /// turns a key a caller invented into bytes it may see, because the key comes
+    /// from a reply and the digest in `reference` is what the stream verifies
+    /// against.
+    ///
+    /// Crate-private: the whole-read entry points beside it take a journal handle
+    /// and prove ownership themselves.
+    ///
+    /// # Errors
+    /// Reports a missing or resized object and a malformed descriptor.
+    pub(crate) async fn open_located(
+        &self,
+        app: &AppId,
+        payload_id: &str,
+        reference: &WorkflowOutputRef,
+    ) -> Result<PayloadRead, WorkflowServiceError> {
+        ObjectOpener(self)
+            .open(PayloadTarget {
+                app,
+                id: payload_id,
+                reference,
+                // The policy generation guards the in-process path because the
+                // body outlives the transaction that authorized it. Here the
+                // authorizing transaction committed on the service before the
+                // reply arrived, and the request that carried it was itself
+                // authorized against a freshly observed policy, so there is no
+                // transaction for a body to outlive.
+                authority: None,
+            })
+            .await
+    }
+}
+
 #[cfg(test)]
 impl PayloadObjects {
     /// A store on a directory that lives as long as the returned guard.
