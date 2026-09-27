@@ -472,13 +472,29 @@ protocol. This extends a working client rather than inventing one.
    `crates/zeroship-workflow-server/tests/http_runs.rs` seeds by raw SQL, and it stays a
    sequencing constraint on steps 4 and 5 rather than a gap in this step.
 
-4. **Carry the three direct calls across, merged into the claims that already cross.** This is
-   the step that earns its own review, and it is not "add a remote `TaskTransport`".
-   `WorkerTasks` implements that trait in production, but the type that dispatches through it,
-   `RunnerSlot` (`crates/zeroship-workflow-runner/src/lib.rs`), is constructed only by tests;
-   the production job path is `DeliverySlot` over `JobTransport`
+4. **DONE. The three direct calls cross, merged into the claims that already crossed.** One
+   exchange now carries both halves: the assignment rides the claim reply, one renewal carries both
+   leases, the frontier rides the settlement. The journal arrives as an argument, so the remote
+   transport sends one request and the in-process one runs both halves locally.
+   `JobJournal` (`crates/zeroship-workflow-client/src/journal.rs`) is the port, with four
+   associated types bounded by serde alone - the client validates nothing inside a journal half,
+   every check it makes is on `Delivery` fields it already owns, and naming the engine's types
+   there would be a Cargo cycle as well as a crate-ownership violation. `AppJournal`
+   (`crates/zeroship-workflow/src/service/delivery.rs`) is the single implementation: the engine
+   already depends on the client, so the mapping has one home rather than one per host.
+   Two findings the implementation produced that the design did not predict. The settlement's
+   journal half was redundant - `JobReceipt` is `{job, outcome}`, the caller sent the job and the
+   queue receipt carries the outcome - so it answers one half and the port has four types rather
+   than five. And serde's `flatten` does not reliably apply the flattened type's
+   `deny_unknown_fields`, so the envelopes NAME each half rather than staying byte-compatible with
+   the single-half bodies; that strictness is what caught a stale reader loudly instead of
+   silently mis-decoding.
+   It was not "add a remote `TaskTransport`". `WorkerTasks` implements that trait in production,
+   but the type that dispatches through it, `RunnerSlot`
+   (`crates/zeroship-workflow-runner/src/lib.rs`), is constructed only by tests; the production job
+   path is `DeliverySlot` over `JobTransport`
    (`crates/zeroship-workflow-runner/src/delivery.rs`). Building against `TaskTransport` would
-   ship a remote implementation of something the worker never calls.
+   have shipped a remote implementation of something the worker never calls.
 
    What crosses is `AppWorkflows::accept_job`, `AppWorkflows::heartbeat_job` and
    `AppWorkflows::complete_job`, all in `crates/zeroship-workflow/src/service/delivery.rs`, each
