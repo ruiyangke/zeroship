@@ -41,6 +41,7 @@ use zeroship_workflow_calendar::{
 };
 use zeroship_workflow_manager::{
     lifecycle::{AppLifecycle, Undeletable},
+    maintenance::MaintenanceAuthority,
     driver::{Driver, LaneReport, Options},
     recovery::Options as RecoveryOptions,
     retention::{HoldClient, HoldFuture},
@@ -177,24 +178,78 @@ fn advance(app: &AppId, deployment: &DeploymentId) -> JobSpec {
     }
 }
 
-/// Complete every deliverable job, as the app's worker would.
-async fn settle_all(queue: &Queue, app: &AppId) {
-    let authority = Assignment {
+/// The lane of the process that owns this queue. Calendar occurrences and hold
+/// releases are sweeps, so the lane is what takes them.
+fn lane(app: &AppId) -> MaintenanceAuthority {
+    MaintenanceAuthority::new(app.clone(), WorkerId::mint())
+}
+
+/// A placement over the app, for the creator work no lane may take. These
+/// contracts run no coordinator, so the authority is stated rather than read.
+fn placement(app: &AppId) -> Assignment {
+    Assignment {
         app_id: app.clone(),
         worker_id: WorkerId::mint(),
         revision: 1.try_into().unwrap(),
         expires_at: i64::MAX.try_into().unwrap(),
-    };
+    }
+}
+
+/// Settle one deliverable job of `app`, asking both of the queue's claimants:
+/// the lane takes the sweeps and a placed worker takes creator work, and one
+/// hold can be pinned by either. `outcome` answers the job that was delivered.
+/// Answers the job it settled, and `None` once neither claimant has one.
+async fn settle_next(
+    queue: &Queue,
+    app: &AppId,
+    outcome: impl Fn(&JobSpec) -> JobOutcome,
+) -> Option<JobSpec> {
+    let lane = lane(app);
+    if let Some(grant) = lane
+        .claim(queue, Ok(support::delivery_ceiling()))
+        .await
+        .unwrap()
+    {
+        let job = grant.delivery().job.clone();
+        lane.settle(
+            queue,
+            &Settlement {
+                delivery: grant.delivery().clone(),
+                outcome: outcome(&job),
+                successors: vec![],
+            },
+        )
+        .await
+        .unwrap();
+        return Some(job);
+    }
+    let placed = placement(app);
+    let grant = queue.claim(&placed).await.unwrap()?;
+    let job = grant.delivery().job.clone();
+    queue
+        .settle(
+            &placed,
+            &Settlement {
+                delivery: grant.delivery().clone(),
+                outcome: outcome(&job),
+                successors: vec![],
+            },
+        )
+        .await
+        .unwrap();
+    Some(job)
+}
+
+/// Complete every deliverable job, as the lane's turns and the app's worker
+/// would between them.
+async fn settle_all(queue: &Queue, app: &AppId) {
     for _ in 0..32 {
-        let Some(grant) = queue.claim(&authority).await.unwrap() else {
+        if settle_next(queue, app, |_| JobOutcome::Completed {})
+            .await
+            .is_none()
+        {
             return;
-        };
-        let settlement = Settlement {
-            delivery: grant.delivery().clone(),
-            outcome: JobOutcome::Completed {},
-            successors: vec![],
-        };
-        queue.settle(&authority, &settlement).await.unwrap();
+        }
     }
     panic!("the app queue did not drain");
 }
@@ -306,34 +361,20 @@ async fn releases(fixture: &Fixture, app: &AppId) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Drain the app's queue as its worker would, answering the release job with
-/// `outcome` and completing whatever maintenance work shares the queue.
+/// Drain the app's queue through both its claimants, answering the release job
+/// with `outcome` and completing whatever else shares the queue.
 async fn settle_release(queue: &Queue, app: &AppId, outcome: JobOutcome) -> JobSpec {
-    let authority = Assignment {
-        app_id: app.clone(),
-        worker_id: WorkerId::mint(),
-        revision: 1.try_into().unwrap(),
-        expires_at: i64::MAX.try_into().unwrap(),
-    };
     for _ in 0..32 {
-        let grant = queue
-            .claim(&authority)
-            .await
-            .unwrap()
-            .expect("a deliverable job");
-        let job = grant.delivery().job.clone();
-        let release = job.released_deployment().is_some();
-        let settlement = Settlement {
-            delivery: grant.delivery().clone(),
-            outcome: if release {
+        let job = settle_next(queue, app, |job| {
+            if job.released_deployment().is_some() {
                 outcome.clone()
             } else {
                 JobOutcome::Completed {}
-            },
-            successors: vec![],
-        };
-        queue.settle(&authority, &settlement).await.unwrap();
-        if release {
+            }
+        })
+        .await
+        .expect("a deliverable job");
+        if job.released_deployment().is_some() {
             return job;
         }
     }
