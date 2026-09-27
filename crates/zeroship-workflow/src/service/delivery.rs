@@ -13,11 +13,15 @@ use super::{
     publication,
     store::{Row, Transaction},
     tasks::{self, ReadyClaim},
+    types::TaskToken,
     AppWorkflows, ControlIntent, TaskAssignment, WorkerIdentity,
 };
 use crate::{WorkflowExecution, WorkflowServiceError};
 use serde::{Deserialize, Serialize};
-use std::time::{Duration, Instant};
+use std::{
+    num::NonZeroU64,
+    time::{Duration, Instant},
+};
 use zeroship_core::{
     app_id::AppId,
     workflow_jobs::{Delivery, JobLease, JobOperation, JobOutcome, JobSpec, Settlement},
@@ -90,6 +94,26 @@ pub enum JobAcceptance {
     Deferred,
 }
 
+/// What the journal needs to act on a task its holder already has: which task,
+/// proof of holding it, the delivery it was handed under, and how much creator
+/// authority the holder still measures.
+///
+/// [`DeliveredTask`] is the holder's own copy and carries the invocation it
+/// replays as well; the journal never reads that, and a holder reaching the
+/// journal over a wire must not send a run's whole replay history back on every
+/// heartbeat. So the journal takes this projection, which [`TaskClaim`] also
+/// satisfies from a decoded reference.
+pub trait TaskGrant {
+    fn task_id(&self) -> &str;
+    fn task_token(&self) -> &TaskToken;
+    fn delivery(&self) -> &Delivery;
+    /// Creator authority left on the holder's monotonic clock.
+    ///
+    /// # Errors
+    /// Refuses execution or renewal at or after the confirmed expiration.
+    fn granted(&self) -> Result<Duration, WorkflowServiceError>;
+}
+
 /// Creator execution authority with its original monotonic expiration.
 /// The executor also enforces its separate hard execution budget.
 #[derive(Debug, Clone)]
@@ -115,11 +139,199 @@ impl DeliveredTask {
     /// monotonic expiration derived from them take effect together, so no
     /// caller can extend the stored deadline without the expiration that
     /// bounds execution under it.
+    ///
+    /// A renewal that extended nothing changes nothing here: the control intent
+    /// it carries is the whole of its answer.
     pub fn renew(&mut self, renewal: TaskRenewal) {
-        self.delivery = renewal.delivery;
-        self.expires = renewal.expires;
-        self.assignment.deadline = renewal.deadline;
-        self.assignment.lease_ms = renewal.lease_ms;
+        let Some(extended) = renewal.extended else {
+            return;
+        };
+        self.delivery = extended.delivery;
+        self.expires = extended.expires;
+        self.assignment.deadline = extended.deadline;
+        self.assignment.lease_ms = extended.lease_ms;
+    }
+
+    /// Rebuild the task a merged claim reply describes, anchoring its creator
+    /// authority to the instant the caller started the request.
+    ///
+    /// The delivery comes from the manager half of the same reply rather than
+    /// from the journal half: one exchange grants one delivery, and letting the
+    /// journal half name a second one would admit a reply whose two halves
+    /// disagree about which attempt was accepted.
+    ///
+    /// # Errors
+    /// Refuses authority already exhausted by transport delay, and an
+    /// expiration outside the representable monotonic range.
+    pub fn received(
+        assignment: TaskAssignment,
+        delivery: Delivery,
+        remaining_ms: NonZeroU64,
+        started: Instant,
+    ) -> Result<Self, WorkflowServiceError> {
+        let task = Self {
+            assignment,
+            delivery,
+            expires: anchor(remaining_ms, started)?,
+        };
+        task.remaining()?;
+        Ok(task)
+    }
+
+    /// What this task reports to a journal that is not in this process.
+    ///
+    /// # Errors
+    /// Refuses a task whose creator authority has already expired.
+    pub fn reported(&self) -> Result<ClaimedTask, WorkflowServiceError> {
+        Ok(ClaimedTask {
+            id: self.assignment.id.clone(),
+            token: self.assignment.token.clone(),
+            remaining_ms: millis(self.remaining()?)?,
+        })
+    }
+}
+
+impl TaskGrant for DeliveredTask {
+    fn task_id(&self) -> &str {
+        &self.assignment.id
+    }
+    fn task_token(&self) -> &TaskToken {
+        &self.assignment.token
+    }
+    fn delivery(&self) -> &Delivery {
+        &self.delivery
+    }
+    fn granted(&self) -> Result<Duration, WorkflowServiceError> {
+        self.remaining()
+    }
+}
+
+/// A decoded [`ClaimedTask`] bound to the delivery that authorized it.
+///
+/// WHAT THE HOLDER ASSERTS AND WHAT THE JOURNAL PROVES. The remaining authority
+/// is the holder's own measurement, so a holder could name more of it than it
+/// has. It gains nothing by doing so: this bounds only how long the journal will
+/// spend on the holder's behalf, while whether the holder may act at all is
+/// decided inside the journal transaction against the stored task row - its
+/// token, its deadline and `authorize_task`'s comparison of that row against
+/// this delivery. Naming less of it is simply a shorter attempt.
+#[derive(Debug, Clone)]
+pub struct TaskClaim {
+    id: String,
+    token: TaskToken,
+    delivery: Delivery,
+    expires: Instant,
+}
+
+impl TaskClaim {
+    /// Bind a reported task reference to the delivery it arrived under.
+    ///
+    /// # Errors
+    /// Refuses authority already exhausted by transport delay, and an
+    /// expiration outside the representable monotonic range.
+    pub fn resume(
+        reported: ClaimedTask,
+        delivery: Delivery,
+        started: Instant,
+    ) -> Result<Self, WorkflowServiceError> {
+        let claim = Self {
+            id: reported.id,
+            token: reported.token,
+            delivery,
+            expires: anchor(reported.remaining_ms, started)?,
+        };
+        claim.granted()?;
+        Ok(claim)
+    }
+}
+
+impl TaskGrant for TaskClaim {
+    fn task_id(&self) -> &str {
+        &self.id
+    }
+    fn task_token(&self) -> &TaskToken {
+        &self.token
+    }
+    fn delivery(&self) -> &Delivery {
+        &self.delivery
+    }
+    fn granted(&self) -> Result<Duration, WorkflowServiceError> {
+        expires_in(self.expires)
+    }
+}
+
+/// How a holder names the live task it is renewing or completing.
+///
+/// It carries no delivery. The delivery rides the manager half of the same
+/// exchange, which is the half a server has already authenticated and matched
+/// against its own queue row.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ClaimedTask {
+    pub id: String,
+    pub token: TaskToken,
+    /// Creator authority the holder still measures, on its own monotonic clock.
+    pub remaining_ms: NonZeroU64,
+}
+
+/// What a journal acceptance answers to a holder that is not in its process.
+///
+/// `Execute` carries the assignment whole, because the holder replays it; the
+/// creator authority that bounds it crosses as a duration rather than as an
+/// instant, since two processes share no monotonic clock.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+pub enum AcceptedJob {
+    Execute {
+        assignment: Box<TaskAssignment>,
+        remaining_ms: NonZeroU64,
+    },
+    Settled {
+        receipt: Box<JobReceipt>,
+    },
+    Deferred {},
+}
+
+impl AcceptedJob {
+    /// Bind an acceptance to the delivery it arrived under.
+    ///
+    /// # Errors
+    /// Refuses creator authority exhausted by transport delay.
+    pub fn received(
+        self,
+        delivery: &Delivery,
+        started: Instant,
+    ) -> Result<JobAcceptance, WorkflowServiceError> {
+        match self {
+            Self::Execute {
+                assignment,
+                remaining_ms,
+            } => Ok(JobAcceptance::Execute(Box::new(DeliveredTask::received(
+                *assignment,
+                delivery.clone(),
+                remaining_ms,
+                started,
+            )?))),
+            Self::Settled { receipt } => Ok(JobAcceptance::Settled(receipt)),
+            Self::Deferred {} => Ok(JobAcceptance::Deferred),
+        }
+    }
+}
+
+impl JobAcceptance {
+    /// What this acceptance reports to a holder in another process.
+    ///
+    /// # Errors
+    /// Refuses a task whose creator authority expired before the reply was built.
+    pub fn reported(self) -> Result<AcceptedJob, WorkflowServiceError> {
+        match self {
+            Self::Execute(task) => Ok(AcceptedJob::Execute {
+                remaining_ms: millis(task.remaining()?)?,
+                assignment: Box::new(task.assignment),
+            }),
+            Self::Settled(receipt) => Ok(AcceptedJob::Settled { receipt }),
+            Self::Deferred => Ok(AcceptedJob::Deferred {}),
+        }
     }
 }
 
@@ -131,11 +343,18 @@ impl DeliveredTask {
 /// instead of crossing the reply on every heartbeat of a long step.
 #[derive(Debug, Clone)]
 pub struct TaskRenewal {
+    /// What the renewal extended, absent when admission or dispatch is off and
+    /// it extended nothing.
+    extended: Option<Extended>,
+    control: ControlIntent,
+}
+
+#[derive(Debug, Clone)]
+struct Extended {
     delivery: Delivery,
     expires: Instant,
     deadline: i64,
     lease_ms: i64,
-    control: ControlIntent,
 }
 
 impl TaskRenewal {
@@ -144,6 +363,97 @@ impl TaskRenewal {
     pub const fn control(&self) -> ControlIntent {
         self.control
     }
+
+    /// What this renewal reports to a holder in another process.
+    ///
+    /// # Errors
+    /// Refuses an extension whose authority expired before the reply was built.
+    pub fn reported(&self) -> Result<RenewedTask, WorkflowServiceError> {
+        Ok(RenewedTask {
+            extended: self
+                .extended
+                .as_ref()
+                .map(|extended| -> Result<ExtendedTask, WorkflowServiceError> {
+                    Ok(ExtendedTask {
+                        deadline: extended.deadline,
+                        lease_ms: extended.lease_ms,
+                        remaining_ms: millis(expires_in(extended.expires)?)?,
+                    })
+                })
+                .transpose()?,
+            control: self.control,
+        })
+    }
+}
+
+/// What a journal renewal answers over a wire.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RenewedTask {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extended: Option<ExtendedTask>,
+    pub control: ControlIntent,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExtendedTask {
+    pub deadline: i64,
+    pub lease_ms: i64,
+    pub remaining_ms: NonZeroU64,
+}
+
+impl RenewedTask {
+    /// Bind a renewal to the delivery the same reply granted.
+    ///
+    /// # Errors
+    /// Refuses an extension exhausted by transport delay.
+    pub fn received(
+        self,
+        delivery: &Delivery,
+        started: Instant,
+    ) -> Result<TaskRenewal, WorkflowServiceError> {
+        Ok(TaskRenewal {
+            extended: self
+                .extended
+                .map(|extended| -> Result<Extended, WorkflowServiceError> {
+                    Ok(Extended {
+                        delivery: delivery.clone(),
+                        expires: anchor(extended.remaining_ms, started)?,
+                        deadline: extended.deadline,
+                        lease_ms: extended.lease_ms,
+                    })
+                })
+                .transpose()?,
+            control: self.control,
+        })
+    }
+}
+
+/// What a holder reports for the journal half of a merged settlement: the task
+/// it held and the batch its executor produced.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReportedExecution {
+    pub task: ClaimedTask,
+    pub execution: WorkflowExecution,
+}
+
+/// Re-anchor a remaining duration onto this process's monotonic clock.
+///
+/// The anchor is when the caller STARTED its request, so the transport delay is
+/// charged against the authority rather than added to it.
+fn anchor(remaining_ms: NonZeroU64, started: Instant) -> Result<Instant, WorkflowServiceError> {
+    started
+        .checked_add(Duration::from_millis(remaining_ms.get()))
+        .ok_or(WorkflowServiceError::Timeout)
+}
+
+fn millis(remaining: Duration) -> Result<NonZeroU64, WorkflowServiceError> {
+    u64::try_from(remaining.as_millis())
+        .ok()
+        .and_then(NonZeroU64::new)
+        .ok_or(WorkflowServiceError::Timeout)
 }
 
 /// Creator authority left on the monotonic clock.
@@ -463,36 +773,28 @@ impl AppWorkflows {
     /// Refuses stale task/delivery identity, expired authority and storage errors.
     pub async fn heartbeat_job(
         &self,
-        task: &DeliveredTask,
+        task: &impl TaskGrant,
         grant: &impl JobLease,
     ) -> Result<TaskRenewal, WorkflowServiceError> {
-        let delivery = self.task_delivery(task, grant)?;
-        task.remaining()?;
+        let delivery = self.grant_delivery(task, grant)?;
+        task.granted()?;
         let lease = CapturedLease::capture(self, grant)?;
-        let budget = attempt_budget(Some(&lease), Some(task));
+        let budget = attempt_budget(Some(&lease), Some(task as &dyn TaskGrant));
         run_attempt(Some(lease.cancelled()), budget, async {
             let worker = WorkerIdentity::new(delivery.worker_id.as_str().into())?;
             let mut tx = self.service.begin().await?;
-            let claim = tasks::authorized_task(
-                &mut tx,
-                &worker,
-                &task.assignment.id,
-                &task.assignment.token,
-            )
-            .await?;
+            let claim =
+                tasks::authorized_task(&mut tx, &worker, task.task_id(), task.task_token()).await?;
             authorize_task(&claim, &delivery)?;
             claim.validate_live()?;
             lease.check(self)?;
-            task.remaining()?;
+            task.granted()?;
             let control =
                 super::propagation::effective_control(&tx, &claim.app, &claim.run).await?;
             if !lease.policy.policy.admission || !lease.policy.policy.dispatch {
                 tx.commit().await?;
                 return Ok(TaskRenewal {
-                    delivery: task.delivery.clone(),
-                    expires: task.expires,
-                    deadline: task.assignment.deadline,
-                    lease_ms: task.assignment.lease_ms,
+                    extended: None,
                     control: if control == ControlIntent::None {
                         ControlIntent::Pause
                     } else {
@@ -509,16 +811,18 @@ impl AppWorkflows {
             let expires = creator_deadline(&mut tx, deadline, lease.expires).await?;
             claim.validate_at(tx.now().await?)?;
             lease.check(self)?;
-            task.remaining()?;
+            task.granted()?;
             tx.commit().await?;
             lease.check(self)?;
-            task.remaining()?;
+            task.granted()?;
             expires_in(expires)?;
             Ok(TaskRenewal {
-                delivery,
-                expires,
-                deadline,
-                lease_ms,
+                extended: Some(Extended {
+                    delivery,
+                    expires,
+                    deadline,
+                    lease_ms,
+                }),
                 control,
             })
         })
@@ -533,13 +837,13 @@ impl AppWorkflows {
     /// invalid checkpoints and creator storage failures.
     pub async fn complete_job(
         &self,
-        task: &DeliveredTask,
+        task: &impl TaskGrant,
         grant: &impl JobLease,
         execution: WorkflowExecution,
     ) -> Result<JobReceipt, WorkflowServiceError> {
-        let delivery = self.task_delivery(task, grant)?;
+        let delivery = self.grant_delivery(task, grant)?;
         let captured = CapturedLease::capture(self, grant);
-        let budget = attempt_budget(captured.as_ref().ok(), Some(task));
+        let budget = attempt_budget(captured.as_ref().ok(), Some(task as &dyn TaskGrant));
         run_attempt(
             captured.as_ref().ok().map(CapturedLease::cancelled),
             budget,
@@ -547,13 +851,8 @@ impl AppWorkflows {
                 let worker = WorkerIdentity::new(delivery.worker_id.as_str().into())?;
                 let digest = super::types::digest(&execution)?;
                 let mut tx = self.service.begin().await?;
-                let claim = tasks::inspect_task(
-                    &mut tx,
-                    &worker,
-                    &task.assignment.id,
-                    &task.assignment.token,
-                )
-                .await?;
+                let claim =
+                    tasks::inspect_task(&mut tx, &worker, task.task_id(), task.task_token()).await?;
                 authorize_task(&claim, &delivery)?;
                 if claim.task.state == "completed" {
                     if claim.task.completion_digest.as_deref() != Some(&digest) {
@@ -569,7 +868,7 @@ impl AppWorkflows {
                 }
                 let lease = captured?;
                 lease.check(self)?;
-                task.remaining()?;
+                task.granted()?;
                 claim.validate_live()?;
                 let claim = claim.authorize(&mut tx)?;
                 let completion = tasks::complete_in(&mut tx, &claim, execution, &digest).await?;
@@ -581,7 +880,7 @@ impl AppWorkflows {
                 let receipt = finish(&tx, &delivery.job, outcome, claim.now).await?;
                 claim.validate_at(tx.now().await?)?;
                 lease.check(self)?;
-                task.remaining()?;
+                task.granted()?;
                 tx.commit().await?;
                 Ok(receipt)
             }),
@@ -596,25 +895,20 @@ impl AppWorkflows {
     /// Refuses changed delivery, expired authority, stale tasks and storage errors.
     pub async fn release_job(
         &self,
-        task: &DeliveredTask,
+        task: &impl TaskGrant,
         grant: &impl JobLease,
     ) -> Result<(), WorkflowServiceError> {
-        let delivery = self.task_delivery(task, grant)?;
+        let delivery = self.grant_delivery(task, grant)?;
         let captured = CapturedLease::capture(self, grant);
-        let budget = attempt_budget(captured.as_ref().ok(), Some(task));
+        let budget = attempt_budget(captured.as_ref().ok(), Some(task as &dyn TaskGrant));
         run_attempt(
             captured.as_ref().ok().map(CapturedLease::cancelled),
             budget,
             async {
                 let worker = WorkerIdentity::new(delivery.worker_id.as_str().into())?;
                 let mut tx = self.service.begin().await?;
-                let claim = tasks::inspect_task(
-                    &mut tx,
-                    &worker,
-                    &task.assignment.id,
-                    &task.assignment.token,
-                )
-                .await?;
+                let claim =
+                    tasks::inspect_task(&mut tx, &worker, task.task_id(), task.task_token()).await?;
                 authorize_task(&claim, &delivery)?;
                 if claim.task.state == "released" {
                     tx.commit().await?;
@@ -622,7 +916,7 @@ impl AppWorkflows {
                 }
                 let lease = captured?;
                 lease.check(self)?;
-                task.remaining()?;
+                task.granted()?;
                 claim.validate_live()?;
                 let claim = claim.authorize(&mut tx)?;
                 claim
@@ -631,24 +925,35 @@ impl AppWorkflows {
                 claim.update_run(&tx, value!({"due_at":claim.now})).await?;
                 claim.validate_at(tx.now().await?)?;
                 lease.check(self)?;
-                task.remaining()?;
+                task.granted()?;
                 tx.commit().await
             },
         )
         .await
     }
 
-    fn task_delivery(
+    /// The delivery this grant authorizes, proved to be the one the holder's
+    /// task was handed under.
+    ///
+    /// WHERE THE REAL PROOF IS. This compares two objects the holder supplied,
+    /// so a holder whose task and grant arrive in one reply satisfies it by
+    /// construction. What refuses a task that does not belong to this delivery
+    /// is `authorize_task`, inside the journal transaction, against the STORED
+    /// row: its job id, delivery attempt, assignment revision, run, generation
+    /// and frontier revision. This check keeps a caller holding two live
+    /// deliveries at once from pairing one's task with the other's grant.
+    fn grant_delivery(
         &self,
-        task: &DeliveredTask,
+        task: &impl TaskGrant,
         lease: &impl JobLease,
     ) -> Result<Delivery, WorkflowServiceError> {
         let delivery = lease.delivery();
         check_scope(&self.app, &delivery.job)?;
-        if delivery.job != task.delivery.job
-            || delivery.worker_id != task.delivery.worker_id
-            || delivery.assignment_revision != task.delivery.assignment_revision
-            || delivery.attempt != task.delivery.attempt
+        let held = task.delivery();
+        if delivery.job != held.job
+            || delivery.worker_id != held.worker_id
+            || delivery.assignment_revision != held.assignment_revision
+            || delivery.attempt != held.attempt
         {
             return Err(conflict());
         }
@@ -822,7 +1127,7 @@ pub(super) const ATTEMPT_IO_CEILING: Duration = Duration::from_secs(5);
 // COMMIT wait. Expired attempts can only reach the bounded receipt branches.
 pub(super) fn attempt_budget(
     lease: Option<&CapturedLease>,
-    task: Option<&DeliveredTask>,
+    task: Option<&dyn TaskGrant>,
 ) -> Duration {
     let Some(lease) = lease else {
         return ATTEMPT_IO_CEILING;
@@ -831,7 +1136,7 @@ pub(super) fn attempt_budget(
     task.map_or_else(
         || ATTEMPT_IO_CEILING.min(remaining),
         |task| {
-            task.remaining().map_or(ATTEMPT_IO_CEILING, |task| {
+            task.granted().map_or(ATTEMPT_IO_CEILING, |task| {
                 ATTEMPT_IO_CEILING.min(remaining).min(task)
             })
         },

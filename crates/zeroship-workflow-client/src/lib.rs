@@ -8,6 +8,7 @@
 mod app_facts;
 mod control;
 mod jobs;
+mod journal;
 mod policy;
 mod queue_holds;
 mod schema_bundles;
@@ -15,7 +16,11 @@ mod transport;
 
 pub use app_facts::ControlAppFacts;
 pub use control::ControlCoordinator;
-pub use jobs::LeasedJob;
+pub use jobs::{ClaimedJob, LeasedJob, RenewedJob, SettledJob};
+pub use journal::{
+    ClaimedDelivery, Exclusive, JobJournal, RenewDelivery, RenewedDelivery, Reported,
+    SettleDelivery, SettledDelivery,
+};
 pub use policy::LeasedPolicy;
 pub use queue_holds::QueueDeploymentHolds;
 pub use schema_bundles::{SchemaBundles, MAX_BUNDLE_BYTES};
@@ -42,6 +47,11 @@ use zeroship_core::{
 pub struct Options {
     pub timeout: Duration,
     pub max_request_bytes: usize,
+    /// Bound for a request whose body carries a JOURNAL quantity rather than a
+    /// creator input: a settlement reporting an outcome batch. That batch has to
+    /// fit the run's replay journal, so it answers to `max_journal_bytes` and
+    /// not to `max_input_bytes`, which governs one value at a time.
+    pub max_journal_request_bytes: usize,
     pub max_response_bytes: usize,
     /// Origins an operator named as reachable in clear. Empty by default, and
     /// the default is the whole deployment that configures nothing: the fence
@@ -60,6 +70,7 @@ impl Default for Options {
         Self {
             timeout: Duration::from_secs(5),
             max_request_bytes: MAX_INPUT_BYTES_CEILING,
+            max_journal_request_bytes: MAX_JOURNAL_BYTES_CEILING,
             max_response_bytes: MAX_JOURNAL_BYTES_CEILING,
             plaintext_peers: PlaintextPeers::default(),
         }
