@@ -590,6 +590,35 @@ fn executable_prerequisites_belong_only_to_operations_that_require_code() {
     assert!(executable && journal_only);
 }
 
+/// One operation kind hands its claimant a task; every other is maintenance the
+/// journal settles from the delivery alone.
+///
+/// This is the rule a merged claim reply's producers and consumers all read, so
+/// it is asserted over the whole enumeration rather than trusted to one caller's
+/// match. Both sides are counted, because a rule that answered the same way for
+/// every kind would satisfy any one-sided assertion and tell a reader nothing.
+#[test]
+fn one_operation_kind_accepts_execution_and_every_other_is_maintenance() {
+    let mut executable = Vec::new();
+    let mut maintenance = Vec::new();
+    for (operation, wire) in operations() {
+        let kind = wire["kind"].as_str().unwrap().to_owned();
+        if operation.accepts_execution() {
+            executable.push(kind);
+        } else {
+            maintenance.push(kind);
+        }
+    }
+    assert!(
+        !executable.is_empty() && executable.iter().all(|kind| kind == "advance"),
+        "only an advance hands out a task: {executable:?}"
+    );
+    assert!(
+        maintenance.len() > 1 && maintenance.iter().all(|kind| kind != "advance"),
+        "every other kind is maintenance, and there is more than one: {maintenance:?}"
+    );
+}
+
 #[test]
 fn management_commands_reject_ambiguous_targets_and_extra_authority() {
     let mut saw_management = false;
