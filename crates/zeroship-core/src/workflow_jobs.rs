@@ -146,6 +146,20 @@ pub struct JobSpec {
     pub available_at: UnixMillis,
 }
 
+impl JobOperation {
+    /// Whether claiming this operation hands its holder a task to execute.
+    ///
+    /// One kind does. Every other is maintenance, which the journal settles from
+    /// the delivery alone with no task and no executor. A merged claim reply
+    /// therefore carries a journal acceptance for exactly this kind, and the
+    /// producers and consumers of that reply all read the rule from here rather
+    /// than each restating it.
+    #[must_use]
+    pub const fn accepts_execution(&self) -> bool {
+        matches!(self, Self::Advance { .. })
+    }
+}
+
 impl JobSpec {
     /// The operation's executable prerequisite, if it has one. Journal-only
     /// operations must remain deliverable without acquiring a deployment hold.

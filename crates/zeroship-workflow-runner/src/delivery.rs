@@ -8,12 +8,15 @@
 use crate::{CancelOnDrop, ExecutionGuard, PayloadObjects, TaskExecution, TaskExecutor};
 use zeroship_workflow::{
     service::{
-        delivery::{DeliveredTask, JobAcceptance, JobReceipt},
+        delivery::{
+            AcceptedJob, ClaimedTask, DeliveredTask, JobAcceptance, JobReceipt, RenewedTask,
+            ReportedExecution, TaskRenewal,
+        },
         maintenance::{MaintenanceOptions, MaintenanceOutcome},
         publication::JobPublisher,
         AppWorkflows, ControlIntent, PolicyAuthority,
     },
-    WorkflowServiceError,
+    WorkflowExecution, WorkflowServiceError,
 };
 use futures::{future::Either, FutureExt};
 use std::{
@@ -26,17 +29,28 @@ use zeroship_core::{
     workflow_coordination::{AssignedScope, FailureCode},
     workflow_jobs::{Delivery, JobLease, JobSpec, Settlement, SettlementReceipt, SubmitJob},
 };
-use zeroship_workflow_client::{LeasedJob, WorkerCoordinator};
+use zeroship_workflow_client::{JobJournal, LeasedJob, WorkerCoordinator};
 
-/// Metadata operations supplied by the host; no creator data crosses this port.
+/// One delivery exchange, whose two halves are the manager's queue and the
+/// app's journal.
+///
+/// EACH OPERATION CARRIES BOTH HALVES OR NEITHER. A claim answers a lease and
+/// the acceptance that authorizes executing under it; a renewal extends the
+/// queue lease and the journal task together; a settlement commits the
+/// execution and settles the delivery with what that commit decided. An
+/// implementation either performs both halves in this process or sends one
+/// request that does, and the journal it acts on arrives as an argument -- this
+/// port grants no journal capability of its own.
+///
 /// Implementations preserve authenticated lease identity and monotonic expiry.
 pub trait JobTransport {
     type Lease: JobLease + Clone;
 
     fn claim(
         &self,
+        journal: &AppWorkflows,
         scope: &AssignedScope,
-    ) -> impl Future<Output = Result<Option<Self::Lease>, WorkflowServiceError>>;
+    ) -> impl Future<Output = Result<Option<Claimed<Self::Lease>>, WorkflowServiceError>>;
     fn submit(
         &self,
         scope: &AssignedScope,
@@ -44,12 +58,62 @@ pub trait JobTransport {
     ) -> impl Future<Output = Result<JobSpec, WorkflowServiceError>>;
     fn heartbeat(
         &self,
+        journal: &AppWorkflows,
         lease: &Self::Lease,
-    ) -> impl Future<Output = Result<Self::Lease, WorkflowServiceError>>;
+        task: &DeliveredTask,
+    ) -> impl Future<Output = Result<Renewed<Self::Lease>, WorkflowServiceError>>;
+    /// Settle an outcome the journal has already committed. The receipt is the
+    /// caller's, so no journal half rides this one.
     fn settle(
         &self,
         settlement: &Settlement,
     ) -> impl Future<Output = Result<SettlementReceipt, WorkflowServiceError>>;
+    fn complete(
+        &self,
+        journal: &AppWorkflows,
+        lease: &Self::Lease,
+        task: &DeliveredTask,
+        execution: WorkflowExecution,
+    ) -> impl Future<Output = Result<Completed, WorkflowServiceError>>;
+}
+
+/// A claimed delivery and the journal acceptance that rode with it.
+#[derive(Debug)]
+pub struct Claimed<L> {
+    pub lease: L,
+    /// Absent for the maintenance operations, which the journal settles from the
+    /// lease alone with no task and no executor.
+    pub accepted: Option<JobAcceptance>,
+}
+
+/// A renewed delivery and the journal renewal that rode with it.
+#[derive(Debug)]
+pub struct Renewed<L> {
+    pub lease: L,
+    pub renewal: TaskRenewal,
+}
+
+/// A committed execution and the settlement its outcome produced.
+#[derive(Debug)]
+pub struct Completed {
+    pub receipt: JobReceipt,
+    pub settlement: SettlementReceipt,
+}
+
+/// The journal payloads [`AppWorkflows`] exchanges over the client's port.
+///
+/// The impl lives here rather than in the client because the client must not
+/// name these types, and it names a marker of this crate rather than
+/// `AppWorkflows` itself because the trait and that type are both foreign here.
+#[derive(Debug)]
+pub struct AppJournal;
+
+impl JobJournal for AppJournal {
+    type Claim = ClaimedTask;
+    type Acceptance = AcceptedJob;
+    type Renewal = RenewedTask;
+    type Execution = ReportedExecution;
+    type Receipt = JobReceipt;
 }
 
 impl JobTransport for WorkerCoordinator {
@@ -70,19 +134,85 @@ impl JobTransport for WorkerCoordinator {
 
     async fn claim(
         &self,
+        // The journal these deliveries are accepted into is the coordinator's,
+        // at the far end of this call. A host that reaches the manager over HTTP
+        // holds no credential to it, which is what merging the halves is for.
+        _journal: &AppWorkflows,
         scope: &AssignedScope,
-    ) -> Result<Option<Self::Lease>, WorkflowServiceError> {
-        self.claim_job(scope).await.map_err(metadata_error)
+    ) -> Result<Option<Claimed<Self::Lease>>, WorkflowServiceError> {
+        let claimed = self
+            .claim_job::<AppJournal>(scope)
+            .await
+            .map_err(metadata_error)?;
+        claimed
+            .map(|claimed| {
+                Ok(Claimed {
+                    accepted: claimed
+                        .accepted
+                        .map(|accepted| {
+                            accepted.received(claimed.lease.delivery(), claimed.started)
+                        })
+                        .transpose()?,
+                    lease: claimed.lease,
+                })
+            })
+            .transpose()
     }
-    async fn heartbeat(&self, lease: &Self::Lease) -> Result<Self::Lease, WorkflowServiceError> {
-        self.heartbeat_job(lease).await.map_err(metadata_error)
+
+    async fn heartbeat(
+        &self,
+        _journal: &AppWorkflows,
+        lease: &Self::Lease,
+        task: &DeliveredTask,
+    ) -> Result<Renewed<Self::Lease>, WorkflowServiceError> {
+        let renewed = self
+            .heartbeat_job::<AppJournal>(lease, Some(&task.reported()?))
+            .await
+            .map_err(metadata_error)?;
+        let renewal = renewed
+            .renewal
+            .ok_or_else(|| lossy("renewal"))?
+            .received(renewed.lease.delivery(), renewed.started)?;
+        Ok(Renewed {
+            lease: renewed.lease,
+            renewal,
+        })
     }
+
     async fn settle(
         &self,
         settlement: &Settlement,
     ) -> Result<SettlementReceipt, WorkflowServiceError> {
         self.settle_job(settlement).await.map_err(metadata_error)
     }
+
+    async fn complete(
+        &self,
+        _journal: &AppWorkflows,
+        lease: &Self::Lease,
+        task: &DeliveredTask,
+        execution: WorkflowExecution,
+    ) -> Result<Completed, WorkflowServiceError> {
+        let settled = self
+            .settle_execution::<AppJournal>(
+                lease.delivery(),
+                &ReportedExecution {
+                    task: task.reported()?,
+                    execution,
+                },
+            )
+            .await
+            .map_err(metadata_error)?;
+        Ok(Completed {
+            receipt: settled.receipt,
+            settlement: settled.settlement,
+        })
+    }
+}
+
+/// A merged reply arrived without the half its request asked for.
+fn lossy(half: &str) -> WorkflowServiceError {
+    WorkflowServiceError::Unavailable(format!("workflow delivery reply carried no {half}").into())
 }
 
 /// Execution and finalization have separate bounds; renewal never resets either.
@@ -219,8 +349,9 @@ impl<T: JobTransport> DeliverySlot<T> {
     pub async fn run(
         &mut self,
         app: &AppWorkflows,
-        lease: T::Lease,
+        claimed: Claimed<T::Lease>,
     ) -> Result<DeliveryOutcome, WorkflowServiceError> {
+        let Claimed { lease, accepted } = claimed;
         self.drain_interrupted().await;
         let publisher = Submission {
             transport: self.transport.as_ref(),
@@ -248,7 +379,11 @@ impl<T: JobTransport> DeliverySlot<T> {
             MaintenanceOutcome::Unclaimed => {}
         }
         let authority = app.captured_authority();
-        let accepted = app.accept_job(&lease).await?;
+        // The acceptance rode in with the claim. Maintenance answers `Unclaimed`
+        // only for the one operation the journal accepts execution for, so a
+        // claim that reaches here and carried none is a transport that dropped
+        // half of its own reply.
+        let accepted = accepted.ok_or_else(|| lossy("journal acceptance"))?;
         let task = match accepted {
             JobAcceptance::Deferred => return Ok(DeliveryOutcome::Deferred),
             JobAcceptance::Settled(receipt) => return self.acknowledge(*receipt, &lease).await,
@@ -329,7 +464,11 @@ impl<T: JobTransport> DeliverySlot<T> {
         let lease = active.claims.borrow().lease.clone();
         self.active = None;
         match result? {
-            ExecutionResult::Complete(receipt) => self.acknowledge(*receipt, &lease).await,
+            ExecutionResult::Settled(completed) => Ok(DeliveryOutcome::Settled {
+                creator: Box::new(completed.receipt),
+                manager: completed.settlement,
+            }),
+            ExecutionResult::Recovered(receipt) => self.acknowledge(*receipt, &lease).await,
             ExecutionResult::Interrupted(control) => Ok(DeliveryOutcome::Interrupted(control)),
         }
     }
@@ -390,7 +529,11 @@ impl<T: JobTransport> JobPublisher for Submission<'_, T> {
 }
 
 enum ExecutionResult {
-    Complete(Box<JobReceipt>),
+    /// The execution committed and its outcome settled the delivery, in one
+    /// exchange.
+    Settled(Box<Completed>),
+    /// A receipt the journal already holds, whose manager half is still open.
+    Recovered(Box<JobReceipt>),
     Interrupted(ControlIntent),
 }
 
@@ -402,6 +545,7 @@ async fn run_active<T: JobTransport>(
     let execution = CancelOnDrop(active.execution.as_mut());
     let result = {
         let work = execute(
+            transport,
             &active.app,
             &active.claims,
             execution.0,
@@ -435,12 +579,12 @@ async fn run_active<T: JobTransport>(
     active.guard.finish();
     execution.0.stop().await;
     let lease = active.claims.borrow().lease.clone();
-    let result = match result {
-        Ok(Ok(receipt)) => Ok(receipt),
+    match result {
+        Ok(Ok(completed)) => Ok(ExecutionResult::Settled(Box::new(completed))),
         Ok(Err(error)) | Err(Err(error)) => {
             if let Ok(Some(receipt)) = recover(&active.app, &lease, options.operation_timeout).await
             {
-                Ok(receipt)
+                Ok(ExecutionResult::Recovered(Box::new(receipt)))
             } else {
                 let task = active.claims.borrow().task.clone();
                 release(&active.app, &task, &lease, options.operation_timeout).await;
@@ -450,15 +594,14 @@ async fn run_active<T: JobTransport>(
         Err(Ok(control)) => {
             if let Ok(Some(receipt)) = recover(&active.app, &lease, options.operation_timeout).await
             {
-                Ok(receipt)
+                Ok(ExecutionResult::Recovered(Box::new(receipt)))
             } else {
                 let task = active.claims.borrow().task.clone();
                 release(&active.app, &task, &lease, options.operation_timeout).await;
-                return Ok(ExecutionResult::Interrupted(control));
+                Ok(ExecutionResult::Interrupted(control))
             }
         }
-    };
-    result.map(|receipt| ExecutionResult::Complete(Box::new(receipt)))
+    }
 }
 
 fn snapshot<L: Clone>(claims: &RefCell<Claims<L>>) -> (DeliveredTask, L) {
@@ -486,6 +629,25 @@ fn constrain<L: JobLease>(
     guard.renew_lease(deadline)
 }
 
+/// Extend both leases until the run's control intent says to stop.
+///
+/// WHAT THE SPLIT PATH GUARDED HERE AND THIS ONE CANNOT. When the queue lease
+/// and the journal task were renewed by two calls, this function re-read the
+/// grant's remaining authority and the task's BETWEEN them, so a manager reply
+/// that arrived after either had lapsed on this process's clock was never
+/// followed by a journal write. Merged, the journal half has already committed at
+/// the far end before this function resumes, so a reply that slow is admitted
+/// rather than refused.
+///
+/// WHAT STILL REFUSES IT, AND WHERE. The lapse those reads caught is a lapse of
+/// the STORED deadlines, and both ends check their own: `heartbeat_authorized`
+/// refuses a queue row whose lease deadline has passed, and the journal's
+/// `CapturedLease::capture` refuses a grant with no remaining authority before
+/// it opens a transaction, then rechecks it around the commit. The narrow case
+/// the merge admits is one where this process's monotonic view of the grant had
+/// expired while the manager's stored deadline had not, which is transport delay
+/// inside the grant rather than past it. The pre-call reads below are what keep
+/// this side from ASKING in that state; they no longer gate the write.
 async fn renew<T: JobTransport>(
     transport: &T,
     app: &AppWorkflows,
@@ -502,19 +664,13 @@ async fn renew<T: JobTransport>(
             .min(options.operation_timeout)
             .min(phase.remaining()?);
         let (task, renewed, control) = bounded(timeout, async {
-            let renewed = transport.heartbeat(&original).await?;
-            if !same_delivery(original.delivery(), renewed.delivery()) {
+            let renewed = transport.heartbeat(app, &original, &task).await?;
+            if !same_delivery(original.delivery(), renewed.lease.delivery()) {
                 return Err(WorkflowServiceError::PermissionDenied);
             }
-            original
-                .remaining()
-                .filter(|remaining| !remaining.is_zero())
-                .ok_or(WorkflowServiceError::Timeout)?;
-            task.remaining()?;
-            let renewal = app.heartbeat_job(&task, &renewed).await?;
-            let control = renewal.control();
-            task.renew(renewal);
-            Ok((task, renewed, control))
+            let control = renewed.renewal.control();
+            task.renew(renewed.renewal);
+            Ok((task, renewed.lease, control))
         })
         .await?;
         *claims.borrow_mut() = Claims {
@@ -528,14 +684,15 @@ async fn renew<T: JobTransport>(
     }
 }
 
-async fn execute<L: JobLease + Clone>(
+async fn execute<T: JobTransport>(
+    transport: &T,
     app: &AppWorkflows,
-    claims: &RefCell<Claims<L>>,
+    claims: &RefCell<Claims<T::Lease>>,
     execution: &mut dyn TaskExecution,
     guard: &ExecutionGuard,
     phase: &Phase,
     options: DeliveryOptions,
-) -> Result<JobReceipt, WorkflowServiceError> {
+) -> Result<Completed, WorkflowServiceError> {
     // A resolved frontier describes effects that already reached the world, so
     // local expiry does not withdraw the right to publish it; the completion
     // loop below stays bounded by the phase deadline and the creator lease.
@@ -550,14 +707,27 @@ async fn execute<L: JobLease + Clone>(
     guard.finish();
     execution.stop().await;
     let outcome = result?;
+    // ONE BOUND, BECAUSE ONE CALL. The split path spent `operation_timeout` on
+    // the journal completion and then a second one on the manager settlement;
+    // merged there is a single exchange, so the phase deadline that `finalize`
+    // just set to `operation_timeout` bounds the whole of it. A retry that finds
+    // the journal already holds this attempt's receipt still has a manager half
+    // left to settle, and `acknowledge` is what carries that one on its own.
     bounded(phase.remaining()?, async {
         loop {
             let (task, lease) = snapshot(claims);
-            match app.complete_job(&task, &lease, outcome.clone()).await {
-                Ok(receipt) => return Ok(receipt),
+            match transport
+                .complete(app, &lease, &task, outcome.clone())
+                .await
+            {
+                Ok(completed) => return Ok(completed),
                 Err(error) if retryable(&error) => {
                     if let Ok(Some(receipt)) = app.job_receipt(&lease.delivery().job).await {
-                        return Ok(receipt);
+                        let settlement = receipt.settlement(&lease)?;
+                        return Ok(Completed {
+                            settlement: transport.settle(&settlement).await?,
+                            receipt,
+                        });
                     }
                     compio::time::sleep(options.retry_delay).await;
                 }

@@ -113,13 +113,14 @@ impl WorkerCoordinator {
                 if delivery.worker_id != self.worker_id
                     || delivery.job.app_id != scope.app_id
                     || delivery.assignment_revision != scope.assignment_revision
-                    || claimed.accepted.is_some() != executes(&delivery.job.operation)
+                    || claimed.accepted.is_some() != delivery.job.operation.accepts_execution()
                 {
                     return Err(Error::InvalidResponse);
                 }
                 Ok(ClaimedJob {
                     lease: LeasedJob::received(claimed.lease, started)?,
                     accepted: claimed.accepted,
+                    started,
                 })
             })
             .transpose()
@@ -177,6 +178,7 @@ impl WorkerCoordinator {
         Ok(RenewedJob {
             lease: LeasedJob::received(renewed.lease, started)?,
             renewal: renewed.renewal,
+            started,
         })
     }
 
@@ -289,6 +291,15 @@ impl WorkerCoordinator {
 pub struct ClaimedJob<A> {
     pub lease: LeasedJob,
     pub accepted: Option<A>,
+    /// When this exchange began, which is the anchor the lease's own expiration
+    /// was measured from.
+    ///
+    /// The journal half carries a remaining duration too, and it has to be
+    /// anchored HERE rather than on arrival: anchoring later would add the
+    /// transport delay to the authority instead of charging it, and anchoring it
+    /// somewhere else than the lease would leave one half of a single grant
+    /// outliving the other.
+    pub started: Instant,
 }
 
 /// A renewed delivery and the journal renewal that rode with it.
@@ -296,6 +307,8 @@ pub struct ClaimedJob<A> {
 pub struct RenewedJob<R> {
     pub lease: LeasedJob,
     pub renewal: Option<R>,
+    /// When this exchange began; see [`ClaimedJob::started`].
+    pub started: Instant,
 }
 
 /// A settled delivery and the journal receipt its execution committed.
@@ -303,15 +316,6 @@ pub struct RenewedJob<R> {
 pub struct SettledJob<R> {
     pub settlement: SettlementReceipt,
     pub receipt: R,
-}
-
-/// Whether the journal accepts execution for an operation, and so whether a
-/// claim of it carries an acceptance.
-///
-/// Every other kind is maintenance: the journal settles those itself, from the
-/// lease alone, with no task and no executor.
-const fn executes(operation: &JobOperation) -> bool {
-    matches!(operation, JobOperation::Advance { .. })
 }
 
 /// Workers publish only creator intents. Activation, calendar, management,

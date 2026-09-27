@@ -30,10 +30,10 @@ use zeroship_core::{
 };
 use zeroship_workflow::{
     deployment_holds::DeploymentHoldClient,
-    service::publication::JobPublisher,
-    WorkflowServiceError,
+    service::{delivery::DeliveredTask, publication::JobPublisher, AppWorkflows},
+    WorkflowExecution, WorkflowServiceError,
 };
-use zeroship_workflow_runner::delivery::JobTransport;
+use zeroship_workflow_runner::delivery::{Claimed, Completed, JobTransport, Renewed};
 use zeroship_workflow_manager::{
     capacity::LocalCapacity,
     coordinator::{Coordinator, Options as CoordinatorOptions, Placed},
@@ -674,13 +674,19 @@ pub struct LocalTransport {
 impl JobTransport for LocalTransport {
     type Lease = DeliveryGrant;
 
+    /// Both halves run here, in this process, against the journal handed in.
+    /// The manager commits first and the journal second, which is the order a
+    /// served claim keeps too: the queue must have counted the delivery before
+    /// anything accepts work under it.
     async fn claim(
         &self,
+        journal: &AppWorkflows,
         scope: &AssignedScope,
-    ) -> Result<Option<DeliveryGrant>, WorkflowServiceError> {
+    ) -> Result<Option<Claimed<DeliveryGrant>>, WorkflowServiceError> {
         let scope = scope.clone();
         let ceiling = self.max_delivery_attempts;
-        self.client
+        let granted = self
+            .client
             .call(move |manager| {
                 async move {
                     manager
@@ -693,7 +699,16 @@ impl JobTransport for LocalTransport {
                 }
                 .boxed_local()
             })
-            .await
+            .await?;
+        let Some(lease) = granted else {
+            return Ok(None);
+        };
+        let accepted = if lease.delivery().job.operation.accepts_execution() {
+            Some(journal.accept_job(&lease).await?)
+        } else {
+            None
+        };
+        Ok(Some(Claimed { lease, accepted }))
     }
 
     async fn submit(
@@ -706,10 +721,13 @@ impl JobTransport for LocalTransport {
 
     async fn heartbeat(
         &self,
+        journal: &AppWorkflows,
         lease: &DeliveryGrant,
-    ) -> Result<DeliveryGrant, WorkflowServiceError> {
+        task: &DeliveredTask,
+    ) -> Result<Renewed<DeliveryGrant>, WorkflowServiceError> {
         let delivery: Delivery = lease.delivery().clone();
-        self.client
+        let lease = self
+            .client
             .call(move |manager| {
                 async move {
                     manager
@@ -722,7 +740,9 @@ impl JobTransport for LocalTransport {
                 }
                 .boxed_local()
             })
-            .await
+            .await?;
+        let renewal = journal.heartbeat_job(task, &lease).await?;
+        Ok(Renewed { lease, renewal })
     }
 
     async fn settle(
@@ -749,6 +769,26 @@ impl JobTransport for LocalTransport {
         // outbox. A full channel already holds a pending wake.
         let _ = self.settled.try_send(());
         Ok(receipt)
+    }
+
+    /// The journal commits first here, because its commit is what decides the
+    /// outcome the queue is then settled with. Two stores and no shared
+    /// transaction, so a failure between them leaves the journal holding a
+    /// receipt whose delivery is unsettled -- which is what `job_receipt` and
+    /// the manager's settlement replay recover.
+    async fn complete(
+        &self,
+        journal: &AppWorkflows,
+        lease: &DeliveryGrant,
+        task: &DeliveredTask,
+        execution: WorkflowExecution,
+    ) -> Result<Completed, WorkflowServiceError> {
+        let receipt = journal.complete_job(task, lease, execution).await?;
+        let settlement = receipt.settlement(lease)?;
+        Ok(Completed {
+            settlement: JobTransport::settle(self, &settlement).await?,
+            receipt,
+        })
     }
 }
 

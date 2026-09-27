@@ -359,18 +359,18 @@ async fn run_slot<T: JobTransport>(
         };
         let scope = claim.0.clone();
         let cancelled = either_stop(shutdown.clone(), scope.stopped.clone());
-        let lease = stopped(
+        let claimed = stopped(
             cancelled.clone(),
             bounded(
                 options.delivery.operation_timeout,
-                transport.claim(&scope.binding.0.selection),
+                transport.claim(&scope.binding.0.app, &scope.binding.0.selection),
             ),
         )
         .await;
         drop(claim);
-        let lease = match lease {
+        let claimed = match claimed {
             None => continue,
-            Some(Ok(Some(lease))) => lease,
+            Some(Ok(Some(claimed))) => claimed,
             Some(Ok(None)) => {
                 scope.delay(options.idle_poll);
                 continue;
@@ -388,7 +388,7 @@ async fn run_slot<T: JobTransport>(
                 continue;
             }
         };
-        let delivery = lease.delivery();
+        let delivery = claimed.lease.delivery();
         if delivery.worker_id != *worker
             || delivery.job.app_id != scope.binding.0.selection.app_id
             || delivery.assignment_revision != scope.binding.0.selection.assignment_revision
@@ -400,7 +400,8 @@ async fn run_slot<T: JobTransport>(
         if scope.binding.is_retired() {
             continue;
         }
-        if lease
+        if claimed
+            .lease
             .remaining()
             .is_none_or(|remaining| remaining.is_zero())
         {
@@ -420,7 +421,7 @@ async fn run_slot<T: JobTransport>(
                 continue;
             }
         };
-        let result = stopped(cancelled, delivery_slot.run(&scope.binding.0.app, lease)).await;
+        let result = stopped(cancelled, delivery_slot.run(&scope.binding.0.app, claimed)).await;
         // Even a cancelled run with an unresponsive executor retains this slot.
         delivery_slot.drain_interrupted().await;
         match result {

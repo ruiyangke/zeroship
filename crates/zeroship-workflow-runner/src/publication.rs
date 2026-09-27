@@ -12,10 +12,10 @@
     reason = "publication runs on the host's compio thread"
 )]
 
-use crate::delivery::{bounded, JobTransport};
+use crate::delivery::{bounded, Claimed, Completed, JobTransport, Renewed};
 use zeroship_workflow::{
-    service::{publication::JobPublisher, AppWorkflows, CommitHint},
-    WorkflowServiceError,
+    service::{delivery::DeliveredTask, publication::JobPublisher, AppWorkflows, CommitHint},
+    WorkflowExecution, WorkflowServiceError,
 };
 use std::{
     collections::BTreeSet,
@@ -131,9 +131,10 @@ impl JobTransport for HostTransport {
 
     async fn claim(
         &self,
+        journal: &AppWorkflows,
         scope: &AssignedScope,
-    ) -> Result<Option<LeasedJob>, WorkflowServiceError> {
-        JobTransport::claim(&self.client, scope).await
+    ) -> Result<Option<Claimed<LeasedJob>>, WorkflowServiceError> {
+        JobTransport::claim(&self.client, journal, scope).await
     }
 
     async fn submit(
@@ -144,8 +145,13 @@ impl JobTransport for HostTransport {
         JobTransport::submit(&self.client, scope, job).await
     }
 
-    async fn heartbeat(&self, lease: &LeasedJob) -> Result<LeasedJob, WorkflowServiceError> {
-        JobTransport::heartbeat(&self.client, lease).await
+    async fn heartbeat(
+        &self,
+        journal: &AppWorkflows,
+        lease: &LeasedJob,
+        task: &DeliveredTask,
+    ) -> Result<Renewed<LeasedJob>, WorkflowServiceError> {
+        JobTransport::heartbeat(&self.client, journal, lease, task).await
     }
 
     async fn settle(
@@ -155,5 +161,18 @@ impl JobTransport for HostTransport {
         let receipt = JobTransport::settle(&self.client, settlement).await?;
         self.settled.mark(&settlement.delivery.job.app_id);
         Ok(receipt)
+    }
+
+    async fn complete(
+        &self,
+        journal: &AppWorkflows,
+        lease: &LeasedJob,
+        task: &DeliveredTask,
+        execution: WorkflowExecution,
+    ) -> Result<Completed, WorkflowServiceError> {
+        let completed =
+            JobTransport::complete(&self.client, journal, lease, task, execution).await?;
+        self.settled.mark(&lease.delivery().job.app_id);
+        Ok(completed)
     }
 }
