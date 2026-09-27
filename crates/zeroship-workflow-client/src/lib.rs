@@ -16,10 +16,10 @@ mod transport;
 
 pub use app_facts::ControlAppFacts;
 pub use control::ControlCoordinator;
-pub use jobs::{ClaimedJob, LeasedJob, RenewedJob, SettledJob};
+pub use jobs::{ClaimedJob, LeasedJob, RenewedJob};
 pub use journal::{
     ClaimedDelivery, Exclusive, JobJournal, RenewDelivery, RenewedDelivery, Reported,
-    SettleDelivery, SettledDelivery,
+    SettleDelivery,
 };
 pub use policy::LeasedPolicy;
 pub use queue_holds::QueueDeploymentHolds;

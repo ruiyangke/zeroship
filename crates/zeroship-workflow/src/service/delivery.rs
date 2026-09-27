@@ -405,6 +405,14 @@ impl TaskRenewal {
 }
 
 /// What a journal renewal answers over a wire.
+///
+/// WHO CAN MINT A RENEWAL, AND WHY THAT IS UNCHANGED. `TaskRenewal`'s fields stay
+/// private so that a renewal is the only way to advance a task's deadline, and
+/// [`Self::received`] is a second way to build one -- but it is in this crate,
+/// the journal's own, so the hosts that can mint a renewal are exactly the hosts
+/// that could already call `heartbeat_job`. What the shape avoids is publishing
+/// these types in `zeroship-core`, where every host that links core would gain
+/// that ability whether or not it holds a journal.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RenewedTask {
@@ -540,7 +548,6 @@ impl zeroship_workflow_client::JobJournal for AppJournal {
     type Acceptance = AcceptedJob;
     type Renewal = RenewedTask;
     type Execution = ReportedExecution;
-    type Receipt = JobReceipt;
 }
 
 /// Re-anchor a remaining duration onto this process's monotonic clock.

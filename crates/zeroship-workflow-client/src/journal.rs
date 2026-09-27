@@ -15,7 +15,7 @@
 //! identity bound would be a capability it never exercises.
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use zeroship_core::workflow_jobs::{Delivery, DeliveryLease, JobOutcome, JobSpec, SettlementReceipt};
+use zeroship_core::workflow_jobs::{Delivery, DeliveryLease, JobOutcome, JobSpec};
 
 /// The journal payloads one implementation's merged exchanges carry.
 ///
@@ -29,10 +29,9 @@ pub trait JobJournal {
     type Acceptance: DeserializeOwned;
     /// What a renewal's journal half answers.
     type Renewal: DeserializeOwned;
-    /// What a holder reports for the journal half of a settlement.
+    /// What a holder reports for the journal half of a settlement. Its reply
+    /// carries no journal half, for the reason recorded below `Exclusive`.
     type Execution: Serialize;
-    /// What that report's journal half answers.
-    type Receipt: DeserializeOwned;
 }
 
 /// A claimed delivery and, when the journal accepted the operation it names,
@@ -137,15 +136,15 @@ impl<C> SettleDelivery<C> {
 #[error("a settlement reports either a committed outcome or an execution, never both")]
 pub struct Exclusive;
 
-/// What one settlement answers: the queue receipt, and the journal receipt when
-/// the request carried an execution.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct SettledDelivery<R> {
-    pub settlement: SettlementReceipt,
-    #[serde(default = "absent", skip_serializing_if = "Option::is_none")]
-    pub receipt: Option<R>,
-}
+// A SETTLEMENT ANSWERS WITH ONE HALF, because the other adds nothing. The
+// journal's own receipt names the logical job and the outcome it committed, and
+// the queue receipt this endpoint already returns carries that same outcome --
+// the server derives the settlement FROM the receipt, so the two cannot
+// disagree. A caller therefore reconstructs the journal receipt from the
+// delivery it sent and the outcome it got back, and every field it holds is one
+// this client validated. Sending it instead would put a second copy on the wire
+// with no check to make against it, which is exactly the half a merged reply
+// must not acquire.
 
 /// `None`, named rather than derived: `#[serde(default)]` on a generic field
 /// makes the derive demand `Default` from the type parameter, which a journal

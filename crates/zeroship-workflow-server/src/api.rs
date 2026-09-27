@@ -28,6 +28,8 @@ use zeroship_core::{
     },
 };
 
+pub use jobs::SETTLE_BODY_BYTES;
+
 pub const DEFAULT_MAX_REQUEST_BYTES: usize = 64 * 1024;
 pub fn configure(config: &mut web::ServiceConfig) {
     configure_with_limit(config, DEFAULT_MAX_REQUEST_BYTES);

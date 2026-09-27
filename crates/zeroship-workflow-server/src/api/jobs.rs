@@ -19,7 +19,7 @@ use zeroship_workflow::{
     WorkflowServiceError,
 };
 use zeroship_workflow_client::{
-    ClaimedDelivery, RenewDelivery, RenewedDelivery, Reported, SettleDelivery, SettledDelivery,
+    ClaimedDelivery, RenewDelivery, RenewedDelivery, Reported, SettleDelivery,
 };
 use zeroship_workflow_manager::Error as NativeError;
 
@@ -184,12 +184,12 @@ async fn submit(
 /// Claim a delivery and, for the one operation that hands out a task, accept it
 /// into this service's journal under the grant just committed.
 ///
-/// THE QUEUE COMMITS FIRST. `claimed_in` counts the delivery inside the claim
-/// transaction, so an attempt that reaches creator code has already been counted
-/// against the app's delivery ceiling; accepting first would let a journal that
-/// handed out a task be followed by a queue rollback. The wire lease is taken
-/// LAST, after the journal work, so the authority the caller receives is what is
-/// actually left rather than what was left before this service did its own I/O.
+/// THE QUEUE COMMITS FIRST. The claim transaction numbers the attempt and opens
+/// the recovery responsibility an intent-producing job needs, so a journal that
+/// hands out a task is never followed by a queue rollback that would leave the
+/// task authorized by nothing. The wire lease is taken LAST, after the journal
+/// work, so the authority the caller receives is what is actually left rather
+/// than what was left before this service did its own I/O.
 ///
 /// TWO STORES, NO SHARED TRANSACTION. A failure between the halves leaves the
 /// queue holding a leased row whose journal accepted nothing; that row's lease
@@ -303,8 +303,8 @@ async fn settle(
             let actor = authenticate(&request, &state, endpoints::WORKFLOW_JOB_SETTLE).await?;
             let command: SettleDelivery<ReportedExecution> = read_json(&request, body).await?;
             match command.reported().map_err(|_| Error::Invalid)? {
-                Reported::Outcome(outcome) => Ok(SettledDelivery {
-                    settlement: settled(
+                Reported::Outcome(outcome) => {
+                    settled(
                         &state,
                         &actor,
                         &Settlement {
@@ -313,9 +313,8 @@ async fn settle(
                             successors: command.successors.clone(),
                         },
                     )
-                    .await?,
-                    receipt: None,
-                }),
+                    .await
+                }
                 Reported::Execution(reported) => {
                     let journal = journal(&state, &command.delivery.job.app_id).await?;
                     let grant = ReportedGrant::resume(
@@ -331,11 +330,12 @@ async fn settle(
                         .complete_job(&claim, &grant, reported.execution.clone())
                         .await
                         .map_err(journal_error)?;
+                    // The journal receipt does not cross back. Its two fields are
+                    // the logical job the caller sent and the outcome the
+                    // settlement receipt already carries, so a second copy would
+                    // be a half the caller has nothing to check it against.
                     let settlement = receipt.settlement(&grant).map_err(journal_error)?;
-                    Ok(SettledDelivery {
-                        settlement: settled(&state, &actor, &settlement).await?,
-                        receipt: Some(receipt),
-                    })
+                    settled(&state, &actor, &settlement).await
                 }
             }
         }

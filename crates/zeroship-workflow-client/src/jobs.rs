@@ -1,5 +1,5 @@
 use super::{
-    journal::{ClaimedDelivery, JobJournal, RenewDelivery, RenewedDelivery, SettleDelivery, SettledDelivery},
+    journal::{ClaimedDelivery, JobJournal, RenewDelivery, RenewedDelivery, SettleDelivery},
     Error, WorkerCoordinator,
 };
 use std::time::{Duration, Instant};
@@ -130,16 +130,14 @@ impl WorkerCoordinator {
     /// previously confirmed local authority is live. A late reply cannot
     /// reactivate an expired execution.
     ///
-    /// WHAT THE SPLIT PATH CHECKED HERE AND THIS ONE CANNOT. When these were two
-    /// calls, the caller re-read its grant's remaining authority BETWEEN them,
-    /// so a manager reply that arrived after the caller's own view of the grant
-    /// had lapsed was never followed by a journal write. Merged, the journal
-    /// half has already committed at the far end before this function resumes,
-    /// so that window is admitted rather than refused. What still refuses it,
-    /// one clock removed, is the manager's own `live` check on the stored lease
-    /// deadline and the journal's capture of the grant it was handed: a lapsed
-    /// delivery renews nothing at either end. The check below therefore reports
-    /// to the caller rather than guarding the write.
+    /// THE LOCAL AUTHORITY CHECK REPORTS; IT DOES NOT GATE. Both halves commit at
+    /// the far end before this function resumes, so a reply that arrives after
+    /// this process's own view of the grant has lapsed finds the journal already
+    /// renewed. What refuses a lapsed delivery is one clock removed: the
+    /// manager's `live` check against the stored lease deadline, and the
+    /// journal's capture of the grant it is handed, which refuses a grant with no
+    /// remaining authority before it opens a transaction. This side's reads bound
+    /// what it will ASK for.
     ///
     /// # Errors
     /// Refuses expired grants, another worker's delivery, failed exchanges, a
@@ -198,18 +196,18 @@ impl WorkerCoordinator {
             }
             worker_publication(successor)?;
         }
-        let settled: SettledDelivery<()> = self
-            .settle::<(), ()>(SettleDelivery {
+        let receipt = self
+            .settle::<()>(SettleDelivery {
                 delivery: request.delivery.clone(),
                 outcome: Some(request.outcome.clone()),
                 successors: request.successors.clone(),
                 execution: None,
             })
             .await?;
-        if settled.receipt.is_some() || settled.settlement.outcome != request.outcome {
+        if receipt.outcome != request.outcome {
             return Err(Error::InvalidResponse);
         }
-        self.settled(&request.delivery, settled.settlement)
+        self.settled(&request.delivery, receipt)
     }
 
     /// Commit an execution into the journal and settle the delivery with the
@@ -221,15 +219,15 @@ impl WorkerCoordinator {
     /// [`Self::settle_job`] instead.
     ///
     /// # Errors
-    /// Refuses another worker's delivery, failed exchanges, a settlement whose
-    /// receipt does not match the delivery sent, an outcome family the operation
-    /// does not admit, and a reply carrying no journal receipt.
+    /// Refuses another worker's delivery, failed exchanges, a receipt that does
+    /// not match the delivery sent, and an outcome family the operation does not
+    /// admit.
     pub async fn settle_execution<J: JobJournal>(
         &self,
         delivery: &Delivery,
         execution: &J::Execution,
-    ) -> Result<SettledJob<J::Receipt>, Error> {
-        let settled: SettledDelivery<J::Receipt> = self
+    ) -> Result<SettlementReceipt, Error> {
+        let receipt = self
             .settle(SettleDelivery {
                 delivery: delivery.clone(),
                 outcome: None,
@@ -237,20 +235,13 @@ impl WorkerCoordinator {
                 execution: Some(execution),
             })
             .await?;
-        let Some(receipt) = settled.receipt else {
-            return Err(Error::InvalidResponse);
-        };
-        if !settled
-            .settlement
-            .outcome
-            .valid_for(&delivery.job.operation)
-        {
+        // The outcome arrives rather than being sent, so it is checked against
+        // the operation it answers for: this is the one settlement shape where
+        // the caller cannot compare the reply to a value it chose.
+        if !receipt.outcome.valid_for(&delivery.job.operation) {
             return Err(Error::InvalidResponse);
         }
-        Ok(SettledJob {
-            settlement: self.settled(delivery, settled.settlement)?,
-            receipt,
-        })
+        self.settled(delivery, receipt)
     }
 
     /// The one bound-and-post both settlement shapes share.
@@ -259,10 +250,10 @@ impl WorkerCoordinator {
     /// it answers to `max_journal_request_bytes`. Every other exchange this
     /// client makes carries metadata or one creator input and answers to
     /// `max_request_bytes`.
-    async fn settle<C: serde::Serialize, R: serde::de::DeserializeOwned>(
+    async fn settle<C: serde::Serialize>(
         &self,
         request: SettleDelivery<C>,
-    ) -> Result<SettledDelivery<R>, Error> {
+    ) -> Result<SettlementReceipt, Error> {
         if request.delivery.worker_id != self.worker_id {
             return Err(denied());
         }
@@ -309,13 +300,6 @@ pub struct RenewedJob<R> {
     pub renewal: Option<R>,
     /// When this exchange began; see [`ClaimedJob::started`].
     pub started: Instant,
-}
-
-/// A settled delivery and the journal receipt its execution committed.
-#[derive(Clone, Debug)]
-pub struct SettledJob<R> {
-    pub settlement: SettlementReceipt,
-    pub receipt: R,
 }
 
 /// Workers publish only creator intents. Activation, calendar, management,

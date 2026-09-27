@@ -176,16 +176,25 @@ impl JobTransport for WorkerCoordinator {
         task: &DeliveredTask,
         execution: WorkflowExecution,
     ) -> Result<Completed, WorkflowServiceError> {
-        let settled = self
+        let settlement = self
             .settle_execution::<AppJournal>(
                 lease.delivery(),
                 &ReportedExecution::of(lease, task, execution)?,
             )
             .await
             .map_err(metadata_error)?;
+        // RECONSTRUCTED, NOT RECEIVED. The journal's own receipt is the logical
+        // job this call named and the outcome the journal committed, and the
+        // settlement receipt carries that outcome because the far end derived the
+        // settlement FROM the receipt. Both fields are ones this exchange already
+        // validated, so a second copy on the wire would be a half with nothing to
+        // check it against.
         Ok(Completed {
-            receipt: settled.receipt,
-            settlement: settled.settlement,
+            receipt: JobReceipt {
+                job: lease.delivery().job.clone(),
+                outcome: settlement.outcome.clone(),
+            },
+            settlement,
         })
     }
 }
@@ -611,23 +620,20 @@ fn constrain<L: JobLease>(
 
 /// Extend both leases until the run's control intent says to stop.
 ///
-/// WHAT THE SPLIT PATH GUARDED HERE AND THIS ONE CANNOT. When the queue lease
-/// and the journal task were renewed by two calls, this function re-read the
-/// grant's remaining authority and the task's BETWEEN them, so a manager reply
-/// that arrived after either had lapsed on this process's clock was never
-/// followed by a journal write. Merged, the journal half has already committed at
-/// the far end before this function resumes, so a reply that slow is admitted
-/// rather than refused.
+/// ONE EXCHANGE CARRIES BOTH LEASES, SO THIS SIDE READS ITS AUTHORITY BEFORE
+/// ASKING AND NOT BETWEEN THE HALVES. `available` is the read: it takes the
+/// smaller of the grant's remaining authority and the task's, and refuses to ask
+/// at all once either is spent. Once the request is out, both halves commit at the
+/// far end before this function resumes.
 ///
-/// WHAT STILL REFUSES IT, AND WHERE. The lapse those reads caught is a lapse of
-/// the STORED deadlines, and both ends check their own: `heartbeat_authorized`
-/// refuses a queue row whose lease deadline has passed, and the journal's
-/// `CapturedLease::capture` refuses a grant with no remaining authority before
-/// it opens a transaction, then rechecks it around the commit. The narrow case
-/// the merge admits is one where this process's monotonic view of the grant had
-/// expired while the manager's stored deadline had not, which is transport delay
-/// inside the grant rather than past it. The pre-call reads below are what keep
-/// this side from ASKING in that state; they no longer gate the write.
+/// WHAT THAT ADMITS, AND WHAT REFUSES IT INSTEAD. The case is a reply that
+/// arrives after this process's monotonic view of the grant has run out while the
+/// manager's STORED lease deadline has not - transport delay inside the grant
+/// rather than past it. Both ends refuse a delivery that is genuinely spent:
+/// `heartbeat_authorized` checks the stored deadline with `live`, and the
+/// journal's `CapturedLease::capture` refuses a grant with no remaining authority
+/// before it opens a transaction and rechecks it around the commit. What this
+/// side cannot do is withhold the journal write on its own clock.
 async fn renew<T: JobTransport>(
     transport: &T,
     app: &AppWorkflows,
