@@ -60,6 +60,21 @@ pub struct WorkflowSettings {
     /// the manager cannot provision rather than being answered as though it had.
     #[config(name = "workflow.migrate_url", default = String::new())]
     pub migrate_url: Operational<String>,
+    /// Object-store location for workflow payload objects.
+    ///
+    /// Blob storage keeps large objects out of the database, so this service
+    /// stages run inputs into it and collects them from it. A bare path or
+    /// `file://...` selects the local filesystem; `s3://...` selects the S3
+    /// backend, through the same grammar `worker.storage_url` uses. It MUST name
+    /// the same store the workers of this deployment name, because an object
+    /// this service writes is one an executing run reads back: a local path is a
+    /// volume mounted identically on both, and S3 is inherently shared.
+    ///
+    /// Required. A service that cannot write payloads cannot run the sweeps its
+    /// own lane claims, so it refuses to start rather than claiming rows it
+    /// would then fail.
+    #[config(name = "workflow.storage_url", default = String::new())]
+    pub storage_url: Operational<String>,
     /// HTTP worker threads.
     #[config(name = "workflow.http_threads", default = 2)]
     pub http_threads: Operational<usize>,

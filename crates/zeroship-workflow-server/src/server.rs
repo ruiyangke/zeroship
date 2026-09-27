@@ -8,6 +8,7 @@ use crate::{
     auth::{PostgresWorkerRegistry, WorkflowAuth},
     config::WorkflowSettings,
     coordinator::{connect_eligibility, Coordinator, Options},
+    payloads::ServicePayloads,
     sweeps::{LaneOptions, MaintenanceDriver, MaintenanceLane, SweepReport},
     WorkflowHttpState,
 };
@@ -17,6 +18,7 @@ use std::{
     future::Future, net::SocketAddr, num::NonZeroUsize, pin::Pin, rc::Rc, sync::Arc, time::Duration,
 };
 use zeroship_authn::service_replay::SharedClientReplayStore;
+use zeroship_storage::StorageBackendConfig;
 use zeroship_core::{
     app_id::AppId,
     config::PlaintextPeers,
@@ -57,6 +59,10 @@ pub struct ServerOptions {
     pub policy_cache_entries: NonZeroUsize,
     pub max_request_bytes: usize,
     pub coordinator: Options,
+    /// Where this service's payload objects live. Validated by
+    /// `--check-config`, which opens nothing; the store itself is opened when
+    /// the sweep lane is composed.
+    pub storage: StorageBackendConfig,
     /// Origins this process may reach over plaintext HTTP. Empty by default.
     pub plaintext_peers: PlaintextPeers,
     replay_sweep: Duration,
@@ -97,6 +103,10 @@ impl ServerOptions {
         if settings.control_url.get().is_empty() {
             return Err("workflow.control_url is required for deployment queue retention".into());
         }
+        if settings.storage_url.get().is_empty() {
+            return Err("workflow.storage_url is required for workflow payload objects".into());
+        }
+        let storage = StorageBackendConfig::parse(settings.storage_url.get())?;
         let coordinator = Options {
             connections: *settings.database_connections.get(),
             acquire_timeout: Duration::from_millis(*settings.database_acquire_timeout_ms.get()),
@@ -144,6 +154,7 @@ impl ServerOptions {
             policy_cache_entries,
             max_request_bytes,
             coordinator,
+            storage,
             plaintext_peers,
             replay_sweep,
             driver,
@@ -384,6 +395,11 @@ async fn maintenance(
         // This process's own identity, minted once: every row the lane leases
         // carries it, and a restart is a different holder of the same lane.
         WorkerId::mint(),
+        // Opened here rather than per HTTP thread, because the lane is what
+        // writes and deletes objects and the lane lives on this runtime. A store
+        // this process cannot open stops the startup instead of turning the
+        // sweeps it claims into failures.
+        ServicePayloads::open(&options.storage)?,
         MaintenanceOptions::default(),
     )?;
     let sweeps = MaintenanceDriver::new(

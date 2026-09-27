@@ -45,6 +45,12 @@ impl ServerProcess {
             toml::to_string(&serde_json::json!({"workflow":{
                 "listen":address.to_string(),"database_url":database,"service_peers_file":peers,
                 "control_url":control.url(),"service_key_file":control.key_file,
+                // The payload store this process stages and collects objects
+                // through. ONE root for every process this fixture starts,
+                // because that is what a deployment owes: an object one replica
+                // wrote is one another replica and the workers must be able to
+                // read. A root per process would model a misconfiguration.
+                "storage_url":directory.join("payload-objects"),
                 "http_threads":2,"max_request_bytes":MAX_REQUEST_BYTES,
             }}))
             .unwrap(),

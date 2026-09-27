@@ -350,6 +350,7 @@ Every environment name below is `ZEROSHIP_<CANONICAL>` and every overlay path is
 | `workflow.replay_sweep_ms` | operational | `ZEROSHIP_WORKFLOW_REPLAY_SWEEP_MS` | `workflow.replay_sweep_ms` | zeroship-workflow-server `--replay-sweep-ms` | `30000` |
 | `workflow.service_key_file` | operational | `ZEROSHIP_WORKFLOW_SERVICE_KEY_FILE` | `workflow.service_key_file` | zeroship-workflow-server `--service-key-file` | empty |
 | `workflow.service_peers_file` | operational | `ZEROSHIP_WORKFLOW_SERVICE_PEERS_FILE` | `workflow.service_peers_file` | zeroship-workflow-server `--service-peers-file` | empty |
+| `workflow.storage_url` | operational | `ZEROSHIP_WORKFLOW_STORAGE_URL` | `workflow.storage_url` | zeroship-workflow-server `--storage-url` | empty |
 | `workflow.worker_ttl_ms` | operational | `ZEROSHIP_WORKFLOW_WORKER_TTL_MS` | `workflow.worker_ttl_ms` | zeroship-workflow-server `--worker-ttl-ms` | `30000` |
 
 <!-- END GENERATED CONFIGURATION CONTRACT -->

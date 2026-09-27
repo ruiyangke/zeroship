@@ -396,6 +396,9 @@ pub struct WorkflowSection {
     pub closing_backoff_ms: Option<u64>,
     /// Ceiling of the doubling closing backoff.
     pub closing_backoff_max_ms: Option<u64>,
+    /// Object-store location for workflow payload objects. It must name the same
+    /// store the deployment's workers name.
+    pub storage_url: Option<String>,
     /// Platform coordination metadata login; no customer database credentials.
     pub database_url: Option<String>,
 }

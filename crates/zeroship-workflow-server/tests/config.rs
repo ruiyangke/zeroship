@@ -17,6 +17,7 @@ fn config_check_validates_toml_and_flags_without_opening_dependencies() {
             "service_peers_file":dir.path().join("unread-peers"),
             "service_key_file":dir.path().join("unread-workflow-key"),
             "control_url":"https://control.example.test",
+            "storage_url":dir.path().join("payload-objects"),
             "batch_limit":3,
             "driver_interval_ms":250,
             "driver_lane_timeout_ms":1500,
@@ -146,6 +147,7 @@ fn hold_release_grace_outlasts_the_queue_transaction_budget() {
                 "database_url":"postgres://unused@127.0.0.1:1/unreachable",
                 "service_peers_file":"unread-peers", "service_key_file":"unread-key",
                 "control_url":"https://control.example.test",
+                "storage_url":"unread-payload-objects",
                 "database_command_timeout_ms":command_timeout_ms,
             }}))
             .unwrap(),
@@ -175,6 +177,7 @@ fn capacity_bounds_and_pacing_come_from_configuration_and_reject_an_empty_range(
         "database_url":"postgres://unused@127.0.0.1:1/unreachable",
         "service_peers_file":"unread-peers", "service_key_file":"unread-key",
         "control_url":"https://control.example.test",
+        "storage_url":"unread-payload-objects",
         "capacity_min_slots":2,
         "capacity_max_slots":9,
         "capacity_hold_down_ms":7000,
@@ -227,6 +230,7 @@ fn retention_configuration_requires_a_signer_and_unambiguous_control_origin() {
         "database_url":"postgres://unused@127.0.0.1:1/unreachable",
         "service_peers_file":"unread-peers", "service_key_file":"unread-key",
         "control_url":"https://control.example.test",
+        "storage_url":"unread-payload-objects",
     }});
     let resolve = |input: &serde_json::Value| {
         let overlay = toml::from_str(&toml::to_string(input).unwrap()).unwrap();
@@ -310,5 +314,51 @@ fn retention_configuration_requires_a_signer_and_unambiguous_control_origin() {
         let mut malformed = named.clone();
         malformed["plaintext_peers"] = serde_json::json!([entry]);
         assert!(settings(&malformed).is_err(), "accepted peer {entry}");
+    }
+}
+
+/// A payload store is a startup requirement, and an unusable location is
+/// refused where an absent one is.
+///
+/// This service's own lane claims the sweeps that stage and delete payload
+/// objects, so a process with nowhere to put them would take rows it could only
+/// fail. The well-formed arm is the control: each refusal below differs from it
+/// in this one field.
+#[test]
+fn a_payload_store_is_required_and_its_location_is_validated() {
+    let valid = serde_json::json!({"workflow":{
+        "database_url":"postgres://unused@127.0.0.1:1/unreachable",
+        "service_peers_file":"unread-peers", "service_key_file":"unread-key",
+        "control_url":"https://control.example.test",
+        "storage_url":"unread-payload-objects",
+    }});
+    let resolve = |input: &serde_json::Value| {
+        let overlay: toml::Value = toml::from_str(&toml::to_string(input).unwrap()).unwrap();
+        let settings = WorkflowSettings::resolve_config(
+            WorkflowSettingsSources::try_parse_from(["zeroship-workflow-server", "--no-config"])
+                .unwrap(),
+            Some(&overlay),
+        )
+        .unwrap();
+        ServerOptions::resolve(&settings)
+    };
+    assert_eq!(
+        resolve(&valid)
+            .expect("a well-formed location resolves")
+            .storage
+            .kind(),
+        "local"
+    );
+
+    let mut absent = valid.clone();
+    absent["workflow"]
+        .as_object_mut()
+        .unwrap()
+        .remove("storage_url");
+    assert!(resolve(&absent).is_err(), "accepted an absent store");
+    for location in ["", "redis://objects", "file://"] {
+        let mut invalid = valid.clone();
+        invalid["workflow"]["storage_url"] = serde_json::json!(location);
+        assert!(resolve(&invalid).is_err(), "accepted location {location:?}");
     }
 }

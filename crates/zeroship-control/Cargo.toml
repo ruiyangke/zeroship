@@ -120,6 +120,9 @@ chrono-tz = "0.10"
 
 [dev-dependencies]
 zeroship-workflow-server = { path = "../zeroship-workflow-server" }
+# The workflow lane holds a payload store, so composing one in a test names the
+# backend it is rooted at.
+zeroship-storage = { workspace = true }
 rcgen = "0.14"
 testcontainers = { version = "0.28", features = ["blocking"] }
 zeroship-workflow-v8 = { workspace = true }
