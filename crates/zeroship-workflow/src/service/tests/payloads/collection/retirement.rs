@@ -60,10 +60,7 @@ impl Manager {
     async fn claim(&self, expected: &JobSpec) -> DeliveryGrant {
         let grant = self
             .authority
-            .claim(
-                &self.queue,
-                Ok(AppPolicy::default().max_delivery_attempts),
-            )
+            .claim(&self.queue, Ok(AppPolicy::default().max_delivery_attempts))
             .await
             .unwrap()
             .expect("the manager delivers its maintenance job");

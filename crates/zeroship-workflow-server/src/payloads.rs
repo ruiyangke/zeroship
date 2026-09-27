@@ -101,8 +101,8 @@ impl PayloadWriter for InputWriter<'_> {
         target: PayloadTarget<'_>,
         budget: Duration,
     ) -> Result<(), WorkflowServiceError> {
-        let expected =
-            u64::try_from(target.reference.size).map_err(|_| WorkflowServiceError::PayloadTooLarge)?;
+        let expected = u64::try_from(target.reference.size)
+            .map_err(|_| WorkflowServiceError::PayloadTooLarge)?;
         let written = compio::time::timeout(
             budget,
             self.objects.0.put_stream(

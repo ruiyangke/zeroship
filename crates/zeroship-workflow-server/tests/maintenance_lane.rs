@@ -35,9 +35,7 @@ use zeroship_core::{
     workflow_jobs::{DeploymentId, JobId, JobOperation, JobOutcome, JobSpec},
     workflow_policy::AppPolicy,
 };
-use zeroship_storage::{
-    backend::ListRequest, Namespace, StorageBackendConfig, StorageStore,
-};
+use zeroship_storage::{backend::ListRequest, Namespace, StorageBackendConfig, StorageStore};
 use zeroship_workflow::{
     service::{maintenance::MaintenanceOptions, publication::JobPublisher, PAYLOAD_NAMESPACE},
     InputStager, WorkflowServiceError,
@@ -206,11 +204,10 @@ impl Fixture {
     /// over the same root. Reading them back through the lane's own handle would
     /// say nothing about where it put them.
     async fn stored_objects(&self, app: &AppId) -> Vec<(String, Vec<u8>)> {
-        let store = StorageStore::open(&StorageBackendConfig::Local(
-            self.objects.path().to_owned(),
-        ))
-        .unwrap()
-        .namespace(Namespace::platform(PAYLOAD_NAMESPACE).unwrap());
+        let store =
+            StorageStore::open(&StorageBackendConfig::Local(self.objects.path().to_owned()))
+                .unwrap()
+                .namespace(Namespace::platform(PAYLOAD_NAMESPACE).unwrap());
         let page = store
             .list(
                 app.as_str(),

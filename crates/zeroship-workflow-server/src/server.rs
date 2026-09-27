@@ -18,7 +18,6 @@ use std::{
     future::Future, net::SocketAddr, num::NonZeroUsize, pin::Pin, rc::Rc, sync::Arc, time::Duration,
 };
 use zeroship_authn::service_replay::SharedClientReplayStore;
-use zeroship_storage::StorageBackendConfig;
 use zeroship_core::{
     app_id::AppId,
     config::PlaintextPeers,
@@ -30,6 +29,7 @@ use zeroship_core::{
     workflow_deployments::{HoldGeneration, HoldReceipt, QueueHoldRequest},
     workflow_jobs::DeploymentId,
 };
+use zeroship_storage::StorageBackendConfig;
 use zeroship_workflow::{
     deploy_registrations::RemoteDeployRegistrations,
     deployment_holds::ServiceHolds,

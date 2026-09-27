@@ -15,6 +15,7 @@ use zeroship_core::{
     workflow_jobs::{DeploymentId, JobId, JobOperation, JobOutcome, JobSpec},
     workflow_policy::AppPolicy,
 };
+use zeroship_storage::StorageBackendConfig;
 use zeroship_workflow::{
     deploy_registrations::{DeployRegistrationSource, RemoteDeployRegistrations},
     deployment_holds::ServiceHolds,
@@ -26,7 +27,6 @@ use zeroship_workflow_manager::{
     policy::{PolicyObservation, PolicySource},
     recovery::Options as RecoveryOptions,
 };
-use zeroship_storage::StorageBackendConfig;
 use zeroship_workflow_server::{
     payloads::ServicePayloads,
     sweeps::{MaintenanceLane, Swept},

@@ -33,10 +33,12 @@ impl PayloadObjects {
     /// # Errors
     /// Reports a store that refuses the platform namespace.
     pub fn open(store: StorageStore) -> Result<Self, WorkflowServiceError> {
-        Ok(Self(store.namespace(
-            Namespace::platform(zeroship_workflow::service::PAYLOAD_NAMESPACE)
-                .map_err(storage_error)?,
-        )))
+        Ok(Self(
+            store.namespace(
+                Namespace::platform(zeroship_workflow::service::PAYLOAD_NAMESPACE)
+                    .map_err(storage_error)?,
+            ),
+        ))
     }
 }
 
