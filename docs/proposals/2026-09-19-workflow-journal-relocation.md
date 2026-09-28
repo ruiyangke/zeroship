@@ -1107,14 +1107,18 @@ protocol. This extends a working client rather than inventing one.
      (`crates/zeroship-core/src/workflow_coordination/lifecycle.rs`) carries hash, size and content
      type and NO object key, so only the `payloads` row locates the object - which is why the
      descriptor-to-id step belongs before this bullet rather than after it.
-     `TaskPayloads::stage` holds its lock across the object write. And `release_job` and
-     `job_receipt`, reached from `DeliverySlot`'s release, recover and uncertain-reply arms, have no
-     endpoints either.
-     So severing the journal while those four are unbuilt does not move the break, it relocates it:
-     a run started through the service's journal is then executed against the creator's and finds no
-     task. The prerequisite is the task protocol, and the read has a shape to copy - `RemoteBackend`
-     already locates a payload on the service and opens it in the runner behind an unchanged
-     signature.
+     `TaskPayloads::stage` holds its lock across the object write, and it is the one of the four
+     still to cross. The other three are served and bound: `TaskPayloads::read` answers to
+     `/v1/tasks/payload` and the executable RESOLUTION to `/v1/tasks/executable`, and `release_job`
+     and `job_receipt`, reached from `DeliverySlot`'s release, recover and uncertain-reply arms,
+     answer to `/v1/jobs/release` and `/v1/jobs/receipt`. Each of those carries a route, a client
+     method, a grant to `svc/worker` and a row in the pinned authorization table, so none of them is
+     a declared endpoint nothing serves.
+     Severing the journal while any of the four is uncrossed does not move the break, it relocates
+     it: a run started through the service's journal is then executed against the creator's and finds
+     no task. So `stage` is what the severance waits on, and the read is the shape to copy -
+     `RemoteBackend` already locates a payload on the service and opens it in the runner behind an
+     unchanged signature.
 
      **Two of those crossings take a different shape than this step assumed, and both for reasons in
      the code rather than preference.**
