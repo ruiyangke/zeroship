@@ -92,9 +92,9 @@ async fn journal_tables_in(
 /// grantee from the catalog; an oracle that repeated that derivation would
 /// agree with the migration by construction and assert nothing.
 ///
-/// The stamp is compared against the same constants the creator bundle declares
-/// (`journal_bundle` in `crates/zeroship-workflow-server/src/journal.rs`), so
-/// the two installation sites cannot describe different journals.
+/// The stamp is compared against the constants `zeroship-workflow-schema`
+/// generates beside the artifact, so the DDL that was installed and the
+/// version recorded for it cannot describe different journals.
 async fn journal_is_installed_and_served_by_one_role(fixture: &platform::Platform) {
     let stamp = fixture
         .admin

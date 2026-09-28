@@ -44,7 +44,7 @@ and request identities within the live task budget, without repeating the step
 callback. The service stores the payload and commits its history reference;
 storage credentials never enter V8.
 
-The worker uses `WorkflowBinding::new` for control-plane-backed workflows.
+The worker uses `WorkflowBinding::remote` for service-backed workflows.
 The CLI uses the shared engine through `WorkflowBinding::service`, using
 an app-scoped `AppBackend`. Before evaluating app code, the binding
 checks its scope against `RuntimeBuilder::app_id`; an environment variable
