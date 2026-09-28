@@ -130,7 +130,13 @@ impl Fixture {
             .unwrap(),
         );
         let http = Client::new().await;
-        let server = server_process::ServerProcess::start(
+        // No sweep lane on this host. Every case in this target is about a queue
+        // ROUTE -- what submit, claim, renew and settle accept, authenticate and
+        // record -- and the sweep it arranges is arranged so the settle route has
+        // a delivery to discharge. The lane claims under an authority no
+        // placement expiry fences, so a running one would take that row first and
+        // the route under test would never see it.
+        let server = server_process::ServerProcess::without_maintenance_sweeps(
             &platform.runtime_url,
             &peers,
             platform.work.path(),

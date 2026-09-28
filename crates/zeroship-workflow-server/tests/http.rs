@@ -125,7 +125,12 @@ async fn native_worker_client_uses_the_authenticated_coordinator_api() {
         .unwrap(),
     );
     let http = Client::new().await;
-    let mut server = server_process::ServerProcess::start(
+    // No sweep lane on this host. The subject is the native client's own use of
+    // the authenticated protocol, and it asserts what the queue offers a placed
+    // worker -- including that a leased sweep is redelivered to nobody. The lane
+    // claims under an authority no placement expiry fences, so a running one
+    // would answer those reads instead of the client.
+    let mut server = server_process::ServerProcess::without_maintenance_sweeps(
         &fixture.runtime_url,
         &peers,
         fixture.work.path(),
@@ -718,7 +723,12 @@ async fn replicas_authenticate_metadata_and_keep_customer_execution_off_the_prot
         .unwrap(),
     );
     let client = Client::new().await;
-    let mut first = server_process::ServerProcess::start(
+    // No sweep lane on either replica. The subject is that two hosts authenticate
+    // and serve the SAME metadata for the same delivery, so the case has to hold
+    // one delivery and present it to both. Each replica's lane would claim under
+    // its own identity, and the settle route authorizes on the delivery's worker
+    // id, so a running lane makes the delivery unavailable to the case at all.
+    let mut first = server_process::ServerProcess::without_maintenance_sweeps(
         &fixture.runtime_url,
         &peers,
         fixture.work.path(),
@@ -726,7 +736,7 @@ async fn replicas_authenticate_metadata_and_keep_customer_execution_off_the_prot
         &client,
     )
     .await;
-    let mut second = server_process::ServerProcess::start(
+    let mut second = server_process::ServerProcess::without_maintenance_sweeps(
         &fixture.runtime_url,
         &peers,
         fixture.work.path(),

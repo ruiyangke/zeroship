@@ -309,7 +309,15 @@ async fn collection_contract(platform: &platform::Platform) {
     let http = Client::new().await;
     no_workers(platform).await;
     no_holds(platform, app).await;
-    let mut server = server_process::ServerProcess::start(
+    // No sweep lane on this host. What the case measures is the collect duty --
+    // that it is published with no worker in the deployment, survives process
+    // loss, and continues from the EXACT settlement each page reported -- and
+    // every one of those comes from the manager driver's recovery lane and the
+    // settle route, both of which stay on. The sweep lane only claims rows the
+    // driver has already published, under an authority no placement expiry can
+    // fence, so a running one would take the very page this case has to be the
+    // claimant of and leave the exactness unobservable.
+    let mut server = server_process::ServerProcess::without_maintenance_sweeps(
         &platform.runtime_url,
         &peers,
         platform.work.path(),
