@@ -22,7 +22,9 @@ use zeroship_core::{
     workflow_jobs::{JobOperation, JobOutcome, ManagementCommand, Settlement},
     workflow_policy::AppPolicy,
 };
-use zeroship_workflow_manager::{coordinator::Placed, Error};
+use zeroship_workflow_manager::{
+    coordinator::Placed, maintenance::MaintenanceAuthority, Error,
+};
 use zeroship_workflow_server::coordinator::{Coordinator, Error as HostError, Options, SCHEMA_SQL};
 
 type StoredIds = BTreeMap<(String, String, String), String>;
@@ -467,12 +469,33 @@ async fn management_is_durable_bounded_typed_and_assignment_scoped() {
     let assignment = place(&a, &app).await;
     assert_eq!(assignment.worker_id, worker);
     let scope = assigned(&assignment);
-    let grant = b
+    // A lifecycle command is a maintenance row. `claim_job` claims as
+    // `Claimant::Placed`, which admits the creator operation alone, so the placed
+    // worker is offered nothing here and the row belongs to the authority the
+    // owning process asserts. The refusal is the control for the claim below: one
+    // variable differs, and it is the claimant.
+    assert!(b
         .manager
         .claim_job(&worker, &scope, Ok(AppPolicy::default().max_delivery_attempts), || async { Ok(worker.clone()) })
         .await
         .unwrap()
+        .is_none());
+    // The authority carries this app's own placed identity rather than a fresh
+    // one, because `Queue::settle` authorizes on `settlement.delivery.worker_id`
+    // and the settlements below are made under `worker`. Its asserted revision is
+    // `ASSERTED`, which is the revision this first placement holds, so the
+    // placement read behind `settle_job` resolves the authority this lease names.
+    let lane = MaintenanceAuthority::new(app.clone(), worker.clone());
+    let grant = lane
+        .claim(
+            b.manager.queue(),
+            Ok(AppPolicy::default().max_delivery_attempts),
+        )
+        .await
+        .unwrap()
         .unwrap();
+    assert_eq!(grant.delivery().worker_id, worker);
+    assert_eq!(grant.delivery().assignment_revision, assignment.revision);
     assert_eq!(
         grant.delivery().job.operation,
         JobOperation::Management {
@@ -555,6 +578,10 @@ async fn management_is_durable_bounded_typed_and_assignment_scoped() {
         .await
         .unwrap();
     let renewed = place(&a, &app).await;
+    assert_ne!(
+        renewed.revision, assignment.revision,
+        "a re-placement must supersede the revision the settlement above names"
+    );
     // Exact committed settlement remains readable after placement replacement.
     assert_eq!(
         b.manager
@@ -566,11 +593,13 @@ async fn management_is_durable_bounded_typed_and_assignment_scoped() {
     drop(a);
     drop(b);
     let reopened = fixture.options(options).await;
-    let grant = reopened
-        .manager
-        .claim_job(&worker, &assigned(&renewed), Ok(AppPolicy::default().max_delivery_attempts), || async {
-            Ok(worker.clone())
-        })
+    // The same authority over a reopened queue. It is asserted rather than read,
+    // so the replaced placement above neither grants nor withdraws it.
+    let grant = lane
+        .claim(
+            reopened.manager.queue(),
+            Ok(AppPolicy::default().max_delivery_attempts),
+        )
         .await
         .unwrap()
         .unwrap();
