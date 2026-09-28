@@ -183,7 +183,7 @@ impl JobTransport for WorkerCoordinator {
 
 /// A merged reply arrived without the half its request asked for.
 fn lossy(half: &str) -> WorkflowServiceError {
-    WorkflowServiceError::Unavailable(format!("workflow delivery reply carried no {half}").into())
+    WorkflowServiceError::Unavailable(format!("workflow delivery reply carried no {half}"))
 }
 
 /// Execution and finalization have separate bounds; renewal never resets either.
