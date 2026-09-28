@@ -69,6 +69,12 @@ pub struct ServerOptions {
     replay_sweep: Duration,
     pub driver: DriverOptions,
     pub driver_interval: Duration,
+    /// Whether this process composes a sweep lane at all.
+    ///
+    /// `false` leaves [`maintenance`] returning no [`MaintenanceDriver`], so the
+    /// cadence has nothing to tick: the lane is absent rather than idle, and no
+    /// identity is minted for rows nothing will claim.
+    pub maintenance_sweeps: bool,
 }
 impl ServerOptions {
     /// Pure validation used by the read-only configuration check.
@@ -160,6 +166,7 @@ impl ServerOptions {
             replay_sweep,
             driver,
             driver_interval,
+            maintenance_sweeps: *settings.maintenance_sweeps.get(),
         })
     }
 }
@@ -361,14 +368,14 @@ pub async fn run(settings: WorkflowSettings, options: ServerOptions) -> Result<(
 }
 
 /// Verify migration readiness before accepting connections, then compose the
-/// manager's maintenance driver and this process's own sweep lane over one
-/// startup coordinator. Each HTTP thread constructs its own bounded pool and
-/// retention transport in the state factory.
+/// manager's maintenance driver and, when this process is the sweep authority
+/// over its queue, its own sweep lane, over one startup coordinator. Each HTTP
+/// thread constructs its own bounded pool and retention transport in the state
+/// factory.
 ///
-/// The lane opens a journal of its own here, on the runtime that drives it,
-/// because the journals the state factory opens belong to their HTTP threads.
-/// Opening it before the listener binds also means a process whose journal is
-/// not installed fails to start rather than refusing sweeps once it is serving.
+/// `options.maintenance_sweeps` decides the lane by its PRESENCE: off, nothing
+/// here opens a journal, a policy ledger or a payload store for it, no identity
+/// is minted, and the cadence receives `None`. There is no lane running rarely.
 async fn maintenance(
     url: &str,
     options: &ServerOptions,
@@ -376,7 +383,7 @@ async fn maintenance(
     facts: Rc<dyn AppFactsSource>,
     observations: PolicyObservations,
     deployments: AppDeployments,
-) -> Result<(Driver, MaintenanceDriver), Error> {
+) -> Result<(Driver, Option<MaintenanceDriver>), Error> {
     let startup = Coordinator::connect(
         url,
         options.coordinator,
@@ -384,16 +391,49 @@ async fn maintenance(
         Rc::new(connect_eligibility(url, options.coordinator).await?),
     )
     .await?;
+    // The closing lane reads Control's deletion marker over the same capability
+    // the policy ledger reads its inputs through. There is no second binding
+    // and no second credential: one exchange answers both.
+    let lifecycle = FactsLifecycle::new(facts.clone());
+    let sweeps = if options.maintenance_sweeps {
+        Some(sweep_lane(url, options, &startup, facts, observations, deployments).await?)
+    } else {
+        None
+    };
+    // A deployment that starts workers itself (compose replicas, a single
+    // host) is a static pool: the manager never starts processes and reports
+    // exhaustion durably. Adapters that start processes need an orchestrator.
+    Ok((
+        Driver::new(
+            startup.manager.clone(),
+            options.driver,
+            Rc::new(lifecycle),
+            Rc::new(StaticPool),
+        )?,
+        sweeps,
+    ))
+}
+
+/// This process's own lane over the maintenance rows of the queue it owns.
+///
+/// The lane opens a journal of its own here, on the runtime that drives it,
+/// because the journals the state factory opens belong to their HTTP threads.
+/// Opening it before the listener binds also means a process whose journal is
+/// not installed fails to start rather than refusing sweeps once it is serving.
+async fn sweep_lane(
+    url: &str,
+    options: &ServerOptions,
+    startup: &Coordinator,
+    facts: Rc<dyn AppFactsSource>,
+    observations: PolicyObservations,
+    deployments: AppDeployments,
+) -> Result<MaintenanceDriver, Error> {
     // ONE policy ledger for the lane and for the readiness check the lane's
     // startup owes: the lane needs an app's observed policy for the delivery
     // ceiling it claims under, and reading it from anywhere else would grant a
     // second authority over the same rows.
     let policies =
-        Rc::new(connect_policies(facts.clone(), url, options.coordinator, observations).await?);
-    // The closing lane reads Control's deletion marker over the same capability
-    // the policy ledger reads its inputs through. There is no second binding
-    // and no second credential: one exchange answers both.
-    let lifecycle = FactsLifecycle::new(facts);
+        Rc::new(connect_policies(facts, url, options.coordinator, observations).await?);
     let runs = Rc::new(
         crate::runs::RunService::connect(url, startup.recovery(options.driver.recovery)?)
             .await?
@@ -413,25 +453,13 @@ async fn maintenance(
         ServicePayloads::open(&options.storage)?,
         MaintenanceOptions::default(),
     )?;
-    let sweeps = MaintenanceDriver::new(
+    Ok(MaintenanceDriver::new(
         lane,
         LaneOptions {
             page_limit: options.driver.page_limit,
             lane_timeout: options.driver.lane_timeout,
         },
-    )?;
-    // A deployment that starts workers itself (compose replicas, a single
-    // host) is a static pool: the manager never starts processes and reports
-    // exhaustion durably. Adapters that start processes need an orchestrator.
-    Ok((
-        Driver::new(
-            startup.manager.clone(),
-            options.driver,
-            Rc::new(lifecycle),
-            Rc::new(StaticPool),
-        )?,
-        sweeps,
-    ))
+    )?)
 }
 
 /// The journal's OWN deployment holds, on the same Control origin and the same
@@ -528,15 +556,19 @@ async fn sweep_assertions(
 }
 
 /// This process's whole maintenance cadence: one bounded pass of the manager's
-/// lanes, then one of this service's own sweep lane, every `interval` until
-/// `stopped` or until the future is dropped.
+/// lanes, then one of this service's own sweep lane when it holds one, every
+/// `interval` until `stopped` or until the future is dropped.
 ///
 /// Each pass reports what it did and propagates nothing, so a lane that refuses
 /// never costs the next lane its turn or ends the cadence. The two share the
 /// runtime, so they take their turns in order rather than at once.
+///
+/// `sweeps` is absent on a host that is not the sweep authority over its queue,
+/// and then this cadence drives the manager's lanes alone. It is the whole of
+/// what "no sweep lane" means: nothing to tick, rather than a turn taken rarely.
 pub async fn drive(
     mut driver: Driver,
-    mut sweeps: MaintenanceDriver,
+    mut sweeps: Option<MaintenanceDriver>,
     interval: Duration,
     mut stopped: futures::channel::oneshot::Receiver<()>,
 ) {
@@ -545,7 +577,9 @@ pub async fn drive(
             return;
         }
         report_tick(driver.tick().await);
-        report_sweep(&sweeps.tick().await);
+        if let Some(sweeps) = sweeps.as_mut() {
+            report_sweep(&sweeps.tick().await);
+        }
         if matches!(
             select(Box::pin(compio::time::sleep(interval)), &mut stopped).await,
             Either::Right(_)

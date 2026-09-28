@@ -10,6 +10,12 @@ mod holds;
 mod platform;
 #[path = "support/app_facts.rs"]
 mod app_facts;
+#[allow(
+    dead_code,
+    reason = "the shared journal seeding also serves the creator-facing run suites"
+)]
+#[path = "support/journal.rs"]
+mod journal;
 #[path = "support/policy.rs"]
 mod policy_fixture;
 #[allow(
@@ -29,6 +35,7 @@ use zeroship_core::{
     service_peers::{service_issuer, CONTROL_SERVICE_NAME},
     typed_id,
     workflow_jobs::{DeploymentId, JobId, JobOperation, JobSpec},
+    workflow_policy::AppPolicy,
     workflow_schedules::{
         ActivateSchedules, RegisterSchedules, ScheduleCatchUp, ScheduleDescriptor, ScheduleId,
         ScheduleOverlap, ScheduleTiming,
@@ -648,4 +655,91 @@ async fn server_drives_metadata_without_workers_and_resumes_after_restart() {
     ready(&http, &restarted.url).await;
     drop(restarted);
     assert_replayed(&platform, &seed, &snapshot).await;
+}
+
+/// One queue row's state and the identity holding it.
+async fn job_holder(platform: &platform::Platform, job: &JobId) -> (String, Option<String>) {
+    let row = platform
+        .admin
+        .query_one(
+            "SELECT state, worker_id FROM workflow_manager.jobs WHERE id=$1",
+            &[&job.as_str()],
+        )
+        .await
+        .unwrap();
+    (row.get(0), row.get(1))
+}
+
+/// A host configured the way a deployment configures one claims the maintenance
+/// rows of the queue it owns, and settles them under an identity nothing placed.
+///
+/// `workflow.maintenance_sweeps` decides whether the process composes a sweep
+/// lane, and it defaults ON. A gate that defaulted off, or one that ignored its
+/// own setting, would leave reconciliation, collection, fanout, propagation and
+/// lifecycle commands unswept in production while every suite stayed green, so
+/// this is the arm that must never be lost: the overlay
+/// `server_process::ServerProcess::start` writes names no such key, and the row
+/// still has to reach `settled`.
+///
+/// The control is the same overlay with the setting off, which is what
+/// `ServerProcess::without_maintenance_sweeps` writes and what the route, scope
+/// and duty suites run under: under it this row is the caller's to claim, and
+/// those suites go red if the lane runs anyway.
+///
+/// No worker is registered and no placement exists, so the settlement can only be
+/// the lane asserting its own authority.
+#[ntex::test]
+async fn a_default_host_claims_and_settles_the_maintenance_rows_of_its_own_queue() {
+    let platform = platform::Platform::new().await;
+    let queue = Queue::connect(
+        DbBinding::platform(
+            "workflow_manager",
+            "sweep-default",
+            SchemaName::new("workflow_manager").unwrap(),
+        ),
+        &platform.runtime_url,
+        Options::default(),
+        holds::client(),
+    )
+    .await
+    .unwrap();
+    let app = AppId::mint();
+    policy_fixture::provision(&platform, &app, &AppPolicy::default()).await;
+    queue.register_scope(&app).await.unwrap();
+    journal::seed_run(&platform, &app).await;
+    let row = JobSpec {
+        id: JobId::mint(),
+        app_id: app.clone(),
+        operation: JobOperation::Reconcile {},
+        available_at: 0.try_into().unwrap(),
+    };
+    queue.submit(&row).await.unwrap();
+    assert_eq!(
+        job_holder(&platform, &row.id).await,
+        ("ready".to_owned(), None)
+    );
+    no_workers(&platform).await;
+
+    let http = Client::new().await;
+    let server = server_process::ServerProcess::start(
+        &platform.runtime_url,
+        &peers(&platform),
+        platform.work.path(),
+        "sweep-default",
+        &http,
+    )
+    .await;
+    let holder = until("settle the maintenance row", async || {
+        let (state, worker) = job_holder(&platform, &row.id).await;
+        (state == "settled").then_some(worker)
+    })
+    .await;
+    assert!(
+        holder.is_some(),
+        "a settled maintenance row must name the lane that leased it"
+    );
+    ready(&http, &server.url).await;
+    // The lane asserts its own authority rather than reading a placement, so a
+    // settlement here proves the lane ran and not that something was placed.
+    no_workers(&platform).await;
 }
