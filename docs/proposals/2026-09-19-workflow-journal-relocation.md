@@ -1194,6 +1194,24 @@ protocol. This extends a working client rather than inventing one.
      trusting it: list the callers of each `WorkflowBinding` constructor and check that `::remote`
      has acquired one.
 
+     **The switch is small; getting the slot able to make it was not, and that part is worth
+     recording because nothing above predicts it.** `DeliverySlot` is handed an `&AppWorkflows`
+     per delivery and passes it to its transport on every call, and a severed worker has no such
+     value to hand. The journal is not what the slot wants from it either: the four delivery calls
+     crossed, and what remained was the type itself plus `captured_authority()`, which is a policy
+     binding rather than a journal fact. So the transport has to declare what it holds -
+     `JobTransport::Journal`, `AppWorkflows` for an in-process transport and `()` for a crossed
+     one, with the unit type meaning the journal is at the far end rather than absent - and supply
+     it on demand rather than receiving it. Two shapes reach that: threading the associated type
+     through `ConsumerScope` and its holders, or the transport answering `journal()`. Prefer the
+     second, because `ConsumerBindings` is taken bare by
+     `crates/zeroship-workflow-runner/src/assignments.rs` and
+     `crates/zeroship-cli/src/workflow/host.rs`, neither of which has a transport parameter, so
+     threading it adds a type parameter to code that is not about transports and then to its
+     holders. Either way the authority scoping belongs in ONE place: an unscoped journal takes a
+     different policy snapshot's `lease_ms` for the attempt, which is a behaviour change rather
+     than a failure.
+
      **And it is gated on the TASK protocol crossing, not only the creator seam.** Measured on the
      branch: four journal readers sit on the execution path, none of them reached through
      `WorkflowBackend`, so an HTTP `WorkflowBackend` does not free the worker of its journal.
