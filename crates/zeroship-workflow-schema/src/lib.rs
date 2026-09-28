@@ -9,13 +9,14 @@
 //! `schema/schema.ts` remains the one authored source; `schema/generate.mjs`
 //! compiles it through the migration compiler into the artifacts embedded here.
 //!
-//! # The schema-name substitution lives here, once
+//! # The placeholder lives here, once
 //!
 //! The generated `PostgreSQL` DDL names its schema with the placeholder
-//! [`SCHEMA_PLACEHOLDER`], which the installer replaces with the schema the
-//! journal is installed into. [`postgres_sql`] is the only place that
-//! substitution is written, so the installer and the engine cannot disagree
-//! about it.
+//! [`SCHEMA_PLACEHOLDER`], and two installers bind it: [`postgres_sql`] here,
+//! and `db/migrations-ts/20260919000000_workflow_journal.ts`, which reads
+//! `schema/postgres.sql` off disk and substitutes in TypeScript. They agree
+//! because the placeholder is declared once, here, and the TypeScript side
+//! refuses an artifact that does not carry it or still carries it unbound.
 //!
 //! # The schema is not an app
 //!
