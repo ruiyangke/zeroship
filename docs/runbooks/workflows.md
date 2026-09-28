@@ -78,10 +78,11 @@ bundle derives the same summary from the bytes instead. Reading the artifacts is
 refused by name on this process, not silently skipped.
 
 A creator run is executed by the `zeroship-worker` that the manager placed the
-app on (`crates/zeroship-worker/src/workflow_host.rs`). That host owns the
-creator journal in the app database and its payloads in the app object store.
-It receives work only as a job the manager delivered; it runs no due-work scan
-and no maintenance loop of its own.
+app on (`crates/zeroship-worker/src/workflow_host.rs`). That host holds NO
+journal: it reaches the workflow service for every journal fact, and writes
+payload bytes into the platform object store under the `workflow` namespace the
+service names. It receives work only as a job the manager delivered; it runs no
+due-work scan and no maintenance loop of its own.
 
 Control publishes deployment lifecycle intents to the manager and arbitrates
 deployment holds. It reaches no creator journal, and there is no advance
@@ -169,17 +170,16 @@ UPDATE workflow_manager.workflow_rollout_config
 
 When the manager reports no delivery in flight for the app, no execution is
 running. Queued, sleeping, waiting and compensating work stays durable in the
-creator journal and resumes after the switch is cleared.
+service's journal and resumes after the switch is cleared.
 
 ## Inspecting a run, restarting one, and reading GC state
 
-Run state is not in the platform database. Each app's runs, steps, signals,
-subscriptions and staged payload references live in that app's own creator
-schema, reached only by the worker hosting it; the durable job queue, delivery
-attempts and deadlines live in the manager's `workflow_manager` schema in the
-platform database. That schema also carries journal tables under a
-`__zeroship_workflow_` prefix which nothing writes and nothing reads: an empty
-one there says nothing about an app. Neither is an operator SQL surface.
+Run state is IN the platform database. Each app's runs, steps, signals,
+subscriptions and staged payload references live in the `workflow_manager`
+schema, reached only by the workflow service; the durable job queue, delivery
+attempts and deadlines live in that same schema. No creator database holds
+workflow state and no worker opens one - a host runs creator code and asks the
+service for every journal fact. Not an operator SQL surface.
 
 - Run state, outputs and restart go through the creator-authorized handle:
   `env.workflows` in app code, and the manager's management commands
