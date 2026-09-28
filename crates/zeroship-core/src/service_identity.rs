@@ -628,13 +628,6 @@ pub mod endpoints {
     /// is no creator principal in a platform provisioning call.
     pub const MIGRATE_SCHEMA_BUNDLE: ServiceEndpoint =
         ServiceEndpoint::new("migrate-server", "POST", "/v1/schema-bundles/apply");
-    /// Ensure an app's workflow journal is at the current version.
-    ///
-    /// Two callers, one capability: Control when an app registers, and a worker
-    /// whose host REFUSED the journal it found. The second is what turns a
-    /// refusal into a repair rather than a dead end.
-    pub const WORKFLOW_JOURNAL_ENSURE: ServiceEndpoint =
-        ServiceEndpoint::new("workflow", "POST", "/v1/journal/ensure");
 }
 
 /// One individual principal and its machine-identity endpoint grants.
@@ -689,10 +682,6 @@ pub fn service_allowlist() -> &'static [ServiceAuthorization] {
                     endpoints::WORKFLOW_SCHEDULE_ACTIVATE,
                     endpoints::WORKFLOW_SCHEDULE_DISABLE,
                     endpoints::WORKER_APP_LOGS,
-                    // Control learns an app registered, so Control is what asks
-                    // the manager to bring that app's journal up to date. The
-                    // manager, not Control, holds the journal artifacts.
-                    endpoints::WORKFLOW_JOURNAL_ENSURE,
                 ],
             ),
             ServiceAuthorization::new(
@@ -810,11 +799,6 @@ pub fn service_allowlist() -> &'static [ServiceAuthorization] {
                     // demanding a fresh token to renew would defeat a
                     // use-capped one.
                     endpoints::CONTROL_WORKER_RENEW,
-                    // A host that REFUSES the journal it found reports it, and
-                    // the manager repairs. The worker holds no DDL authority of
-                    // its own - privilege follows the process - so all it can do
-                    // is name the schema and ask.
-                    endpoints::WORKFLOW_JOURNAL_ENSURE,
                     // JOINING IS NOT AN ENDPOINT IN THIS TABLE. A joining
                     // process has no service identity yet: it presents a join
                     // token a trusted signer minted, verified by

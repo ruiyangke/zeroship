@@ -72,18 +72,6 @@ pub struct SchemaBundle {
     pub versions: Vec<SchemaBundleVersion>,
 }
 
-/// Ask the owner of a platform schema to bring one creator database's copy of it
-/// to the current version.
-///
-/// The request names a SCHEMA rather than an app for the same reason a bundle
-/// does: a creator database holds the schemas of every app inside it, and one
-/// stamp covers them all.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct EnsureJournal {
-    /// The physical schema whose journal must be current.
-    pub schema: String,
-}
-
 /// What applying a bundle did.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

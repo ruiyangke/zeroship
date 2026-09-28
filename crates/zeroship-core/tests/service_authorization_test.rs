@@ -57,7 +57,6 @@ const CATALOG: &[ServiceEndpoint] = &[
     endpoints::WORKER_DISPATCH,
     endpoints::WORKER_APP_LOGS,
     endpoints::MIGRATE_SCHEMA_BUNDLE,
-    endpoints::WORKFLOW_JOURNAL_ENSURE,
 ];
 
 /// The principals the table grants to, which must each own exactly one row.
@@ -406,12 +405,6 @@ fn endpoint_catalog_records_exact_measured_operations() {
             "POST",
             "/v1/schema-bundles/apply",
         ),
-        (
-            endpoints::WORKFLOW_JOURNAL_ENSURE,
-            "workflow",
-            "POST",
-            "/v1/journal/ensure",
-        ),
     ] {
         assert_endpoint(endpoint, destination, method, path_template);
         recorded.insert(endpoint);
@@ -466,9 +459,6 @@ fn measured_allowlist_is_encoded_and_enforced_row_by_row() {
             endpoints::WORKFLOW_SCHEDULE_ACTIVATE,
             endpoints::WORKFLOW_SCHEDULE_DISABLE,
             endpoints::WORKER_APP_LOGS,
-            // Control learns an app registered; the MANAGER holds the journal
-            // artifacts, so Control asks rather than provisioning itself.
-            endpoints::WORKFLOW_JOURNAL_ENSURE,
         ],
         all,
     );
@@ -561,9 +551,6 @@ fn measured_allowlist_is_encoded_and_enforced_row_by_row() {
             endpoints::CONTROL_WORKER_RETIRE,
             // The same shape for extending its own lease.
             endpoints::CONTROL_WORKER_RENEW,
-            // A host that REFUSED a journal reports it. The worker holds no DDL
-            // authority of its own: it names a schema and asks.
-            endpoints::WORKFLOW_JOURNAL_ENSURE,
         ],
         all,
     );

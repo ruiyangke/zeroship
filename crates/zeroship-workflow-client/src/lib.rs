@@ -35,7 +35,6 @@ use zeroship_core::workflow_coordination::{
 };
 use zeroship_core::{
     config::PlaintextPeers,
-    schema_bundle::{EnsureJournal, SchemaBundleOutcome},
     service_assertion::ServiceIssuer,
     service_identity::endpoints,
     service_peers::{service_issuer, ServiceAuth, WORKER_SERVICE_NAME},
@@ -164,34 +163,6 @@ impl WorkerCoordinator {
     #[must_use]
     pub fn signing_key_id(&self) -> &str {
         &self.signing_key_id
-    }
-
-    /// Report that this host REFUSED the journal it found, and wait for the
-    /// manager to bring it to the version this build expects.
-    ///
-    /// A worker holds no DDL authority of its own - privilege follows the
-    /// process - so all it can do is name the schema and ask. Before this, a
-    /// refused journal was terminal: nothing in the system could move it
-    /// forward, and the host simply stopped.
-    ///
-    /// Idempotent at the far end, so a host may call it on every refusal.
-    ///
-    /// # Errors
-    /// Refuses failed exchanges and an outcome describing another schema.
-    pub async fn ensure_journal(&self, schema: &str) -> Result<SchemaBundleOutcome, Error> {
-        let outcome: SchemaBundleOutcome = self
-            .transport
-            .post(
-                endpoints::WORKFLOW_JOURNAL_ENSURE,
-                &EnsureJournal {
-                    schema: schema.to_owned(),
-                },
-            )
-            .await?;
-        if outcome.schema != schema {
-            return Err(Error::InvalidResponse);
-        }
-        Ok(outcome)
     }
 
     /// # Errors

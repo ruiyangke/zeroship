@@ -170,7 +170,6 @@ impl Fixture {
             policy_source: Some(source as Rc<dyn PolicySource>),
             runs,
             payloads,
-            journal: None,
         });
         Self {
             platform,

@@ -236,7 +236,6 @@ impl Fixture {
                 platform.work.path().join("payloads"),
             ))
             .unwrap(),
-            journal: None,
         });
         Self {
             platform,

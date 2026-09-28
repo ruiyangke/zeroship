@@ -676,9 +676,8 @@ services:
       # assertion carries no digest of the request it accompanies, and the list
       # belongs to the PROCESS rather than to one client. Every origin here is
       # one whose whole network path on this compose network is trusted.
-      ZEROSHIP_PLAINTEXT_PEERS: http://control:9090,http://migrate-server:9091
+      ZEROSHIP_PLAINTEXT_PEERS: http://control:9090
       ZEROSHIP_WORKFLOW_CONTROL_URL: http://control:9090
-      ZEROSHIP_WORKFLOW_MIGRATE_URL: http://migrate-server:9091
       # THE SAME STORE THE WORKERS MOUNT, at the same path. This service stages
       # a run's input into it and an executing run reads that object back, so a
       # store only one of them can reach is a run that cannot start. Its objects
