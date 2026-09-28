@@ -1,4 +1,4 @@
-//! Exact-run acceptance of manager-delivered work in the creator journal.
+//! Exact-run acceptance of manager-delivered work in the journal.
 
 #![expect(
     clippy::future_not_send,

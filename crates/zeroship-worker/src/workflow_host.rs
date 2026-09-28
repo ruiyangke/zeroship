@@ -151,7 +151,7 @@ pub struct HostResources {
     /// The enrolled instance identity every manager and Control call uses.
     pub service_auth: Arc<ServiceAuth>,
     pub control_url: String,
-    /// The creator database service `env.db` uses; journals share its login.
+    /// The creator database service `env.db` uses.
     pub db_service: Arc<DbService>,
     /// The creator object store `env.storage` uses; payloads live there.
     pub storage: StorageBackendConfig,

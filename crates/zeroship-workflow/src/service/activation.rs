@@ -1,4 +1,4 @@
-//! Manager-delivered deployment readiness in the creator journal.
+//! Manager-delivered deployment readiness in the journal.
 
 #![expect(
     clippy::future_not_send,

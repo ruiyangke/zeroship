@@ -46,17 +46,15 @@ pub enum DerivationError {
 /// `zeroship_worker::workflow_host::app_schema` reaches it through
 /// `DbBinding::platform` - the trusted-service constructor, which carries no
 /// database edge and consults no binding.
-/// `zeroship_control::publication::journal` derives it again to name the
-/// schema it asks the manager to INSTALL the journal in, so the installing
-/// side and the reading side agree only by both coming through here.
 /// A creator's own tables are not here:
 /// they live in the schema of the DATABASE they were migrated into, which
 /// [`crate::database_derivation::schema_name`] composes from a `DatabaseId`.
+/// The workflow journal is not here either: it belongs to the workflow
+/// service, in the platform database.
 ///
-/// **Re-keying this MOVES the workflow journal** of every app whose host
-/// installs journals in the creator schema, with no compile error and rows
-/// already written left in a schema nothing points at afterwards.
-/// `a_journal_schema_answers_the_app_it_belongs_to`
+/// **Re-keying this MOVES the app's platform-owned tables**, with no compile
+/// error and rows already written left in a schema nothing points at
+/// afterwards. `an_app_schema_answers_the_app_it_belongs_to`
 /// (`crates/zeroship-worker/src/workflow_host/tests.rs`) asserts that schema
 /// answers the app id itself, so it fails on exactly that change and carries
 /// the reasoning; it is deliberately not restated here, because two copies of

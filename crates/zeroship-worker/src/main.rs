@@ -102,13 +102,13 @@ fn worker_rejects_db_url(db_url: &str) -> bool {
         && !normalized.starts_with("postgresql://")
 }
 
-/// A workflow host prepares creator journals in the worker's own database and
+/// A workflow host runs creator code against the worker's own database and
 /// stages payloads in its own object store, so it cannot run without either.
 /// Refusing the boot beats a host that registers capacity it can never use.
 fn workflow_host_prerequisites(database: bool, storage: bool) -> Result<(), &'static str> {
     if !database {
         return Err("worker.workflow_manager_url requires worker.database_url: creator \
-                    workflow journals live in the app database");
+                    code reaches its database during a run");
     }
     if !storage {
         return Err("worker.workflow_manager_url requires worker.storage_url: workflow \

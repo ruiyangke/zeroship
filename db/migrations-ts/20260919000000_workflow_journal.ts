@@ -20,8 +20,7 @@ import { readFileSync } from "node:fs";
 // followed by a per-schema runtime login holding DML on ALL TABLES IN SCHEMA.
 // Pointed at `workflow_manager` it would take the schema away from
 // `zeroship_workflow_migrator` and mint a login with full reach over the
-// manager's queue. It stays the installer for a journal in a CREATOR schema,
-// which is a different target with different owners.
+// manager's queue.
 //
 // WHY RAW SQL. Every object here sits behind the platform-reserved
 // `__zeroship_` prefix, and `validate_collection`

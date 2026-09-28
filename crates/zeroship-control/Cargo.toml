@@ -145,17 +145,12 @@ hex = { workspace = true }
 serial_test = "3"
 zeroship-runtime = { workspace = true }
 # The workflow test fixtures seed an app by INSERTing into `zeroship.apps`,
-# which skips the deploy-time migration apply that creates the app's workflow
-# journal schema. They provision that schema through the migration service's own
-# `provisioning::provision_workflow_journal_schema` rather than a CREATE SCHEMA
-# of their own, so the seeded app carries production's privilege shape (owner
-# `zeroship_workflow_owner`) instead of a test-only one.
+# which skips the deploy-time migration apply. They provision the creator
+# database through the migration service's own
+# `provisioning::provision_database` rather than a CREATE SCHEMA of their own,
+# so the seeded app carries production's privilege shape instead of a
+# test-only one.
 zeroship-migrate-server = { workspace = true }
-# The journal's generated artifacts, read as the ORACLE for what a deploy must
-# leave behind: the deploy-path test compares the stamp it finds in the creator
-# database against the version and fingerprint this build carries, rather than
-# against the reply the call returned.
-zeroship-workflow-schema = { workspace = true }
 rusqlite = { workspace = true, features = ["bundled"] }
 tempfile = { workspace = true }
 tracing-subscriber = { workspace = true }

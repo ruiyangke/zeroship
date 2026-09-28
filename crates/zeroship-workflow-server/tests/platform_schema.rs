@@ -188,10 +188,10 @@ async fn journal_is_installed_and_served_by_one_role(fixture: &platform::Platfor
         }
     }
 
-    // The journal the worker reads today lives in a CREATOR schema, installed
-    // by the migration service's bundle path. This installation adds a second
-    // site; it must not have moved the first, and it must not have scattered
-    // journal tables through the platform's other schemas.
+    // The journal is installed in the workflow service's own schema. This
+    // check states that the install stayed there: it must not have reached into
+    // a creator schema, and it must not have scattered journal tables through
+    // the platform's other schemas.
     //
     // The scatter check reads a NEGATIVE, so it is only worth the ink if the
     // predicate producing it can produce a positive. The control runs first,

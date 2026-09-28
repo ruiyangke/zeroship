@@ -56,7 +56,7 @@ pub enum JobOperation {
         revision: Revision,
     },
     /// One bounded page of a creator dependency propagation obligation. Its
-    /// kind, source run and cursor stay in the creator journal.
+    /// kind, source run and cursor stay in the journal.
     Propagate {
         propagation_id: PropagationId,
         revision: Revision,
