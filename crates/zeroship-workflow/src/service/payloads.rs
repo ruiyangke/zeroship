@@ -392,13 +392,11 @@ impl WorkflowService {
             )
             .await?;
         scope.validate_at(tx.now().await?)?;
-        tx.database()
-            .collection(models::payloads::Entity::COLLECTION)?
-            .update(
-                value!({"app_id":scope.app().as_str(), "id":id.clone()}),
-                value!({"state":"staged"}),
-            )
-            .await?;
+        // The same compare-and-swap the served confirm makes. Under this lock the
+        // count is always one, so it changes nothing here -- but one
+        // implementation means the served path cannot drift from the in-process
+        // one, and the deadline compared is the reservation's either way.
+        confirm_staged(&tx, scope.app(), &id, row.expires_at).await?;
         scope.validate_at(tx.now().await?)?;
         tx.commit().await?;
         Ok(StagedPayload { id, reference })
@@ -1284,4 +1282,68 @@ impl WorkflowService {
         tx.commit().await?;
         Ok(reserved)
     }
+}
+
+/// Move a reserved upload to `staged`, or refuse because something else claimed
+/// the reservation.
+///
+/// # A compare and swap, and why the COUNT is the mechanism
+///
+/// In one process this transition runs under a lock held across the object write,
+/// so nothing can intervene and a bare primary-key update is safe. That lock
+/// cannot be held across a request boundary, and what replaces it is this: the
+/// collector stakes its claim DURABLY before deleting anything --
+/// `fence_payload` (`payloads/collection.rs`) compare-and-swaps `uploading` to
+/// `deleting` under the app lock and commits before `deleter.delete` runs -- so a
+/// confirm that lost that race finds no row in the state it expects.
+///
+/// THE PREDICATES ALONE WOULD NOT SAY SO. An update that narrows its filter and
+/// discards the result reports success over zero matched rows, turning a lost
+/// reservation into a `staged` row whose bytes the collector is about to delete.
+/// The count is what refuses it, so the count is not defensive tidiness: it is the
+/// half of the exclusion the lock used to provide.
+///
+/// `expires_at` MUST be the deadline the reserve wrote, carried through rather
+/// than recomputed. A value derived again later can drift past the fence's and
+/// leave the predicate comparing two different things while still looking like a
+/// comparison.
+pub(crate) async fn confirm_staged(
+    tx: &Transaction,
+    app: &AppId,
+    id: &str,
+    expires_at: i64,
+) -> Result<(), WorkflowServiceError> {
+    let changed = tx
+        .database()
+        .entity::<models::payloads::Entity>()?
+        .update_many(
+            models::payloads::app_id
+                .eq(app.as_str())?
+                .and(models::payloads::id.eq(id)?)
+                .and(models::payloads::state.eq("uploading")?)
+                .and(models::payloads::expires_at.eq(expires_at)?),
+            models::payloads::state.set("staged")?,
+        )
+        .await?;
+    super::fence::changed_once(changed, || {
+        WorkflowServiceError::Conflict("payload reservation was claimed elsewhere".into())
+    })
+}
+
+/// Confirm one reported upload, treating an already-confirmed one as done.
+///
+/// `staged` and `referenced` are NOT failures and are the ORDINARY case on a
+/// retry: a holder whose settlement acknowledgement was lost sends the same
+/// confirmations again. Only the `uploading` transition is gated.
+pub(crate) async fn confirm_reported(
+    tx: &Transaction,
+    app: &AppId,
+    id: &str,
+    expires_at: i64,
+) -> Result<(), WorkflowServiceError> {
+    let row = payload(tx, app, id).await?;
+    if matches!(row.state.as_str(), "staged" | "referenced") {
+        return Ok(());
+    }
+    confirm_staged(tx, app, id, expires_at).await
 }

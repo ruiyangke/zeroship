@@ -351,7 +351,12 @@ async fn settle(
                         TaskClaim::resume(reported.task.clone(), command.delivery.clone(), started)
                             .map_err(journal_error)?;
                     let receipt = journal
-                        .complete_job(&claim, &grant, reported.execution.clone())
+                        .complete_reported_job(
+                            &claim,
+                            &grant,
+                            reported.execution.clone(),
+                            &reported.confirmed,
+                        )
                         .await
                         .map_err(journal_error)?;
                     // The journal receipt does not cross back. Its two fields are

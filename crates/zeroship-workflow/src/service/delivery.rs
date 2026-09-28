@@ -470,7 +470,35 @@ pub struct ReportedExecution {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grant_ms: Option<NonZeroU64>,
     pub task: ClaimedTask,
+    /// Uploads this holder reserved and wrote, to be confirmed with the outcome
+    /// that references them.
+    ///
+    /// WHY THESE RIDE THE SETTLEMENT RATHER THAN A CALL OF THEIR OWN. `promote`
+    /// resolves a descriptor through `owned_reference`, which has no arm for an
+    /// `uploading` row -- so an outcome naming an object nothing confirmed is
+    /// refused as a missing payload. The confirm therefore has to land in the same
+    /// transaction as the frontier that references it, ahead of the promotion. A
+    /// separate call would either commit first and leave a staged orphan behind a
+    /// failed settlement, or commit after and lose the ordering `promote` needs.
+    ///
+    /// EMPTY FOR A HOLDER THAT UPLOADED NOTHING, which is most of them, and then
+    /// absent on the wire.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub confirmed: Vec<PayloadConfirmation>,
     pub execution: WorkflowExecution,
+}
+
+/// One upload a holder reserved and wrote, named for confirmation.
+///
+/// `expires_at` is the deadline the RESERVATION returned and must arrive
+/// unchanged: the confirm compares against it, and a deadline recomputed by the
+/// holder can drift past the collector's fence and make that comparison compare
+/// two different things while still looking like a comparison.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PayloadConfirmation {
+    pub payload_id: String,
+    pub expires_at: i64,
 }
 
 impl ReportedExecution {
@@ -484,6 +512,7 @@ impl ReportedExecution {
         Ok(Self {
             grant_ms: lease.remaining().and_then(|remaining| millis(remaining).ok()),
             task: task.reported()?,
+            confirmed: Vec::new(),
             execution,
         })
     }
@@ -953,6 +982,27 @@ impl AppWorkflows {
         grant: &impl JobLease,
         execution: WorkflowExecution,
     ) -> Result<JobReceipt, WorkflowServiceError> {
+        self.complete_reported_job(task, grant, execution, &[]).await
+    }
+
+    /// Commit a checkpoint together with the uploads its outcome references.
+    ///
+    /// [`Self::complete_job`] is this with no uploads, which is every holder that
+    /// staged nothing -- and every holder whose object store is this process's
+    /// own, since staging there confirms under its own lock. A holder that
+    /// reserved and wrote across a boundary reports them here so the confirm and
+    /// the frontier referencing it commit together.
+    ///
+    /// # Errors
+    /// Adds to [`Self::complete_job`]'s refusals an upload whose reservation
+    /// something else claimed.
+    pub async fn complete_reported_job(
+        &self,
+        task: &impl TaskGrant,
+        grant: &impl JobLease,
+        execution: WorkflowExecution,
+        confirmed: &[PayloadConfirmation],
+    ) -> Result<JobReceipt, WorkflowServiceError> {
         let delivery = self.grant_delivery(task, grant)?;
         let captured = CapturedLease::capture(self, grant);
         let budget = attempt_budget(captured.as_ref().ok(), Some(task as &dyn TaskGrant));
@@ -983,6 +1033,22 @@ impl AppWorkflows {
                 task.granted()?;
                 claim.validate_live()?;
                 let claim = claim.authorize(&mut tx)?;
+                // Confirm the holder's uploads BEFORE the frontier that references
+                // them. `promote` resolves descriptors through `owned_reference`,
+                // which has no arm for an `uploading` row, so an outcome naming an
+                // object confirmed nowhere is refused as a missing payload. Both
+                // land in this one transaction, so a refused confirm takes the
+                // outcome with it rather than leaving a reference to bytes nothing
+                // owns.
+                for upload in confirmed {
+                    super::payloads::confirm_reported(
+                        &tx,
+                        &claim.app,
+                        &upload.payload_id,
+                        upload.expires_at,
+                    )
+                    .await?;
+                }
                 let completion =
                     tasks::complete_in(&self.service, &mut tx, &claim, execution, &digest).await?;
                 let outcome = if completion.state.is_terminal() {

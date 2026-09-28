@@ -1421,6 +1421,7 @@ async fn one_exchange_carries_the_queue_and_journal_halves_of_a_delivery() {
                         remaining_ms: extended.remaining_ms,
                         ..task
                     },
+                    confirmed: Vec::new(),
                     execution: zeroship_workflow::WorkflowExecution::from_runtime_value(
                         json!({"outcomes":[{"kind":"RunCompleted"}]}),
                     )
