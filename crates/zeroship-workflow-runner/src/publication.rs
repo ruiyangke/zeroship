@@ -128,6 +128,14 @@ pub(crate) struct HostTransport {
 
 impl JobTransport for HostTransport {
     type Lease = LeasedJob;
+    type Journal = ();
+    fn scope(
+        &self,
+        _journal: &Self::Journal,
+        _authority: &zeroship_workflow::service::PolicyAuthority,
+    ) -> Result<Self::Journal, WorkflowServiceError> {
+        Ok(())
+    }
 
     async fn claim(
         &self,

@@ -43,6 +43,31 @@ use zeroship_workflow_client::{LeasedJob, WorkerCoordinator};
 /// Implementations preserve authenticated lease identity and monotonic expiry.
 pub trait JobTransport {
     type Lease: JobLease + Clone;
+    /// The journal this transport reaches, as this host holds it.
+    ///
+    /// `AppWorkflows` for a host whose journal is in its own process. `()` for the
+    /// crossed transport, and that does NOT mean the journal is absent -- it means
+    /// the journal is at the far end of the call, where the service establishes
+    /// authority server-side from the credential that signed the request. A reader
+    /// who takes the unit type for "no journal" will reach for the wrong extension
+    /// later: there is a journal, and this host simply holds no handle to it.
+    ///
+    /// DECLARED RATHER THAN RETURNED, which is what makes it safe. A transport that
+    /// declares `()` and then needs a journal does not misbehave quietly; it fails
+    /// to compile, because there is no value of that type to use.
+    type Journal;
+    /// Bind one attempt's policy authority to this transport's journal.
+    ///
+    /// ONE SITE PER SHAPE, deliberately. The retained authority is not decoration:
+    /// `CapturedLease::capture` reads it to choose the policy snapshot whose
+    /// `lease_ms` bounds the attempt, so an unscoped journal yields a DIFFERENT
+    /// lease budget rather than an error. An in-process transport therefore
+    /// delegates to `scope_journal`, and the crossed one has nothing to scope.
+    fn scope(
+        &self,
+        journal: &Self::Journal,
+        authority: &PolicyAuthority,
+    ) -> Result<Self::Journal, WorkflowServiceError>;
 
     fn claim(
         &self,
@@ -135,6 +160,18 @@ pub struct Completed {
 
 impl JobTransport for WorkerCoordinator {
     type Lease = LeasedJob;
+    /// The journal is the SERVICE'S, at the far end of every call here. This host
+    /// holds no handle to it and needs none: the service binds the app's journal
+    /// itself and establishes authority from the credential that signed the
+    /// request, so there is nothing for this side to scope.
+    type Journal = ();
+    fn scope(
+        &self,
+        _journal: &Self::Journal,
+        _authority: &PolicyAuthority,
+    ) -> Result<Self::Journal, WorkflowServiceError> {
+        Ok(())
+    }
 
     async fn claim(
         &self,
@@ -814,3 +851,17 @@ fn metadata_error(error: zeroship_workflow_client::Error) -> WorkflowServiceErro
 
 #[cfg(test)]
 mod tests;
+
+/// Bind an attempt's authority to an in-process journal.
+///
+/// The one implementation of the scoping every in-process transport needs, so a
+/// transport delegates rather than restating it. Handing back an unscoped journal
+/// would take a different policy snapshot's `lease_ms` for the attempt, which is
+/// a behaviour change rather than a failure -- so the omission has to be a visible
+/// act, and delegating here is what makes it one.
+pub fn scope_journal(
+    journal: &AppWorkflows,
+    authority: &PolicyAuthority,
+) -> Result<AppWorkflows, WorkflowServiceError> {
+    journal.clone().with_authority(authority.clone())
+}

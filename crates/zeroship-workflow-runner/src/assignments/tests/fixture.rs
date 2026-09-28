@@ -707,6 +707,16 @@ pub(super) struct Probe {
 
 impl JobTransport for Probe {
     type Lease = LeasedJob;
+    /// This host holds the journal, so an attempt is scoped here rather than
+    /// server-side.
+    type Journal = AppWorkflows;
+    fn scope(
+        &self,
+        journal: &Self::Journal,
+        authority: &zeroship_workflow::service::PolicyAuthority,
+    ) -> Result<Self::Journal, WorkflowServiceError> {
+        crate::delivery::scope_journal(journal, authority)
+    }
     async fn claim(
         &self,
         _: &AppWorkflows,

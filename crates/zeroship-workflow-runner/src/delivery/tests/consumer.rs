@@ -50,6 +50,16 @@ impl Queue {
 }
 impl JobTransport for Queue {
     type Lease = Lease;
+    /// This host holds the journal, so an attempt is scoped here rather than
+    /// server-side.
+    type Journal = AppWorkflows;
+    fn scope(
+        &self,
+        journal: &Self::Journal,
+        authority: &zeroship_workflow::service::PolicyAuthority,
+    ) -> Result<Self::Journal, WorkflowServiceError> {
+        scope_journal(journal, authority)
+    }
     async fn claim(
         &self,
         journal: &AppWorkflows,
@@ -760,6 +770,16 @@ fn manager_error(error: zeroship_workflow_manager::Error) -> WorkflowServiceErro
 
 impl JobTransport for NativeManager {
     type Lease = zeroship_workflow_manager::DeliveryGrant;
+    /// This host holds the journal, so an attempt is scoped here rather than
+    /// server-side.
+    type Journal = AppWorkflows;
+    fn scope(
+        &self,
+        journal: &Self::Journal,
+        authority: &zeroship_workflow::service::PolicyAuthority,
+    ) -> Result<Self::Journal, WorkflowServiceError> {
+        scope_journal(journal, authority)
+    }
     async fn claim(
         &self,
         journal: &AppWorkflows,

@@ -1237,6 +1237,16 @@ fn manager_error(error: zeroship_workflow_manager::Error) -> WorkflowServiceErro
 
 impl zeroship_workflow_runner::delivery::JobTransport for Manager {
     type Lease = zeroship_workflow_manager::DeliveryGrant;
+    /// This host holds the journal, so an attempt is scoped here rather than
+    /// server-side.
+    type Journal = zeroship_workflow::service::AppWorkflows;
+    fn scope(
+        &self,
+        journal: &Self::Journal,
+        authority: &zeroship_workflow::service::PolicyAuthority,
+    ) -> Result<Self::Journal, WorkflowServiceError> {
+        zeroship_workflow_runner::delivery::scope_journal(journal, authority)
+    }
 
     async fn claim(
         &self,

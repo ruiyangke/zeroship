@@ -763,6 +763,16 @@ pub struct LocalTransport {
 
 impl JobTransport for LocalTransport {
     type Lease = DeliveryGrant;
+    /// This host holds the journal, so an attempt is scoped here rather than
+    /// server-side.
+    type Journal = AppWorkflows;
+    fn scope(
+        &self,
+        journal: &Self::Journal,
+        authority: &zeroship_workflow::service::PolicyAuthority,
+    ) -> Result<Self::Journal, WorkflowServiceError> {
+        zeroship_workflow_runner::delivery::scope_journal(journal, authority)
+    }
 
     /// Both halves run here, in this process, against the journal handed in.
     /// The manager commits first and the journal second, which is the order a
