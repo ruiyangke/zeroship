@@ -1242,7 +1242,10 @@ protocol. This extends a working client rather than inventing one.
      should not restore it by adding a field.
      One arm sits outside this fence on purpose: a settlement replayed against an already-completed
      task returns the stored receipt before any re-validation, because there is nothing left to
-     commit, and `fanout`/`propagation`'s `preserve_scope_without_holds` assert exactly that
+     commit, and `fanout_delivery_and_receipts_preserve_scope_without_holds`
+     (`crates/zeroship-workflow-server/tests/http_jobs/fanout.rs`) and
+     `propagation_delivery_and_receipts_preserve_scope_without_holds`
+     (`crates/zeroship-workflow-server/tests/http_jobs/propagation.rs`) assert exactly that
      idempotence. Demanding evidence there would fail a replay that must succeed.
 
 
