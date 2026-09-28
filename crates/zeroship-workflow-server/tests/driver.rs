@@ -10,10 +10,6 @@ mod holds;
 mod platform;
 #[path = "support/app_facts.rs"]
 mod app_facts;
-#[allow(
-    dead_code,
-    reason = "the shared journal seeding also serves the creator-facing run suites"
-)]
 #[path = "support/journal.rs"]
 mod journal;
 #[path = "support/policy.rs"]
