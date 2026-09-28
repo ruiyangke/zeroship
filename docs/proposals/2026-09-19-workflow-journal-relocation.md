@@ -563,8 +563,9 @@ protocol. This extends a working client rather than inventing one.
    `execute`, and `acknowledge` settles the receipt it returned.
 
    **Take the heartbeat first; its server half waits.** Production journals per app
-   into the creator's own schema - `JournalLocation::CreatorSchema` in
-   `crates/zeroship-worker/src/main.rs` - while `RunService` holds one platform
+   into the creator's own schema - `app_schema` in
+   `crates/zeroship-worker/src/workflow_host.rs`, which composes
+   `app_derivation::schema_name(app)` - while `RunService` holds one platform
    `workflow_manager` schema, so a merged server handler would have no rows to touch. The
    client, wire and DTO halves land green; leave
    `crates/zeroship-workflow-server/src/api/jobs.rs` alone until the cutover animates it.
@@ -1136,13 +1137,12 @@ protocol. This extends a working client rather than inventing one.
    - **Then the backend**, cheapest first: the three methods whose halves the wire-pair test
      already binds, then `start`, then the two reads as two-phase.
    - **Then the merged heartbeat**, which cannot land until its timeout budget is settled.
-   - **Then the worker stops holding a journal**, which is the flag and is bigger than the enum.
-     Flipping `JournalLocation::CreatorSchema` to `Service(..)` does NOT point the worker at the
-     service's journal: `ProductionResources::resolve`
-     (`crates/zeroship-worker/src/workflow_host.rs`) builds its `HostStorage` over
-     `self.db.connection()`, the CREATOR database, whichever schema the enum picks, while
-     `RunService::connect` opens `workflow_manager` through
-     `ConnectionFactory::for_platform_url`. The arms differ by schema, not by database. So the
+   - **Then the worker stops holding a journal**, which is the flag and is bigger than a schema
+     switch. There is no two-armed choice left to flip, because the one that existed collapsed:
+     `ProductionResources::resolve` (`crates/zeroship-worker/src/workflow_host.rs`) builds its
+     `HostStorage` over `self.db.connection()`, the CREATOR database, composing the schema with
+     `app_schema`, while `RunService::connect` opens `workflow_manager` through
+     `ConnectionFactory::for_platform_url`. A schema switch differs by schema, not by database. So the
      flag is either repointing the worker's journal connection at the platform database, or the
      worker opening no journal at all and reaching the service over HTTP. The first of those is
      what the do-not note below forbids - a DSN to the journal database held by the one process
@@ -2153,13 +2153,14 @@ part that dates, not the verdict.
 
    **Nothing in the database scopes any of it.** The journal declares no role, no row-level
    security and no grant (`crates/zeroship-workflow-schema/schema/schema.ts`). What binds the
-   handle is the schema the host composes and a check in Rust. `JournalLocation`
-   (`crates/zeroship-worker/src/workflow_host.rs`) answers `CreatorSchema` through
-   `app_derivation::schema_name`, which returns the app id, so a schema holds a single app; its
-   other arm is one journal "for every app, in a schema the service owns". `Transaction::check_app`
+   handle is the schema the host composes and a check in Rust. `app_schema`
+   (`crates/zeroship-worker/src/workflow_host.rs`) composes it through
+   `app_derivation::schema_name`, which returns the app id, so a schema holds a single app. A
+   service-owned journal is instead one journal for every app, in a schema the service owns.
+   `Transaction::check_app`
    (`crates/zeroship-workflow/src/service/store.rs`) refuses a foreign app, and engages only
    where a policy binding is set, while `OrmStore::begin` in the same file sets none and the
-   worker holds the store. Under that other arm the Rust check is the whole fence, which is Why
+   worker holds the store. Under a service-owned journal the Rust check is the whole fence, which is Why
    it is this way seen from the worker's side.
 
    **What it would hold afterwards is its task and the reply.** `accept_job` answers a
