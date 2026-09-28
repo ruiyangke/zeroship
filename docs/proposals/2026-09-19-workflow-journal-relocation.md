@@ -234,11 +234,15 @@ closed, and the shared names that must NOT follow the deletion.
 The ORM entry is a dependency-boundary improvement the AGENTS.md invariant already gestures at:
 `zeroship-workflow-schema` is a leaf so a service can install the journal without depending on
 the engine. Read it as the last step of the move rather than a deletion available on its own,
-because the ORM is not confined to the store: every module under
-`crates/zeroship-workflow/src/service/` reaches it - activation, signals, continuations,
-collection, app, models, control, frontier, delivery - while
-`crates/zeroship-workflow/src/engine.rs` names it nowhere. That asymmetry is exactly what makes
-the split clean, and it is also why what moves is the whole `service/` tree, not one file.
+because the ORM is not confined to the store: it is reached from across
+`crates/zeroship-workflow/src/service/`, and from nowhere else in the crate at all.
+`crates/zeroship-workflow/src/engine.rs` names it nowhere, and neither does any other module
+outside `service/`. The containment rather than the density is what makes the split clean, and
+it is why what moves is the whole `service/` tree rather than one file. Re-measure it instead of
+trusting this paragraph: list the files under `crates/zeroship-workflow/src/` that name
+`zeroship_data_orm` and check that every one of them sits under `service/`. Plenty of modules
+under `service/` never name it, so a claim that each one needs the ORM would be the wrong
+reading and would argue for moving files one at a time.
 
 ### What it does NOT decide
 
@@ -1523,14 +1527,19 @@ protocol. This extends a working client rather than inventing one.
    holds.
 
 7. **Drop `zeroship-data-orm` from `zeroship-workflow`**, the engine - NOT from
-   `crates/zeroship-worker`, which declares it directly and keeps needing it. The worker's own
-   uses are creator data rather than journal: resolved bindings, connection factories and
-   project keys in `crates/zeroship-worker/src/sync.rs`,
+   `crates/zeroship-worker`, which declares it directly and keeps needing it. The worker's uses
+   are creator data rather than journal: resolved bindings, connection factories and project
+   keys, in `crates/zeroship-worker/src/sync.rs`,
    `crates/zeroship-worker/src/cache/fixture.rs` and
-   `crates/zeroship-worker/src/workflow_host.rs`. Removing that declaration would break
-   `env.db`, and removing it from the engine is what this step means: once the `service/` tree
-   has moved to the service, the engine holds no store and needs no ORM. It is the last step
-   because nothing earlier makes the engine storeless, not because it is hard.
+   `crates/zeroship-worker/src/workflow_host.rs` among others, so treat those as examples and
+   list the worker files naming `zeroship_data_orm` rather than trusting the three. The only
+   journal-flavoured uses left there are the fixtures under
+   `crates/zeroship-worker/src/workflow_creator/`, which step 6 removes with the repair path
+   they set up; `workflow_creator.rs` itself reaches the ORM nowhere, so no production worker
+   module uses it for the journal. Removing that declaration would break `env.db`, and removing
+   it from the engine is what this step means: once the `service/` tree has moved to the
+   service, the engine holds no store and needs no ORM. It is the last step because nothing
+   earlier makes the engine storeless, not because it is hard.
 
 **Latency is not the gate; payload is, and its bound is settled.** Open 1 holds the answer and
 names `crates/zeroship-workflow-client/tests/round_trip_cost.rs` as the instrument: re-run it
