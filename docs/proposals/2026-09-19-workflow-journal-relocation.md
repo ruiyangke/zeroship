@@ -1137,6 +1137,20 @@ protocol. This extends a working client rather than inventing one.
      settlement, or commit after and lose the ordering `promote` needs. That is why the
      confirmations are a field on the reported execution, empty for the holders that uploaded
      nothing and absent from the wire when empty.
+     **And the staging window bounds a whole EXECUTION once the confirm crosses, which it already
+     did before.** `reserve_inner` inserts `expires_at = deadline(now, payload_staging_retention_ms)`
+     unconditionally, so the row's life is the retention window and not the lease; the lease enters
+     only through `StagingAuthority::budget_until`, which bounds the WRITE. `fence_payload` takes a
+     row only when its state is one of `uploading`, `staged`, `deleting` or `deleted` AND its
+     `expires_at` has elapsed, and `require_unreferenced` refuses a row a `payload_refs` edge
+     already claims - so once the settlement promotes and references an object the question closes.
+     The in-process path used this same window and simply confirmed inside its own call, so severing
+     lengthens nothing. What it does is make a previously unreachable state ordinary: between the
+     upload and the settlement the row sits `uploading`, claimed only by that deadline. An execution
+     that outlives the window has its uploads collected and its settlement refused by the
+     compare-and-swap, which is the correct outcome rather than a gap to close - a settlement that
+     promoted a collected object would be worse. So neither a longer window nor a heartbeat
+     extending reserved rows belongs here; the second would be a mechanism with no sender.
      The index dedupes one path and not the other, which is the part a reader gets wrong in the
      safe-seeming direction. `__zeroship_workflow_payload_upload_request` is unique on
      `("app_id","task_id","request_id")`, so on the LEASED path, where `task_id` is non-NULL, it
