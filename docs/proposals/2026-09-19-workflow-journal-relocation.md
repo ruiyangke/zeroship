@@ -340,7 +340,11 @@ workers **and local development**", and `WorkflowBackendFactory` already carries
 Two consequences to record in `docs/reference/sqlite-divergences.md` rather than leave silent:
 the dev tier keeps the journal in the local file and therefore exercises the SQL store that
 production no longer uses, so a dev-tier pass is not evidence about the production write path;
-and `SCHEMA_PLACEHOLDER` survives for that tier alone.
+and the dev tier binds no schema at all, so it exercises none of the substitution the PostgreSQL
+path depends on. `SCHEMA_PLACEHOLDER` belongs to the PostgreSQL artifact, not to this tier:
+`the_sqlite_artifact_needs_no_binding` (`crates/zeroship-workflow-schema/src/lib.rs`) asserts the
+SQLite SQL must not carry it, while `the_template_still_carries_the_placeholder` in the same module
+requires the PostgreSQL template to.
 
 ---
 
@@ -1070,16 +1074,38 @@ protocol. This extends a working client rather than inventing one.
      (`crates/zeroship-workflow/src/deployment_holds/mod.rs`), which mints an asserted client per
      app and scopes each to the one app it was asked for.
    - **Then the payload reserve and confirm**, since `start` and `stage` share that one
-     mechanism, and the confirm must gain the `state` and `expires_at` predicates it does not
-     need while a lock is held across the write. Predicates alone do not make it a compare and
-     swap. The confirm discards its update's result today
-     (`crates/zeroship-workflow/src/service/payloads.rs`), so narrowing the filter without
-     reading the count would turn a lost reservation into a silent success - a row nothing
-     matched, reported as staged. The arm it needs is already the idiom in this crate:
-     `if !matches!(changed, Output::Count(1))`, in
+     mechanism. What the lock across the write actually holds is mutual exclusion between the
+     WRITER and the COLLECTOR, which its own comment says
+     (`crates/zeroship-workflow/src/service/payloads.rs`): a bounded upload holds it until the
+     store finishes, so GC cannot race a live writer. So the question a crossing has to answer is
+     not whether the confirm can move, it is what replaces that exclusion - and the answer is that
+     the collector already fences durably instead of relying on the lock. `fence_payload`
+     (`crates/zeroship-workflow/src/service/payloads/collection.rs`) moves the row `uploading` to
+     `deleting` under a compare-and-swap guarded by `changed_once` and COMMITS that transition
+     before `collect_payload_checked` calls `deleter.delete`, so a confirm comparing and swapping
+     on `state = "uploading"` and the deadline the reserve wrote cannot win once the collector has
+     claimed the row. The one thing exclusion additionally bought, bytes landing after the row is
+     gone, is already designed for: that module's header records a two-deletion tombstone with a
+     resweep one staging window away, expressly because an upload dispatched by a dead writer may
+     still arrive.
+     So the confirm becomes a counted compare-and-swap, and the count is the mechanism rather than
+     a precaution. The confirm discards its update's result today, so narrowing the filter without
+     reading the count would turn a confirm that LOST to the fence into a silent success: a row
+     nothing matched, reported as staged, whose bytes the collector is about to delete. The arm it
+     needs is already the idiom in this crate: `if !matches!(changed, Output::Count(1))`, in
      `crates/zeroship-workflow/src/service/delivery.rs` and
-     `crates/zeroship-workflow/src/service/activation.rs`, where the filter carries the state the
-     caller expects and the count is what proves the swap happened.
+     `crates/zeroship-workflow/src/service/activation.rs`. The predicate gates only `uploading` to
+     `staged`, and `staged` and `referenced` must read as already done and successful the way
+     `stage_inner`'s second transaction does, or a retried confirm after a lost acknowledgement
+     becomes a failure instead of the ordinary case.
+     Nothing dedupes a retried cross at the index. `__zeroship_workflow_payload_upload_request` is
+     unique on `("app_id","task_id","request_id")`, which enforces nothing while `task_id` is NULL,
+     and the ownerless path is deliberate rather than an oversight. What dedupes is the
+     service-side select on `(app_id, request_id)`, narrowed by the task term only when a task
+     exists, plus the refusal when a request id is reused for different bytes. Crossing keeps that
+     select on the service side, so what it adds is an obligation on the caller: a retry resends
+     the SAME `RequestId`, which belongs in the endpoint's own contract rather than staying an
+     internal detail.
    - **Then the backend**, cheapest first: the three methods whose halves the wire-pair test
      already binds, then `start`, then the two reads as two-phase.
    - **Then the merged heartbeat**, which cannot land until its timeout budget is settled.
@@ -1505,8 +1531,9 @@ protocol. This extends a working client rather than inventing one.
    **Three shared names must not follow the deletion, and a tree-wide search for any of them
    argues for deleting far too much.** `SCHEMA_PLACEHOLDER` names two different constants: the
    private charter token above, which goes, and the public quoted DDL token in
-   `crates/zeroship-workflow-schema/src/lib.rs`, which stays, for the reason given under the
-   design and again under the SQLite dev tier. `ensure_journal` also names
+   `crates/zeroship-workflow-schema/src/lib.rs`, which stays because the PostgreSQL template ships
+   carrying it and the platform migration binds the target schema into it, quoted; the do-not note
+   below pins both halves with tests. `ensure_journal` also names
    `MigrationBackend::ensure_journal` across the `zeroship-migrate-*` crates, which creates the
    migration stamp table and is unrelated to the workflow journal; it is most of what searching
    the name returns. `SchemaBundleOutcome` and the rest of
@@ -2365,10 +2392,19 @@ part that dates, not the verdict.
   model. Any future step that relies on a journal record and a data write committing together
   is relying on something that has never been true and cannot be true across processes.
 
-- **Do not keep `SCHEMA_PLACEHOLDER` on the PostgreSQL path "for symmetry".** One fixed schema
-  needs no substitution, and a placeholder that is always replaced with the same value is a
-  seam inviting a caller to pass something else. It survives for SQLite because that tier has a
-  genuine reason.
+- **Do not delete `SCHEMA_PLACEHOLDER` from the PostgreSQL path.** It is that artifact's binding
+  seam rather than a symmetry with SQLite, and the direction is the opposite of what a reader
+  might guess: the generated PostgreSQL template ships carrying it and the platform migration
+  substitutes the target schema in, quoted, while the SQLite artifact has no schema to bind and
+  must not carry it at all. Both halves are pinned in
+  `crates/zeroship-workflow-schema/src/lib.rs` - `the_template_still_carries_the_placeholder`
+  requires the template to keep it and to leave none behind once bound, and
+  `the_sqlite_artifact_needs_no_binding` requires the SQLite SQL to be free of it. A fixed target
+  schema does not remove the need, and the QUOTED form is the reason: `STAMP_TABLE` is
+  `__zeroship_workflow_schema_version`, which contains the placeholder's bare word, so
+  substituting unquoted would rewrite the stamp table's name along with the schema.
+  `substitution_matches_the_orm_quoting_rule` holds the substitution to `zeroship_data_orm`'s own
+  quoting rule, which is what keeps the one caller-supplied name reaching generated DDL narrow.
 
 - **Do not split claimants by which host holds the payload store.** Blob storage keeps large
   objects out of the database, so the process that owns the journal owns the store those objects
