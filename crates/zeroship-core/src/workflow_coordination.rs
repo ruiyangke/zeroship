@@ -351,6 +351,31 @@ pub struct ReadStepOutput {
     pub occurrence: u32,
 }
 
+/// Locate the object one replay edge of a running task names.
+///
+/// The reply is a [`PayloadLocation`], for the reason [`ReadStepOutput`]'s is:
+/// the bytes answer to a payload's ceiling and a reply to a smaller one. The
+/// caller opens the object itself, out of the lock this call takes and releases.
+///
+/// THE APP IS A SELECTOR AND NOT THE AUTHORITY. It names which journal to ask,
+/// and the authority is the task credential, which that journal minted and holds
+/// only a hash of. A caller naming another app's journal reaches one where its
+/// own task and token do not exist, so the selector cannot widen what it may
+/// read -- unlike a placement, which names an app the caller asserts it holds.
+///
+/// `token` IS A STRING because the token's type belongs to the journal crate,
+/// which this one cannot name. The wire bytes are the same either way: that type
+/// serializes as a string already. Parsing it on the CALLEE's side is the point,
+/// since refusing a malformed credential is the callee's to do.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReadTaskPayload {
+    pub app_id: AppId,
+    pub task_id: String,
+    pub token: String,
+    pub reference: WorkflowOutputRef,
+}
+
 /// Deliver a signal to a waiting run.
 ///
 /// `request_id` is the idempotency of the delivery: a caller that retries after

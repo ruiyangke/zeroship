@@ -569,6 +569,14 @@ pub mod endpoints {
         ServiceEndpoint::new("workflow", "POST", "/v1/runs/step-output");
     pub const WORKFLOW_RUN_OUTPUT: ServiceEndpoint =
         ServiceEndpoint::new("workflow", "POST", "/v1/runs/output");
+    /// Locate one object a running task's replay edge names.
+    ///
+    /// Answers with a descriptor and a key, for the reason the two above do. What
+    /// authorizes it is the TASK CREDENTIAL in the body, not a placement: a
+    /// dispatch holds one, the journal holds only its hash, and the app named
+    /// beside it selects the journal to ask rather than asserting a claim on it.
+    pub const WORKFLOW_TASK_PAYLOAD: ServiceEndpoint =
+        ServiceEndpoint::new("workflow", "POST", "/v1/tasks/payload");
     pub const WORKER_DISPATCH: ServiceEndpoint =
         ServiceEndpoint::new("worker", "POST", "/dispatch/{app_id}");
     pub const WORKER_APP_LOGS: ServiceEndpoint =
@@ -728,6 +736,11 @@ pub fn service_allowlist() -> &'static [ServiceAuthorization] {
                     endpoints::WORKFLOW_RUN_RESTART,
                     endpoints::WORKFLOW_RUN_STEP_OUTPUT,
                     endpoints::WORKFLOW_RUN_OUTPUT,
+                    // A dispatch reading its own replay edge. Not a creator
+                    // call and not a placement one: the task credential in the
+                    // body is what the journal checks, and this grant only says
+                    // a worker is the kind of peer that may present one.
+                    endpoints::WORKFLOW_TASK_PAYLOAD,
                     endpoints::CDC_SUBSCRIBE,
                     // Host app reads are role-scoped: an authenticated worker
                     // may request any app's version, environment, and project

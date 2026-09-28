@@ -5,7 +5,8 @@ use super::{
 use std::time::{Duration, Instant};
 use zeroship_core::{
     service_identity::endpoints,
-    workflow_coordination::{AssignedScope, FailureCode},
+    typed_id,
+    workflow_coordination::{AssignedScope, FailureCode, PayloadLocation, ReadTaskPayload},
     workflow_jobs::{
         Delivery, DeliveryLease, JobLease, JobOperation, JobSpec, Settlement, SettlementReceipt,
         SubmitJob,
@@ -260,6 +261,39 @@ impl WorkerCoordinator {
         self.transport
             .post_journal(endpoints::WORKFLOW_JOB_SETTLE, &request)
             .await
+    }
+
+    /// Locate the object one replay edge of a live dispatch names.
+    ///
+    /// TWO PHASES, and this is the first. The bytes cannot cross -- a payload
+    /// answers to its own ceiling and a reply to the smaller journal one -- so
+    /// what comes back is the key the journal proved this task owns, plus the
+    /// descriptor those bytes must satisfy. The caller opens the object from the
+    /// store it binds under the same namespace.
+    ///
+    /// THE WORKER IS NOT IN THE REQUEST. The credential that signs it is what
+    /// the service substitutes into the task lookup, so a caller cannot read
+    /// another worker's dispatch by naming it.
+    ///
+    /// # Errors
+    /// Refuses failed exchanges, the journal's own refusals, and a reply whose
+    /// key is not a workflow payload id.
+    pub async fn read_task_payload(
+        &self,
+        request: &ReadTaskPayload,
+    ) -> Result<PayloadLocation, Error> {
+        let located: PayloadLocation = self
+            .transport
+            .post(endpoints::WORKFLOW_TASK_PAYLOAD, request)
+            .await?;
+        // A key addresses an object store, so it is parsed against the one prefix
+        // a payload may carry before any caller uses it as one. The descriptor is
+        // NOT checked here: `read_verified` compares it against the one this call
+        // asked for, which is a stronger check than a well-formedness one and is
+        // the caller's to make against its own request.
+        typed_id::parse_with_prefix(&located.payload_id, typed_id::WORKFLOW_PAYLOAD_PREFIX)
+            .map_err(|_| Error::InvalidResponse)?;
+        Ok(located)
     }
 
     fn settled(

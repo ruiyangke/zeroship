@@ -1,11 +1,11 @@
-use super::{authorization, read_json, respond};
+use super::{authorization, read_json, respond, LocatePayload};
 use crate::{auth::VerifiedWorker, coordinator::Error, SharedState};
 use ntex::web::{self, types::State};
 use std::time::{Duration, Instant};
 use zeroship_core::{
     app_id::AppId,
     service_identity::{endpoints, ServiceEndpoint},
-    workflow_coordination::{AssignedScope, WorkerId},
+    workflow_coordination::{AssignedScope, PayloadLocation, ReadTaskPayload, WorkerId},
     workflow_jobs::{Settlement, SubmitJob},
     workflow_policy::MAX_JOURNAL_BYTES_CEILING,
 };
@@ -14,7 +14,7 @@ use zeroship_workflow::{
         delivery::{
             AcceptedJob, ClaimedTask, RenewedTask, ReportedExecution, ReportedGrant, TaskClaim,
         },
-        AppWorkflows,
+        AppWorkflows, TaskToken, WorkerIdentity,
     },
     WorkflowServiceError,
 };
@@ -54,6 +54,10 @@ pub fn configure(config: &mut web::ServiceConfig) {
                 // only one that needs more than the metadata budget.
                 .state(web::types::JsonConfig::default().limit(SETTLE_BODY_BYTES))
                 .route(web::post().to(settle)),
+        )
+        .service(
+            web::resource(endpoints::WORKFLOW_TASK_PAYLOAD.path_template())
+                .route(web::post().to(task_payload)),
         );
 }
 
@@ -338,6 +342,53 @@ async fn settle(
                     settled(&state, &actor, &settlement).await
                 }
             }
+        }
+        .await,
+    )
+}
+
+/// Locate one object a live dispatch's replay edge names.
+///
+/// THE WORKER IS NEVER READ FROM THE BODY, and here that is load-bearing twice
+/// rather than once. A task row is keyed by (id, worker, token hash), so the
+/// identity substituted here is half of the lookup: presenting another worker's
+/// task and token finds no row at all. The same substitution is what the run
+/// routes make, for the same reason.
+///
+/// The APP in the body selects which journal to ask and grants nothing. Unlike a
+/// placement, it is not a claim this service has to verify: the task credential
+/// is the authority, the journal holds only its hash, and a body naming another
+/// app reaches a journal where this caller's task does not exist.
+///
+/// What crosses back is a key and a descriptor. The lock this takes is released
+/// before the caller opens the object, which is the point of splitting it -- in
+/// process the object open happens inside `lock_app_state` and `lock_run`, so an
+/// object-store round trip serializes against every journal mutation for the app.
+async fn task_payload(
+    request: web::HttpRequest,
+    state: State<SharedState>,
+    body: web::types::Payload,
+) -> web::HttpResponse {
+    respond(
+        async {
+            let actor = authenticate(&request, &state, endpoints::WORKFLOW_TASK_PAYLOAD).await?;
+            let command: ReadTaskPayload = read_json(&request, body).await?;
+            let token = TaskToken::try_from(command.token).map_err(|_| Error::Unauthenticated)?;
+            let worker = WorkerIdentity::new(actor.id().as_str().to_owned())
+                .map_err(|_| Error::Unauthenticated)?;
+            let journal = journal(&state, &command.app_id).await?;
+            let located: PayloadLocation = journal
+                .service()
+                .read_task_payload(
+                    &worker,
+                    &command.task_id,
+                    &token,
+                    &command.reference,
+                    LocatePayload,
+                )
+                .await
+                .map_err(journal_error)?;
+            Ok(located)
         }
         .await,
     )

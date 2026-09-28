@@ -55,9 +55,11 @@ use zeroship_core::{
     },
     service_peers::{service_issuer, ServiceAuth, ServiceKeyring, CONTROL_SERVICE_NAME},
     workflow_coordination::{
-        AssignedScope, ConflictPolicy, CreatorStartOptions, ReadStepOutput, RegisterWorker,
-        RequestId, RestartOptions, RestartRun, RunFailure, RunId, RunOperation, RunScope, RunState,
-        SignalOptions, SignalRun, StartRun, TransitionRun, WorkerId, WorkerState,
+        AssignedScope, ConflictPolicy, CreatorStartOptions, FailureCode, ReadStepOutput,
+        ReadTaskPayload,
+        RegisterWorker, RequestId, RestartOptions, RestartRun, RunFailure, RunId, RunOperation,
+        RunScope, RunState, SignalOptions, SignalRun, StartRun, TransitionRun, WorkerId,
+        WorkerState,
     },
     workflow_jobs::DeploymentId,
     workflow_policy::AppPolicy,
@@ -397,5 +399,94 @@ async fn the_client_and_the_service_agree_on_every_run_call() {
     assert!(
         matches!(unrecorded, RunError::Refused(RunFailure::NotFound { .. })),
         "{unrecorded:?}"
+    );
+}
+
+/// The task payload read, client to service, over a real socket.
+///
+/// Separate from the run calls because the AUTHORITY is different in kind: a run
+/// call is authorized by the placement the manager holds for this worker, and
+/// this one by a dispatch credential the journal minted and keeps only a hash
+/// of. Sharing the run test's body would hide that, since the fixture's
+/// placement would satisfy both and neither arm would say which one answered.
+///
+/// THREE ARMS, and the pairing is the point. The located reply proves the
+/// journal was reached and answered from its own rows. The two refusals prove it
+/// was reached for the right reason and refused at different STAGES: a malformed
+/// credential is refused by the route before any journal call, and a well-formed
+/// one naming no dispatch is refused by the journal itself. Two codes from two
+/// stages is what separates "the journal said no" from "the request never got
+/// there" -- which a single refusal arm cannot distinguish, and which is exactly
+/// how a route registered at the wrong path or missing its grant would look.
+///
+/// What this does NOT cover: the bytes. They never cross this call, and opening
+/// the located object is the caller's half, asserted where the object store is.
+#[ntex::test]
+async fn the_client_and_the_service_agree_on_a_task_payload_read() {
+    let fixture = Box::pin(Fixture::new()).await;
+    let run = journal::seed_run(&fixture.platform, &fixture.app).await;
+    let leased = journal::seed_leased_task(
+        &fixture.platform,
+        &fixture.app,
+        &run,
+        fixture.client.worker_id(),
+    )
+    .await;
+
+    let located = fixture
+        .client
+        .read_task_payload(&ReadTaskPayload {
+            app_id: fixture.app.clone(),
+            task_id: leased.task.clone(),
+            token: leased.token.clone(),
+            reference: leased.reference.clone(),
+        })
+        .await
+        .expect("the journal locates the object its own edge names");
+    assert_eq!(located.payload_id, leased.payload);
+    assert_eq!(located.reference, leased.reference);
+
+    // Refused by the ROUTE, before a journal call: the token's own parse.
+    let malformed = fixture
+        .client
+        .read_task_payload(&ReadTaskPayload {
+            app_id: fixture.app.clone(),
+            task_id: leased.task.clone(),
+            token: "not-a-token".to_owned(),
+            reference: leased.reference.clone(),
+        })
+        .await
+        .expect_err("a credential that cannot be a token was accepted");
+    assert!(
+        matches!(
+            malformed,
+            zeroship_workflow_client::Error::Refused(FailureCode::Unauthenticated)
+        ),
+        "{malformed:?}"
+    );
+
+    // Refused by the JOURNAL: a well-formed credential naming no dispatch of
+    // this app. A stale delivery is a conflict rather than a missing URL, which
+    // is the mapping every delivery call shares.
+    let unknown = fixture
+        .client
+        .read_task_payload(&ReadTaskPayload {
+            app_id: fixture.app.clone(),
+            // A WELL-FORMED dispatch id, so the refusal is the lookup's and not the
+            // prefix parse that precedes it.
+            task_id: zeroship_core::typed_id::generate(
+                zeroship_core::typed_id::WORKFLOW_DISPATCH_PREFIX,
+            ),
+            token: leased.token,
+            reference: leased.reference,
+        })
+        .await
+        .expect_err("a dispatch this app never held was answered");
+    assert!(
+        matches!(
+            unknown,
+            zeroship_workflow_client::Error::Refused(FailureCode::Conflict)
+        ),
+        "{unknown:?}"
     );
 }

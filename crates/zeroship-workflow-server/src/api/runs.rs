@@ -1,6 +1,6 @@
 //! The creator-facing run calls, answered from this service's own journal.
 
-use super::{authorization, read_json};
+use super::{authorization, read_json, LocatePayload};
 use crate::{coordinator::Error, SharedState};
 use ntex::{
     http::StatusCode,
@@ -11,13 +11,13 @@ use std::time::Duration;
 use zeroship_core::{
     service_identity::{endpoints, ServiceEndpoint},
     workflow_coordination::{
-        AssignedScope, PayloadLocation, ReadStepOutput, RestartRun, RunFailure, RunScope,
-        SignalRun, StartRun, StepOutputLocation, TransitionRun, VerifyAssignment,
+        AssignedScope, ReadStepOutput, RestartRun, RunFailure, RunScope, SignalRun, StartRun,
+        StepOutputLocation, TransitionRun, VerifyAssignment,
     },
     workflow_policy::MAX_INPUT_BYTES_CEILING,
 };
 use zeroship_workflow::{
-    service::{stage_start_input, AppWorkflows, PayloadOpener, PayloadTarget, StepOutput},
+    service::{stage_start_input, AppWorkflows, StepOutput},
     WorkflowServiceError,
 };
 
@@ -68,30 +68,6 @@ pub fn configure(config: &mut web::ServiceConfig) {
             web::resource(endpoints::WORKFLOW_RUN_OUTPUT.path_template())
                 .route(web::post().to(output)),
         );
-}
-
-/// Answers with the payload a proven read located, instead of opening it.
-///
-/// `PayloadOpener` is the seam the engine hands one authorized object through,
-/// and its `Read` is whatever the host makes of that object. A host that holds
-/// the store makes bytes; this one makes the key and the descriptor, so the
-/// journal's proof of which object a step owns happens here under the run lock
-/// and the object itself is opened by the caller that holds the same store.
-///
-/// The engine's own guard against a substituted object is unaffected: it compares
-/// the row's descriptor against the step's recorded one BEFORE this is reached.
-struct LocatePayload;
-
-#[async_trait::async_trait(?Send)]
-impl PayloadOpener for LocatePayload {
-    type Read = PayloadLocation;
-
-    async fn open(self, target: PayloadTarget<'_>) -> Result<Self::Read, WorkflowServiceError> {
-        Ok(PayloadLocation {
-            payload_id: target.id.to_owned(),
-            reference: target.reference.clone(),
-        })
-    }
 }
 
 /// Resolve the app this call may act for, and bind it to the journal.
