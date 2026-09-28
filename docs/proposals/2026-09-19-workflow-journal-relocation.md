@@ -1582,6 +1582,34 @@ protocol. This extends a working client rather than inventing one.
    service, the engine holds no store and needs no ORM. It is the last step because nothing
    earlier makes the engine storeless, not because it is hard.
 
+
+   **This step's precondition is unowned work, and it is worth naming before someone reaches this
+   step and finds it blocked.** Nothing above moves the `service/` tree. Step 5's last bullet stops
+   the WORKER from holding a journal, which is not the same as the engine ceasing to hold one. For
+   `crates/zeroship-workflow/Cargo.toml` to stop declaring the ORM, no file in that crate may name
+   `zeroship_data_orm`, and most of the files under `crates/zeroship-workflow/src/service/` do,
+   while nothing outside `service/` in that crate names it at all. That containment is what makes
+   the tree the unit in practice even though part of it is already ORM-free. Measure both halves
+   rather than trusting a count written here.
+
+   The callers outside the engine split, and the split decides how much has to move. The
+   store-bound ones are what the severance removes: `crates/zeroship-worker/src/workflow_runtime.rs`
+   and the runner's `outputs.rs` and `payloads/objects.rs` reach the embedded service, and a worker
+   that holds no journal cannot construct what they ask for. The type-only ones carry no store and
+   need not follow it: `crates/zeroship-control/src/publication/command.rs` and
+   `crates/zeroship-control/src/deployment_hold_api.rs` name `BundleDeclarations`,
+   `DeployRegistration` and `DeployRegistrationRequest`, which are declaration shapes rather than
+   journal access.
+
+   **What is NOT settled is the destination, and the dev tier is why.** `AppBackend` is store-bound,
+   and `crates/zeroship-workflow-v8/src/lib.rs` composes it through
+   `WorkflowBackendFactory::service`, which the embedded tier still needs because the SQLite dev
+   tier keeps the journal local by design. So the store-bound code cannot move behind the service's
+   HTTP surface; it has to live somewhere both the service and the local host reach.
+   `crates/zeroship-workflow-server/Cargo.toml` already declares the ORM, which makes it the
+   obvious home, but putting it there means `zeroship-workflow-v8` reaches the server crate for
+   `AppBackend`. Settle that before starting the move rather than during it.
+
 **Latency is not the gate; payload is, and its bound is settled.** Open 1 holds the answer and
 names `crates/zeroship-workflow-client/tests/round_trip_cost.rs` as the instrument: re-run it
 rather than trusting a paragraph. The bounds a crossing payload meets answer to the ceiling
