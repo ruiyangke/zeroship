@@ -1701,6 +1701,24 @@ protocol. This extends a working client rather than inventing one.
    learned the lease. The lease predicate is the fix that matters now, and deleting the endpoint
    is what removes the shape.
 
+   **And it orphans a capability that existed only for this reader, which is the same rule one
+   level up.** `MIGRATE_SCHEMA_BUNDLE` (`crates/zeroship-core/src/service_identity.rs`) is granted
+   to `svc/workflow` alone, and the grant says why: the manager owns when a journal must exist, so
+   it is the one principal that may send a schema bundle, because routing it through Control would
+   move the workflow artifacts into Control. The manager's only sender was
+   `SchemaBundles` in `crates/zeroship-workflow-client/src/schema_bundles.rs`, reached from the
+   `journal.rs` this step deletes. So after this step the grant belongs to a principal that never
+   sends, the client method has no caller, and the route in
+   `crates/zeroship-migrate-server/src/api.rs` can be reached by nobody entitled to call it.
+   The bundle MODULE itself is not dead - `crates/zeroship-migrate-server/src/bundle.rs` validates,
+   composes and stamps, with its own tests - so this is a reachability question rather than a
+   correctness one, and the types in `crates/zeroship-core/src/schema_bundle.rs` stay either way
+   because that module answers with them.
+   Deleting a platform capability is outside this proposal, so it is recorded here rather than
+   scheduled: the journal was the reason the bundle path exists, and the journal has left. Whoever
+   takes it should expect the grant, the client, the route and the exhaustive table's row to go
+   together, which is the same set this step's own deletion taught.
+
    **The grant and the probe go with the reader.** The exposure is recorded where a search for
    `ensure_journal` does not reach, because both places name the endpoint constant instead: the
    allowlist rows in `crates/zeroship-core/src/service_identity.rs`, and the exhaustive table in
