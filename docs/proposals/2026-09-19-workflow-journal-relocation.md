@@ -1309,6 +1309,22 @@ protocol. This extends a working client rather than inventing one.
    fixture, not a property. The radius is wider than the two observed failures:
    `crates/zeroship-workflow-server/tests/http_jobs.rs` provisions a policy and claims fanout,
    propagation, management and activate rows the same way, and cargo stopped before reaching it.
+
+   **The radius reached further still, into the RUNNER, and that part is an open regression rather
+   than a design consequence.** `crates/zeroship-workflow-runner/src/delivery/tests/consumer.rs`
+   claims journal-only kinds the same way, as `.claim(...).await.unwrap().unwrap()`, and the inner
+   `unwrap` now takes a `None` because the claim legitimately returns no job. Seven of its tests
+   fail that way - three claiming `close`, and one each for `collect`, `fanout`, `propagate` and
+   `reconcile`. They are deterministic refusals, not the load-induced timing failure that also
+   lives in that module.
+   **Do not read them as inherited.** Measured against main, that module is twenty passed and none
+   failed; on the branch it is thirteen passed and seven failed. A baseline taken at a commit after
+   the narrowing makes them look pre-existing, and they were carried under that word for a while.
+   The repair is the one that already worked for the server's contracts: claim in process through a
+   `MaintenanceAuthority` with the fixture's own worker id, which settles because `settle`
+   authorizes against `settlement.delivery.worker_id` rather than being claimant-scoped. Not by
+   widening `admits`, not by relaxing `Claimant::Placed.denied()`, and not by letting an assertion
+   accept `None` - which would leave the test asserting nothing about delivery.
    Making those deterministic wants either `Claimant::Placed` narrowed so a worker stops taking
    journal-only kinds, or those claim contracts rewritten to drop exclusivity. So the lane's start
    and the worker's narrowing are one change, and that change is the flag. The consequence to
