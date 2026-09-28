@@ -12,6 +12,7 @@ pub use objects::{
     AppPayloads, HostPayloads, ObjectStepOutputs, PayloadObjects, PayloadRead, RunPayloads,
     WorkerPayloads,
 };
+pub(crate) use objects::ObjectWriter;
 
 use crate::WorkerTasks;
 use zeroship_workflow::{

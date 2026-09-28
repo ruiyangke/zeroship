@@ -225,9 +225,9 @@ impl InputStager for PayloadObjects {
     }
 }
 
-struct ObjectWriter<'a> {
-    objects: &'a PayloadObjects,
-    body: BoxChunkSource,
+pub(crate) struct ObjectWriter<'a> {
+    pub(crate) objects: &'a PayloadObjects,
+    pub(crate) body: BoxChunkSource,
 }
 #[async_trait(?Send)]
 impl PayloadWriter for ObjectWriter<'_> {

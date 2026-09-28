@@ -22,6 +22,8 @@ pub mod host;
 pub mod publication;
 pub mod ready;
 pub mod remote;
+mod remote_tasks;
+pub use remote_tasks::RemoteTasks;
 pub use budget::{BudgetEnd, ExecutionBudget, ExecutionGuard};
 mod payloads;
 pub use payloads::{
