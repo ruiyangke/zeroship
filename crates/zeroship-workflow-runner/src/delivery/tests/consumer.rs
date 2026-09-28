@@ -687,6 +687,27 @@ impl NativeManager {
     /// Take the next maintenance row of this app's queue as the lane that owns
     /// it, and run it over the fixture's journal.
     ///
+    /// Claim through the maintenance lane, under this fixture's own worker id.
+    ///
+    /// `Claimant::Placed` admits `Work::Creator` alone, so every other class is
+    /// reachable only here. This is the claim half of [`Self::sweep`], for the
+    /// cases that dispatch and settle by hand.
+    async fn lane_claim(
+        &self,
+        journal: &AppWorkflows,
+    ) -> Option<zeroship_workflow_manager::DeliveryGrant> {
+        zeroship_workflow_manager::maintenance::MaintenanceAuthority::new(
+            journal.app_id().clone(),
+            self.worker.clone(),
+        )
+        .claim(
+            self.coordinator.queue(),
+            Ok(AppPolicy::default().max_delivery_attempts),
+        )
+        .await
+        .unwrap()
+    }
+
     /// The lane asserts its own authority: `Claimant::Placed` denies every sweep,
     /// so a host claiming a placement can never be handed one, and the retention
     /// duty this fixture publishes is claimable only here.
@@ -695,22 +716,35 @@ impl NativeManager {
         journal: &AppWorkflows,
         objects: &PayloadObjects,
     ) -> (JobSpec, JobReceipt, SettlementReceipt) {
+        self.sweep_publishing(journal, objects, &super::NoPublication(journal.app_id().clone()))
+            .await
+    }
+
+    /// As [`Self::sweep`], with the publisher the dispatch's own intents reach.
+    ///
+    /// A duty that commits creator work publishes it through a publisher rather
+    /// than on its settlement, so a case that wants the consumer to go on and
+    /// execute that work has to hand the lane one that really submits.
+    async fn sweep_publishing(
+        &self,
+        journal: &AppWorkflows,
+        objects: &PayloadObjects,
+        publisher: &impl zeroship_workflow::service::publication::JobPublisher,
+    ) -> (JobSpec, JobReceipt, SettlementReceipt) {
         let lane = zeroship_workflow_manager::maintenance::MaintenanceAuthority::new(
             journal.app_id().clone(),
             self.worker.clone(),
         );
         let queue = self.coordinator.queue();
-        let grant = lane
-            .claim(queue, Ok(AppPolicy::default().max_delivery_attempts))
+        let grant = self
+            .lane_claim(journal)
             .await
-            .unwrap()
             .expect("the lane takes the published maintenance row");
         let job = grant.delivery().job.clone();
-        let publisher = super::NoPublication(journal.app_id().clone());
         let MaintenanceOutcome::Settled(receipt) = journal
             .maintenance_job(
                 &grant,
-                &publisher,
+                publisher,
                 objects,
                 objects,
                 MaintenanceOptions::default(),
@@ -984,10 +1018,20 @@ async fn manager_collect_duty_settles_without_publishing_or_executing_creator_wo
             manager.scope.assignment_revision.get(),
         )])
         .unwrap();
+    // The consumer runs THROUGHOUT, bound to the placement, and is offered
+    // nothing: `Claimant::Placed` admits `Work::Creator` alone, so a row of any
+    // other class is the lane's. Keeping it live is what makes the executor
+    // assertion below say something rather than hold vacuously.
+    let swept = RefCell::new(None);
     finished(consumer.run_until(async {
-        manager.completion.recv_async().await.unwrap();
+        *swept.borrow_mut() = Some(Box::pin(manager.sweep(&fixture.app, &fixture.objects)).await);
     }))
     .await;
+    let (settled_job, settled_receipt, acknowledged) =
+        swept.into_inner().expect("the lane settled the row it claimed");
+    assert_eq!(settled_job, collect, "the lane claimed the published row");
+    assert_eq!(settled_receipt.outcome, JobOutcome::Completed {});
+    assert_eq!(acknowledged.outcome, JobOutcome::Completed {});
     assert_eq!(fixture.probe.starts.get(), 0);
     assert!(!super::collection::has_task(&fixture).await);
     assert_eq!(
@@ -1032,10 +1076,20 @@ async fn manager_delivers_committed_fanout_publication_without_executor() {
             manager.scope.assignment_revision.get(),
         )])
         .unwrap();
+    // The consumer runs THROUGHOUT, bound to the placement, and is offered
+    // nothing: `Claimant::Placed` admits `Work::Creator` alone, so a row of any
+    // other class is the lane's. Keeping it live is what makes the executor
+    // assertion below say something rather than hold vacuously.
+    let swept = RefCell::new(None);
     finished(consumer.run_until(async {
-        manager.completion.recv_async().await.unwrap();
+        *swept.borrow_mut() = Some(Box::pin(manager.sweep(&fixture.app, &fixture.objects)).await);
     }))
     .await;
+    let (settled_job, settled_receipt, acknowledged) =
+        swept.into_inner().expect("the lane settled the row it claimed");
+    assert_eq!(settled_job, fanout, "the lane claimed the published row");
+    assert_eq!(settled_receipt.outcome, JobOutcome::Completed {});
+    assert_eq!(acknowledged.outcome, JobOutcome::Completed {});
     assert_eq!(fixture.probe.starts.get(), 0);
     assert!(!super::collection::has_task(&fixture).await);
     assert_eq!(
@@ -1079,10 +1133,20 @@ async fn manager_delivers_committed_propagation_page_without_executor() {
             manager.scope.assignment_revision.get(),
         )])
         .unwrap();
+    // The consumer runs THROUGHOUT, bound to the placement, and is offered
+    // nothing: `Claimant::Placed` admits `Work::Creator` alone, so a row of any
+    // other class is the lane's. Keeping it live is what makes the executor
+    // assertion below say something rather than hold vacuously.
+    let swept = RefCell::new(None);
     finished(consumer.run_until(async {
-        manager.completion.recv_async().await.unwrap();
+        *swept.borrow_mut() = Some(Box::pin(manager.sweep(&fixture.app, &fixture.objects)).await);
     }))
     .await;
+    let (settled_job, settled_receipt, acknowledged) =
+        swept.into_inner().expect("the lane settled the row it claimed");
+    assert_eq!(settled_job, page, "the lane claimed the published row");
+    assert_eq!(settled_receipt.outcome, JobOutcome::Completed {});
+    assert_eq!(acknowledged.outcome, JobOutcome::Completed {});
     assert_eq!(fixture.probe.starts.get(), 0);
     assert_eq!(
         super::propagation::control(&fixture, &child).await,
@@ -1145,11 +1209,29 @@ async fn manager_reconciliation_publishes_creator_work_before_the_consumer_execu
             manager.scope.assignment_revision.get(),
         )])
         .unwrap();
+    // Two claimants, one consumer run. The reconciliation is `Work::Maintenance`,
+    // which `Claimant::Placed` denies, so the lane takes it; its settlement
+    // carries the creator Advance, and THAT is what the consumer executes. The
+    // order is the point: the duty publishes creator work before the placement
+    // can be handed any.
+    let swept = RefCell::new(None);
     finished(consumer.run_until(async {
-        manager.completion.recv_async().await.unwrap();
+        *swept.borrow_mut() = Some(
+            Box::pin(manager.sweep_publishing(
+                &fixture.app,
+                &fixture.objects,
+                manager.as_ref(),
+            ))
+            .await,
+        );
         manager.completion.recv_async().await.unwrap();
     }))
     .await;
+    let (settled_job, settled_receipt, acknowledged) =
+        swept.into_inner().expect("the lane settled the duty it claimed");
+    assert_eq!(settled_job, reconciliation);
+    assert_eq!(settled_receipt.outcome, JobOutcome::Waiting {});
+    assert_eq!(acknowledged.outcome, JobOutcome::Waiting {});
     assert_eq!(
         fixture.probe.starts.get(),
         1,
@@ -1321,9 +1403,17 @@ async fn closing_watermark_keeps_late_delivered_intents_across_separate_database
     assert!(fixture.app.pending_jobs(None, 1).await.unwrap().is_empty());
 
     let close = recovery.begin_close(&app).await.unwrap().unwrap();
-    let page_grant = manager.claim(&fixture.app, &manager.scope).await.unwrap().unwrap().lease;
+    // Both rows are `Work::Maintenance`, so both claims are the lane's: a
+    // placement admits `Work::Creator` alone and would be handed neither.
+    let page_grant = manager
+        .lane_claim(&fixture.app)
+        .await
+        .expect("the lane takes the published page");
     assert_eq!(page_grant.delivery().job, page);
-    let close_grant = manager.claim(&fixture.app, &manager.scope).await.unwrap().unwrap().lease;
+    let close_grant = manager
+        .lane_claim(&fixture.app)
+        .await
+        .expect("the lane takes the closure alongside it");
     assert_eq!(close_grant.delivery().job, close);
     let closed = fixture.app.close_job(&close_grant).await.unwrap();
     assert_eq!(
@@ -1395,7 +1485,7 @@ async fn closing_watermark_keeps_late_delivered_intents_across_separate_database
 /// retires exactly once. A crashed first attempt redelivered to another worker
 /// replays the committed creator receipt.
 #[compio::test]
-async fn consumer_closes_retires_once_after_lost_ack_and_redelivery() {
+async fn the_lane_closes_and_retires_once_after_lost_ack_and_redelivery() {
     use zeroship_workflow_manager::recovery::ScopeState;
     let fixture = Fixture::new(AppPolicy::default()).await;
     let app = fixture.app.app_id().clone();
@@ -1418,8 +1508,13 @@ async fn consumer_closes_retires_once_after_lost_ack_and_redelivery() {
             .unwrap();
     }
     let close = recovery.begin_close(&app).await.unwrap().unwrap();
-    // A first worker commits the creator receipt, then crashes before settling.
-    let crashed = manager.claim(&fixture.app, &manager.scope).await.unwrap().unwrap().lease;
+    // A first lane worker commits the creator receipt, then crashes before
+    // settling. The claim is the lane's because a closure is `Work::Maintenance`,
+    // which `Claimant::Placed` denies.
+    let crashed = manager
+        .lane_claim(&fixture.app)
+        .await
+        .expect("the lane takes the closure it published");
     assert_eq!(crashed.delivery().job, close);
     let committed = fixture.app.close_job(&crashed).await.unwrap();
     assert_eq!(committed.outcome, JobOutcome::Closed { drained: true });
@@ -1433,19 +1528,12 @@ async fn consumer_closes_retires_once_after_lost_ack_and_redelivery() {
             .unwrap(),
         1
     );
-    let mut consumer =
-        JobConsumer::new(manager.clone(), manager.worker.clone(), options(1)).unwrap();
-    consumer
-        .bindings()
-        .replace(vec![scope(
-            &fixture,
-            manager.scope.assignment_revision.get(),
-        )])
-        .unwrap();
-    finished(consumer.run_until(async {
-        manager.completion.recv_async().await.unwrap();
-    }))
-    .await;
+    // The expired row is redelivered to the lane, whose dispatch replays the
+    // receipt the crashed attempt already committed rather than closing twice.
+    let (redelivered, replayed, _) =
+        Box::pin(manager.sweep(&fixture.app, &fixture.objects)).await;
+    assert_eq!(redelivered, close);
+    assert_eq!(replayed, committed);
     {
         let requests = manager.requests.borrow();
         assert_eq!(requests.len(), 2, "the lost acknowledgement was retried");
@@ -1462,6 +1550,8 @@ async fn consumer_closes_retires_once_after_lost_ack_and_redelivery() {
     let retired = recovery.responsibility(&app).await.unwrap().unwrap();
     assert_eq!(retired.state, ScopeState::Retired);
     assert_eq!(retired.ingress_epoch, Revision::try_from(1).unwrap());
+    // Settled once: neither claimant is offered it again.
+    assert!(manager.lane_claim(&fixture.app).await.is_none());
     assert!(manager.claim(&fixture.app, &manager.scope).await.unwrap().is_none());
 }
 
@@ -1469,7 +1559,7 @@ async fn consumer_closes_retires_once_after_lost_ack_and_redelivery() {
 /// establish ingress, yet the consumer still delivers the manager-origin Close
 /// to the creator handler, the evidence drains and the scope retires.
 #[compio::test]
-async fn consumer_delivers_close_under_archived_policy_and_the_scope_retires() {
+async fn the_lane_delivers_close_under_archived_policy_and_the_scope_retires() {
     use zeroship_workflow_manager::recovery::ScopeState;
     let fixture = Fixture::new(AppPolicy::default()).await;
     let app = fixture.app.app_id().clone();
@@ -1543,10 +1633,19 @@ async fn consumer_delivers_close_under_archived_policy_and_the_scope_retires() {
             manager.scope.assignment_revision.get(),
         )])
         .unwrap();
+    // A closure is `Work::Maintenance`, so the placement this consumer holds is
+    // offered nothing while the lane claims and settles it. The consumer stays
+    // live for exactly that reason.
+    let swept = RefCell::new(None);
     finished(consumer.run_until(async {
-        manager.completion.recv_async().await.unwrap();
+        *swept.borrow_mut() = Some(Box::pin(manager.sweep(&fixture.app, &fixture.objects)).await);
     }))
     .await;
+    let (settled_job, settled_receipt, acknowledged) =
+        swept.into_inner().expect("the lane settled the closure it claimed");
+    assert_eq!(settled_job, close);
+    assert_eq!(settled_receipt.outcome, JobOutcome::Closed { drained: true });
+    assert_eq!(acknowledged.outcome, JobOutcome::Closed { drained: true });
     assert_eq!(
         fixture.app.job_receipt(&close).await.unwrap().unwrap().outcome,
         JobOutcome::Closed { drained: true }
