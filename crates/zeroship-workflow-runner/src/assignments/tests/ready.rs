@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::publication::{self, HostTransport};
+use zeroship_core::{service_identity::endpoints, workflow_coordination::RunFailure};
 use zeroship_workflow::{backend::WorkflowBackend, operations::StartOptions};
 use zeroship_core::workflow_jobs::{
     Delivery, JobId, JobOperation, JobOutcome, JobSpec, Settlement,
@@ -22,6 +23,18 @@ async fn backend_is_published_only_after_preparation_and_withdrawn_on_removal() 
     let mut exchanges = fixture.scan(std::slice::from_ref(&scope));
     exchanges.extend(fixture.establish(&scope));
     exchanges.push(fixture.page(None, &[]));
+    exchanges.push(fixture.run_refusal(
+        endpoints::WORKFLOW_RUN_STATUS,
+        &scope,
+        &RunFailure::NotFound {
+            message: "workflow run not found".into(),
+        },
+    ));
+    exchanges.push(fixture.run_refusal(
+        endpoints::WORKFLOW_RUN_START,
+        &scope,
+        &RunFailure::PermissionDenied {},
+    ));
     peer(&fixture, exchanges, async |client| {
         let (consumer, _probe) = fixture.consumer(1);
         let bindings = fixture.bindings(client, &consumer, 1);
@@ -59,8 +72,13 @@ async fn backend_is_published_only_after_preparation_and_withdrawn_on_removal() 
         bindings.reconcile().await.unwrap();
         assert!(!fixture.ready.is_ready(&scope.app_id));
         not_ready(requests.status(run_id()).await);
-        // A client cloned before removal keeps its retired generation.
-        unavailable(start(&retained).await);
+        // A client cloned before removal keeps its retired generation, and asks
+        // the service under it rather than being answered locally.
+        assert_eq!(retained.scope(), &scope);
+        assert!(matches!(
+            start(&retained).await,
+            Err(WorkflowServiceError::PermissionDenied)
+        ));
     })
     .await;
 }
@@ -117,6 +135,39 @@ async fn replacement_and_closure_withdraw_published_backends() {
     exchanges.extend(fixture.establish(&original));
     exchanges.extend(fixture.scan(std::slice::from_ref(&replacement)));
     exchanges.extend(fixture.establish(&replacement));
+    // Three creator calls cross, each matched by the placement it names. The
+    // service decides what a call is admitted under, so a refusal is scripted
+    // here and the PAIRING of reason to code is bound where a real coordinator
+    // answers -- `a_moved_assignment_revision_conflicts_rather_than_denying` in
+    // `zeroship-workflow-server`. What this test settles is that the runner
+    // still sends a retired generation's call under its OWN placement, and
+    // surfaces the answer rather than inventing one.
+    exchanges.push(fixture.run_refusal(
+        endpoints::WORKFLOW_RUN_START,
+        &original,
+        &RunFailure::Conflict {
+            message: "workflow placement is no longer current".into(),
+        },
+    ));
+    exchanges.push(fixture.run_refusal(
+        endpoints::WORKFLOW_RUN_STATUS,
+        &replacement,
+        &RunFailure::NotFound {
+            message: "workflow run not found".into(),
+        },
+    ));
+    exchanges.push(fixture.run_refusal(
+        endpoints::WORKFLOW_RUN_STATUS,
+        &replacement,
+        &RunFailure::NotFound {
+            message: "workflow run not found".into(),
+        },
+    ));
+    exchanges.push(fixture.run_refusal(
+        endpoints::WORKFLOW_RUN_START,
+        &replacement,
+        &RunFailure::PermissionDenied {},
+    ));
     peer(&fixture, exchanges, async |client| {
         let (consumer, _probe) = fixture.consumer(1);
         let bindings = fixture.bindings(client, &consumer, 1);
@@ -138,15 +189,24 @@ async fn replacement_and_closure_withdraw_published_backends() {
         let calls = fixture.factory.calls();
         let old = calls[0].runtime.borrow().as_ref().unwrap().backend.clone();
         let new = calls[1].runtime.borrow().as_ref().unwrap().backend.clone();
-        unavailable(start(&old).await);
+        assert_eq!(old.scope(), &original);
+        assert_eq!(new.scope(), &replacement);
+        // The retired generation still calls under its own placement, and the
+        // service's refusal of that placement is what the creator is told. A
+        // retry is the honest instruction: the registry below already resolves
+        // the generation that now holds.
+        assert!(matches!(
+            start(&old).await,
+            Err(WorkflowServiceError::Conflict(_))
+        ));
         // The registry now resolves the replacement generation.
         assert!(matches!(
             requests.status(run_id()).await,
             Err(WorkflowServiceError::NotFound(_))
         ));
         // A retired generation cannot withdraw its replacement: a late
-        // retirement of the old binding leaves the published one reachable.
-        fixture.ready.retire(old.binding());
+        // retirement of the old placement leaves the published one reachable.
+        fixture.ready.retire(&original);
         assert!(fixture.ready.is_ready(&original.app_id));
         assert!(matches!(
             requests.status(run_id()).await,
@@ -155,20 +215,41 @@ async fn replacement_and_closure_withdraw_published_backends() {
         bindings.close().unwrap();
         assert!(!fixture.ready.is_ready(&original.app_id));
         not_ready(requests.status(run_id()).await);
-        unavailable(start(&new).await);
+        // A handle retained past closure is not silenced locally either: the
+        // placement it names was released, so the far end refuses it.
+        assert!(matches!(
+            start(&new).await,
+            Err(WorkflowServiceError::PermissionDenied)
+        ));
     })
     .await;
 }
 
+/// Readiness publishes a predecessor's intents; a request-path start does not.
+///
+/// The first half is this host's own: an app becoming ready marks it once, so
+/// intents a previous process committed and never published are submitted under
+/// the current assignment.
+///
+/// The second half is what the severance changed. A request-path start now
+/// commits in the SERVICE's journal, so there is no local intent for this host to
+/// publish and nothing marks it. The negative is asserted against the positive
+/// above it, which is what shows the channel was working and simply had nothing
+/// to carry.
 #[compio::test]
-async fn readiness_and_request_mutations_publish_intents_under_the_assignment() {
+async fn readiness_publishes_predecessor_intents_and_a_crossed_start_marks_nothing() {
     let fixture = Fixture::new();
     fixture.factory.deployed(true).await;
     let scope = scope();
     let mut exchanges = fixture.scan(std::slice::from_ref(&scope));
     exchanges.extend(fixture.establish(&scope));
     exchanges.push(fixture.submission());
-    exchanges.push(fixture.submission());
+    exchanges.push(fixture.run_call(
+        endpoints::WORKFLOW_RUN_START,
+        &scope,
+        200,
+        json!({"id": run_id(), "state": "queued"}),
+    ));
     peer(&fixture, exchanges, async |client| {
         let (consumer, _probe) = fixture.consumer(1);
         let bindings = fixture.bindings(client, &consumer, 1);
@@ -192,29 +273,22 @@ async fn readiness_and_request_mutations_publish_intents_under_the_assignment() 
         assert!(fixture.submitted.borrow().is_empty());
         bindings.publish_marked(marked).await;
         assert!(app.pending_jobs(None, 16).await.unwrap().is_empty());
-        let run = start(fixture.ready.backend(scope.app_id.clone()).as_ref())
+        let submitted = fixture.submitted.borrow().clone();
+        assert_eq!(submitted.len(), 1);
+        assert_eq!(submitted[0]["job"], json!(leftover[0]));
+        assert_eq!(submitted[0]["scope"], json!(scope));
+        // The request path crosses, so the run it starts exists in the service's
+        // journal and this one gains no intent to publish.
+        start(fixture.ready.backend(scope.app_id.clone()).as_ref())
             .await
             .unwrap();
-        let marked = compio::time::timeout(Duration::from_secs(5), bindings.marked())
-            .await
-            .expect("a request-path start must mark its app");
-        assert_eq!(marked, [scope.app_id.clone()].into());
-        bindings.publish_marked(marked).await;
+        assert!(
+            compio::time::timeout(Duration::from_secs(1), bindings.marked())
+                .await
+                .is_err(),
+            "a crossed start must leave this host nothing to publish"
+        );
         assert!(app.pending_jobs(None, 16).await.unwrap().is_empty());
-        let submitted = fixture.submitted.borrow().clone();
-        assert_eq!(submitted.len(), 2);
-        assert_eq!(submitted[0]["job"], json!(leftover[0]));
-        for submission in &submitted {
-            assert_eq!(submission["scope"], json!(scope));
-        }
-        let JobOperation::Advance { run_id, .. } =
-            serde_json::from_value::<JobSpec>(submitted[1]["job"].clone())
-                .unwrap()
-                .operation
-        else {
-            panic!("a start publishes its first Advance");
-        };
-        assert_eq!(run_id.as_str(), run);
     })
     .await;
 }

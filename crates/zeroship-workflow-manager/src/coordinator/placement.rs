@@ -346,10 +346,30 @@ impl Coordinator {
         rev: Revision,
     ) -> Result<(Placement, Sample, i64), Error> {
         let registration = lock_worker(tx, worker).await?;
+        // A REVISION THAT MOVED IS NOT A REVISION THAT NEVER EXISTED, and the
+        // difference is what a caller does next. Revisions only increase, since
+        // `admit` grants `prior + 1`, so the comparison separates the two:
+        //
+        // - BELOW the row: this instance was legitimately placed and the
+        //   placement advanced. Retrying reaches the revision that now holds, so
+        //   this is `Conflict`, which already names a revision that does not
+        //   match the record. Reporting it as `Denied` was not merely imprecise:
+        //   `refresh_entry` in `zeroship-workflow-runner` keys a PERMANENT
+        //   refusal off `Denied` and releases the placement as refused, which
+        //   stops the manager offering the pair to this instance again.
+        // - ABOVE the row: nothing has granted that revision, so the caller is
+        //   naming authority it was never given and no retry changes that.
+        // - No row at all: this instance is not the placed one.
+        //
+        // The last two are `Denied`, and so are a released grant and a lapsed
+        // deadline: there the authority is gone rather than superseded.
         let row = placement(tx, app, worker).await?.ok_or(Error::Denied)?;
         let sample = self.queue.clock.sample().await?;
         let expires = row.expires_at.min(registration.expires_at);
-        if row.revision != rev.get() || row.released || expires <= sample.millis {
+        if rev.get() < row.revision {
+            return Err(Error::Conflict);
+        }
+        if rev.get() > row.revision || row.released || expires <= sample.millis {
             return Err(Error::Denied);
         }
         Ok((row, sample, expires))

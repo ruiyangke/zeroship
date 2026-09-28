@@ -12,7 +12,7 @@ use zeroship_workflow::{
             AppJournal, DeliveredTask, JobAcceptance, JobReceipt, PayloadConfirmation,
             ReportedExecution, TaskRenewal,
         },
-        AppWorkflows, ControlIntent, PolicyAuthority,
+        AppWorkflows, ControlIntent, PolicyAuthority, PolicyBinding,
     },
     WorkflowExecution, WorkflowServiceError,
 };
@@ -71,12 +71,12 @@ pub trait JobTransport {
 
     fn claim(
         &self,
-        journal: &AppWorkflows,
+        journal: &Self::Journal,
         scope: &AssignedScope,
     ) -> impl Future<Output = Result<Option<Claimed<Self::Lease>>, WorkflowServiceError>>;
     fn heartbeat(
         &self,
-        journal: &AppWorkflows,
+        journal: &Self::Journal,
         lease: &Self::Lease,
         task: &DeliveredTask,
     ) -> impl Future<Output = Result<Renewed<Self::Lease>, WorkflowServiceError>>;
@@ -96,7 +96,7 @@ pub trait JobTransport {
     /// frontier that references it.
     fn complete(
         &self,
-        journal: &AppWorkflows,
+        journal: &Self::Journal,
         lease: &Self::Lease,
         task: &DeliveredTask,
         execution: WorkflowExecution,
@@ -111,14 +111,10 @@ pub trait JobTransport {
     /// dispatch.
     fn release(
         &self,
-        journal: &AppWorkflows,
+        journal: &Self::Journal,
         lease: &Self::Lease,
         task: &DeliveredTask,
-    ) -> impl Future<Output = Result<(), WorkflowServiceError>> {
-        // A host whose journal is in this process asks it directly. The crossed
-        // transport overrides this, because it holds no journal to ask.
-        async move { journal.release_job(task, lease).await }
-    }
+    ) -> impl Future<Output = Result<(), WorkflowServiceError>>;
     /// Read what an attempt of this logical job already committed, if any.
     ///
     /// The recovery read for an uncertain settlement, for the same reason: the
@@ -126,11 +122,9 @@ pub trait JobTransport {
     /// cannot ask one directly. Absence is a fact rather than a refusal.
     fn receipt(
         &self,
-        journal: &AppWorkflows,
+        journal: &Self::Journal,
         job: &JobSpec,
-    ) -> impl Future<Output = Result<Option<JobReceipt>, WorkflowServiceError>> {
-        async move { journal.job_receipt(job).await }
-    }
+    ) -> impl Future<Output = Result<Option<JobReceipt>, WorkflowServiceError>>;
 }
 
 /// A claimed delivery and the journal acceptance that rode with it.
@@ -178,7 +172,7 @@ impl JobTransport for WorkerCoordinator {
         // The journal these deliveries are accepted into is the coordinator's,
         // at the far end of this call. A host that reaches the manager over HTTP
         // holds no credential to it, which is what merging the halves is for.
-        _journal: &AppWorkflows,
+        _journal: &Self::Journal,
         scope: &AssignedScope,
     ) -> Result<Option<Claimed<Self::Lease>>, WorkflowServiceError> {
         let claimed = self
@@ -202,7 +196,7 @@ impl JobTransport for WorkerCoordinator {
 
     async fn heartbeat(
         &self,
-        _journal: &AppWorkflows,
+        _journal: &Self::Journal,
         lease: &Self::Lease,
         task: &DeliveredTask,
     ) -> Result<Renewed<Self::Lease>, WorkflowServiceError> {
@@ -230,7 +224,7 @@ impl JobTransport for WorkerCoordinator {
     /// The journal half of a release crosses with the delivery it gives back.
     async fn release(
         &self,
-        _journal: &AppWorkflows,
+        _journal: &Self::Journal,
         lease: &Self::Lease,
         task: &DeliveredTask,
     ) -> Result<(), WorkflowServiceError> {
@@ -243,7 +237,7 @@ impl JobTransport for WorkerCoordinator {
     /// still learn what an uncertain settlement committed.
     async fn receipt(
         &self,
-        _journal: &AppWorkflows,
+        _journal: &Self::Journal,
         job: &JobSpec,
     ) -> Result<Option<JobReceipt>, WorkflowServiceError> {
         self.job_receipt::<AppJournal>(job)
@@ -253,7 +247,7 @@ impl JobTransport for WorkerCoordinator {
 
     async fn complete(
         &self,
-        _journal: &AppWorkflows,
+        _journal: &Self::Journal,
         lease: &Self::Lease,
         task: &DeliveredTask,
         execution: WorkflowExecution,
@@ -331,8 +325,8 @@ struct Claims<L> {
     task: DeliveredTask,
 }
 
-struct Active<L> {
-    app: AppWorkflows,
+struct Active<L, J> {
+    app: J,
     claims: RefCell<Claims<L>>,
     execution: Box<dyn TaskExecution>,
     authority: PolicyAuthority,
@@ -367,7 +361,7 @@ impl Phase {
     }
 }
 
-impl<L> Drop for Active<L> {
+impl<L, J> Drop for Active<L, J> {
     fn drop(&mut self) {
         self.guard.finish();
         self.execution.cancel();
@@ -380,7 +374,7 @@ pub struct DeliverySlot<T: JobTransport> {
     transport: Rc<T>,
     executor: Rc<dyn TaskExecutor>,
     options: DeliveryOptions,
-    active: Option<Active<T::Lease>>,
+    active: Option<Active<T::Lease, T::Journal>>,
 }
 
 impl<T: JobTransport> std::fmt::Debug for DeliverySlot<T> {
@@ -418,12 +412,22 @@ impl<T: JobTransport> DeliverySlot<T> {
     /// storage or transport. Committed creator receipts survive failed ACKs.
     pub async fn run(
         &mut self,
-        app: &AppWorkflows,
+        app: &T::Journal,
+        policy: &PolicyBinding,
         claimed: Claimed<T::Lease>,
     ) -> Result<DeliveryOutcome, WorkflowServiceError> {
         let Claimed { lease, accepted } = claimed;
         self.drain_interrupted().await;
-        let authority = app.captured_authority();
+        // THE CAPTURE SITE, and the only one. `PolicyBinding::authority` captures a
+        // FRESH authority; `AppWorkflows::captured_authority` answers with the
+        // RETAINED one once `with_authority` has installed it. Same type, different
+        // provenance, so they are interchangeable HERE and nowhere after: this runs
+        // before anything is scoped, so there is nothing retained to answer with.
+        // The scope call below CONSUMES this value rather than capturing again, so a
+        // second capture placed after it would be visibly a second capture -- and
+        // would take a fresh authority where the retained one decides the attempt's
+        // lease budget.
+        let authority = policy.authority();
         // The acceptance rode in with the claim. A claimant holding a placement
         // is admitted to creator work alone -- `Claimant::admits` in
         // `zeroship-workflow-manager` pairs each work class with exactly one
@@ -475,7 +479,8 @@ impl<T: JobTransport> DeliverySlot<T> {
             .await;
             return Err(error);
         }
-        let scoped = app.clone().with_authority(authority.clone())?;
+        // The scope site: one call, consuming the authority captured above.
+        let scoped = self.transport.scope(app, &authority)?;
         let execution = match self
             .executor
             .start(claims.task.assignment(), guard.budget())
@@ -575,7 +580,7 @@ enum ExecutionResult {
 
 async fn run_active<T: JobTransport>(
     transport: &T,
-    active: &mut Active<T::Lease>,
+    active: &mut Active<T::Lease, T::Journal>,
     options: DeliveryOptions,
 ) -> Result<ExecutionResult, WorkflowServiceError> {
     let execution = CancelOnDrop(active.execution.as_mut());
@@ -685,7 +690,7 @@ fn constrain<L: JobLease>(
 /// side cannot do is withhold the journal write on its own clock.
 async fn renew<T: JobTransport>(
     transport: &T,
-    app: &AppWorkflows,
+    app: &T::Journal,
     claims: &RefCell<Claims<T::Lease>>,
     guard: &ExecutionGuard,
     phase: &Phase,
@@ -721,7 +726,7 @@ async fn renew<T: JobTransport>(
 
 async fn execute<T: JobTransport>(
     transport: &T,
-    app: &AppWorkflows,
+    app: &T::Journal,
     claims: &RefCell<Claims<T::Lease>>,
     execution: &mut dyn TaskExecution,
     guard: &ExecutionGuard,
@@ -781,7 +786,7 @@ async fn execute<T: JobTransport>(
 
 async fn recover<T: JobTransport>(
     transport: &T,
-    app: &AppWorkflows,
+    app: &T::Journal,
     lease: &T::Lease,
     timeout: Duration,
 ) -> Result<Option<JobReceipt>, WorkflowServiceError> {
@@ -790,7 +795,7 @@ async fn recover<T: JobTransport>(
 
 async fn release<T: JobTransport>(
     transport: &T,
-    app: &AppWorkflows,
+    app: &T::Journal,
     task: &DeliveredTask,
     lease: &T::Lease,
     timeout: Duration,

@@ -863,6 +863,24 @@ impl JobTransport for LocalTransport {
         Ok(receipt)
     }
 
+    /// Both halves are this process's own journal, asked directly.
+    async fn release(
+        &self,
+        journal: &AppWorkflows,
+        lease: &DeliveryGrant,
+        task: &DeliveredTask,
+    ) -> Result<(), WorkflowServiceError> {
+        journal.release_job(task, lease).await
+    }
+
+    async fn receipt(
+        &self,
+        journal: &AppWorkflows,
+        job: &zeroship_core::workflow_jobs::JobSpec,
+    ) -> Result<Option<zeroship_workflow::service::delivery::JobReceipt>, WorkflowServiceError> {
+        journal.job_receipt(job).await
+    }
+
     /// The journal commits first here, because its commit is what decides the
     /// outcome the queue is then settled with. Two stores and no shared
     /// transaction, so a failure between them leaves the journal holding a

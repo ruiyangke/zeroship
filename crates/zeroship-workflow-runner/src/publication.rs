@@ -14,7 +14,7 @@
 
 use crate::delivery::{bounded, Claimed, Completed, JobTransport, Renewed};
 use zeroship_workflow::{
-    service::{delivery::DeliveredTask, publication::JobPublisher, AppWorkflows, CommitHint},
+    service::{delivery::DeliveredTask, publication::JobPublisher, AppWorkflows},
     WorkflowExecution, WorkflowServiceError,
 };
 use std::{
@@ -69,13 +69,6 @@ impl PublicationWake {
             .insert(app.clone());
         // A full channel already holds a wake that will observe this mark.
         let _ = self.signal.try_send(());
-    }
-
-    /// A hint for `app`'s backend. It carries no customer data and grants
-    /// nothing: the host publishes only intents already in the journal.
-    pub(crate) fn hint(&self, app: AppId) -> CommitHint {
-        let wake = self.clone();
-        Arc::new(move || wake.mark(&app))
     }
 }
 
@@ -139,7 +132,7 @@ impl JobTransport for HostTransport {
 
     async fn claim(
         &self,
-        journal: &AppWorkflows,
+        journal: &Self::Journal,
         scope: &AssignedScope,
     ) -> Result<Option<Claimed<LeasedJob>>, WorkflowServiceError> {
         JobTransport::claim(&self.client, journal, scope).await
@@ -147,7 +140,7 @@ impl JobTransport for HostTransport {
 
     async fn heartbeat(
         &self,
-        journal: &AppWorkflows,
+        journal: &Self::Journal,
         lease: &LeasedJob,
         task: &DeliveredTask,
     ) -> Result<Renewed<LeasedJob>, WorkflowServiceError> {
@@ -165,7 +158,7 @@ impl JobTransport for HostTransport {
 
     async fn release(
         &self,
-        journal: &AppWorkflows,
+        journal: &Self::Journal,
         lease: &LeasedJob,
         task: &DeliveredTask,
     ) -> Result<(), WorkflowServiceError> {
@@ -174,7 +167,7 @@ impl JobTransport for HostTransport {
 
     async fn receipt(
         &self,
-        journal: &AppWorkflows,
+        journal: &Self::Journal,
         job: &zeroship_core::workflow_jobs::JobSpec,
     ) -> Result<Option<zeroship_workflow::service::delivery::JobReceipt>, WorkflowServiceError> {
         JobTransport::receipt(&self.client, journal, job).await
@@ -182,7 +175,7 @@ impl JobTransport for HostTransport {
 
     async fn complete(
         &self,
-        journal: &AppWorkflows,
+        journal: &Self::Journal,
         lease: &LeasedJob,
         task: &DeliveredTask,
         execution: WorkflowExecution,

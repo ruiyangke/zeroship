@@ -49,6 +49,23 @@ impl Queue {
     }
 }
 impl JobTransport for Queue {
+    /// Asked of the journal this host holds, the way the crossed transport asks
+    /// the service that holds it.
+    async fn release(
+        &self,
+        journal: &Self::Journal,
+        lease: &Self::Lease,
+        task: &zeroship_workflow::service::delivery::DeliveredTask,
+    ) -> Result<(), WorkflowServiceError> {
+        journal.release_job(task, lease).await
+    }
+    async fn receipt(
+        &self,
+        journal: &Self::Journal,
+        job: &zeroship_core::workflow_jobs::JobSpec,
+    ) -> Result<Option<zeroship_workflow::service::delivery::JobReceipt>, WorkflowServiceError> {
+        journal.job_receipt(job).await
+    }
     type Lease = Lease;
     /// This host holds the journal, so an attempt is scoped here rather than
     /// server-side.
@@ -139,9 +156,10 @@ fn options(slots: usize) -> ConsumerOptions {
         },
     }
 }
-fn scope(fixture: &Fixture, revision: i64) -> ConsumerScope {
+fn scope(fixture: &Fixture, revision: i64) -> ConsumerScope<AppWorkflows> {
     ConsumerScope::new(
         fixture.app.clone(),
+        fixture.app.binding().clone(),
         AssignedScope {
             app_id: fixture.app.app_id().clone(),
             assignment_revision: revision.try_into().unwrap(),
@@ -157,8 +175,8 @@ fn consumer(
     queue: Rc<Queue>,
     worker: &WorkerId,
     slots: usize,
-    scopes: Vec<ConsumerScope>,
-) -> (JobConsumer<Queue>, ConsumerBindings) {
+    scopes: Vec<ConsumerScope<AppWorkflows>>,
+) -> (JobConsumer<Queue>, ConsumerBindings<AppWorkflows>) {
     let consumer = JobConsumer::new(queue, worker.clone(), options(slots)).unwrap();
     let bindings = consumer.bindings();
     bindings.replace(scopes).unwrap();
@@ -769,6 +787,23 @@ fn manager_error(error: zeroship_workflow_manager::Error) -> WorkflowServiceErro
 }
 
 impl JobTransport for NativeManager {
+    /// Asked of the journal this host holds, the way the crossed transport asks
+    /// the service that holds it.
+    async fn release(
+        &self,
+        journal: &Self::Journal,
+        lease: &Self::Lease,
+        task: &zeroship_workflow::service::delivery::DeliveredTask,
+    ) -> Result<(), WorkflowServiceError> {
+        journal.release_job(task, lease).await
+    }
+    async fn receipt(
+        &self,
+        journal: &Self::Journal,
+        job: &zeroship_core::workflow_jobs::JobSpec,
+    ) -> Result<Option<zeroship_workflow::service::delivery::JobReceipt>, WorkflowServiceError> {
+        journal.job_receipt(job).await
+    }
     type Lease = zeroship_workflow_manager::DeliveryGrant;
     /// This host holds the journal, so an attempt is scoped here rather than
     /// server-side.

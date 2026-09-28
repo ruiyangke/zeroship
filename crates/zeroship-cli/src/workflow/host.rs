@@ -52,7 +52,11 @@ const APPLIED_POLL: Duration = Duration::from_millis(20);
 /// Wraps the delivery transport and executor built on the host thread.
 /// The CLI uses both unchanged; tests observe them without another host.
 pub trait Composition: Send + 'static {
-    type Transport: JobTransport + 'static;
+    /// The journal is this process's own, so the transport must be one that
+    /// takes it as a handle. The dev host OPENS the journal it serves -- `api`
+    /// below is that handle -- and hands it to every claim, so a transport
+    /// declaring `()` would be one whose journal is somewhere this host is not.
+    type Transport: JobTransport<Journal = AppWorkflows> + 'static;
 
     fn transport(&self, transport: LocalTransport) -> Self::Transport;
 
@@ -86,7 +90,7 @@ pub struct Settings {
 
 /// A host whose placement, deployment selection and recovery responsibility
 /// are established, ready to run its loops.
-pub struct Opened<T: JobTransport> {
+pub struct Opened<T: JobTransport<Journal = AppWorkflows>> {
     pub api: AppWorkflows,
     pub backend: AppBackend,
     pub executable: Option<LoadedWorker>,
@@ -96,7 +100,7 @@ pub struct Opened<T: JobTransport> {
     pub host: Host<T>,
 }
 
-pub struct Host<T: JobTransport> {
+pub struct Host<T: JobTransport<Journal = AppWorkflows>> {
     api: AppWorkflows,
     manager: ManagerClient,
     thread: ManagerThread,
@@ -113,7 +117,7 @@ pub struct Host<T: JobTransport> {
 
 struct Placement {
     scope: AssignedScope,
-    binding: ConsumerScope,
+    binding: ConsumerScope<AppWorkflows>,
 }
 
 /// What one turn of the maintenance lane runs under.
@@ -256,7 +260,12 @@ pub async fn open<C: Composition>(
         manager.worker().clone(),
         consumer_options,
     )?;
-    let binding = ConsumerScope::new(api.clone(), scope.clone(), executor.clone())?;
+    let binding = ConsumerScope::new(
+        api.clone(),
+        api.binding().clone(),
+        scope.clone(),
+        executor.clone(),
+    )?;
     consumer.bindings().replace(vec![binding.clone()])?;
     // A previous process may have committed intents it never published.
     let _ = wake_sender.try_send(());
@@ -391,7 +400,7 @@ pub async fn applied(
     })?
 }
 
-impl<T: JobTransport> Host<T> {
+impl<T: JobTransport<Journal = AppWorkflows>> Host<T> {
     /// Consume delivered jobs, renew placement and publish committed intents
     /// until `stop`. Returns after execution joins and the manager stops.
     pub async fn run_until(self, stop: impl std::future::Future<Output = ()>) {
@@ -462,7 +471,7 @@ async fn place(
     api: &AppWorkflows,
     executor: &Rc<dyn TaskExecutor>,
     ingress: &LocalIngress,
-    bindings: &ConsumerBindings,
+    bindings: &ConsumerBindings<AppWorkflows>,
     placement: &RefCell<Placement>,
     every: Duration,
     stop: Stop<'_>,
@@ -501,7 +510,13 @@ async fn place(
             }
         };
         let installed =
-            ConsumerScope::new(api.clone(), next.clone(), executor.clone()).and_then(|binding| {
+            ConsumerScope::new(
+                api.clone(),
+                api.binding().clone(),
+                next.clone(),
+                executor.clone(),
+            )
+            .and_then(|binding| {
                 bindings.replace(vec![binding.clone()])?;
                 Ok(binding)
             });

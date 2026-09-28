@@ -8839,6 +8839,7 @@ dependencies = [
  "zeroship-runtime-macros",
  "zeroship-storage",
  "zeroship-workflow",
+ "zeroship-workflow-client",
  "zeroship-workflow-manager",
  "zeroship-workflow-runner",
 ]

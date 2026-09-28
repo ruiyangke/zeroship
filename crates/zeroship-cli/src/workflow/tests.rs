@@ -889,6 +889,23 @@ struct LossyTransport {
 }
 
 impl JobTransport for LossyTransport {
+    /// Asked of the journal this host holds, the way the crossed transport asks
+    /// the service that holds it.
+    async fn release(
+        &self,
+        journal: &Self::Journal,
+        lease: &Self::Lease,
+        task: &zeroship_workflow::service::delivery::DeliveredTask,
+    ) -> Result<(), WorkflowServiceError> {
+        journal.release_job(task, lease).await
+    }
+    async fn receipt(
+        &self,
+        journal: &Self::Journal,
+        job: &zeroship_core::workflow_jobs::JobSpec,
+    ) -> Result<Option<zeroship_workflow::service::delivery::JobReceipt>, WorkflowServiceError> {
+        journal.job_receipt(job).await
+    }
     type Lease = DeliveryGrant;
     /// This host holds the journal, so an attempt is scoped here rather than
     /// server-side.

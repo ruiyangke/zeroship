@@ -15,7 +15,7 @@ use zeroship_core::{
     },
     service_identity::{endpoints, verify_service_call, ServiceEndpoint},
     service_peers::{ServiceAuth, ServiceKeyring},
-    workflow_coordination::{Assignment, AUDIENCE},
+    workflow_coordination::{Assignment, RunFailure, AUDIENCE},
     workflow_jobs::{Settlement, SettlementReceipt},
     workflow_policy::{AppPolicy, EstablishIngress, PolicyLease, PolicyLeaseRequest},
 };
@@ -35,6 +35,36 @@ pub(super) struct Fixture {
 }
 
 impl Fixture {
+    /// Answer one creator run call, matched by the placement its body names.
+    ///
+    /// `RemoteBackend` mints a request identity per call, so the body cannot be
+    /// matched whole; the scope is what distinguishes a call made by a retired
+    /// generation from one made by the generation that now holds.
+    pub fn run_call(
+        &self,
+        endpoint: ServiceEndpoint,
+        scope: &AssignedScope,
+        status: u16,
+        response: Value,
+    ) -> Exchange {
+        Exchange {
+            field: Some(("scope", json!(scope))),
+            status,
+            ..Exchange::new(endpoint, Value::Null, response)
+        }
+    }
+
+    /// As [`Self::run_call`], refusing with a `RunFailure` whose status the
+    /// client checks against its own body.
+    pub fn run_refusal(
+        &self,
+        endpoint: ServiceEndpoint,
+        scope: &AssignedScope,
+        failure: &RunFailure,
+    ) -> Exchange {
+        self.run_call(endpoint, scope, failure.status(), json!(failure))
+    }
+
     /// Accept one settlement exactly as sent and acknowledge it.
     pub fn settlement(&self, settlement: &Settlement) -> Exchange {
         Exchange::new(
@@ -109,6 +139,7 @@ impl Fixture {
         Self {
             factory: Factory(Rc::new(FactoryState {
                 policies: policies.clone(),
+                client: RefCell::new(None),
                 directory: tempfile::tempdir().unwrap(),
                 calls: RefCell::new(Vec::new()),
                 gates: RefCell::new(BTreeMap::new()),
@@ -298,6 +329,12 @@ pub(super) struct Exchange {
     request: Value,
     response: Value,
     status: u16,
+    /// Match a request to the endpoint by ONE field rather than the whole body,
+    /// for a creator call whose body carries a freshly minted request identity.
+    /// The field is what makes two calls to the same endpoint distinguishable,
+    /// so an assertion about which generation was refused is about the request
+    /// rather than about the order the exchanges were listed in.
+    field: Option<(&'static str, Value)>,
     gate: Option<Gate>,
     /// Match any request to the endpoint and reply with this request field.
     echo: Option<&'static str>,
@@ -325,6 +362,7 @@ impl Exchange {
             request,
             response,
             status: 200,
+            field: None,
             gate: None,
             echo: None,
             recorded: false,
@@ -357,6 +395,7 @@ pub(super) fn peer<'a>(
             Options::default(),
         )
         .unwrap();
+        fixture.factory.serve(client.clone());
         let (issuer, key) = fixture.auth.signing_identity().unwrap();
         let mut trust = ServiceTrustBundle::new();
         trust.trust_signing_key(issuer, key.key_id(), key).unwrap();
@@ -384,9 +423,14 @@ pub(super) fn peer<'a>(
                     .iter()
                     .position(|exchange| {
                         exchange.endpoint.path_template() == observed.path
-                            && (exchange.echo.is_some()
-                                || exchange.recorded
-                                || exchange.request == observed.body)
+                            && match exchange.field.as_ref() {
+                                Some((field, value)) => &observed.body[field] == value,
+                                None => {
+                                    exchange.echo.is_some()
+                                        || exchange.recorded
+                                        || exchange.request == observed.body
+                                }
+                            }
                     })
                     .unwrap_or_else(|| {
                         panic!(
@@ -501,6 +545,9 @@ pub(super) struct Factory(Rc<FactoryState>);
 
 struct FactoryState {
     policies: Arc<HostPolicies>,
+    /// Installed by [`peer`], because a backend that reaches the service over
+    /// HTTP needs the same client the host coordinates through.
+    client: RefCell<Option<WorkerCoordinator>>,
     directory: tempfile::TempDir,
     calls: RefCell<Vec<Rc<Opening>>>,
     gates: RefCell<BTreeMap<AppId, Gate>>,
@@ -515,7 +562,7 @@ pub(super) struct Opening {
     pub scope: AssignedScope,
     pub policy: PolicyBinding,
     pub dropped: Cell<bool>,
-    pub runtime: RefCell<Option<CreatorRuntime>>,
+    pub runtime: RefCell<Option<CreatorRuntime<AppWorkflows>>>,
 }
 
 struct OpeningGuard(Rc<Opening>);
@@ -545,9 +592,18 @@ impl Factory {
         *self.0.alternative.borrow_mut() = Some(app);
     }
 
-    /// Return the exact app, but a request backend from another generation.
+    /// Return the exact app, but a request backend naming another placement.
+    ///
+    /// The generation a remote call is admitted under is the service's, so the
+    /// identity this side can get wrong is the PLACEMENT the backend names, and
+    /// that is what the final check compares.
     pub fn foreign_backend(&self) {
         self.0.foreign_backend.set(true);
+    }
+
+    /// Serve remote backends through `client`.
+    pub fn serve(&self, client: WorkerCoordinator) {
+        *self.0.client.borrow_mut() = Some(client);
     }
 
     /// Open creators with an activated deployment of an `Example` workflow.
@@ -570,13 +626,45 @@ impl Factory {
     }
 }
 
-impl CreatorFactory for Factory {
+/// The same creator resources, opened for a host whose journal is the
+/// service's rather than its own.
+///
+/// `WorkerHost` pairs its factory with the crossed transport, so an opening it
+/// takes carries no journal handle. Everything else about the opening -- the
+/// gates, the recorded call, the backend and the executor -- is the inner
+/// factory's, so a `WorkerHost` test observes exactly what an
+/// `AssignmentBindings` test does, minus the handle it could not hold.
+#[derive(Clone)]
+pub(super) struct Severed(pub Factory);
+
+impl CreatorFactory for Severed {
+    type Journal = ();
+
     async fn open(
         &self,
         scope: &AssignedScope,
         policy: &PolicyBinding,
         ingress: Rc<dyn IngressEpochs>,
-    ) -> Result<CreatorRuntime, WorkflowServiceError> {
+    ) -> Result<CreatorRuntime<()>, WorkflowServiceError> {
+        let opened = self.0.open(scope, policy, ingress).await?;
+        Ok(CreatorRuntime {
+            app: (),
+            executor: opened.executor,
+            backend: opened.backend,
+        })
+    }
+}
+
+impl CreatorFactory for Factory {
+    /// The fixture pairs this with `Probe`, which holds the journal in process.
+    type Journal = AppWorkflows;
+
+    async fn open(
+        &self,
+        scope: &AssignedScope,
+        policy: &PolicyBinding,
+        ingress: Rc<dyn IngressEpochs>,
+    ) -> Result<CreatorRuntime<AppWorkflows>, WorkflowServiceError> {
         let opening = Rc::new(Opening {
             scope: scope.clone(),
             policy: policy.clone(),
@@ -632,26 +720,30 @@ impl CreatorFactory for Factory {
                 self.0.directory.path().join("objects"),
             )),
         ))?;
-        let outputs: zeroship_workflow::SharedStepOutputs =
-            Arc::new(crate::ObjectStepOutputs::new(objects.clone(), 1024)?);
-        let backend = if self.0.foreign_backend.get() {
-            let policies = Arc::new(HostPolicies::default());
-            let binding = policies.bind(scope.app_id.clone())?;
-            binding
-                .begin_refresh()?
-                .install(PolicySnapshot::configuration(
-                    1.try_into().unwrap(),
-                    AppPolicy::default(),
-                )?)?;
-            let foreign = creator(self.0.directory.path(), &scope.app_id, policies).await;
-            foreign
-                .register_app(&binding)
-                .await?
-                .into_backend(&foreign, outputs.clone(), Arc::new(objects.clone()))?
+        let served = if self.0.foreign_backend.get() {
+            AssignedScope {
+                assignment_revision: scope
+                    .assignment_revision
+                    .get()
+                    .checked_add(1)
+                    .unwrap()
+                    .try_into()
+                    .unwrap(),
+                ..scope.clone()
+            }
         } else {
-            app.clone()
-                .into_backend(&service, outputs.clone(), Arc::new(objects.clone()))?
+            scope.clone()
         };
+        let backend = RemoteBackend::new(
+            self.0
+                .client
+                .borrow()
+                .clone()
+                .expect("peer installs the coordinator client"),
+            served,
+            objects.clone(),
+            1024,
+        )?;
         let runtime = CreatorRuntime {
             app: app.with_ingress(ingress),
             executor: Rc::new(NoExecution),
@@ -706,6 +798,23 @@ pub(super) struct Probe {
 }
 
 impl JobTransport for Probe {
+    /// Asked of the journal this host holds, the way the crossed transport asks
+    /// the service that holds it.
+    async fn release(
+        &self,
+        journal: &Self::Journal,
+        lease: &Self::Lease,
+        task: &zeroship_workflow::service::delivery::DeliveredTask,
+    ) -> Result<(), WorkflowServiceError> {
+        journal.release_job(task, lease).await
+    }
+    async fn receipt(
+        &self,
+        journal: &Self::Journal,
+        job: &zeroship_core::workflow_jobs::JobSpec,
+    ) -> Result<Option<zeroship_workflow::service::delivery::JobReceipt>, WorkflowServiceError> {
+        journal.job_receipt(job).await
+    }
     type Lease = LeasedJob;
     /// This host holds the journal, so an attempt is scoped here rather than
     /// server-side.

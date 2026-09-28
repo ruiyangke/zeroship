@@ -68,7 +68,13 @@ pub fn thread() -> std::thread::Builder {
 /// consumes delivered jobs. It does not decide placement, scan journals for
 /// work or open the Control database. Registration is not an enrollment
 /// bootstrap.
-pub struct WorkerHost<F> {
+/// The `Journal = ()` bound is the invariant that this host's factory and its
+/// transport agree about where the journal lives. `HostTransport` declares
+/// `Journal = ()`, so a factory opening an `AppWorkflows` here would give the
+/// consumer a handle the transport never takes, and the placement guard would
+/// then be proving a journal nothing in this host uses. Relaxing the bound does
+/// not add a capability; it decouples two declarations that must match.
+pub struct WorkerHost<F: CreatorFactory<Journal = ()>> {
     client: WorkerCoordinator,
     assignments: AssignmentBindings<F>,
     consumer: JobConsumer<HostTransport>,
@@ -77,7 +83,7 @@ pub struct WorkerHost<F> {
     started: bool,
 }
 
-impl<F> std::fmt::Debug for WorkerHost<F> {
+impl<F: CreatorFactory<Journal = ()>> std::fmt::Debug for WorkerHost<F> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WorkerHost")
             .field("worker", self.client.worker_id())
@@ -87,7 +93,7 @@ impl<F> std::fmt::Debug for WorkerHost<F> {
     }
 }
 
-impl<F> WorkerHost<F> {
+impl<F: CreatorFactory<Journal = ()>> WorkerHost<F> {
     /// The manager's advertised capacity counts app placements, while the
     /// consumer's slots independently bound concurrent execution. `ready` is
     /// the registry request threads resolve app backends from; this host is
@@ -163,7 +169,7 @@ impl<F> WorkerHost<F> {
     }
 }
 
-impl<F: CreatorFactory> WorkerHost<F> {
+impl<F: CreatorFactory<Journal = ()>> WorkerHost<F> {
     /// Register before discovering assignments, then drive independent liveness,
     /// placement, policy and consumer loops until shutdown or identity refusal.
     ///
@@ -222,8 +228,8 @@ impl<F: CreatorFactory> WorkerHost<F> {
     }
 }
 
-struct RetireOnDrop<'a, F>(&'a AssignmentBindings<F>);
-impl<F> Drop for RetireOnDrop<'_, F> {
+struct RetireOnDrop<'a, F: CreatorFactory>(&'a AssignmentBindings<F>);
+impl<F: CreatorFactory> Drop for RetireOnDrop<'_, F> {
     fn drop(&mut self) {
         let _ = self.0.close();
     }
@@ -321,7 +327,7 @@ async fn ready(
     }
 }
 
-async fn drain<F>(
+async fn drain<F: CreatorFactory>(
     client: &WorkerCoordinator,
     assignments: &AssignmentBindings<F>,
     consumer: &mut JobConsumer<HostTransport>,

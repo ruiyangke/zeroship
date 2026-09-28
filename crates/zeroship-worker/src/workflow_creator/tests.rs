@@ -3,56 +3,14 @@ use futures::{channel::oneshot, future::Either};
 use serde_json::json;
 use std::{
     cell::{Cell, RefCell},
-    time::{Duration, Instant},
+    time::Duration,
 };
-use zeroship_core::workflow_jobs::{
-    Delivery, DeploymentId, JobId, JobLease, JobOperation, JobOutcome, JobSpec,
-};
-use zeroship_workflow::{
-    operations::{RunState, StartOptions},
-    service::{
-        delivery::{DeliveredTask, JobAcceptance},
-        AppPolicy, PayloadSlot, RequestId,
-    },
-};
-use zeroship_workflow_runner::{ExecutionGuard, RunPayloads};
+use zeroship_workflow_runner::ExecutionGuard;
 
 #[path = "../../../../tests/fixtures/workflow_deployments.rs"]
 mod deployment_fixture;
 mod fixture;
 use fixture::{execute, install, Fixture};
-
-/// What a run returned, read back from the payload object it was staged into.
-///
-/// A run's result reaches the journal as a descriptor, so `status` names the
-/// object and the bytes come from the store the factory supplied. Both halves
-/// are asserted here: the descriptor status hands out is the one whose object
-/// holds these bytes.
-async fn returned_value(
-    runtime: &CreatorRuntime,
-    objects: &PayloadObjects,
-    run: &str,
-) -> serde_json::Value {
-    let described = runtime
-        .app
-        .status(run)
-        .await
-        .unwrap()
-        .output
-        .expect("a run that returned a value names the payload holding it");
-    assert_eq!(described["kind"], "ref", "{described}");
-    let bytes = runtime
-        .app
-        .payloads(objects)
-        .read(run, 0, PayloadSlot::Output)
-        .await
-        .unwrap()
-        .into_bytes(4096)
-        .await
-        .unwrap();
-    assert_eq!(described["size"], json!(bytes.len()), "{described}");
-    serde_json::from_slice(&bytes).unwrap()
-}
 
 #[compio::test]
 async fn unknown_assignment_and_wrong_policy_are_refused_before_creator_io() {
@@ -81,36 +39,10 @@ async fn unknown_assignment_and_wrong_policy_are_refused_before_creator_io() {
     ));
     assert_eq!(fixture.provider.calls(), vec![unknown]);
     assert_eq!(fixture.contexts.calls.get(), 0);
-    fixture.assert_storage_unopened();
 }
 
 #[compio::test]
-async fn foreign_storage_app_is_refused_before_context_or_database_open() {
-    use zeroship_data_orm::binding::DbBinding;
-
-    let fixture = Fixture::new().await;
-    let mut resources = fixture.provider.resources();
-    let other = AppId::mint();
-    resources.storage.binding = DbBinding::platform(
-        other.as_str(),
-        "foreign-fixture",
-        SchemaName::new(other.as_str()).unwrap(),
-    );
-    fixture.provider.replace(resources);
-    assert!(matches!(
-        fixture
-            .factory()
-            .open(&fixture.scope, &fixture.policy, fixture.ingress())
-            .await,
-        Err(WorkflowServiceError::PermissionDenied)
-    ));
-    assert_eq!(fixture.provider.calls(), vec![fixture.scope.clone()]);
-    assert_eq!(fixture.contexts.calls.get(), 0);
-    fixture.assert_storage_unopened();
-}
-
-#[compio::test]
-async fn initial_context_must_match_the_storage_app_and_physical_schema() {
+async fn initial_context_must_match_the_apps_derived_schema() {
     for wrong_app in [false, true] {
         let fixture = Fixture::new().await;
         let other = AppId::mint();
@@ -127,63 +59,12 @@ async fn initial_context_must_match_the_storage_app_and_physical_schema() {
             Err(WorkflowServiceError::PermissionDenied)
         ));
         assert_eq!(fixture.contexts.calls.get(), 1);
-        fixture.assert_storage_unopened();
     }
 }
 
 #[compio::test]
-async fn factory_verifies_missing_journal_without_provisioning_it() {
-    let fixture = Fixture::new().await;
-    let factory = fixture.factory();
-    assert!(factory.open(&fixture.scope, &fixture.policy, fixture.ingress()).await.is_err());
-    let store = fixture.provider.resources().storage.open().await.unwrap();
-    assert!(
-        store.verify().await.is_err(),
-        "failed assembly must not install the workflow schema"
-    );
-    fixture.provision().await;
-    let runtime = factory.open(&fixture.scope, &fixture.policy, fixture.ingress()).await.unwrap();
-    assert_eq!(runtime.app.app_id(), &fixture.scope.app_id);
-    assert!(runtime.app.pending_jobs(None, 1).await.unwrap().is_empty());
-}
+async fn policy_replacement_cancels_pending_resource_resolution_without_creator_io() {
 
-/// A host with a repair client ASKS when it refuses a journal, and reports the
-/// original refusal when the manager cannot be reached.
-///
-/// Both halves matter. Without the first, a refused journal is terminal again.
-/// Without the second, the operator sees "coordinator unavailable" for a database
-/// whose journal is simply out of date, which points at the wrong system.
-#[compio::test]
-async fn a_refused_journal_is_reported_by_its_own_error_when_repair_cannot_be_reached() {
-    let fixture = Fixture::new().await;
-    // The control: the SAME fixture, differing only in whether a repair client is
-    // attached. Comparing the two errors is what pins "the journal's refusal
-    // survives the repair attempt" without depending on how it renders.
-    let without = fixture
-        .factory()
-        .open(&fixture.scope, &fixture.policy, fixture.ingress())
-        .await
-        .expect_err("a missing journal must refuse");
-    let with = fixture
-        .factory_with_unreachable_repair()
-        .open(&fixture.scope, &fixture.policy, fixture.ingress())
-        .await
-        .expect_err("an unreachable manager must not turn the refusal into a success");
-    assert_eq!(
-        format!("{with:?}"),
-        format!("{without:?}"),
-        "an unreachable manager must not replace the journal's refusal with a transport \
-         error; that would point an operator at the wrong system"
-    );
-    let store = fixture.provider.resources().storage.open().await.unwrap();
-    assert!(
-        store.verify().await.is_err(),
-        "an unreachable manager must not have installed anything"
-    );
-}
-
-#[compio::test]
-async fn policy_replacement_cancels_pending_resource_resolution_without_storage_io() {
     let fixture = Fixture::new().await;
     let factory = fixture.factory();
     let (observed, release) = fixture.provider.gate();
@@ -205,106 +86,61 @@ async fn policy_replacement_cancels_pending_resource_resolution_without_storage_
     assert!(fixture.policy.begin_refresh().is_err());
     assert!(replacement.begin_refresh().is_ok());
     assert_eq!(fixture.contexts.calls.get(), 0);
-    fixture.assert_storage_unopened();
 }
 
+/// The severed assembly runs creator code: the factory's loader resolves the
+/// pinned deployment ACROSS the transport, loads its bytes from the artifact
+/// store this host holds, and the executor it returns produces a frontier.
+///
+/// The journal is the service's, so nothing here starts a run or settles one --
+/// those are bound where the service answers. What is bound here is the wiring:
+/// one resolution crosses, the bytes do not, and the executable that reaches V8
+/// is the one the resolution named.
 #[compio::test]
-async fn factory_executes_delivered_v8_frontiers_with_its_creator_artifact_and_payloads() {
+async fn factory_executes_a_pinned_frontier_from_a_crossed_resolution() {
     zeroship_runtime::init_v8();
     let fixture = Fixture::new().await;
-    fixture.provision().await;
-    let ingress = fixture.ingress();
-    let runtime = fixture
-        .factory()
-        .open(&fixture.scope, &fixture.policy, ingress.clone())
-        .await
-        .unwrap();
-    let deployment = fixture.activate(&runtime, r"
+    let deploy_hash = fixture
+        .publish(
+            r"
         export class Example {
             async run(trigger, step) {
-                const saved = await step.run('saved', {output:{as:'blob', contentType:'application/json'}}, () => ({value:trigger.input.value}));
-                return (await saved.json()).value;
+                const seen = await step.run('seen', {}, () => trigger.input.value);
+                return seen;
             }
         }
-    ").await;
-    let input = "creator-owned-payload".repeat(8);
-    let request = RequestId::mint();
-    let started = runtime
-        .app
-        .start(
-            &request,
-            "Example",
-            StartOptions {
-                input_ref: Some(
-                    zeroship_workflow::InputStager::stage_input(
-                        &fixture.provider.resources().objects,
-                        &runtime.app,
-                        &request,
-                        &json!({"value":input}),
-                    )
-                    .await
-                    .unwrap(),
-                ),
-                ..StartOptions::default()
-            },
+    ",
         )
+        .await;
+    // The pin the service answers with. The hash is what the loader verifies the
+    // artifact bytes against, so a peer naming another deployment cannot have its
+    // bytes loaded under this one's identity.
+    let peer = fixture
+        .serving(json!({
+            "deployId": zeroship_core::typed_id::generate("dep"),
+            "deployHash": deploy_hash,
+            "availabilityEpoch": 1,
+            "admissionGeneration": 1,
+        }))
+        .await;
+    let runtime = fixture
+        .factory_through(peer.client.clone())
+        .open(&fixture.scope, &fixture.policy, fixture.ingress())
         .await
         .unwrap();
-    // The factory attached the placement's establishment: the lease held no
-    // epoch, so the refused start obtained one and was accepted on retry.
-    assert_eq!(*ingress.requested.borrow(), vec![None]);
-    assert_eq!(ingress.accepted.get(), 1);
-    let mut finished = false;
-    for _ in 0..8 {
-        let lease = fixture.next(&runtime.app, &started.id).await;
-        assert_eq!(lease.delivery.job.deployment_id(), Some(&deployment));
-        let JobAcceptance::Execute(task) = runtime.app.accept_job(&lease).await.unwrap() else {
-            panic!("exact published Advance must be executable");
-        };
-        let outcome = execute(&runtime, &task).await.unwrap();
-        let receipt = runtime
-            .app
-            .complete_job(&task, &lease, outcome)
-            .await
-            .unwrap();
-        assert_eq!(
-            runtime.app.job_receipt(&lease.delivery.job).await.unwrap(),
-            Some(receipt.clone())
-        );
-        assert!(
-            matches!(runtime.app.accept_job(&lease).await.unwrap(), JobAcceptance::Settled(replayed) if *replayed == receipt)
-        );
-        let status = runtime.app.status(&started.id).await.unwrap();
-        if status.state == RunState::Completed {
-            assert_eq!(
-                returned_value(&runtime, &fixture.provider.resources().objects, &started.id).await,
-                json!(input)
-            );
-            finished = true;
-            break;
-        }
-        assert!(matches!(status.state, RunState::Queued | RunState::Running));
-    }
-    assert!(
-        finished,
-        "bounded delivered frontiers must finish the workflow"
-    );
-    let saved = runtime
-        .app
-        .payloads(&fixture.provider.resources().objects)
-        .read_step_output(&started.id, "saved", 0)
-        .await
-        .unwrap()
-        .into_bytes(4096)
-        .await
-        .unwrap();
+    assert_eq!(runtime.backend.scope(), &fixture.scope);
+    let assignment = fixture.assignment(&deploy_hash);
+    let execution = execute(&runtime, &assignment).await.unwrap();
     assert_eq!(
-        serde_json::from_slice::<serde_json::Value>(&saved).unwrap(),
-        json!({"value":input})
+        peer.served().await,
+        1,
+        "one resolution crosses per execution, and the bytes never do"
     );
+    // The creator step ran and its value reached the frontier.
+    let outcomes = serde_json::to_value(&execution).unwrap();
     assert!(
-        fixture::contains_file(&fixture.directory.path().join("objects")),
-        "the returned executor must stage referenced outputs in the supplied object store"
+        format!("{outcomes}").contains("creator-owned-input"),
+        "{outcomes}"
     );
     assert_eq!(fixture.provider.calls(), vec![fixture.scope.clone()]);
     assert!(
@@ -313,52 +149,55 @@ async fn factory_executes_delivered_v8_frontiers_with_its_creator_artifact_and_p
     );
 }
 
+/// A context that moves an installed creator's schema is refused at TASK LOAD,
+/// not only at assembly.
+///
+/// The loader resolves fresh metadata for every execution, so a provider that
+/// starts answering with another tenant's schema must be refused there. The
+/// control is the same assignment executing again once the schema is restored:
+/// without it, a refusal for any other reason would also pass.
 #[compio::test]
 async fn dynamic_context_cannot_move_an_installed_creator_to_another_schema() {
     zeroship_runtime::init_v8();
     let fixture = Fixture::new().await;
-    fixture.provision().await;
+    // A workflow whose value stays INLINE, so the only call this execution makes
+    // is the executable resolution. A returned object would reserve a payload
+    // too, and this test is about the context check rather than the payload seam.
+    let deploy_hash = fixture
+        .publish(
+            r"
+        export class Example {
+            async run(trigger, step) {
+                return await step.run('bound', {}, () => 'bound');
+            }
+        }
+    ",
+        )
+        .await;
+    let peer = fixture
+        .serving(json!({
+            "deployId": zeroship_core::typed_id::generate("dep"),
+            "deployHash": deploy_hash,
+            "availabilityEpoch": 1,
+            "admissionGeneration": 1,
+        }))
+        .await;
     let runtime = fixture
-        .factory()
+        .factory_through(peer.client.clone())
         .open(&fixture.scope, &fixture.policy, fixture.ingress())
         .await
         .unwrap();
-    fixture
-        .activate(
-            &runtime,
-            "export class Example { run() { return 'bound'; } }",
-        )
-        .await;
-    let started = runtime
-        .app
-        .start(&RequestId::mint(), "Example", StartOptions::default())
-        .await
-        .unwrap();
-    let lease = fixture.next(&runtime.app, &started.id).await;
-    let JobAcceptance::Execute(task) = runtime.app.accept_job(&lease).await.unwrap() else {
-        panic!("published job must be claimable");
-    };
+    let assignment = fixture.assignment(&deploy_hash);
     let original = fixture.contexts.current.borrow().schema.clone();
     fixture.contexts.current.borrow_mut().schema = SchemaName::new(AppId::mint().as_str()).unwrap();
     assert!(matches!(
-        execute(&runtime, &task).await,
+        execute(&runtime, &assignment).await,
         Err(WorkflowServiceError::PermissionDenied)
     ));
-    assert!(runtime
-        .app
-        .job_receipt(&lease.delivery.job)
-        .await
-        .unwrap()
-        .is_none());
     fixture.contexts.current.borrow_mut().schema = original;
-    let execution = execute(&runtime, &task).await.unwrap();
-    runtime
-        .app
-        .complete_job(&task, &lease, execution)
-        .await
-        .unwrap();
-    assert_eq!(
-        returned_value(&runtime, &fixture.provider.resources().objects, &started.id).await,
-        json!("bound")
+    execute(&runtime, &assignment).await.unwrap();
+    assert!(
+        peer.served().await > 0,
+        "the accepted execution must have resolved its pin across the transport"
     );
 }

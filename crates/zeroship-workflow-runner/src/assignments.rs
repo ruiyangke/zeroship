@@ -8,14 +8,16 @@
 use crate::{
     consumer::{ConsumerBindings, ConsumerScope},
     delivery::bounded,
+    journal_duties::JournalDuties,
     publication::{self, PublicationWait, PublicationWake},
     ready::ReadyApps,
+    remote::RemoteBackend,
     TaskExecutor,
 };
 use zeroship_workflow::{
     service::{
-        publication::AssignedPublisher, AppBackend, AppWorkflows, AssignedPolicies, HostPolicies,
-        IngressEpochs, PolicyBinding,
+        publication::AssignedPublisher, AssignedPolicies, HostPolicies, IngressEpochs,
+        PolicyBinding,
     },
     WorkflowServiceError,
 };
@@ -43,19 +45,20 @@ use zeroship_workflow_client::WorkerCoordinator;
 
 /// Creator I/O and execution assembled by trusted deployment-host configuration.
 ///
-/// `backend` is the app's workflow client for request isolates. It must come
-/// from `app` itself, so it carries the same policy generation.
+/// `backend` is the app's workflow client for request isolates. It names the
+/// same placement the opening was made for, which is what the registry retires
+/// it by.
 #[derive(Clone)]
-pub struct CreatorRuntime {
-    pub app: AppWorkflows,
+pub struct CreatorRuntime<J> {
+    pub app: J,
     pub executor: Rc<dyn TaskExecutor>,
-    pub backend: AppBackend,
+    pub backend: RemoteBackend,
 }
 
-impl std::fmt::Debug for CreatorRuntime {
+impl<J> std::fmt::Debug for CreatorRuntime<J> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CreatorRuntime")
-            .field("app", self.app.app_id())
+            .field("app", self.backend.app_id())
             .finish_non_exhaustive()
     }
 }
@@ -63,8 +66,13 @@ impl std::fmt::Debug for CreatorRuntime {
 /// Resolve only resources this process is independently authorized to access.
 /// Placement metadata supplies neither database credentials nor schema authority.
 pub trait CreatorFactory {
+    /// The journal handle this factory opens, which must be the same shape the
+    /// host's transport declares: an `AppWorkflows` in process, `()` when the
+    /// journal is at the far end of the transport's calls.
+    type Journal: Clone + JournalDuties;
+
     /// Use the supplied policy generation for the returned app, and attach
-    /// `ingress` to it with [`AppWorkflows::with_ingress`] before creating any
+    /// `ingress` to it with `AppWorkflows::with_ingress` before creating any
     /// backend, so a fenced acceptance establishes a newer epoch through this
     /// placement's policy lease. Opening must be cancellation safe: dropping
     /// this future must stop or quarantine its I/O.
@@ -73,7 +81,7 @@ pub trait CreatorFactory {
         scope: &AssignedScope,
         policy: &PolicyBinding,
         ingress: Rc<dyn IngressEpochs>,
-    ) -> impl Future<Output = Result<CreatorRuntime, WorkflowServiceError>>;
+    ) -> impl Future<Output = Result<CreatorRuntime<Self::Journal>, WorkflowServiceError>>;
 }
 
 /// Active placement and per-operation bounds. Policy grants retain their own
@@ -84,23 +92,23 @@ pub struct AssignmentOptions {
     pub operation_timeout: Duration,
 }
 
-struct Ready {
-    runtime: CreatorRuntime,
-    consumer: ConsumerScope,
+struct Ready<J> {
+    runtime: CreatorRuntime<J>,
+    consumer: ConsumerScope<J>,
     /// The request-path backend published while this generation is ready.
-    backend: AppBackend,
+    backend: RemoteBackend,
 }
 
-struct Entry {
+struct Entry<J> {
     policies: AssignedPolicies,
-    ready: RefCell<Option<Ready>>,
+    ready: RefCell<Option<Ready<J>>>,
     published: ReadyApps,
     busy: Cell<bool>,
     stop: RefCell<Option<oneshot::Sender<()>>>,
     stopped: Shared<LocalBoxFuture<'static, ()>>,
 }
 
-impl Entry {
+impl<J> Entry<J> {
     fn new(policies: AssignedPolicies, published: ReadyApps) -> Self {
         let (stop, stopped) = oneshot::channel();
         Self {
@@ -123,12 +131,12 @@ impl Entry {
         if let Some(stop) = self.stop.borrow_mut().take() {
             let _ = stop.send(());
         }
-        self.published.retire(self.policies.binding());
+        self.published.retire(self.policies.scope());
         self.policies.binding().revoke()
     }
 }
 
-impl Drop for Entry {
+impl<J> Drop for Entry<J> {
     fn drop(&mut self) {
         let _ = self.retire();
     }
@@ -152,21 +160,21 @@ impl Drop for Busy<'_> {
 /// dropping this withdraws every published backend and revokes admission
 /// synchronously; the host must separately await the consumer's joined drain
 /// before discarding execution capacity.
-pub struct AssignmentBindings<F> {
+pub struct AssignmentBindings<F: CreatorFactory> {
     client: WorkerCoordinator,
     policies: Arc<HostPolicies>,
-    consumer: ConsumerBindings,
+    consumer: ConsumerBindings<F::Journal>,
     factory: F,
     options: AssignmentOptions,
     ready: ReadyApps,
     wake: PublicationWake,
     marked: PublicationWait,
-    entries: RefCell<BTreeMap<AppId, Rc<Entry>>>,
+    entries: RefCell<BTreeMap<AppId, Rc<Entry<F::Journal>>>>,
     scan: Cell<u64>,
     closed: Cell<bool>,
 }
 
-impl<F> std::fmt::Debug for AssignmentBindings<F> {
+impl<F: CreatorFactory> std::fmt::Debug for AssignmentBindings<F> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AssignmentBindings")
             .field("worker", self.client.worker_id())
@@ -176,14 +184,14 @@ impl<F> std::fmt::Debug for AssignmentBindings<F> {
     }
 }
 
-impl<F> AssignmentBindings<F> {
+impl<F: CreatorFactory> AssignmentBindings<F> {
     /// # Errors
     /// Rejects empty bounds, limits exceeding the consumer's capacity, and
     /// durations that cannot be represented by the local monotonic clock.
     pub fn new(
         client: WorkerCoordinator,
         policies: Arc<HostPolicies>,
-        consumer: ConsumerBindings,
+        consumer: ConsumerBindings<F::Journal>,
         factory: F,
         ready: ReadyApps,
         options: AssignmentOptions,
@@ -203,7 +211,7 @@ impl<F> AssignmentBindings<F> {
     pub(crate) fn with_publication(
         client: WorkerCoordinator,
         policies: Arc<HostPolicies>,
-        consumer: ConsumerBindings,
+        consumer: ConsumerBindings<F::Journal>,
         factory: F,
         ready: ReadyApps,
         options: AssignmentOptions,
@@ -265,7 +273,7 @@ impl<F> AssignmentBindings<F> {
         }
     }
 
-    async fn publish_entry(&self, entry: &Rc<Entry>) -> Result<(), WorkflowServiceError> {
+    async fn publish_entry(&self, entry: &Rc<Entry<F::Journal>>) -> Result<(), WorkflowServiceError> {
         let app = entry
             .ready
             .borrow()
@@ -279,8 +287,7 @@ impl<F> AssignmentBindings<F> {
         // A local binding, so the unfinished half drops before what it borrows.
         let selected = futures::future::select(
             entry.stopped.clone(),
-            publication::publish_pending(&app, &publisher, self.options.operation_timeout)
-                .boxed_local(),
+            JournalDuties::drain(&app, &publisher, self.options.operation_timeout).boxed_local(),
         )
         .await;
         match selected {
@@ -307,7 +314,7 @@ impl<F> AssignmentBindings<F> {
         result
     }
 
-    fn current(&self, entry: &Rc<Entry>) -> Result<(), WorkflowServiceError> {
+    fn current(&self, entry: &Rc<Entry<F::Journal>>) -> Result<(), WorkflowServiceError> {
         if self.closed.get()
             || !self
                 .entries
@@ -340,7 +347,7 @@ impl<F> AssignmentBindings<F> {
     }
 }
 
-impl<F> Drop for AssignmentBindings<F> {
+impl<F: CreatorFactory> Drop for AssignmentBindings<F> {
     fn drop(&mut self) {
         let _ = self.close();
     }
@@ -470,7 +477,7 @@ impl<F: CreatorFactory> AssignmentBindings<F> {
         result
     }
 
-    async fn refresh_entry(&self, entry: &Rc<Entry>) -> Result<(), WorkflowServiceError> {
+    async fn refresh_entry(&self, entry: &Rc<Entry<F::Journal>>) -> Result<(), WorkflowServiceError> {
         self.current(entry)?;
         if entry.busy.replace(true) {
             return Err(WorkflowServiceError::Unavailable(
@@ -505,7 +512,7 @@ impl<F: CreatorFactory> AssignmentBindings<F> {
     ///
     /// A release that does not reach the manager changes nothing: the
     /// placement stands and the next refresh refuses again.
-    async fn refuse(&self, entry: &Rc<Entry>) {
+    async fn refuse(&self, entry: &Rc<Entry<F::Journal>>) {
         let scope = entry.policies.scope().clone();
         let released = self
             .client
@@ -534,7 +541,7 @@ impl<F: CreatorFactory> AssignmentBindings<F> {
         let _ = self.publish();
     }
 
-    async fn prepare(&self, entry: &Rc<Entry>) -> Result<(), WorkflowServiceError> {
+    async fn prepare(&self, entry: &Rc<Entry<F::Journal>>) -> Result<(), WorkflowServiceError> {
         self.client
             .renew(entry.policies.scope())
             .await
@@ -569,11 +576,18 @@ impl<F: CreatorFactory> AssignmentBindings<F> {
                 .run(self.factory.open(entry.policies.scope(), binding, ingress))
                 .await?
         };
-        if runtime.app.app_id() != binding.app_id()
-            || !runtime.app.binding().same_binding(binding)
-            || runtime.backend.app_id() != binding.app_id()
-            || !runtime.backend.binding().same_binding(binding)
-        {
+        // The journal half of this check is a method on the journal shape, so a
+        // host that holds no handle states at the DEFINITION site why the
+        // condition cannot arise, instead of each caller remembering to skip it.
+        runtime.app.belongs_to(binding)?;
+        // CHECKED AGAINST THE PLACEMENT, because that is what this backend
+        // carries and what the far end authorizes against. The scope holds the
+        // app id and the assignment revision, so a factory answering with a
+        // backend for another app or another generation is refused here; the
+        // policy generation is deliberately not compared, since a call this
+        // backend makes is admitted under the generation the SERVICE observes,
+        // not one this side could assert.
+        if runtime.backend.scope() != entry.policies.scope() {
             return Err(WorkflowServiceError::PermissionDenied);
         }
         authority.check()?;
@@ -593,6 +607,7 @@ impl<F: CreatorFactory> AssignmentBindings<F> {
             Some(consumer) => consumer.clone(),
             None => ConsumerScope::new(
                 runtime.app.clone(),
+                binding.clone(),
                 entry.policies.scope().clone(),
                 runtime.executor.clone(),
             )?,
@@ -600,13 +615,7 @@ impl<F: CreatorFactory> AssignmentBindings<F> {
         let app = binding.app_id().clone();
         let (backend, first) = match previous {
             Some((_, backend)) => (backend, false),
-            None => (
-                runtime
-                    .backend
-                    .clone()
-                    .with_commit_hint(self.wake.hint(app.clone())),
-                true,
-            ),
+            None => (runtime.backend.clone(), true),
         };
         *entry.ready.borrow_mut() = Some(Ready {
             runtime,

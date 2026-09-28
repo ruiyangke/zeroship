@@ -531,7 +531,11 @@ async fn claim_authority(fixture: &Fixture) {
     ));
     assert_ready(&database, &spec).await;
     // The worker gives the placement up; the next visit places the app again
-    // under a higher revision, which retires the original authority.
+    // under a higher revision, which retires the original authority. The refusal
+    // is a CONFLICT rather than a denial: this instance is still the placed one
+    // and the revision it names was superseded, so the next scan reaches the one
+    // that holds. The forged revision above stays denied, because nothing ever
+    // granted it.
     relinquish(&coordinator, &original).await;
     let replacement = place(&coordinator, &app).await;
     assert!(replacement.revision > original.revision);
@@ -541,7 +545,7 @@ async fn claim_authority(fixture: &Fixture) {
                 std::future::ready(Ok(original.worker_id.clone()))
             })
             .await,
-        Err(Error::Denied)
+        Err(Error::Conflict)
     ));
     assert_ready(&database, &spec).await;
     let foreign_worker = Assignment {

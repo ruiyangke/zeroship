@@ -9,7 +9,10 @@ use crate::{
     delivery::{bounded, DeliveryOptions, DeliveryOutcome, DeliverySlot, JobTransport},
     TaskExecutor,
 };
-use zeroship_workflow::{service::AppWorkflows, WorkflowServiceError};
+use zeroship_workflow::{
+    service::PolicyBinding,
+    WorkflowServiceError,
+};
 use futures::{
     channel::oneshot,
     future::{Either, LocalBoxFuture, Shared},
@@ -31,10 +34,18 @@ use zeroship_core::{
 
 /// An immutable trusted host binding. Clones retain the same local identity.
 /// Placement metadata selects work; the app handle separately binds creator I/O.
-#[derive(Clone)]
-pub struct ConsumerScope(Rc<ScopeBinding>);
+///
+/// An `Rc` wrapper, so cloning works whatever `J` is. The derive would demand
+/// `J: Clone`, which neither journal shape needs to be.
+pub struct ConsumerScope<J>(Rc<ScopeBinding<J>>);
 
-impl std::fmt::Debug for ConsumerScope {
+impl<J> Clone for ConsumerScope<J> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+impl<J> std::fmt::Debug for ConsumerScope<J> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("ConsumerScope")
@@ -43,28 +54,44 @@ impl std::fmt::Debug for ConsumerScope {
     }
 }
 
-struct ScopeBinding {
-    app: AppWorkflows,
+struct ScopeBinding<J> {
+    /// The journal handle and the placement stay ONE OBJECT.
+    ///
+    /// Asking a transport for a journal by app id instead would turn an identity
+    /// into a lookup, and a lookup answering with another tenant's journal would
+    /// answer with a perfectly legal handle. The journal's only separation is its
+    /// `app_id` columns, so that is the tenant boundary, and a type parameter is
+    /// the price of not putting a fallible lookup on it.
+    app: J,
+    /// What an attempt captures its authority from, and what names the app this
+    /// binding may act for.
+    policy: PolicyBinding,
     selection: AssignedScope,
     executor: Rc<dyn TaskExecutor>,
     retired: Cell<bool>,
 }
 
-impl ConsumerScope {
+impl<J> ConsumerScope<J> {
     /// The executor must use this app's creator storage and the consumer's worker identity.
     ///
     /// # Errors
     /// Refuses a placement for another app. Only trusted host code supplies bindings.
     pub fn new(
-        app: AppWorkflows,
+        app: J,
+        policy: PolicyBinding,
         selection: AssignedScope,
         executor: Rc<dyn TaskExecutor>,
     ) -> Result<Self, WorkflowServiceError> {
-        if app.app_id() != &selection.app_id {
+        // COMPARED AGAINST THE POLICY BINDING, not against the journal handle.
+        // Every host has a policy binding; a host whose journal is another
+        // process's has no handle to compare, so a guard written against one would
+        // hold here and pass vacuously there.
+        if policy.app_id() != &selection.app_id {
             return Err(WorkflowServiceError::PermissionDenied);
         }
         Ok(Self(Rc::new(ScopeBinding {
             app,
+            policy,
             selection,
             executor,
             retired: Cell::new(false),
@@ -110,16 +137,16 @@ impl ConsumerOptions {
 
 type Stop<'a> = Shared<LocalBoxFuture<'a, ()>>;
 
-struct Scope {
-    binding: ConsumerScope,
+struct Scope<J> {
+    binding: ConsumerScope<J>,
     revoke: RefCell<Option<oneshot::Sender<()>>>,
     stopped: Stop<'static>,
     claiming: Cell<bool>,
     ready_at: Cell<Instant>,
 }
 
-impl Scope {
-    fn new(binding: ConsumerScope) -> Self {
+impl<J> Scope<J> {
+    fn new(binding: ConsumerScope<J>) -> Self {
         let (revoke, stopped) = oneshot::channel();
         Self {
             binding,
@@ -148,13 +175,13 @@ impl Scope {
     }
 }
 
-struct Bindings {
-    scopes: BTreeMap<AppId, Rc<Scope>>,
+struct Bindings<J> {
+    scopes: BTreeMap<AppId, Rc<Scope<J>>>,
     cursor: Option<AppId>,
     limit: usize,
 }
 
-impl Drop for Bindings {
+impl<J> Drop for Bindings<J> {
     fn drop(&mut self) {
         for scope in self.scopes.values() {
             scope.revoke();
@@ -164,10 +191,17 @@ impl Drop for Bindings {
 
 /// Updated by the trusted placement/runtime host on the consumer's compio thread.
 /// Removing or replacing a binding interrupts its claims and execution immediately.
-#[derive(Clone)]
-pub struct ConsumerBindings(Rc<RefCell<Bindings>>);
+pub struct ConsumerBindings<J>(Rc<RefCell<Bindings<J>>>);
 
-impl std::fmt::Debug for ConsumerBindings {
+/// Hand-written for the same reason as [`ConsumerScope`]'s: the derive would
+/// require `J: Clone`, and the shared state is behind an `Rc` regardless.
+impl<J> Clone for ConsumerBindings<J> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+impl<J> std::fmt::Debug for ConsumerBindings<J> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("ConsumerBindings")
@@ -176,7 +210,7 @@ impl std::fmt::Debug for ConsumerBindings {
     }
 }
 
-impl ConsumerBindings {
+impl<J> ConsumerBindings<J> {
     pub(crate) fn limit(&self) -> usize {
         self.0.borrow().limit
     }
@@ -191,7 +225,7 @@ impl ConsumerBindings {
     /// # Errors
     /// Refuses duplicate apps and snapshots exceeding the host bound, without
     /// changing the current snapshot. The caller must authenticate its source.
-    pub fn replace(&self, scopes: Vec<ConsumerScope>) -> Result<(), WorkflowServiceError> {
+    pub fn replace(&self, scopes: Vec<ConsumerScope<J>>) -> Result<(), WorkflowServiceError> {
         let mut state = self.0.borrow_mut();
         if scopes.len() > state.limit {
             return Err(WorkflowServiceError::ResourceExhausted(
@@ -223,10 +257,10 @@ impl ConsumerBindings {
         Ok(())
     }
 
-    fn reserve(&self) -> Option<Claim> {
+    fn reserve(&self) -> Option<Claim<J>> {
         let mut state = self.0.borrow_mut();
         let now = Instant::now();
-        let eligible = |(_, scope): &(&AppId, &Rc<Scope>)| {
+        let eligible = |(_, scope): &(&AppId, &Rc<Scope<J>>)| {
             !scope.binding.is_retired() && !scope.claiming.get() && scope.ready_at.get() <= now
         };
         let selected = state
@@ -244,8 +278,8 @@ impl ConsumerBindings {
     }
 }
 
-struct Claim(Rc<Scope>);
-impl Drop for Claim {
+struct Claim<J>(Rc<Scope<J>>);
+impl<J> Drop for Claim<J> {
     fn drop(&mut self) {
         self.0.claiming.set(false);
     }
@@ -256,7 +290,7 @@ impl Drop for Claim {
 pub struct JobConsumer<T: JobTransport> {
     transport: Rc<T>,
     worker: WorkerId,
-    bindings: ConsumerBindings,
+    bindings: ConsumerBindings<T::Journal>,
     options: ConsumerOptions,
     slots: Vec<Option<DeliverySlot<T>>>,
 }
@@ -294,7 +328,7 @@ impl<T: JobTransport> JobConsumer<T> {
     }
 
     #[must_use]
-    pub fn bindings(&self) -> ConsumerBindings {
+    pub fn bindings(&self) -> ConsumerBindings<T::Journal> {
         self.bindings.clone()
     }
 
@@ -337,7 +371,7 @@ async fn run_slot<T: JobTransport>(
     slot: &mut Option<DeliverySlot<T>>,
     transport: Rc<T>,
     worker: &WorkerId,
-    bindings: &ConsumerBindings,
+    bindings: &ConsumerBindings<T::Journal>,
     options: ConsumerOptions,
     shutdown: Stop<'_>,
 ) {
@@ -417,7 +451,7 @@ async fn run_slot<T: JobTransport>(
                 continue;
             }
         };
-        let result = stopped(cancelled, delivery_slot.run(&scope.binding.0.app, claimed)).await;
+        let result = stopped(cancelled, delivery_slot.run(&scope.binding.0.app, &scope.binding.0.policy, claimed)).await;
         // Even a cancelled run with an unresponsive executor retains this slot.
         delivery_slot.drain_interrupted().await;
         match result {
@@ -443,7 +477,7 @@ async fn run_slot<T: JobTransport>(
 /// carrying only the code cannot tell an operator which of them stopped this
 /// worker from consuming, and a worker that has stopped consuming looks from
 /// outside like runs that simply never start.
-fn failed(scope: &Scope, options: ConsumerOptions, error: &WorkflowServiceError) {
+fn failed<J>(scope: &Scope<J>, options: ConsumerOptions, error: &WorkflowServiceError) {
     tracing::warn!(
         code = error.code(),
         reason = %error,

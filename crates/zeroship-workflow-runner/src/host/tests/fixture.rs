@@ -321,12 +321,16 @@ async fn request(stream: &mut compio::net::TcpStream) -> Option<Request> {
 pub(super) struct UnexpectedCreator;
 
 impl CreatorFactory for UnexpectedCreator {
+    /// `WorkerHost` pairs a factory with the crossed transport, so this is the
+    /// only shape it accepts.
+    type Journal = ();
+
     async fn open(
         &self,
         _: &AssignedScope,
         _: &PolicyBinding,
         _: Rc<dyn zeroship_workflow::service::IngressEpochs>,
-    ) -> Result<CreatorRuntime, WorkflowServiceError> {
+    ) -> Result<CreatorRuntime<()>, WorkflowServiceError> {
         panic!("empty placement fixture cannot authorize creator setup")
     }
 }

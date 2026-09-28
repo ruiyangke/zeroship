@@ -1215,6 +1215,7 @@ impl Manager {
             .bindings()
             .replace(vec![ConsumerScope::new(
                 fixture.app.clone(),
+                fixture.app.binding().clone(),
                 self.scope.clone(),
                 executor,
             )
@@ -1236,6 +1237,23 @@ fn manager_error(error: zeroship_workflow_manager::Error) -> WorkflowServiceErro
 }
 
 impl zeroship_workflow_runner::delivery::JobTransport for Manager {
+    /// Asked of the journal this host holds, the way the crossed transport asks
+    /// the service that holds it.
+    async fn release(
+        &self,
+        journal: &Self::Journal,
+        lease: &Self::Lease,
+        task: &zeroship_workflow::service::delivery::DeliveredTask,
+    ) -> Result<(), WorkflowServiceError> {
+        journal.release_job(task, lease).await
+    }
+    async fn receipt(
+        &self,
+        journal: &Self::Journal,
+        job: &zeroship_core::workflow_jobs::JobSpec,
+    ) -> Result<Option<zeroship_workflow::service::delivery::JobReceipt>, WorkflowServiceError> {
+        journal.job_receipt(job).await
+    }
     type Lease = zeroship_workflow_manager::DeliveryGrant;
     /// This host holds the journal, so an attempt is scoped here rather than
     /// server-side.
