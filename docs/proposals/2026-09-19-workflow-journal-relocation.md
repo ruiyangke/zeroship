@@ -340,7 +340,11 @@ workers **and local development**", and `WorkflowBackendFactory` already carries
 Two consequences to record in `docs/reference/sqlite-divergences.md` rather than leave silent:
 the dev tier keeps the journal in the local file and therefore exercises the SQL store that
 production no longer uses, so a dev-tier pass is not evidence about the production write path;
-and `SCHEMA_PLACEHOLDER` survives for that tier alone.
+and the dev tier binds no schema at all, so it exercises none of the substitution the PostgreSQL
+path depends on. `SCHEMA_PLACEHOLDER` belongs to the PostgreSQL artifact, not to this tier:
+`the_sqlite_artifact_needs_no_binding` (`crates/zeroship-workflow-schema/src/lib.rs`) asserts the
+SQLite SQL must not carry it, while `the_template_still_carries_the_placeholder` in the same module
+requires the PostgreSQL template to.
 
 ---
 
@@ -1505,8 +1509,9 @@ protocol. This extends a working client rather than inventing one.
    **Three shared names must not follow the deletion, and a tree-wide search for any of them
    argues for deleting far too much.** `SCHEMA_PLACEHOLDER` names two different constants: the
    private charter token above, which goes, and the public quoted DDL token in
-   `crates/zeroship-workflow-schema/src/lib.rs`, which stays, for the reason given under the
-   design and again under the SQLite dev tier. `ensure_journal` also names
+   `crates/zeroship-workflow-schema/src/lib.rs`, which stays because the PostgreSQL template ships
+   carrying it and the platform migration binds the target schema into it, quoted; the do-not note
+   below pins both halves with tests. `ensure_journal` also names
    `MigrationBackend::ensure_journal` across the `zeroship-migrate-*` crates, which creates the
    migration stamp table and is unrelated to the workflow journal; it is most of what searching
    the name returns. `SchemaBundleOutcome` and the rest of
@@ -2365,10 +2370,19 @@ part that dates, not the verdict.
   model. Any future step that relies on a journal record and a data write committing together
   is relying on something that has never been true and cannot be true across processes.
 
-- **Do not keep `SCHEMA_PLACEHOLDER` on the PostgreSQL path "for symmetry".** One fixed schema
-  needs no substitution, and a placeholder that is always replaced with the same value is a
-  seam inviting a caller to pass something else. It survives for SQLite because that tier has a
-  genuine reason.
+- **Do not delete `SCHEMA_PLACEHOLDER` from the PostgreSQL path.** It is that artifact's binding
+  seam rather than a symmetry with SQLite, and the direction is the opposite of what a reader
+  might guess: the generated PostgreSQL template ships carrying it and the platform migration
+  substitutes the target schema in, quoted, while the SQLite artifact has no schema to bind and
+  must not carry it at all. Both halves are pinned in
+  `crates/zeroship-workflow-schema/src/lib.rs` - `the_template_still_carries_the_placeholder`
+  requires the template to keep it and to leave none behind once bound, and
+  `the_sqlite_artifact_needs_no_binding` requires the SQLite SQL to be free of it. A fixed target
+  schema does not remove the need, and the QUOTED form is the reason: `STAMP_TABLE` is
+  `__zeroship_workflow_schema_version`, which contains the placeholder's bare word, so
+  substituting unquoted would rewrite the stamp table's name along with the schema.
+  `substitution_matches_the_orm_quoting_rule` holds the substitution to `zeroship_data_orm`'s own
+  quoting rule, which is what keeps the one caller-supplied name reaching generated DDL narrow.
 
 - **Do not split claimants by which host holds the payload store.** Blob storage keeps large
   objects out of the database, so the process that owns the journal owns the store those objects
