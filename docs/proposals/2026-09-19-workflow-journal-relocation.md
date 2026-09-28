@@ -1194,6 +1194,21 @@ protocol. This extends a working client rather than inventing one.
      trusting it: list the callers of each `WorkflowBinding` constructor and check that `::remote`
      has acquired one.
 
+     **And it moves where creator latency comes from, which is worth saying because a later
+     bisect will not find it in the diff.** `CreatorRuntime.backend` cannot stay an `AppBackend`,
+     since one is only obtainable from `AppWorkflows::into_backend`, so `ReadyApps` holds a
+     `RemoteBackend` instead. That means every `env.workflows` call from the REQUEST path crosses
+     HTTP after the severance, not only the calls made from a workflow isolate. Nothing about the
+     design intends otherwise - the worker holds no journal, so there is no local backend for
+     either path - but before the severance the request path was in-process and afterwards it is
+     not, and that is the kind of change someone chasing a latency regression should be able to
+     find by reading rather than by measuring.
+     `ReadyApps::retire` also loses its key, because a `RemoteBackend` deliberately holds no
+     `PolicyBinding`. Key it on `AssignedScope`: within one `Entry` at most one backend is ever
+     published, an `Entry` is removed only when the scan reports a different `assignment_revision`,
+     and two backends for one app never share a revision - so the revision is exactly as
+     discriminating as the binding was on this path, rather than approximately so.
+
      **The switch is small; getting the slot able to make it was not, and that part is worth
      recording because nothing above predicts it.** `DeliverySlot` is handed an `&AppWorkflows`
      per delivery and passes it to its transport on every call, and a severed worker has no such
