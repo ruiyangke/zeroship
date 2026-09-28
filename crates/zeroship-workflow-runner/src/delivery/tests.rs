@@ -515,7 +515,7 @@ impl Fixture {
         let manager = loop {
             match JobTransport::settle(&*self.metadata, &settlement).await {
                 Ok(observed) => break observed,
-                Err(error) if matches!(error, WorkflowServiceError::Timeout) => {
+                Err(WorkflowServiceError::Timeout) => {
                     compio::time::sleep(Duration::from_millis(5)).await;
                 }
                 Err(error) => return Err(error),
