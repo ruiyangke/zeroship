@@ -1104,6 +1104,43 @@ protocol. This extends a working client rather than inventing one.
      already locates a payload on the service and opens it in the runner behind an unchanged
      signature.
 
+     **Two of those crossings take a different shape than this step assumed, and both for reasons in
+     the code rather than preference.**
+
+     The payload read crosses PER READ rather than as the prefetch on `TaskAssignment` this step
+     designs. The prefetch drops the per-read lease recheck, and this step says binding what it
+     removes comes first - so the per-read form keeps `validate_live` and `validate_at` inside the
+     route's own transaction, needs no prerequisite test, and leaves the prefetch as a later
+     optimisation instead of a blocker. It also keeps `TaskToken` out of `zeroship-core`: the token
+     crosses as a `String` and is parsed on the callee's side, where refusing a malformed credential
+     belongs, so the trust-model hazard this step records for `DeliveredTask` and `TaskRenewal` never
+     arises.
+
+     The executable cannot cross at all, and this is arithmetic rather than judgement.
+     `LoadedWorker` (`crates/zeroship-bundle/src/executable.rs`) carries `modules: BTreeMap<String,
+     String>` - the creator's JavaScript SOURCE for every module - bounded by `max_source_bytes`,
+     which `crates/zeroship-cli/src/workflow.rs` sets to 32 MiB against a
+     `MAX_JOURNAL_BYTES_CEILING` of 16 MiB. The artifact budget is twice the reply ceiling before
+     JSON escaping inflates it, so a bundle at its permitted size cannot ride a buffered reply. Nor
+     could this service answer one: it builds `AppDeployments::holds_only(...)`, whose own doc says
+     "this is not a second route to the bytes".
+     A local load is equally wrong, and for a correctness reason rather than a structural one.
+     `task_executable_inner` resolves the hash from `claim.run.text("deploy_id")` - the run's CURRENT
+     row, under lock - while `invocation.deploy_hash` is what was true when the task was ASSIGNED. A
+     restart re-pinning the run between assign and load is exactly the window the post-load re-check
+     exists for, so a worker trusting the invocation replays against a deployment the journal has
+     moved away from. It would also drop `record.available()`, the admission-generation check either
+     side of the load, and `park_deployment` - the write that quarantines a damaged artifact for
+     every other worker rather than each rediscovering it.
+     So the executable takes the same split as the read: the RESOLUTION crosses and the BYTES stay
+     local. The service proves what only the journal can - the task's authorization, the run's
+     current pin, availability and admission - and answers with that registration; the worker loads
+     that exact `(app, hash)` from the blob store it already holds, immutable by construction because
+     the manifest key embeds the deploy hash. The one obligation this adds is the damage report,
+     which rides the settlement the worker already sends rather than a call of its own, so the
+     journal records the failure and the quarantine in one transaction and a crash cannot keep one
+     without the other.
+
 
    **And the lane cannot start before the worker narrows, which folds two bullets into one.** The
    contention between two claimants is safe at the mechanism - `lock_scope` serializes and one wins
