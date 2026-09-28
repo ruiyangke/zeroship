@@ -127,13 +127,14 @@ App objects are mutable and stored through `zeroship-storage`. Multipart
 uploads bound working memory by part size and concurrency; scoped handles also
 enforce a total upload-size ceiling. See [Object storage](../reference/storage.md)
 for the native surface and [docker-compose.md](../runbooks/docker-compose.md)
-for MinIO/R2 configuration.
+for self-hosted/R2 configuration.
 
 End-to-end verification lives in `examples/storage-gallery/tests/`. Its Vitest
-fixture owns MinIO and the platform processes: control writes deploy blobs to
-S3, and gateway/worker load the deployed app from that store. Playwright checks
-the browser entry; RPC tests compare multipart checksums and verify wide stream
-lengths against the physical S3 object. Run `pnpm --dir examples/storage-gallery test`.
+fixture owns the Versity S3 gateway and the platform processes: control writes
+deploy blobs to S3, and gateway/worker load the deployed app from that store.
+Playwright checks the browser entry; RPC tests compare multipart checksums and
+verify wide stream lengths against the physical S3 object. Run
+`pnpm --dir examples/storage-gallery test`.
 
 ## Non-goals
 

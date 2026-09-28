@@ -117,6 +117,18 @@ pub struct WorkflowSettings {
     /// Deadline for each scheduling, recovery, retention or closing lane in a manager pass.
     #[config(name = "workflow.driver_lane_timeout_ms", default = 10000)]
     pub driver_lane_timeout_ms: Operational<u64>,
+    /// Whether this process claims the maintenance rows of the queue it owns.
+    ///
+    /// On, which is what a deployment wants: the sweeps nothing else can claim
+    /// are this service's, and a process that never takes them leaves
+    /// reconciliation, collection, fanout, propagation and lifecycle commands
+    /// unswept. Off composes the manager driver with no sweep lane at all, for a
+    /// host whose queue another process is the sweep authority over -- a second
+    /// authority over the same rows is what the lane's own identity exists to
+    /// prevent.
+    #[arg(value_parser = zeroship_core::config::parse_bool_flag)]
+    #[config(name = "workflow.maintenance_sweeps", default = true)]
+    pub maintenance_sweeps: Operational<bool>,
     /// Inactivity after which an app's recovery responsibility may close.
     #[config(name = "workflow.closing_idle_ms", default = 900_000)]
     pub closing_idle_ms: Operational<u64>,

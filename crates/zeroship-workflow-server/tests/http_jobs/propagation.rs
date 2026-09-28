@@ -39,7 +39,7 @@ async fn propagation_delivery_and_receipts_preserve_scope_without_holds() {
         );
         assert_eq!(fixture.job_snapshot(&job).await, before);
     }
-    let delivery = fixture.claim(&job).await;
+    let delivery = fixture.sweep(&job).await;
     let successor = page(&fixture, &obligation, 2);
     let mut command = settlement(&delivery, vec![successor.clone()]);
     command.outcome = JobOutcome::Management {

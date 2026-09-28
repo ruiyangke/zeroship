@@ -157,7 +157,10 @@ start. Startup refuses an absent or unusable location rather than claiming sweep
 it could only fail.
 `workflow.driver_interval_ms` controls the delay after a completed pass;
 `workflow.driver_lane_timeout_ms` bounds each lane. `workflow.batch_limit` also
-bounds the candidate page. The closing lane begins closing an app's recovery
+bounds the candidate page. `workflow.maintenance_sweeps` decides whether this
+process composes its own sweep lane at all; it is on, and a host that sets it off
+composes none, for a queue another process is the sweep authority over. The
+closing lane begins closing an app's recovery
 responsibility after `workflow.closing_idle_ms` without activity, or once
 Control archived the app; `workflow.closing_timeout_ms` bounds an attempt, and
 `workflow.closing_backoff_ms` doubles up to `workflow.closing_backoff_max_ms`

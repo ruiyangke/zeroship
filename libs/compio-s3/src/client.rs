@@ -974,8 +974,8 @@ impl S3Client {
     /// Prefer [`complete_multipart_on`](S3Client::complete_multipart_on) with
     /// the upload session's already-warm pooled client: opening a *cold*
     /// connection for `CompleteMultipartUpload` right after a long-running
-    /// upload is slow to establish on some endpoints (`cyper`/`MinIO` over
-    /// `io_uring`), and the warm-session variant avoids that connect latency.
+    /// upload is slow to establish on some endpoints (`cyper` over `io_uring`),
+    /// and the warm-session variant avoids that connect latency.
     pub async fn complete_multipart(
         &self,
         key: &str,
@@ -990,7 +990,7 @@ impl S3Client {
     /// Complete a multipart upload, reusing the caller's warm pooled
     /// [`UploadSession`] (the same client the part PUTs used) instead of opening
     /// a fresh, cold connection. After a long upload a brand-new connection is
-    /// slow to establish on this `cyper`/`MinIO`/`io_uring` stack; reusing the warm
+    /// slow to establish on this `cyper`/`io_uring` stack; reusing the warm
     /// kept-alive pool removes that post-upload connect latency.
     pub async fn complete_multipart_on(
         &self,
@@ -1415,9 +1415,9 @@ mod tests {
     }
 
     #[test]
-    fn object_url_path_style_minio() {
+    fn object_url_path_style_custom_endpoint() {
         let cfg = S3Config::parse_url(
-            "s3://bucket/data?provider=minio&endpoint=http://127.0.0.1:9000&region=us-east-1&style=path&dev_http=true",
+            "s3://bucket/data?provider=generic&endpoint=http://127.0.0.1:9000&region=us-east-1&style=path&dev_http=true",
         )
         .unwrap();
         let c = S3Client::new(cfg, S3Credentials::new("AKID", "secret", None));

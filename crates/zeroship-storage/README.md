@@ -29,5 +29,5 @@ the trusted host authenticates the identity it supplies. Sensitive platform
 storage needs credentials unavailable to creator workers.
 
 `cargo test -p zeroship-storage` runs scoped storage, backend parity and dependency
-boundary tests. S3 tests own their MinIO containers through Testcontainers and
+boundary tests. S3 tests own their S3 server containers through Testcontainers and
 require Docker. `--no-default-features` also checks the local-only build.

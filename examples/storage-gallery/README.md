@@ -14,10 +14,11 @@ pnpm typecheck
 
 Vitest owns the acceptance suite, and Playwright checks browser loading and RPC
 access. The fixture builds this example in a temporary directory, builds the
-platform binaries, and starts Postgres, MinIO and a test issuer through
-Testcontainers. It applies the platform migrations, creates an app, and deploys
-through the CLI. Control, gateway and worker use S3 for deploy blobs; the worker
-also uses S3 for app objects. A local Vite process exercises LocalFs.
+platform binaries, and starts Postgres, the Versity S3 gateway and a test
+issuer through Testcontainers. It applies the platform migrations, creates an
+app, and deploys through the CLI. Control, gateway and worker use S3 for
+deploy blobs; the worker also uses S3 for app objects. A local Vite process
+exercises LocalFs.
 
 The suite checks CRUD, binary content, metadata, multipart checksums and a
 stream crossing the `u32` length boundary. The large-stream test checks the

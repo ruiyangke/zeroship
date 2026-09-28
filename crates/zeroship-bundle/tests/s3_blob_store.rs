@@ -1,15 +1,15 @@
-//! MinIO-backed integration test for `S3BlobStore` + LocalDisk↔S3 parity.
+//! S3-backed integration test for `S3BlobStore` + LocalDisk↔S3 parity.
 //!
-//! Self-contained: starts its own MinIO container, creates a bucket, exercises
-//! the `BlobStore` contract over S3 (blob round-trip, a MULTIPART-sized blob,
-//! manifest round-trip, dedup, `get_blob_to_file` refill, `delete_app_manifests`),
-//! then runs the SAME assertions against `LocalDiskBlobStore` for parity, and
-//! tears the container down. It **FAILS** when Docker is unavailable - it used
-//! to skip, which left the only coverage `S3BlobStore` has reporting green on
-//! every machine that could not run it.
+//! Self-contained: starts its own S3 server container, creates a bucket,
+//! exercises the `BlobStore` contract over S3 (blob round-trip, a
+//! MULTIPART-sized blob, manifest round-trip, dedup, `get_blob_to_file` refill,
+//! `delete_app_manifests`), then runs the SAME assertions against
+//! `LocalDiskBlobStore` for parity, and tears the container down. It **FAILS**
+//! when Docker is unavailable - it used to skip, which left the only coverage
+//! `S3BlobStore` has reporting green on every machine that could not run it.
 //!
 //! Run explicitly:
-//!   `cargo test -p zeroship-bundle --test s3_blob_minio -- --nocapture`
+//!   `cargo test -p zeroship-bundle --test s3_blob_store -- --nocapture`
 
 #![allow(clippy::future_not_send)]
 
@@ -25,11 +25,17 @@ use zeroship_bundle::{
 
 use compio_s3::{S3Client, S3Config, S3Credentials};
 
-const ACCESS_KEY: &str = "minioadmin";
-const SECRET_KEY: &str = "minioadmin";
-const CONTAINER: &str = "zs-bundle-s3blob-minio-test";
+const IMAGE: &str = "ghcr.io/versity/versitygw:v1.3.0";
+const ACCESS_KEY: &str = "zeroship-fixture";
+const SECRET_KEY: &str = "zeroship-fixture-secret";
+const CONTAINER: &str = "zs-bundle-s3blob-test";
 const PORT: u16 = 9112;
+/// The gateway's own listener port inside the container.
+const SERVER_PORT: u16 = 7070;
 const BUCKET: &str = "zs-blob-bucket";
+/// The gateway prints this once its listener is bound; polling the container
+/// log for it is a readiness condition rather than a fixed sleep.
+const READY_MARKER: &str = "VersityGW";
 
 /// Refuse the run unless a docker daemon answers `docker info`.
 ///
@@ -50,7 +56,7 @@ fn require_docker() {
         answered,
         "Docker is unavailable, and this test requires it.\n\
          \n\
-         \x20 backend: MinIO (S3), in a container this test starts itself\n\
+         \x20 backend: S3, in a container this test starts itself\n\
          \x20 probe:   `docker info` did not succeed\n\
          \n\
          Nothing in this repository provisions this container - the test does it\n\
@@ -58,7 +64,7 @@ fn require_docker() {
          daemon, and check that your user can reach it:\n\
          \x20 docker info\n\
          \n\
-         The suite then pulls `quay.io/minio/minio` on first run, so the first run needs\n\
+         The suite then pulls `{IMAGE}` on first run, so the first run needs\n\
          network access to the registry.\n\
          \n\
          There is no environment variable that makes this a skip. A backend this\n\
@@ -74,16 +80,23 @@ fn cleanup() {
         .status();
 }
 
-/// Start the MinIO container this test runs against.
+/// Start the S3 server container this test runs against.
+///
+/// The gateway's POSIX backend maps each bucket to a directory under its root,
+/// so the boot command creates the bucket with `mkdir` before handing over to
+/// the server: fixture setup needs no S3 client and no vendor CLI.
 ///
 /// # Panics
 ///
 /// When the container cannot be started, or never becomes ready. Both used to
 /// announce a skip and return `false`, and the caller returned on `false` - so
-/// a docker daemon that WAS present but refused the run, or a MinIO that never
+/// a docker daemon that WAS present but refused the run, or a server that never
 /// came up, produced the same pass as a full round-trip.
-fn start_minio() {
+fn start_s3_server() {
     cleanup();
+    let boot = format!(
+        "mkdir -p /data/{BUCKET} && exec /usr/local/bin/versitygw --port :{SERVER_PORT} posix /data"
+    );
     let run = Command::new("docker")
         .args([
             "run",
@@ -91,29 +104,31 @@ fn start_minio() {
             "--name",
             CONTAINER,
             "-p",
-            &format!("{PORT}:9000"),
+            &format!("{PORT}:{SERVER_PORT}"),
             "-e",
-            &format!("MINIO_ROOT_USER={ACCESS_KEY}"),
+            &format!("ROOT_ACCESS_KEY_ID={ACCESS_KEY}"),
             "-e",
-            &format!("MINIO_ROOT_PASSWORD={SECRET_KEY}"),
-            "quay.io/minio/minio",
-            "server",
-            "/data",
+            &format!("ROOT_SECRET_ACCESS_KEY={SECRET_KEY}"),
+            "--entrypoint",
+            "/bin/sh",
+            IMAGE,
+            "-c",
+            &boot,
         ])
         .status();
     assert!(
         matches!(run, Ok(s) if s.success()),
-        "The MinIO container this test needs would not start.\n\
+        "The S3 server container this test needs would not start.\n\
          \n\
-         \x20 backend:   MinIO (S3)\n\
-         \x20 image:     quay.io/minio/minio\n\
+         \x20 backend:   S3\n\
+         \x20 image:     {IMAGE}\n\
          \x20 container: {CONTAINER}\n\
-         \x20 port:      {PORT} on the host, mapped to 9000\n\
+         \x20 port:      {PORT} on the host, mapped to {SERVER_PORT}\n\
          \n\
          `docker run` failed. The usual causes, in the order worth checking:\n\
          \x20 docker ps -a --filter name={CONTAINER}   # a leftover container\n\
          \x20 ss -lptn 'sport = :{PORT}'                     # the port is taken\n\
-         \x20 docker pull quay.io/minio/minio                # the image is not local\n\
+         \x20 docker pull {IMAGE}   # the image is not local\n\
          \n\
          Nothing in this repository provisions it; the test starts and removes\n\
          it itself, so there is no script to run - fix the daemon and re-run.\n\
@@ -122,52 +137,57 @@ fn start_minio() {
     );
     for _ in 0..40 {
         std::thread::sleep(Duration::from_millis(500));
-        let alias = Command::new("docker")
-            .args([
-                "exec", CONTAINER, "mc", "alias", "set", "local",
-                "http://127.0.0.1:9000", ACCESS_KEY, SECRET_KEY,
-            ])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-        if matches!(alias, Ok(s) if s.success()) {
-            let mb = Command::new("docker")
-                .args(["exec", CONTAINER, "mc", "mb", "-p", &format!("local/{BUCKET}")])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status();
-            if matches!(mb, Ok(s) if s.success()) {
+        let logs = Command::new("docker").args(["logs", CONTAINER]).output();
+        if let Ok(out) = logs {
+            let ready = String::from_utf8_lossy(&out.stdout).contains(READY_MARKER)
+                || String::from_utf8_lossy(&out.stderr).contains(READY_MARKER);
+            if ready {
                 return;
             }
         }
     }
+    let tail = Command::new("docker")
+        .args(["logs", "--tail", "20", CONTAINER])
+        .output()
+        .map(|o| {
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&o.stdout),
+                String::from_utf8_lossy(&o.stderr)
+            )
+        })
+        .unwrap_or_else(|e| format!("(could not read container logs: {e})"));
     cleanup();
     panic!(
-        "The MinIO container started but never became usable.\n\
+        "The S3 server container started but never became usable.\n\
          \n\
-         \x20 backend:   MinIO (S3)\n\
+         \x20 backend:   S3\n\
+         \x20 image:     {IMAGE}\n\
          \x20 container: {CONTAINER} (already removed, so it is not in the way)\n\
          \x20 endpoint:  http://127.0.0.1:{PORT}\n\
          \x20 bucket:    {BUCKET}\n\
          \n\
-         The readiness loop ran to its ceiling without both `mc alias set` and\n\
-         `mc mb` succeeding inside the container. Re-run it by hand to see what\n\
-         MinIO said:\n\
-         \x20 docker run -d --name {CONTAINER} -p {PORT}:9000 \\\n\
-         \x20   -e MINIO_ROOT_USER={ACCESS_KEY} -e MINIO_ROOT_PASSWORD={SECRET_KEY} \\\n\
-         \x20   quay.io/minio/minio server /data\n\
+         The readiness loop ran to its ceiling without `{READY_MARKER}` appearing\n\
+         in the container log, which the gateway prints once its listener is\n\
+         bound. Re-run it by hand to see what the server said:\n\
+         \x20 docker run -d --name {CONTAINER} -p {PORT}:{SERVER_PORT} \\\n\
+         \x20   -e ROOT_ACCESS_KEY_ID={ACCESS_KEY} -e ROOT_SECRET_ACCESS_KEY={SECRET_KEY} \\\n\
+         \x20   --entrypoint /bin/sh {IMAGE} -c '{boot}'\n\
          \x20 docker logs {CONTAINER}\n\
          \n\
-         An `mc` that is missing from the image is the one cause this loop\n\
-         cannot outwait; the rest are slow starts, which a re-run clears.\n\
+         What this loop saw last:\n\
+         {tail}\n\
          \n\
          There is no environment variable that makes this a skip."
     )
 }
 
 fn s3_url() -> String {
+    // `checksum=sha256` is stated rather than inherited: it makes the
+    // single-object PUT send `x-amz-checksum-sha256`, so the server verifies a
+    // digest this client computed.
     format!(
-        "s3://{BUCKET}/it?provider=minio&endpoint=http://127.0.0.1:{PORT}&region=us-east-1&style=path&dev_http=true"
+        "s3://{BUCKET}/it?provider=generic&endpoint=http://127.0.0.1:{PORT}&region=us-east-1&style=path&dev_http=true&checksum=sha256"
     )
 }
 
@@ -181,7 +201,7 @@ fn s3_store() -> S3BlobStore {
 /// specific value passes it here; planting `ZEROSHIP_BLOB_UPLOAD_CONCURRENCY`
 /// in the process environment never reached this store at all.
 fn s3_store_with_concurrency(upload_concurrency: usize) -> S3BlobStore {
-    let cfg = S3Config::parse_url(&s3_url()).expect("parse minio url");
+    let cfg = S3Config::parse_url(&s3_url()).expect("parse s3 url");
     S3BlobStore::new(
         cfg,
         S3Credentials::new(ACCESS_KEY, SECRET_KEY, None),
@@ -189,10 +209,10 @@ fn s3_store_with_concurrency(upload_concurrency: usize) -> S3BlobStore {
     )
 }
 
-/// A raw `S3Client` over the same MinIO bucket, for asserting low-level state
+/// A raw `S3Client` over the same S3 bucket, for asserting low-level state
 /// (e.g. that an aborted multipart leaves no orphaned upload).
 fn s3_raw_client() -> S3Client {
-    let cfg = S3Config::parse_url(&s3_url()).expect("parse minio url");
+    let cfg = S3Config::parse_url(&s3_url()).expect("parse s3 url");
     S3Client::new(cfg, S3Credentials::new(ACCESS_KEY, SECRET_KEY, None))
 }
 
@@ -233,7 +253,7 @@ fn local_store() -> (LocalDiskBlobStore, std::path::PathBuf) {
 #[test]
 fn s3_blob_store_roundtrip_and_parity() {
     require_docker();
-    start_minio();
+    start_s3_server();
     let result = std::panic::catch_unwind(|| {
         compio::runtime::Runtime::new()
             .expect("compio runtime")
@@ -286,9 +306,9 @@ async fn run_c1_mid_upload_abort(store: &S3BlobStore) {
     let fake_hash = "ee".repeat(32); // 64 hex chars; never matches real content
 
     // The store maps hash → logical key `blobs/<hash>`. List multipart uploads
-    // by the EXACT object-key prefix (MinIO's ListMultipartUploads only
-    // surfaces an upload when the prefix reaches the key, not a parent
-    // "directory" prefix). Sanity-check the listing path is non-vacuous first.
+    // by the EXACT object-key prefix, so the assertion can only be satisfied by
+    // this upload and not by a neighbour's under a parent prefix.
+    // Sanity-check the listing path is non-vacuous first.
     let key_prefix = format!("blobs/{fake_hash}");
     {
         let raw = s3_raw_client();

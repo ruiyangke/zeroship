@@ -58,7 +58,7 @@ thread_local! {
     /// Held per-thread like `DB_URL`. When `Some`, `create_plugins` mints a
     /// `StorageBinding` over the selected backend: `LocalFs` (a SHARED volume
     /// across nodes — the same multi-node pattern the deploy blob store uses)
-    /// or `S3` (S3/R2/MinIO — inherently shared). When `None`, the `storage`
+    /// or `S3` (S3/R2 — inherently shared). When `None`, the `storage`
     /// namespace is absent.
     static STORAGE_BACKEND: RefCell<Option<StorageBackendConfig>> = const { RefCell::new(None) };
     /// The app backends the process's workflow host has made ready. Every
@@ -214,7 +214,7 @@ fn plugin_set() -> Vec<Arc<dyn NativePlugin>> {
 ///   `LocalFs` gets multi-node consistency from rooting its path on a SHARED
 ///   volume — the exact pattern the deploy blob store already uses
 ///   (control/gateway/worker all mount the same `bundles` volume). `S3`
-///   (S3/R2/MinIO) is the prod backend behind the same `Backend` trait and is
+///   (S3/R2) is the prod backend behind the same `Backend` trait and is
 ///   inherently shared across nodes. An object written on node A is readable
 ///   on node B in both cases.
 fn create_plugins() -> Vec<Arc<dyn NativePlugin>> {

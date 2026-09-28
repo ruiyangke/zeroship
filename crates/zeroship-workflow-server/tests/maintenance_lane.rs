@@ -574,7 +574,7 @@ async fn the_drive_path_settles_a_due_maintenance_row_without_a_placement() {
     let driven = select(
         Box::pin(drive(
             fixture.driver(),
-            sweeps,
+            Some(sweeps),
             Duration::from_millis(20),
             stopped,
         )),

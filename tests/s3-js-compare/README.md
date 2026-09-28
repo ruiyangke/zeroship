@@ -7,7 +7,7 @@ checksum**, so it is a faithful comparison against our `compio-s3` `env.storage`
 multipart path on two axes:
 
 - **Correctness oracle** — does the official SDK store a correct, full-size
-  object on the *same* MinIO? If yes, a 0-byte/short object from our impl is
+  object on the *same* endpoint? If yes, a 0-byte/short object from our impl is
   *our* bug, not the environment.
 - **Throughput oracle** — official parallel multipart wall-time (and at
   `QUEUE_SIZE=1`, an apples-to-apples sequential comparison) vs our sequential
@@ -19,9 +19,10 @@ Not a workspace member — install + run standalone:
 cd tests/s3-js-compare
 npm install                      # @aws-sdk/client-s3 + lib-storage (gitignored node_modules)
 
-# point at a running MinIO (the e2e harnesses spin one up; or run your own)
-S3_ENDPOINT=http://127.0.0.1:9000 S3_BUCKET=zeroship-e2e-large \
-S3_ACCESS=minioadmin S3_SECRET=minioadmin \
+# point at a running S3-compatible endpoint (the e2e harnesses spin up the
+# Versity S3 gateway; or run your own)
+S3_ENDPOINT=http://127.0.0.1:7070 S3_BUCKET=zeroship-e2e-large \
+S3_ACCESS=zeroship-fixture S3_SECRET=zeroship-fixture-secret \
 SIZE_BYTES=5368709120 PART_SIZE=8388608 QUEUE_SIZE=4 VERIFY=1 \
   node upload.mjs
 ```

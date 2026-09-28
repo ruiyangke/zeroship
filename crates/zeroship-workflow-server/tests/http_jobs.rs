@@ -14,6 +14,8 @@ mod app_facts;
 )]
 #[path = "support/journal.rs"]
 mod journal;
+#[path = "support/holds.rs"]
+mod holds;
 #[path = "support/policy.rs"]
 mod policy_fixture;
 #[allow(
@@ -37,8 +39,13 @@ use zeroship_workflow::service::delivery::{
     AcceptedJob, ClaimedTask, RenewedTask, ReportedExecution,
 };
 use zeroship_workflow_client::{ClaimedDelivery, RenewDelivery, RenewedDelivery, SettleDelivery};
+use zeroship_data_orm::binding::DbBinding;
+use zeroship_workflow_manager::{
+    maintenance::MaintenanceAuthority, Options as QueueOptions, Queue,
+};
 use zeroship_core::{
     app_id::AppId,
+    schema_name::SchemaName,
     service_assertion::{ServiceAssertionMinter, ServiceIssuer, ServiceSigningKey},
     service_identity::{endpoints, ServiceEndpoint},
     service_peers::{service_issuer, CONTROL_SERVICE_NAME},
@@ -102,6 +109,12 @@ struct Fixture {
     /// step: nothing asserted below is written by it.
     run: RunId,
     deploy: DeploymentId,
+    /// The queue the spawned service owns, opened a second time in this process
+    /// so a sweep can be claimed the way the service's own lane claims one.
+    queue: Queue,
+    /// The in-process authority that stands in for the service's maintenance
+    /// lane. See [`Fixture::swept`] for why a sweep cannot be claimed over HTTP.
+    lane: MaintenanceAuthority,
 }
 impl Fixture {
     async fn new() -> Self {
@@ -117,7 +130,13 @@ impl Fixture {
             .unwrap(),
         );
         let http = Client::new().await;
-        let server = server_process::ServerProcess::start(
+        // No sweep lane on this host. Every case in this target is about a queue
+        // ROUTE -- what submit, claim, renew and settle accept, authenticate and
+        // record -- and the sweep it arranges is arranged so the settle route has
+        // a delivery to discharge. The lane claims under an authority no
+        // placement expiry fences, so a running one would take that row first and
+        // the route under test would never see it.
+        let server = server_process::ServerProcess::without_maintenance_sweeps(
             &platform.runtime_url,
             &peers,
             platform.work.path(),
@@ -134,6 +153,19 @@ impl Fixture {
             .await;
         let run = journal::seed_run(&platform, &app).await;
         let deploy = DeploymentId::parse(&app.as_str().replacen("app_", "dep_", 1)).unwrap();
+        let queue = Queue::connect(
+            DbBinding::platform(
+                "workflow_manager",
+                "workflow_manager",
+                SchemaName::new("workflow_manager").unwrap(),
+            ),
+            &platform.runtime_url,
+            QueueOptions::default(),
+            holds::client(),
+        )
+        .await
+        .unwrap();
+        let lane = MaintenanceAuthority::new(app, worker.id.clone());
         Self {
             platform,
             http,
@@ -144,6 +176,8 @@ impl Fixture {
             control_key,
             run,
             deploy,
+            queue,
+            lane,
         }
     }
     fn scope(&self) -> AssignedScope {
@@ -212,6 +246,49 @@ impl Fixture {
             "a claim carries a journal acceptance for exactly the executable kind"
         );
         (lease.delivery, claimed.accepted)
+    }
+
+    /// Take the next sweep off this app's queue, in process, under the authority
+    /// the service's own maintenance lane asserts.
+    ///
+    /// THERE IS NO WIRE CLAIM FOR A SWEEP. `WORKFLOW_JOB_CLAIM` claims as
+    /// `Claimant::Placed` (`Coordinator::claim_job`), and that claimant admits
+    /// `advance` alone, so every journal sweep belongs to the lane. The cases
+    /// below are about what the SETTLE route does with a sweep's delivery, and
+    /// `Queue::settle` is not claimant-scoped: it authorizes on the assignment
+    /// and on `settlement.delivery.worker_id`. So the delivery is arranged here
+    /// and exercised over HTTP from there.
+    ///
+    /// The authority carries this fixture's own worker id rather than a fresh
+    /// one, because that is the identity the settle route authenticates. Its
+    /// asserted revision is `1`, which is the revision `seed_placement` records,
+    /// so the placement read behind the settle route resolves the same authority
+    /// this lease names.
+    async fn swept(&self) -> Delivery {
+        assert_eq!(
+            self.post(endpoints::WORKFLOW_JOB_CLAIM, &self.scope())
+                .await,
+            (StatusCode::OK, Value::Null),
+            "the wire claim offers a placed worker no sweep"
+        );
+        let delivery = self
+            .lane
+            .claim(&self.queue, Ok(AppPolicy::default().max_delivery_attempts))
+            .await
+            .unwrap()
+            .expect("the queue holds a sweep for the lane to claim")
+            .delivery()
+            .clone();
+        assert_eq!(delivery.worker_id, self.worker.id);
+        assert_eq!(delivery.assignment_revision, self.assignment.revision);
+        delivery
+    }
+
+    /// As [`Self::swept`], for a case that published the sweep it expects back.
+    async fn sweep(&self, job: &JobSpec) -> Delivery {
+        let delivery = self.swept().await;
+        assert_eq!(delivery.job, *job);
+        delivery
     }
 
     /// An advance job for the run this service's journal actually holds, so the
@@ -1021,18 +1098,11 @@ async fn management_receipt_replay_rechecks_enrollment_after_linkage_reads() {
     )
     .await;
     assert_eq!(accepted.0, StatusCode::OK, "{:?}", accepted.1);
-    let (status, body) = fixture
-        .post(endpoints::WORKFLOW_JOB_CLAIM, &fixture.scope())
-        .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    let claimed: ClaimedDelivery<AcceptedJob> = serde_json::from_value(body).unwrap();
-    assert!(
-        claimed.accepted.is_none(),
-        "a management claim carries no journal acceptance: the journal settles it from the lease"
-    );
-    let lease = claimed.lease;
+    // Management is a sweep, so the lane claims it. What this case is about
+    // begins at the settle route below.
+    let delivery = fixture.swept().await;
     assert_eq!(
-        lease.delivery.job.operation,
+        delivery.job.operation,
         JobOperation::Management {
             request_id: request.request_id,
             run_id: request.run_id,
@@ -1043,7 +1113,7 @@ async fn management_receipt_replay_rechecks_enrollment_after_linkage_reads() {
         }
     );
     let settlement = Settlement {
-        delivery: lease.delivery,
+        delivery,
         outcome: JobOutcome::Management {
             outcome: ManagementOutcome::NotFound {},
         },

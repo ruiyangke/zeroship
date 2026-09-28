@@ -20,7 +20,7 @@ use crate::error::S3Error;
 pub enum AddressingStyle {
     /// `https://bucket.endpoint/key` — default for AWS.
     Virtual,
-    /// `https://endpoint/bucket/key` — default for custom endpoints / `MinIO`.
+    /// `https://endpoint/bucket/key` — default for custom endpoints.
     Path,
 }
 
@@ -31,9 +31,7 @@ pub enum Provider {
     Aws,
     /// Cloudflare R2.
     R2,
-    /// `MinIO` (typically local, path-style, `dev_http`).
-    Minio,
-    /// Any other S3-compatible endpoint.
+    /// Any other S3-compatible endpoint, self-hosted or third-party.
     Generic,
 }
 
@@ -131,7 +129,7 @@ pub struct S3Config {
     pub region: String,
     /// Addressing style.
     pub style: AddressingStyle,
-    /// Whether plaintext HTTP is permitted (loopback `MinIO` only).
+    /// Whether plaintext HTTP is permitted (loopback endpoints only).
     pub dev_http: bool,
     /// Checksum mode.
     pub checksum: ChecksumMode,
@@ -172,10 +170,9 @@ impl S3Config {
         let provider = match params.get("provider").map(String::as_str) {
             Some("aws") => Provider::Aws,
             Some("r2") => Provider::R2,
-            Some("minio") => Provider::Minio,
             Some("generic") => Provider::Generic,
             Some(other) => return Err(cfg_err(format!("unknown provider: {other}"))),
-            None => infer_provider(endpoint.as_deref(), &params),
+            None => infer_provider(endpoint.as_deref()),
         };
 
         let dev_http = match params.get("dev_http").map(String::as_str) {
@@ -197,8 +194,8 @@ impl S3Config {
         };
 
         // endpoint requirements.
-        if endpoint.is_none() && matches!(provider, Provider::R2 | Provider::Minio) {
-            return Err(cfg_err("endpoint is required for provider=r2/minio"));
+        if endpoint.is_none() && matches!(provider, Provider::R2 | Provider::Generic) {
+            return Err(cfg_err("endpoint is required for provider=r2/generic"));
         }
         if let Some(ep) = &endpoint {
             validate_endpoint(ep, dev_http)?;
@@ -231,7 +228,7 @@ impl S3Config {
             Some("sha256") => ChecksumMode::Sha256,
             Some(other) => return Err(cfg_err(format!("invalid checksum: {other}"))),
             None => match provider {
-                Provider::Aws | Provider::Minio => ChecksumMode::Sha256,
+                Provider::Aws => ChecksumMode::Sha256,
                 Provider::R2 | Provider::Generic => ChecksumMode::None,
             },
         };
@@ -420,10 +417,7 @@ const KNOWN_PARAMS: &[&str] = &[
     "max_list_entries",
 ];
 
-fn infer_provider(
-    endpoint: Option<&str>,
-    params: &std::collections::BTreeMap<String, String>,
-) -> Provider {
+fn infer_provider(endpoint: Option<&str>) -> Provider {
     match endpoint {
         None => Provider::Aws,
         Some(ep) => {
@@ -435,10 +429,6 @@ fn infer_provider(
                 Provider::R2
             } else if host.ends_with(".amazonaws.com") {
                 Provider::Aws
-            } else if params.get("dev_http").map(String::as_str) == Some("true")
-                && is_loopback_host(&host)
-            {
-                Provider::Minio
             } else {
                 Provider::Generic
             }
@@ -606,23 +596,46 @@ mod tests {
     }
 
     #[test]
-    fn minio_profile() {
+    fn self_hosted_loopback_profile() {
         let c = S3Config::parse_url(
-            "s3://bucket/p?provider=minio&endpoint=http://127.0.0.1:9000&region=us-east-1&style=path&dev_http=true",
+            "s3://bucket/p?provider=generic&endpoint=http://127.0.0.1:9000&region=us-east-1&style=path&dev_http=true",
         )
         .unwrap();
-        assert_eq!(c.provider, Provider::Minio);
+        assert_eq!(c.provider, Provider::Generic);
         assert!(c.dev_http);
+        // A self-hosted endpoint carries no AWS checksum guarantee, so the
+        // profile default is off and a caller that wants it must say so.
+        assert_eq!(c.checksum, ChecksumMode::None);
         let parts = c.endpoint_parts();
         assert_eq!(parts.scheme, "http");
         assert_eq!(parts.host, "127.0.0.1:9000");
         assert!(parts.bucket_in_path);
     }
 
+    /// `provider=generic` names an endpoint the library cannot derive, so
+    /// omitting one is a contradiction rather than a silent fall back to the
+    /// AWS default endpoint.
+    #[test]
+    fn generic_requires_an_endpoint() {
+        let e = S3Config::parse_url("s3://bucket/p?provider=generic&region=us-east-1").unwrap_err();
+        assert!(format!("{e}").contains("endpoint is required"), "got: {e}");
+    }
+
+    /// A loopback dev endpoint is not a recognised vendor, so inference lands
+    /// on `Generic` rather than on any product-specific profile.
+    #[test]
+    fn loopback_endpoint_infers_generic() {
+        let c = S3Config::parse_url(
+            "s3://bucket/p?endpoint=http://127.0.0.1:9000&region=us-east-1&style=path&dev_http=true",
+        )
+        .unwrap();
+        assert_eq!(c.provider, Provider::Generic);
+    }
+
     #[test]
     fn dev_http_requires_loopback() {
         let e = S3Config::parse_url(
-            "s3://bucket/p?provider=minio&endpoint=http://example.com:9000&region=us-east-1&style=path&dev_http=true",
+            "s3://bucket/p?provider=generic&endpoint=http://example.com:9000&region=us-east-1&style=path&dev_http=true",
         )
         .unwrap_err();
         assert!(format!("{e}").contains("loopback"));
@@ -631,7 +644,7 @@ mod tests {
     #[test]
     fn plain_http_without_dev_http_rejected() {
         assert!(S3Config::parse_url(
-            "s3://bucket/p?provider=minio&endpoint=http://127.0.0.1:9000&region=us-east-1&style=path"
+            "s3://bucket/p?provider=generic&endpoint=http://127.0.0.1:9000&region=us-east-1&style=path"
         )
         .is_err());
     }
@@ -665,7 +678,7 @@ mod tests {
         .is_err());
         // sse-kms requires AWS.
         assert!(S3Config::parse_url(
-            "s3://b/p?provider=minio&endpoint=http://127.0.0.1:9000&region=us-east-1&style=path&dev_http=true&sse=sse-kms:k"
+            "s3://b/p?provider=generic&endpoint=http://127.0.0.1:9000&region=us-east-1&style=path&dev_http=true&sse=sse-kms:k"
         )
         .is_err());
     }

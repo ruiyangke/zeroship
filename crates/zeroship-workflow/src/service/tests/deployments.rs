@@ -85,7 +85,7 @@ async fn postgres_deployments_survive_redeploy_restart_corruption_and_repair() {
 
 #[compio::test]
 async fn normal_app_deployments_load_from_s3() {
-    let fixture = s3_fixture::Minio::start();
+    let fixture = s3_fixture::S3Server::start();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("zs-workflow.sqlite");
     schema::initialize_sqlite(&path).unwrap();
