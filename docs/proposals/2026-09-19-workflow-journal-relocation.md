@@ -249,11 +249,18 @@ reading and would argue for moving files one at a time.
 
 ### What it does NOT decide
 
-Whether `workflow_manager` should be promoted from a schema in the control database to a
-database of its own. It has its own migrator role, its own login and its own search path
-already, so the promotion is contained and can be made on capacity grounds later. This design
-only requires that the journal live in the workflow service's storage, not which physical
-database that is. See Open 3.
+Not the physical home of `workflow_manager`. Open 3 decides it: every design here assumes the
+service gets a database of its own rather than a schema in the control database, so the journal's
+creator-volume rows never share a store with the control plane. What Open 3 leaves as work rather
+than as a question is the corpus split, because `workflow.database_url` names one store and
+PostgreSQL does not query across databases, so every control read the service makes has to be
+severed before that setting can point anywhere else.
+
+Two things are genuinely left open, and both are recorded where the work is rather than here.
+Where the store-bound engine code lives once the ORM leaves `crates/zeroship-workflow`, which
+step 7 states, because the dev tier keeps `AppBackend` embedded and the obvious home would have
+`zeroship-workflow-v8` reaching the server crate for it. And the per-table fence, which "The
+fence is a separate track, not a gate" keeps beside the steps rather than ahead of them.
 
 ---
 
@@ -311,26 +318,37 @@ coordination metadata login; no customer database credentials". The service has 
 platform state out of customer databases since it was written; the journal is the piece that
 did not move.
 
-**The creator seam is seven methods; the execution seam is its own.** It would be a much larger
-proposal if the storage seam were the RPC boundary, because the store spans roughly twenty
-tables. It is not: the engine's fold is pure and the creator-facing backend is narrow, so the
-whole engine moves server-side and the wire carries `start`, `status`, `signal`, `transition`,
-`restart`, `read_step_output` and `read_output`.
+**The creator seam is narrow; the execution seam is its own.** It would be a much larger proposal
+if the storage seam were the RPC boundary, because the store spans the whole journal schema: count
+`CREATE TABLE` in the generated `crates/zeroship-workflow-schema/schema/postgres.sql` rather than
+trusting a number here. It is not that boundary: the engine's fold is pure and the creator-facing
+backend is narrow, so the whole engine moves server-side and the wire carries `start`, `status`,
+`signal`, `transition`, `restart`, `read_step_output` and `read_output`.
 
-Say plainly that those are the creator-facing surface and not the whole wire. A worker also
-has to be given work and report it, and that path is not a trait at all. `DeliverySlot` in
-`crates/zeroship-workflow-runner/src/delivery.rs` is what production runs, and it calls
-`AppWorkflows::accept_job`, `heartbeat_job` and `complete_job` directly, in process. There is a
-`TaskTransport` trait beside it, but its only consumer, `RunnerSlot`, appears solely in tests -
-do not plan against it, and do not read `WorkerTasks` implementing it as evidence that the
-protocol is already abstracted. `WorkerTasks` is production, in its other role as `TaskPayloads`.
+Say plainly that those are the creator-facing surface and not the whole wire. A worker also has to
+be given work and report it, and that path is not a trait at all. `DeliverySlot` in
+`crates/zeroship-workflow-runner/src/delivery.rs` is what production runs, and its claim,
+heartbeat and completion reach the coordinator rather than a journal the host holds: those methods
+call `claim_job`, `heartbeat_job` and `complete_job` on the client, and the `&AppWorkflows` each
+one still takes is unused, with the comment at the claim giving the reason - a host that reaches
+the manager over HTTP holds no credential to it. `AppJournal` appears there as the type supplying
+the port's associated types, not as a journal the worker opens. What answers those calls lives in
+`crates/zeroship-workflow/src/service/delivery.rs` behind the routes in
+`crates/zeroship-workflow-server/src/api/jobs.rs`, and
+`crates/zeroship-cli/src/workflow/manager.rs` still calls them directly because locally it IS the
+service.
 
-Those three direct calls are what has to cross, and they are the half carrying the durability
-properties: `renewal` in `crates/zeroship-workflow-manager/src/queue.rs` is what advances the
+There is a `TaskTransport` trait beside `DeliverySlot`, but its only consumer, `RunnerSlot`,
+appears solely in tests - do not plan against it, and do not read `WorkerTasks` implementing it as
+evidence that the protocol is already abstracted. `WorkerTasks` is production, in its other role
+as `TaskPayloads`.
+
+Those three calls are the half carrying the durability properties, which is why they crossed ahead
+of the severance: `renewal` in `crates/zeroship-workflow-manager/src/queue.rs` is what advances the
 manager's evidence that an execution began, `complete_job` carries the outcome batch the fold
 consumes, and `settle_attempt` in `crates/zeroship-workflow/src/service/journal.rs` counts a
 reported execution of a run body. A reader who takes the creator seam as the whole surface will
-under-plan the cutover.
+under-read both the cutover and what it has already moved.
 
 ---
 
