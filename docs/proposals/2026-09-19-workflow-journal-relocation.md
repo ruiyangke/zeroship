@@ -1202,15 +1202,23 @@ protocol. This extends a working client rather than inventing one.
      binding rather than a journal fact. So the transport has to declare what it holds -
      `JobTransport::Journal`, `AppWorkflows` for an in-process transport and `()` for a crossed
      one, with the unit type meaning the journal is at the far end rather than absent - and supply
-     it on demand rather than receiving it. Two shapes reach that: threading the associated type
-     through `ConsumerScope` and its holders, or the transport answering `journal()`. Prefer the
-     second, because `ConsumerBindings` is taken bare by
+     it on demand rather than receiving it. Two shapes reach that, and a fact about the journal
+     decides between them rather than the churn either costs. **The journal is per-PLACEMENT.** One
+     in-process transport serves several apps - a consumer test drives three, including a foreign one
+     it must never claim - and today the per-app journal comes from the placement by construction,
+     because `ConsumerScope` carries it. So thread the associated type through `ConsumerScope` and
+     its holders, accepting that `ConsumerBindings` gains a type parameter and that
      `crates/zeroship-workflow-runner/src/assignments.rs` and
-     `crates/zeroship-cli/src/workflow/host.rs`, neither of which has a transport parameter, so
-     threading it adds a type parameter to code that is not about transports and then to its
-     holders. Either way the authority scoping belongs in ONE place: an unscoped journal takes a
-     different policy snapshot's `lease_ms` for the attempt, which is a behaviour change rather
-     than a failure.
+     `crates/zeroship-cli/src/workflow/host.rs` take it bare today and so acquire one.
+     The alternative, the transport answering `journal(&scope)`, looks cheaper and is not: with
+     several apps per transport it is not an accessor but an app-keyed lookup, duplicated per
+     implementor, and a lookup that returns another app's journal returns a perfectly legal
+     `AppWorkflows` that nothing at the use site can distinguish. That is a tenant-boundary failure
+     whose wrong form is legal where it is used, and the journal's only separation is its `app_id`
+     columns. A type parameter is a maintenance cost; that is a defect. Keeping the journal and the
+     placement as one object is what buys the absence of it.
+     Either way the authority scoping belongs in ONE place: an unscoped journal takes a different
+     policy snapshot's `lease_ms` for the attempt, which is a behaviour change rather than a failure.
 
      **And it is gated on the TASK protocol crossing, not only the creator seam.** Measured on the
      branch: four journal readers sit on the execution path, none of them reached through
