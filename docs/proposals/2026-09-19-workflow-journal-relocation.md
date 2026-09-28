@@ -349,6 +349,12 @@ path depends on. `SCHEMA_PLACEHOLDER` belongs to the PostgreSQL artifact, not to
 SQLite SQL must not carry it, while `the_template_still_carries_the_placeholder` in the same module
 requires the PostgreSQL template to.
 
+Write those rows when the severance lands, not before. That page states what is true of the two
+tiers now, one row at a time with the consequence for a caller, and the first of these is not true
+until production stops reaching the creator-schema store. Its neighbour is the existing
+"Platform tables in your database" row, which already explains why `__zeroship_` tables sit in the
+creator's own file on this tier.
+
 ---
 
 ## Sequencing
