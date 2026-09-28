@@ -207,7 +207,12 @@ safe without building anything. See Why it is this way.
 ```
   ensure_journal + its route            crates/zeroship-workflow-server/src/api.rs
   Journal / journal_bundle / bundle_for crates/zeroship-workflow-server/src/journal.rs
+  ControlCoordinator::ensure_journal    crates/zeroship-workflow-client/src/control.rs
+  WorkerCoordinator::ensure_journal     crates/zeroship-workflow-client/src/lib.rs
+  EnsureJournal                         crates/zeroship-core/src/schema_bundle.rs
+  WORKFLOW_JOURNAL_ENSURE, both grants  crates/zeroship-core/src/service_identity.rs
   JournalManager, JournalError          crates/zeroship-control/src/publication/journal.rs
+  their re-export                       crates/zeroship-control/src/publication/mod.rs
   the journal ensure at app registration control's deploy path
   the worker's journal repair path      crates/zeroship-worker/src/workflow_creator.rs
   zeroship-data-orm from the engine      crates/zeroship-workflow/Cargo.toml
@@ -218,12 +223,15 @@ PostgreSQL artifact carries the placeholder quoted, and the platform migration s
 `"workflow_manager"` into it exactly as a creator bundle substitutes a creator schema. The
 quoting matters, because substituting the bare word would also rewrite the stamp table's name.
 
-The first four entries are not available yet. Step 1 left `ensure_journal` and
-`Journal`/`bundle_for`/`journal_bundle` byte-identical on purpose, and they stay until a reader
-exists in `workflow_manager` to replace what they serve. Read this list as the end state, not as
-work unlocked by the installation.
+Everything above the ORM entry is one graph, and none of it is available yet. Step 1 left
+`ensure_journal` and `Journal`/`bundle_for`/`journal_bundle` byte-identical on purpose, and they
+stay until a reader exists in `workflow_manager` to replace what they serve; the client
+coordinators, the endpoint constant and its two grants go when the route goes, because each one
+is a reader or an authorization of that same route. Read this list as the end state, not as work
+unlocked by the installation. Step 6 carries the order, the probe that proves the exposure
+closed, and the shared names that must NOT follow the deletion.
 
-That last one is a dependency-boundary improvement the AGENTS.md invariant already gestures at:
+The ORM entry is a dependency-boundary improvement the AGENTS.md invariant already gestures at:
 `zeroship-workflow-schema` is a leaf so a service can install the journal without depending on
 the engine. Read it as the last step of the move rather than a deletion available on its own,
 because the ORM is not confined to the store: every module under
@@ -1456,19 +1464,63 @@ protocol. This extends a working client rather than inventing one.
    manifest listing, which is strictly less than the policy authority it already trusts Control
    for. Take the other arm only if a reason appears that the service must see the bytes itself.
 
-6. **Delete the creator-schema path**, and say where each piece lives, because they are not all
-   in the workflow crates: `ensure_journal` and its route in
-   `crates/zeroship-workflow-server/src/api.rs`, the journal bundle and `SCHEMA_PLACEHOLDER` in
-   `crates/zeroship-workflow-server/src/journal.rs` and
-   `crates/zeroship-workflow-schema/src/lib.rs`, `JournalManager` in
-   `crates/zeroship-control/src/publication/journal.rs`, and the worker's repair path in
-   `crates/zeroship-worker/src/workflow_creator.rs`. Only once step 5 is green.
+6. **Delete the creator-schema path**, and say where each piece lives, because the pieces reach
+   wider than the workflow crates and three of the names are shared with code that stays. Only
+   once step 5 is green.
+
+   In the workflow crates: `ensure_journal` and its route in
+   `crates/zeroship-workflow-server/src/api.rs`, and the journal bundle together with the
+   private charter token `SCHEMA_PLACEHOLDER` in
+   `crates/zeroship-workflow-server/src/journal.rs`.
+
+   In the client, both coordinators, since each posts the same endpoint and deleting the route
+   alone leaves a caller of a route that is gone: `ControlCoordinator::ensure_journal` in
+   `crates/zeroship-workflow-client/src/control.rs` and `WorkerCoordinator::ensure_journal` in
+   `crates/zeroship-workflow-client/src/lib.rs`.
+
+   In `zeroship-core`: the `EnsureJournal` command in
+   `crates/zeroship-core/src/schema_bundle.rs`, and `WORKFLOW_JOURNAL_ENSURE` in
+   `crates/zeroship-core/src/service_identity.rs` together with both of its grants, to
+   `svc/control` and to `svc/worker`.
+
+   In the control plane: `JournalManager` in
+   `crates/zeroship-control/src/publication/journal.rs` and its re-export from
+   `crates/zeroship-control/src/publication/mod.rs`.
+
+   In the worker: the repair path in `crates/zeroship-worker/src/workflow_creator.rs`.
+
+   In the reference docs: the numbered deploy step in `docs/architecture/control-plane.md` that
+   names the endpoint and its `workflow_journal_unavailable` refusal, which renumbers the
+   sequence around it.
+
+   **Three shared names must not follow the deletion, and a tree-wide search for any of them
+   argues for deleting far too much.** `SCHEMA_PLACEHOLDER` names two different constants: the
+   private charter token above, which goes, and the public quoted DDL token in
+   `crates/zeroship-workflow-schema/src/lib.rs`, which stays, for the reason given under the
+   design and again under the SQLite dev tier. `ensure_journal` also names
+   `MigrationBackend::ensure_journal` across the `zeroship-migrate-*` crates, which creates the
+   migration stamp table and is unrelated to the workflow journal; it is most of what searching
+   the name returns. `SchemaBundleOutcome` and the rest of
+   `crates/zeroship-core/src/schema_bundle.rs` stay as well: the migration service answers with
+   them in `crates/zeroship-migrate-server/src/bundle.rs`, and
+   `crates/zeroship-workflow-client/src/schema_bundles.rs` sends a bundle over a different
+   endpoint. `EnsureJournal` is the journal-specific part.
 
    This step also ends an exposure rather than only removing code. `ensure_journal` is the one
    worker-authenticated endpoint that reaches no placement, app or zone, so the registry key
    lookup is its whole gate; a lapsed instance was admitted there indefinitely until that lookup
    learned the lease. The lease predicate is the fix that matters now, and deleting the endpoint
    is what removes the shape.
+
+   **The grant and the probe go with the reader.** The exposure is recorded where a search for
+   `ensure_journal` does not reach, because both places name the endpoint constant instead: the
+   allowlist rows in `crates/zeroship-core/src/service_identity.rs`, and the exhaustive table in
+   `crates/zeroship-core/tests/service_authorization_test.rs`, which names the endpoint in its
+   endpoint set, in its method-and-path assertions, and in the `svc/control` and `svc/worker`
+   rows. That suite is what proves the property this step claims to end, so the deletion is
+   finished only when the suite no longer names the endpoint and still passes. The explanatory
+   comments on those rows go with them rather than staying to describe a capability nothing
+   holds.
 
 7. **Drop `zeroship-data-orm` from `zeroship-workflow`**, the engine - NOT from
    `crates/zeroship-worker`, which declares it directly and keeps needing it. The worker's own
