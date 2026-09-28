@@ -1317,9 +1317,13 @@ protocol. This extends a working client rather than inventing one.
    fail that way - three claiming `close`, and one each for `collect`, `fanout`, `propagate` and
    `reconcile`. They are deterministic refusals, not the load-induced timing failure that also
    lives in that module.
-   **Do not read them as inherited.** Measured against main, that module is twenty passed and none
-   failed; on the branch it is thirteen passed and seven failed. A baseline taken at a commit after
-   the narrowing makes them look pre-existing, and they were carried under that word for a while.
+   **Do not read them as inherited.** That module passes whole on main and fails on the branch, so
+   a baseline taken at a commit after the narrowing makes them look pre-existing - and they were
+   carried under that word for a while. Re-measure rather than trusting this paragraph:
+   `cargo test -p zeroship-workflow-runner --lib -- delivery::tests::consumer` against main and
+   against the branch, and compare which names fail. The whole binary reconciles too: main's
+   declared set passes entire, and the branch's failures are all inside that one module rather than
+   spread, so the radius is the module and not the crate.
    The repair is the one that already worked for the server's contracts: claim in process through a
    `MaintenanceAuthority` with the fixture's own worker id, which settles because `settle`
    authorizes against `settlement.delivery.worker_id` rather than being claimant-scoped. Not by
