@@ -1674,30 +1674,33 @@ protocol. This extends a working client rather than inventing one.
    obvious home, but putting it there means `zeroship-workflow-v8` reaches the server crate for
    `AppBackend`. Settle that before starting the move rather than during it.
 
-   **And the move is not a clean lift, because the engine's own central trait names a store-bound
-   type.** `crates/zeroship-workflow/src/backend.rs` - the file that defines `WorkflowBackend`,
-   the narrow creator-facing seam this whole design turns on - takes
-   `&crate::service::AppWorkflows` in four of its method signatures, and `AppWorkflows`
+   **And the move is not a clean lift, because two traits in the engine name a store-bound type -
+   though NOT the creator-facing one.** `crates/zeroship-workflow/src/backend.rs` declares three
+   traits: `WorkflowBackend`, `StepOutputReader` and `InputStager`. `WorkflowBackend`, the narrow
+   creator-facing seam this design turns on, is clean. The other two take
+   `&crate::service::AppWorkflows`, and `AppWorkflows`
    (`crates/zeroship-workflow/src/service/app.rs`) holds a `WorkflowService`, which holds the
-   store. So the engine cannot be storeless while `backend.rs` names that type, and only two files
-   outside `service/` reach into it at all: `backend.rs` and
+   store. So the coupling is real but narrower than the file suggests, and only two files outside
+   `service/` reach into it at all: `backend.rs` and
    `crates/zeroship-workflow/src/deploy_registrations.rs`.
 
-   The two references are not the same problem. `RequestId` is only a re-export -
+   The references are not one problem. `RequestId` is only a re-export -
    `crates/zeroship-workflow/src/service/types.rs` re-exports
    `zeroship_core::workflow_coordination::RequestId` - so that one is an import redirected at the
-   leaf it already came from. `AppWorkflows` is the real coupling.
+   leaf it already came from. `AppWorkflows` on `StepOutputReader` and `InputStager` is the real
+   coupling, and because `WorkflowBackend` is free of it, the unit that has to move is negotiable:
+   those two traits can travel with `service/` while the creator-facing trait stays in the engine.
 
    That points at a shape worth weighing against putting the code in the server crate, because it
-   avoids the inversion: move `service/` together with `backend.rs` and `deploy_registrations.rs`
-   into a crate of their own, leaving `crates/zeroship-workflow/src/engine.rs` and the pure fold
-   behind. Nothing outside `service/` in that crate reaches it other than those two files, so the
-   new crate would depend on the engine and not the reverse, and the server, `zeroship-workflow-v8`,
-   `zeroship-cli` and `zeroship-control` would all depend on the new crate rather than
-   `zeroship-workflow-v8` depending on the server. Whether that crate is wanted, and what it is
-   called, is still the open decision; what is now measured is that the alternative to it is a
-   dependency edge from a V8 binding to a service binary, and that either way `AppWorkflows` has to
-   be dealt with rather than lifted.
+   avoids the inversion: move `service/` together with the store-bound traits and
+   `deploy_registrations.rs` into a crate of their own, leaving
+   `crates/zeroship-workflow/src/engine.rs`, `WorkflowBackend` and the pure fold behind. Nothing
+   else in that crate reaches `service/`, so the new crate would depend on the engine and not the
+   reverse, and the server, `zeroship-workflow-v8`, `zeroship-cli` and `zeroship-control` would all
+   depend on the new crate rather than `zeroship-workflow-v8` depending on the server. Whether that
+   crate is wanted, and what it is called, is still the open decision; what is measured is that the
+   alternative is a dependency edge from a V8 binding to a service binary, and that `AppWorkflows`
+   has to be dealt with rather than lifted.
 
 **Latency is not the gate; payload is, and its bound is settled.** Open 1 holds the answer and
 names `crates/zeroship-workflow-client/tests/round_trip_cost.rs` as the instrument: re-run it
