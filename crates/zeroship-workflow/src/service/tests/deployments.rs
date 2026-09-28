@@ -356,3 +356,104 @@ async fn an_app_binding_refuses_an_app_it_was_not_assigned() {
         Err(WorkflowServiceError::PermissionDenied)
     ));
 }
+
+/// An execution whose deployment stopped being admissible while it ran is
+/// refused at the commit, not recorded.
+///
+/// # What this catches that nothing caught before
+///
+/// `task_executable` checks availability on both sides of its own load, so it
+/// guarded load to return. `complete_job` read no `deploys` row at all, so a
+/// deployment parked between the load and the settlement still committed its
+/// execution. This drives exactly that order -- load, park, settle -- and the
+/// settlement has to refuse.
+///
+/// THE PARKING IS THE JOURNAL'S OWN, not a row this test writes: the manifest is
+/// corrupted and `task_executable` is what discovers it and parks the deployment,
+/// which is the sequence a damaged artifact really produces.
+///
+/// TWO CONTROLS. A sibling run on an INTACT deployment settles through the same
+/// call, so the refusal is attributable to the deployment rather than to a
+/// settlement path that refuses everything. And the damaged task's own load
+/// succeeds BEFORE the corruption, so the run reached the commit with a real
+/// execution rather than failing earlier for want of an artifact.
+#[compio::test]
+async fn a_parked_deployment_refuses_the_settlement_of_work_it_already_ran() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("zs-workflow.sqlite");
+    schema::initialize_sqlite(&path).unwrap();
+    let store = Rc::new(sqlite_store(&path).await);
+    let deployments = Deployments::new().await;
+    let (service, app, _other, deployments) =
+        registered_with_deployments(store.clone(), deployments).await;
+
+    let damaged = deployments
+        .publish(&app, &deployment('b'), &image("damaged"))
+        .await
+        .unwrap();
+    service.activate_deploy(&app, &damaged).await.unwrap();
+    let scope = service.fixture_app(app.clone());
+    let run = scope
+        .start(&RequestId::mint(), "Example", StartOptions::default())
+        .await
+        .unwrap();
+    let tasks = TaskHandle::new(&service, "customer");
+    let task = tasks
+        .poll()
+        .await
+        .unwrap()
+        .expect("the run is dispatched before anything is damaged");
+    assert_eq!(task.invocation.run_id, run.id);
+    // The control on the arrangement: this deployment loads cleanly right now, so
+    // the refusal below cannot be an artifact that was never readable.
+    tasks
+        .executable(&task)
+        .await
+        .expect("an intact deployment loads");
+
+    let objects = &deployments.source;
+    let bytes = objects.get_manifest(&app, &damaged.hash).await.unwrap();
+    let mut corrupt = bytes.to_vec();
+    *corrupt.last_mut().unwrap() ^= 1;
+    objects.delete_manifest(&app, &damaged.hash).await.unwrap();
+    objects
+        .put_manifest(&app, &damaged.hash, &corrupt)
+        .await
+        .unwrap();
+    // The journal parks it here, on discovering the damage for itself.
+    assert!(matches!(
+        tasks.executable(&task).await,
+        Err(WorkflowServiceError::Unavailable(_))
+    ));
+
+    let settled = tasks
+        .complete(
+            &task.id,
+            &task.token,
+            execution(json!([{"kind":"RunCompleted"}])),
+        )
+        .await;
+    assert!(
+        matches!(settled, Err(WorkflowServiceError::Unavailable(_))),
+        "{settled:?}"
+    );
+
+    // THE CONTROL, differing in one variable: the deployment. Repair the artifact
+    // and re-admit it, and the same task settles through the same call. Without
+    // this the refusal above could be a settlement path that refuses everything
+    // once a manifest has been touched.
+    objects.delete_manifest(&app, &damaged.hash).await.unwrap();
+    objects
+        .put_manifest(&app, &damaged.hash, &bytes)
+        .await
+        .unwrap();
+    service.activate_deploy(&app, &damaged).await.unwrap();
+    tasks
+        .complete(
+            &task.id,
+            &task.token,
+            execution(json!([{"kind":"RunCompleted"}])),
+        )
+        .await
+        .expect("an admissible deployment settles the work it ran");
+}

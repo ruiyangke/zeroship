@@ -982,7 +982,8 @@ impl AppWorkflows {
                 task.granted()?;
                 claim.validate_live()?;
                 let claim = claim.authorize(&mut tx)?;
-                let completion = tasks::complete_in(&mut tx, &claim, execution, &digest).await?;
+                let completion =
+                    tasks::complete_in(&self.service, &mut tx, &claim, execution, &digest).await?;
                 let outcome = if completion.state.is_terminal() {
                     JobOutcome::Completed {}
                 } else {

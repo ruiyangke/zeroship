@@ -220,6 +220,80 @@ impl WorkflowService {
         self
     }
 
+    /// Refuse to commit an execution whose deployment stopped being admissible
+    /// while it ran.
+    ///
+    /// # What this catches that nothing caught before
+    ///
+    /// `task_executable_inner` checks availability and the admission generation
+    /// on both sides of its own load, so it guards LOAD TO RETURN. Nothing
+    /// guarded LOAD TO SETTLE: neither `complete_job` nor `heartbeat_job` reads a
+    /// `deploys` row, calls `admission_generation`, or compares a hash, so a
+    /// deployment parked for damage or withdrawn from admission while creator
+    /// code was running still committed its execution. This is that missing
+    /// fence, and deleting it reopens the gap rather than removing a duplicate of
+    /// the pair above.
+    ///
+    /// # Why no registration crosses to make this possible
+    ///
+    /// It would be an echo from the party being checked, and such an echo can
+    /// only ever hold one value. The caller loads by the hash the journal handed
+    /// it and `verify_deployment_manifest` refuses bytes that do not match, so a
+    /// caller cannot have loaded a different deployment and produced a usable
+    /// artifact; and one that wanted to lie would send back the journal's own
+    /// value, because that is the only value that passes. The pin is a fact this
+    /// journal already holds -- `generations.deploy_id` for the generation the
+    /// task is bound to -- so it is read here rather than accepted.
+    ///
+    /// The claim reply does carry an acceptance exactly when
+    /// `JobOperation::accepts_execution()` is true, and a settlement carrying no
+    /// registration is NOT that symmetry failing. It is the journal requiring the
+    /// pin of itself instead of asking. A field added here to restore the
+    /// appearance of symmetry would weaken the check it looks like it supports.
+    ///
+    /// # Why a locked read rather than an update-as-lock
+    ///
+    /// An update whose filter carries the expected values, refusing unless
+    /// exactly one row changed, is what a comparison needs when it has crossed a
+    /// request boundary and cannot hold a lock. This comparison crosses nothing:
+    /// the caller already holds the app and run locks `authorized_task` took, so
+    /// a read inside that transaction is exactly as strong and says what it means.
+    ///
+    /// STILL ADMISSIBLE, not UNCHANGED. Nothing recorded an admission generation
+    /// when the artifact was loaded, so this cannot prove that value held steady
+    /// throughout; it proves the deployment is admissible at the moment the
+    /// execution commits. That is the property a commit needs and it is all a
+    /// caller-free check can claim.
+    ///
+    /// # Errors
+    /// Refuses a run whose pin no longer matches the generation the task is bound
+    /// to, a parked deployment, and a deployment with no current admission.
+    pub(crate) async fn admissible_for_commit(
+        &self,
+        tx: &mut super::store::Transaction,
+        claim: &super::tasks::AuthorizedTask,
+    ) -> Result<(), WorkflowServiceError> {
+        let app = claim.app.clone();
+        let source = self.deployments.as_ref().ok_or_else(unavailable)?;
+        let client = source.client(&app)?;
+        // The deployment the generation this task is bound to replays against.
+        // `validate_live` has already tied the task to the run.s CURRENT
+        // generation, so this is the pin of the execution being committed.
+        let pinned = generation_deploy(tx, &app, &claim.task.run_id, claim.task.generation).await?;
+        // The run.s own column and the generation.s must agree: `control::restart`
+        // writes both in one transaction, so a disagreement is a journal this
+        // process should not commit an execution into.
+        if claim.run.text("deploy_id")? != pinned {
+            return Err(unavailable());
+        }
+        let record = deploys::read(tx, &app, &pinned)
+            .await?
+            .ok_or_else(unavailable)?;
+        record.available()?;
+        admission_generation(tx, &app, &pinned, &record.hash, client.scope()).await?;
+        Ok(())
+    }
+
     /// Prove which deployment a live dispatch replays against, without reading
     /// its bytes.
     ///
@@ -381,4 +455,47 @@ impl WorkflowService {
             }).await?;
         tx.commit().await
     }
+}
+
+/// The deployment one generation of a run replays against.
+///
+/// Read rather than accepted, and read from `generations` rather than from
+/// `runs`, because the generation is what a dispatch is bound to:
+/// `AuthorizedTask::validate_at` already ties the task to the run's current
+/// generation, so this row is the pin of the execution under way. `runs` carries
+/// the same value -- `control::restart` writes both in one transaction -- and the
+/// caller compares them rather than trusting either alone.
+async fn generation_deploy(
+    tx: &super::store::Transaction,
+    app: &AppId,
+    run_id: &str,
+    generation: i64,
+) -> Result<String, WorkflowServiceError> {
+    use super::models;
+    use zeroship_data_orm::orm::{FindOptions, FromRow};
+
+    #[derive(FromRow)]
+    #[orm(entity = models::generations)]
+    struct Pin {
+        deploy_id: String,
+    }
+
+    let row = tx
+        .database()
+        .entity::<models::generations::Entity>()?
+        .find::<Pin>(
+            models::generations::app_id
+                .eq(app.as_str())?
+                .and(models::generations::run_id.eq(run_id)?)
+                .and(models::generations::generation.eq(generation)?),
+            FindOptions {
+                limit: Some(1),
+                ..Default::default()
+            },
+        )
+        .await?
+        .into_iter()
+        .next()
+        .ok_or_else(unavailable)?;
+    Ok(row.deploy_id)
 }

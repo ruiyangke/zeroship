@@ -295,7 +295,7 @@ impl WorkflowService {
         }
         claim.validate_live()?;
         let claim = claim.authorize(&mut tx)?;
-        let receipt = complete_in(&mut tx, &claim, execution, &body_digest).await?;
+        let receipt = complete_in(self, &mut tx, &claim, execution, &body_digest).await?;
         tx.commit().await?;
         Ok(receipt)
     }
@@ -611,11 +611,18 @@ pub(super) async fn assign(
 }
 
 pub(super) async fn complete_in(
+    service: &WorkflowService,
     tx: &mut Transaction,
     claim: &AuthorizedTask,
     execution: WorkflowExecution,
     body_digest: &str,
 ) -> Result<CompletionReceipt, WorkflowServiceError> {
+    // THE DEPLOYMENT FENCE LIVES HERE, not in either caller, because both commit
+    // paths end in this function and a third would otherwise be able to miss it.
+    // It is deliberately below every replay arm above: a settlement answered from
+    // a stored receipt never reaches here and must not, since it has nothing left
+    // to commit.
+    service.admissible_for_commit(tx, claim).await?;
     let state = frontier::apply(
         tx,
         &claim.app,
