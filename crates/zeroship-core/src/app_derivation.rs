@@ -56,13 +56,11 @@ pub enum DerivationError {
 /// **Re-keying this MOVES the workflow journal** of every app whose host
 /// installs journals in the creator schema, with no compile error and rows
 /// already written left in a schema nothing points at afterwards.
-/// `a_creator_journal_answers_each_app_its_own_schema`
-/// (`crates/zeroship-worker/src/workflow_host/tests.rs`) asserts that arm
+/// `a_journal_schema_answers_the_app_it_belongs_to`
+/// (`crates/zeroship-worker/src/workflow_host/tests.rs`) asserts that schema
 /// answers the app id itself, so it fails on exactly that change and carries
 /// the reasoning; it is deliberately not restated here, because two copies of
-/// an argument drift and the test is the one that fails. A host running
-/// `JournalLocation::Service` journals into a schema it owns and never reaches
-/// this function, so that arm neither moves nor guards this one.
+/// an argument drift and the test is the one that fails.
 ///
 /// The caller validates the derived spelling with [`crate::schema_name::SchemaName`].
 #[must_use]
