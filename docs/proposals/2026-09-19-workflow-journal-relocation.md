@@ -1222,9 +1222,18 @@ protocol. This extends a working client rather than inventing one.
      `generation`, and `validate_live` (`crates/zeroship-workflow/src/service/tasks.rs`) already
      refuses when `run.generation != task.generation`. So which deployment a dispatch replays against
      is reachable from the task, and the settle-side fence is the journal comparing its own past
-     record against its own present state - availability and admission generation re-read fresh,
-     under an update-as-lock requiring exactly one affected row. That cannot be skipped by omission,
-     which an echo can.
+     record against its own present state. What it re-reads is AVAILABILITY, and deliberately not
+     admission: a parked deployment means the bytes that produced the result are disowned, so
+     committing would record a result derived from an artifact the journal has quarantined, while
+     withdrawn admission means no NEW work should start - which is enforced where work is admitted,
+     at `tasks::assign` and the artifact load. Refusing a commit for withdrawn admission would
+     discard creator work that has already run and force a replay, so the fence must not check it.
+     The read is a LOCKED READ rather than an update-as-lock, because the comparison no longer
+     crosses a request boundary and the caller already holds the app and run locks `authorized_task`
+     took; inside that transaction a read is exactly as strong and says what it means. And it is
+     still-available rather than unchanged, since nothing records an availability epoch at load, so
+     a caller-free check can only claim the deployment is not parked at the moment of the commit.
+     That cannot be skipped by omission, which an echo can.
      So the settlement's addition is the quarantine alone: optional, absent in the ordinary case, and
      byte-identical to today's settlement when nothing was damaged. `accepts_execution()`'s symmetry
      with the claim reply still holds, and it is now the reason there is no registration field rather
