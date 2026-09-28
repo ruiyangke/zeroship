@@ -6,8 +6,8 @@ use zeroship_core::{
     app_id::AppId,
     service_identity::{endpoints, ServiceEndpoint},
     workflow_coordination::{
-        AssignedScope, PayloadLocation, PinnedDeployment, ReadTaskPayload, ResolveTaskExecutable,
-        WorkerId,
+        AssignedScope, PayloadLocation, PayloadReservation, PinnedDeployment, ReadTaskPayload,
+        ReservePayload, ResolveTaskExecutable, WorkerId,
     },
     workflow_jobs::{Settlement, SubmitJob},
     workflow_policy::MAX_JOURNAL_BYTES_CEILING,
@@ -74,6 +74,10 @@ pub fn configure(config: &mut web::ServiceConfig) {
         .service(
             web::resource(endpoints::WORKFLOW_JOB_RECEIPT.path_template())
                 .route(web::post().to(receipt)),
+        )
+        .service(
+            web::resource(endpoints::WORKFLOW_TASK_PAYLOAD_RESERVE.path_template())
+                .route(web::post().to(task_payload_reserve)),
         );
 }
 
@@ -516,6 +520,49 @@ async fn receipt(
                 .job_receipt(&command.job)
                 .await
                 .map_err(journal_error)
+        }
+        .await,
+    )
+}
+
+/// Reserve the row an upload will be keyed by.
+///
+/// Same authority and selector split as [`task_payload`]: the task credential in
+/// the body authorizes it, the app names the journal, and the worker identity is
+/// substituted from the credential.
+///
+/// THE BYTES ARE NOT HERE AND NEVER WILL BE. This answers with a payload id, and
+/// the caller writes the object to the store it already binds. In one process the
+/// staging call holds a lock across that write so collection cannot race a live
+/// writer; no request boundary can hold that lock, which is why the reservation
+/// and the confirm are two calls and why the confirm is a compare-and-swap
+/// against the deadline this returns.
+async fn task_payload_reserve(
+    request: web::HttpRequest,
+    state: State<SharedState>,
+    body: web::types::Payload,
+) -> web::HttpResponse {
+    respond(
+        async {
+            let actor =
+                authenticate(&request, &state, endpoints::WORKFLOW_TASK_PAYLOAD_RESERVE).await?;
+            let command: ReservePayload = read_json(&request, body).await?;
+            let token = TaskToken::try_from(command.token).map_err(|_| Error::Unauthenticated)?;
+            let worker = WorkerIdentity::new(actor.id().as_str().to_owned())
+                .map_err(|_| Error::Unauthenticated)?;
+            let journal = journal(&state, &command.app_id).await?;
+            let reserved: PayloadReservation = journal
+                .service()
+                .reserve_task_payload(
+                    &worker,
+                    &command.task_id,
+                    &token,
+                    &command.request_id,
+                    &command.reference,
+                )
+                .await
+                .map_err(journal_error)?;
+            Ok(reserved)
         }
         .await,
     )

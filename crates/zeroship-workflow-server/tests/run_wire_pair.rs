@@ -55,11 +55,11 @@ use zeroship_core::{
     },
     service_peers::{service_issuer, ServiceAuth, ServiceKeyring, CONTROL_SERVICE_NAME},
     workflow_coordination::{
-        AssignedScope, ConflictPolicy, CreatorStartOptions, FailureCode, ReadStepOutput,
-        ReadTaskPayload, ResolveTaskExecutable,
+        AssignedScope, ConflictPolicy, CreatorStartOptions, FailureCode, PayloadReservation,
+        ReadStepOutput, ReadTaskPayload, ReservePayload, ResolveTaskExecutable,
         RegisterWorker, RequestId, RestartOptions, RestartRun, RunFailure, RunId, RunOperation,
         Revision, RunScope, RunState, SignalOptions, SignalRun, StartRun, TransitionRun, WorkerId,
-        WorkerState,
+        WorkerState, WorkflowOutputRef,
     },
     workflow_jobs::{DeploymentId, JobOperation, JobSpec, SubmitJob},
     workflow_policy::AppPolicy,
@@ -739,4 +739,112 @@ async fn the_client_and_the_service_agree_on_a_release_and_a_receipt() {
         .await
         .expect("the receipt read still answers after a release");
     assert!(after.is_none(), "{after:?}");
+}
+
+/// The payload reservation, client to service, over a real socket.
+///
+/// THE IDEMPOTENCE IS THE POINT, not a side property. The unique index on
+/// `(app_id, task_id, request_id)` enforces nothing while `task_id` is NULL, and
+/// this reservation crosses a wire where retries are expected -- so what stops a
+/// retry reserving a second object is the service's own lookup on
+/// `(app_id, request_id)`. Two reservations under one request id must answer with
+/// the SAME payload id, and this asserts that rather than assuming it.
+///
+/// FOUR ARMS. A first reservation; the same request id again answering the same
+/// id; the same request id with DIFFERENT bytes refused, which is what makes the
+/// dedupe a comparison rather than a blind reuse; and a malformed credential
+/// refused at the route before any journal call.
+///
+/// What this does NOT cover: the object write and the confirm. The bytes never
+/// cross this call, and the confirm's compare-and-swap is asserted where a fence
+/// can be committed between the two.
+#[ntex::test]
+async fn the_client_and_the_service_agree_on_a_payload_reservation() {
+    let fixture = Box::pin(Fixture::new()).await;
+    let run = journal::seed_run(&fixture.platform, &fixture.app).await;
+    let leased = journal::seed_leased_task(
+        &fixture.platform,
+        &fixture.app,
+        &run,
+        fixture.client.worker_id(),
+    )
+    .await;
+    let request = RequestId::mint();
+    let reference = WorkflowOutputRef {
+        hash: "c".repeat(64),
+        size: 7,
+        content_type: Some("application/json".to_owned()),
+    };
+    let reserve = |request: RequestId, reference: WorkflowOutputRef| ReservePayload {
+        app_id: fixture.app.clone(),
+        task_id: leased.task.clone(),
+        token: leased.token.clone(),
+        request_id: request,
+        reference,
+    };
+
+    let first = fixture
+        .client
+        .reserve_task_payload(&reserve(request.clone(), reference.clone()))
+        .await
+        .expect("a live dispatch reserves an upload");
+    let PayloadReservation::Reserved {
+        payload_id,
+        expires_at,
+    } = first
+    else {
+        panic!("a fresh request id has nothing staged against it")
+    };
+    assert!(expires_at > 0, "{expires_at}");
+
+    // The retry contract: same request id, same object.
+    let again = fixture
+        .client
+        .reserve_task_payload(&reserve(request.clone(), reference.clone()))
+        .await
+        .expect("a retried reservation answers rather than refusing");
+    assert_eq!(
+        again,
+        PayloadReservation::Reserved {
+            payload_id: payload_id.clone(),
+            expires_at,
+        }
+    );
+
+    // And the dedupe is a comparison: the same request id for other bytes is a
+    // caller contradicting itself, not a second upload.
+    let substituted = fixture
+        .client
+        .reserve_task_payload(&reserve(
+            request,
+            WorkflowOutputRef {
+                hash: "d".repeat(64),
+                ..reference.clone()
+            },
+        ))
+        .await
+        .expect_err("a request id was reused for another object");
+    assert!(
+        matches!(
+            substituted,
+            zeroship_workflow_client::Error::Refused(FailureCode::Conflict)
+        ),
+        "{substituted:?}"
+    );
+
+    let malformed = fixture
+        .client
+        .reserve_task_payload(&ReservePayload {
+            token: "not-a-token".to_owned(),
+            ..reserve(RequestId::mint(), reference)
+        })
+        .await
+        .expect_err("a credential that cannot be a token was accepted");
+    assert!(
+        matches!(
+            malformed,
+            zeroship_workflow_client::Error::Refused(FailureCode::Unauthenticated)
+        ),
+        "{malformed:?}"
+    );
 }

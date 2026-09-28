@@ -413,6 +413,57 @@ pub struct PinnedDeployment {
     pub admission_generation: i64,
 }
 
+/// Reserve the row an upload's object will be keyed by.
+///
+/// THE BYTES DO NOT CROSS HERE and never will: this mints or finds a payload id,
+/// and the caller writes the object to the store it already binds. Splitting it
+/// this way is what lets a caller upload at all -- in one process the staging
+/// call holds a lock across the object write so collection cannot race a live
+/// writer, and no request boundary can hold that lock.
+///
+/// `request_id` IS THE IDEMPOTENCY, and the obligation it places on the caller is
+/// real: a retry must send the SAME one. The service deduplicates on
+/// `(app_id, request_id)`, narrowed by the task only when one holds the staging,
+/// and refuses a request id reused for different bytes. A caller that minted a
+/// fresh id per attempt would reserve a new object every time and nothing would
+/// fail -- the unique index cannot catch it, because it covers `task_id` and that
+/// column is NULL for every ownerless upload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReservePayload {
+    pub app_id: AppId,
+    pub task_id: String,
+    pub token: String,
+    pub request_id: RequestId,
+    pub reference: WorkflowOutputRef,
+}
+
+/// What a reservation decided.
+///
+/// Two arms, and neither is a failure: one says write the object, the other says
+/// an earlier attempt already did. A retry after a lost acknowledgement is the
+/// ordinary case rather than an edge, so the caller must handle both as success.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum PayloadReservation {
+    /// Write the object, then confirm. `expires_at` is the deadline the
+    /// reservation was recorded with and must be sent back UNCHANGED: the confirm
+    /// compares against this value, and one recomputed later can drift past the
+    /// collector's fence and compare two different things while still looking
+    /// like a comparison.
+    Reserved {
+        payload_id: String,
+        expires_at: i64,
+    },
+    /// Already uploaded and confirmed. There is no object to write.
+    Staged { payload_id: String },
+}
+
 /// Deliver a signal to a waiting run.
 ///
 /// `request_id` is the idempotency of the delivery: a caller that retries after

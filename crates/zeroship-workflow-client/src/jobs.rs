@@ -10,8 +10,8 @@ use zeroship_core::{
     service_identity::endpoints,
     typed_id,
     workflow_coordination::{
-        AssignedScope, FailureCode, PayloadLocation, PinnedDeployment, ReadTaskPayload,
-        ResolveTaskExecutable,
+        AssignedScope, FailureCode, PayloadLocation, PayloadReservation, PinnedDeployment,
+        ReadTaskPayload, ReservePayload, ResolveTaskExecutable,
     },
     workflow_jobs::{
         Delivery, DeliveryLease, JobLease, JobOperation, JobSpec, Settlement, SettlementReceipt,
@@ -376,6 +376,40 @@ impl WorkerCoordinator {
                 &JobReceiptQuery { job: job.clone() },
             )
             .await
+    }
+
+    /// Reserve the row an upload will be keyed by.
+    ///
+    /// THE BYTES DO NOT CROSS. This asks which payload id to write under; the
+    /// caller then writes the object to the store it already binds and confirms
+    /// afterwards. The split exists because staging in one process holds a lock
+    /// across the object write so collection cannot race a live writer, and no
+    /// request boundary can hold that lock.
+    ///
+    /// A RETRY MUST SEND THE SAME `request_id`. The service deduplicates on it,
+    /// and a caller minting a fresh one per attempt reserves a new object each
+    /// time without anything failing.
+    ///
+    /// # Errors
+    /// Refuses failed exchanges, the journal's own refusals, and a reservation
+    /// whose key is not a workflow payload id.
+    pub async fn reserve_task_payload(
+        &self,
+        request: &ReservePayload,
+    ) -> Result<PayloadReservation, Error> {
+        let reserved: PayloadReservation = self
+            .transport
+            .post(endpoints::WORKFLOW_TASK_PAYLOAD_RESERVE, request)
+            .await?;
+        // A reservation is used as an object-store key, so it is parsed against
+        // the one prefix a payload may carry before any caller writes under it.
+        let payload_id = match &reserved {
+            PayloadReservation::Reserved { payload_id, .. }
+            | PayloadReservation::Staged { payload_id } => payload_id,
+        };
+        typed_id::parse_with_prefix(payload_id, typed_id::WORKFLOW_PAYLOAD_PREFIX)
+            .map_err(|_| Error::InvalidResponse)?;
+        Ok(reserved)
     }
 
     fn settled(

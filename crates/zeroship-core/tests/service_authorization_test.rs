@@ -43,6 +43,7 @@ const CATALOG: &[ServiceEndpoint] = &[
     endpoints::WORKFLOW_RUN_OUTPUT,
     endpoints::WORKFLOW_TASK_PAYLOAD,
     endpoints::WORKFLOW_TASK_EXECUTABLE,
+    endpoints::WORKFLOW_TASK_PAYLOAD_RESERVE,
     endpoints::CONTROL_APP,
     endpoints::CONTROL_APP_ENV,
     endpoints::CONTROL_APP_DATA_KEY,
@@ -304,6 +305,12 @@ fn endpoint_catalog_records_exact_measured_operations() {
             "/v1/tasks/executable",
         ),
         (
+            endpoints::WORKFLOW_TASK_PAYLOAD_RESERVE,
+            "workflow",
+            "POST",
+            "/v1/tasks/payload/reserve",
+        ),
+        (
             endpoints::GATEWAY_BACKCHANNEL_LOGOUT,
             "gateway",
             "POST",
@@ -539,6 +546,9 @@ fn measured_allowlist_is_encoded_and_enforced_row_by_row() {
             // And which deployment that dispatch replays against. The pin
             // crosses; the artifact never does.
             endpoints::WORKFLOW_TASK_EXECUTABLE,
+            // And reserving the row an upload is keyed by. The bytes go to the
+            // object store directly; only the reservation crosses.
+            endpoints::WORKFLOW_TASK_PAYLOAD_RESERVE,
             endpoints::CDC_SUBSCRIBE,
             endpoints::CONTROL_APP,
             endpoints::CONTROL_APP_ENV,

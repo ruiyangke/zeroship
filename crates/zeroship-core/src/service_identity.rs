@@ -600,6 +600,22 @@ pub mod endpoints {
     /// that deployment from the object store it already holds.
     pub const WORKFLOW_TASK_EXECUTABLE: ServiceEndpoint =
         ServiceEndpoint::new("workflow", "POST", "/v1/tasks/executable");
+    /// Reserve the row an upload will be keyed by.
+    ///
+    /// The bytes never cross: this answers with a payload id, and the caller
+    /// writes the object to the store it already binds. In one process the
+    /// staging call holds a lock across that write so collection cannot race a
+    /// live writer, and no request boundary can hold it -- which is why the
+    /// reservation and the confirm are separate calls here.
+    ///
+    /// THE CALLER MUST RESEND THE SAME `request_id` ON A RETRY. Deduplication is
+    /// `(app_id, request_id)`, narrowed by the task only when one holds the
+    /// staging, plus a refusal when a request id is reused for different bytes.
+    /// A caller minting a fresh id per attempt reserves a new object each time
+    /// and nothing fails: the unique index covers `task_id`, which is NULL for
+    /// every ownerless upload, and a unique index enforces nothing over NULL.
+    pub const WORKFLOW_TASK_PAYLOAD_RESERVE: ServiceEndpoint =
+        ServiceEndpoint::new("workflow", "POST", "/v1/tasks/payload/reserve");
     pub const WORKER_DISPATCH: ServiceEndpoint =
         ServiceEndpoint::new("worker", "POST", "/dispatch/{app_id}");
     pub const WORKER_APP_LOGS: ServiceEndpoint =
@@ -767,6 +783,7 @@ pub fn service_allowlist() -> &'static [ServiceAuthorization] {
                     // a worker is the kind of peer that may present one.
                     endpoints::WORKFLOW_TASK_PAYLOAD,
                     endpoints::WORKFLOW_TASK_EXECUTABLE,
+                    endpoints::WORKFLOW_TASK_PAYLOAD_RESERVE,
                     endpoints::CDC_SUBSCRIBE,
                     // Host app reads are role-scoped: an authenticated worker
                     // may request any app's version, environment, and project

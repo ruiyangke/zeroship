@@ -10,7 +10,9 @@ use crate::service::policy::admit;
 use crate::{engine::WorkflowOutputRef, validation, WorkflowServiceError};
 use serde::{Deserialize, Serialize};
 use std::{sync::Arc, time::Duration};
-use zeroship_core::{app_id::AppId, typed_id};
+use zeroship_core::{
+    app_id::AppId, typed_id, workflow_coordination::PayloadReservation,
+};
 use zeroship_data_orm::{
     orm::{Entity, FindOptions, FromRow, Operation, Output},
     value, Value,
@@ -350,79 +352,13 @@ impl WorkflowService {
         reference: WorkflowOutputRef,
         writer: W,
     ) -> Result<StagedPayload, WorkflowServiceError> {
-        validate_reference(&reference)?;
-        let mut tx = self.begin().await?;
-        let scope = staging.open(&mut tx).await?;
-        // `request_id` is the idempotency key: `RequestId::mint()` runs once per
-        // upload and rides the prepared execution across every retry, so
-        // (app_id, request_id) already names the upload on its own. A leased
-        // staging narrows further with the task it holds. An ownerless one has
-        // no task to narrow by and drops the term -- a term that named any
-        // particular task would miss the row staged with none, and the retry
-        // would stage a second one and stop deduplicating without ever failing.
-        let mut lookup = models::payloads::app_id
-            .eq(scope.app().as_str())?
-            .and(models::payloads::request_id.eq(request.as_str())?);
-        if let Some(task) = scope.task_id() {
-            lookup = lookup.and(models::payloads::task_id.eq(Some(task))?);
-        }
-        let existing = tx
-            .database()
-            .entity::<models::payloads::Entity>()?
-            .find::<models::PayloadRecord>(
-                lookup,
-                FindOptions {
-                    limit: Some(1),
-                    ..Default::default()
-                },
-            )
-            .await?;
-        let id = if let Some(row) = existing.first() {
-            if reference_from(row) != reference {
-                return Err(WorkflowServiceError::Conflict(
-                    "payload request was used for another object".into(),
-                ));
-            }
-            let id = row.id.clone();
-            if matches!(row.state.as_str(), "staged" | "referenced") {
-                tx.commit().await?;
-                return Ok(StagedPayload { id, reference });
-            }
-            scope.validate_live()?;
-            if row.state != "uploading" || row.expires_at <= scope.now() {
-                return Err(WorkflowServiceError::Conflict(
-                    "payload upload has expired".into(),
-                ));
-            }
-            id
-        } else {
-            scope.validate_live()?;
-            admit(scope.policy())?;
-            if reference.size > scope.policy().max_payload_bytes {
-                return Err(WorkflowServiceError::PayloadTooLarge);
-            }
-            let (total, objects) = payload_usage(&tx, scope.app()).await?;
-            if objects >= scope.policy().max_payload_objects
-                || total
-                    .checked_add(reference.size)
-                    .is_none_or(|total| total > scope.policy().max_payload_storage_bytes)
-            {
-                return Err(WorkflowServiceError::ResourceExhausted(
-                    "workflow payload storage limit reached".into(),
-                ));
-            }
-            let id = typed_id::generate(typed_id::WORKFLOW_PAYLOAD_PREFIX);
-            let at = scope.location()?;
-            tx.database().collection(models::payloads::Entity::COLLECTION)?.insert(value!({
-                "app_id":scope.app().as_str(), "run_id":at.run_id, "generation":at.generation,
-                "id":id.clone(), "task_id":at.task_id, "request_id":request.as_str(), "hash":reference.hash.clone(),
-                "size":reference.size, "content_type":reference.content_type.clone(), "state":"uploading",
-                "created_at":scope.now(), "expires_at":deadline(scope.now(),scope.policy().payload_staging_retention_ms)?,
-            })).await?;
-            id
+        let id = match self.reserve_inner(&staging, request, &reference).await? {
+            // Already uploaded and confirmed by an earlier attempt. There is no
+            // object to write and no transition to make, so the reservation is
+            // the whole answer.
+            Reservation::Staged { id } => return Ok(StagedPayload { id, reference }),
+            Reservation::Reserved { id, .. } => id,
         };
-        scope.validate_at(tx.now().await?)?;
-        tx.commit().await?;
 
         // Lock in the same order as completion and GC. A bounded upload holds
         // this lock until the store finishes, so GC cannot race a live writer.
@@ -1174,4 +1110,178 @@ async fn open_payload<O: PayloadOpener>(
             authority,
         })
         .await
+}
+
+/// What reserving an upload decided.
+///
+/// The two arms are not success and failure; they are "write the object" and
+/// "an earlier attempt already did". A retry after a lost acknowledgement is the
+/// ordinary case, so the already-done arm is the common one rather than an edge.
+enum Reservation {
+    /// The row is `uploading` and the object may be written. `expires_at` is the
+    /// deadline this reservation was recorded with, and the confirm compares
+    /// against THIS value rather than one derived again later: a recomputed
+    /// deadline can drift past the collector's fence and make the comparison
+    /// compare two different things while still looking like a comparison.
+    Reserved { id: String, expires_at: i64 },
+    /// An earlier attempt uploaded and confirmed this request already.
+    Staged { id: String },
+}
+
+impl WorkflowService {
+    /// Reserve the row an upload will be keyed by, for a caller that writes the
+    /// object itself.
+    ///
+    /// The first half of [`Self::stage_payload`] and nothing else. A host holding
+    /// the object store runs both halves under one lock; a host that reaches this
+    /// journal over a wire cannot hold that lock across its write, so it takes
+    /// this, writes, and confirms. What replaces the lock is the confirm's
+    /// compare-and-swap against the deadline returned here -- see the collector's
+    /// own fence in `payloads/collection.rs`, which stakes its claim durably
+    /// before deleting anything.
+    ///
+    /// # Errors
+    /// Rejects an invalid descriptor, stale task authority, withdrawn admission,
+    /// an exhausted payload quota, a request id reused for other bytes, and an
+    /// upload whose staging window has passed.
+    pub async fn reserve_task_payload(
+        &self,
+        worker: &WorkerIdentity,
+        task_id: &str,
+        token: &TaskToken,
+        request: &RequestId,
+        reference: &WorkflowOutputRef,
+    ) -> Result<PayloadReservation, WorkflowServiceError> {
+        let staging = StagingAuthority::Task {
+            worker,
+            task_id,
+            token,
+        };
+        let authority = payload_authority(self)?;
+        let service = match authority.as_deref() {
+            Some(authority) => self.with_authority(authority.clone())?,
+            None => self.clone(),
+        };
+        let reserved = guarded_payload(
+            authority.as_deref(),
+            Box::pin(service.reserve_inner(&staging, request, reference)),
+        )
+        .await?;
+        Ok(match reserved {
+            Reservation::Reserved { id, expires_at } => PayloadReservation::Reserved {
+                payload_id: id,
+                expires_at,
+            },
+            Reservation::Staged { id } => PayloadReservation::Staged { payload_id: id },
+        })
+    }
+
+    /// Mint or find the row an upload will be keyed by, without writing bytes.
+    ///
+    /// # What dedupes a retry, since the unique index cannot
+    ///
+    /// `__zeroship_workflow_payload_upload_request` is on
+    /// `(app_id, task_id, request_id)`, and a unique index enforces nothing when a
+    /// key column is NULL -- which the ownerless path always leaves it. So what
+    /// deduplicates is the lookup below: `(app_id, request_id)`, narrowed by the
+    /// task only when one holds the staging, plus the refusal of a request id
+    /// reused for different bytes.
+    ///
+    /// THAT PLACES AN OBLIGATION ON THE CALLER: a retry must resend the SAME
+    /// request id. `PreparedExecution` satisfies it by minting once and carrying
+    /// the id across every retry. A caller that minted per attempt would stage a
+    /// fresh object each time and nothing would fail.
+    ///
+    /// # Errors
+    /// Rejects an invalid descriptor, stale authority, withdrawn admission, an
+    /// exhausted payload quota, a request id reused for other bytes, and an
+    /// upload whose staging window has passed.
+    async fn reserve_inner(
+        &self,
+        staging: &StagingAuthority<'_>,
+        request: &RequestId,
+        reference: &WorkflowOutputRef,
+    ) -> Result<Reservation, WorkflowServiceError> {
+        validate_reference(reference)?;
+        let mut tx = self.begin().await?;
+        let scope = staging.open(&mut tx).await?;
+        // `request_id` is the idempotency key: `RequestId::mint()` runs once per
+        // upload and rides the prepared execution across every retry, so
+        // (app_id, request_id) already names the upload on its own. A leased
+        // staging narrows further with the task it holds. An ownerless one has
+        // no task to narrow by and drops the term -- a term that named any
+        // particular task would miss the row staged with none, and the retry
+        // would stage a second one and stop deduplicating without ever failing.
+        let mut lookup = models::payloads::app_id
+            .eq(scope.app().as_str())?
+            .and(models::payloads::request_id.eq(request.as_str())?);
+        if let Some(task) = scope.task_id() {
+            lookup = lookup.and(models::payloads::task_id.eq(Some(task))?);
+        }
+        let existing = tx
+            .database()
+            .entity::<models::payloads::Entity>()?
+            .find::<models::PayloadRecord>(
+                lookup,
+                FindOptions {
+                    limit: Some(1),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        let reserved = if let Some(row) = existing.first() {
+            if reference_from(row) != *reference {
+                return Err(WorkflowServiceError::Conflict(
+                    "payload request was used for another object".into(),
+                ));
+            }
+            let id = row.id.clone();
+            if matches!(row.state.as_str(), "staged" | "referenced") {
+                tx.commit().await?;
+                return Ok(Reservation::Staged { id });
+            }
+            scope.validate_live()?;
+            if row.state != "uploading" || row.expires_at <= scope.now() {
+                return Err(WorkflowServiceError::Conflict(
+                    "payload upload has expired".into(),
+                ));
+            }
+            Reservation::Reserved {
+                id,
+                expires_at: row.expires_at,
+            }
+        } else {
+            scope.validate_live()?;
+            admit(scope.policy())?;
+            if reference.size > scope.policy().max_payload_bytes {
+                return Err(WorkflowServiceError::PayloadTooLarge);
+            }
+            let (total, objects) = payload_usage(&tx, scope.app()).await?;
+            if objects >= scope.policy().max_payload_objects
+                || total
+                    .checked_add(reference.size)
+                    .is_none_or(|total| total > scope.policy().max_payload_storage_bytes)
+            {
+                return Err(WorkflowServiceError::ResourceExhausted(
+                    "workflow payload storage limit reached".into(),
+                ));
+            }
+            let id = typed_id::generate(typed_id::WORKFLOW_PAYLOAD_PREFIX);
+            let at = scope.location()?;
+            let expires_at = deadline(
+                scope.now(),
+                scope.policy().payload_staging_retention_ms,
+            )?;
+            tx.database().collection(models::payloads::Entity::COLLECTION)?.insert(value!({
+                "app_id":scope.app().as_str(), "run_id":at.run_id, "generation":at.generation,
+                "id":id.clone(), "task_id":at.task_id, "request_id":request.as_str(), "hash":reference.hash.clone(),
+                "size":reference.size, "content_type":reference.content_type.clone(), "state":"uploading",
+                "created_at":scope.now(), "expires_at":expires_at,
+            })).await?;
+            Reservation::Reserved { id, expires_at }
+        };
+        scope.validate_at(tx.now().await?)?;
+        tx.commit().await?;
+        Ok(reserved)
+    }
 }
