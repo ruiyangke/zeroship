@@ -110,9 +110,9 @@ data write and its journal record to commit atomically.
 `ALTER SCHEMA ... OWNER TO` the migrator role, and a schema owner's privileges are implicit and
 cannot be revoked. So the schema the platform is actively driving runs against is owned by the
 tenant. `docs/proposals/2026-08-28-migration-record-consolidation.md` accepts exactly this for
-the *migration* journal, on the ground that "it is their database and corrupting it breaks only
-them" - which is true there and false here, because the platform is mid-execution against this
-one.
+the *migration* journal, on the ground that "it is their database and their app, and corrupting it
+breaks only them" - which is true there and false here, because the platform is mid-execution
+against this one.
 
 **2. Dropping a database destroys the journal.** Harmless while one app owns one database.
 Under sharing it destroys the workflow state of every app bound to that database, not just the
@@ -2497,7 +2497,11 @@ part that dates, not the verdict.
 ## History
 
 `docs/proposals/2026-08-28-app-database-decoupling.md` is the sibling that makes defect 4 real
-and defect 3 urgent; its Open 3 is closed by this document.
+and defect 3 urgent. What this document answers there is that document's own claim - "This
+deletion breaks the workflow journal, and the ordering is load-bearing" - and not one of its
+numbered Open items, none of which concerns the journal. Its History cites this one in return,
+for "the workflow journal leaving creator schemas, which this design requires before its column
+grants land".
 `docs/proposals/2026-08-28-migration-record-consolidation.md` sets the rule this one deliberately
 departs from: a creator-owned journal is correct for migrations, where corruption breaks only
 the creator, and wrong for workflows, where the platform is executing against it.
