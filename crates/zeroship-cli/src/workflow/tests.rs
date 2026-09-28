@@ -109,24 +109,76 @@ fn local_configuration_refuses_a_payload_budget_below_the_platform_ceiling() {
     assert!(config.validate().is_err());
 }
 
-fn publish(root: &Path, version: &str, cooldown: &str) -> PathBuf {
+/// Where the workspace install puts the TypeScript runner the bundle compiler
+/// runs under.
+fn typescript_runner(workspace: &Path) -> PathBuf {
+    workspace.join("packages/vite-plugin/node_modules/.bin/tsx")
+}
+
+/// The bundle compiler runs under the installed TypeScript runner, addressed by
+/// path, and inside the project it is building.
+///
+/// Reaching the runner through a package manager instead would make this
+/// fixture write outside that project: a package manager relinks the workspace
+/// it runs in, `workspace` derives from `CARGO_MANIFEST_DIR`, and a git
+/// worktree's `packages/*/node_modules` are links into the primary checkout, so
+/// the relink lands in the primary checkout and repoints it at the worktree.
+/// The runner is a plain child process and rewrites nothing.
+fn bundle_compiler(root: &Path, version: &str, cooldown: &str) -> std::process::Command {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let workspace = manifest.parent().unwrap().parent().unwrap();
-    let output = std::process::Command::new("pnpm")
-        .current_dir(workspace.join("packages/vite-plugin"))
-        .args(["exec", "tsx"])
+    let runner = typescript_runner(workspace);
+    assert!(
+        runner.is_file(),
+        "the workflow fixture needs the TypeScript runner installed at {}; \
+         install the workspace dependencies from {} and retry",
+        runner.display(),
+        workspace.display()
+    );
+    let mut command = std::process::Command::new(runner);
+    command
+        .current_dir(root)
         .arg(manifest.join("tests/fixtures/app-bundle.ts"))
         .arg(root)
         .arg(version)
-        .arg(cooldown)
+        .arg(cooldown);
+    command
+}
+
+fn publish(root: &Path, version: &str, cooldown: &str) -> PathBuf {
+    let output = bundle_compiler(root, version, cooldown)
         .output()
-        .expect("run the workflow deploy compiler with pnpm");
+        .expect("run the workflow deploy compiler");
     assert!(
         output.status.success(),
         "workflow fixture build failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     root.join("app.zship")
+}
+
+/// A package manager would arrive as a bare program name resolved from `PATH`,
+/// and would run in the checkout that installed it rather than in the project
+/// being built. Both halves are asserted: the program is the installed runner
+/// addressed absolutely, and the working directory is the fixture's own
+/// temporary project.
+#[test]
+fn the_bundle_compiler_runs_an_installed_runner_inside_the_project() {
+    let root = tempfile::tempdir().unwrap();
+    let command = bundle_compiler(root.path(), "original", "10ms");
+    let program = Path::new(command.get_program());
+    assert!(
+        program.is_absolute(),
+        "a bare program name resolves from PATH: {}",
+        program.display()
+    );
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+    assert_eq!(program, typescript_runner(workspace));
+    assert_eq!(command.get_current_dir(), Some(root.path()));
 }
 
 fn test_storage(root: &Path, app: &AppId) -> HostStorage {
