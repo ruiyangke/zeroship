@@ -155,6 +155,23 @@ impl JobTransport for HostTransport {
         Ok(receipt)
     }
 
+    async fn release(
+        &self,
+        journal: &AppWorkflows,
+        lease: &LeasedJob,
+        task: &DeliveredTask,
+    ) -> Result<(), WorkflowServiceError> {
+        JobTransport::release(&self.client, journal, lease, task).await
+    }
+
+    async fn receipt(
+        &self,
+        journal: &AppWorkflows,
+        job: &zeroship_core::workflow_jobs::JobSpec,
+    ) -> Result<Option<zeroship_workflow::service::delivery::JobReceipt>, WorkflowServiceError> {
+        JobTransport::receipt(&self.client, journal, job).await
+    }
+
     async fn complete(
         &self,
         journal: &AppWorkflows,

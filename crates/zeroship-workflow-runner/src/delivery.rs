@@ -25,7 +25,7 @@ use std::{
 };
 use zeroship_core::{
     workflow_coordination::{AssignedScope, FailureCode},
-    workflow_jobs::{Delivery, JobLease, Settlement, SettlementReceipt},
+    workflow_jobs::{Delivery, JobLease, JobSpec, Settlement, SettlementReceipt},
 };
 use zeroship_workflow_client::{LeasedJob, WorkerCoordinator};
 
@@ -77,6 +77,35 @@ pub trait JobTransport {
         execution: WorkflowExecution,
         confirmed: Vec<PayloadConfirmation>,
     ) -> impl Future<Output = Result<Completed, WorkflowServiceError>>;
+    /// Hand a claimed task back without settling its delivery.
+    ///
+    /// ON THE TRANSPORT RATHER THAN THE JOURNAL, because a host that holds no
+    /// journal still has to give work back. A release commits no execution, so it
+    /// is not fenced on deployment admissibility: the row reopens, `reclaim`
+    /// expires it, and `tasks::assign` re-checks availability before the next
+    /// dispatch.
+    fn release(
+        &self,
+        journal: &AppWorkflows,
+        lease: &Self::Lease,
+        task: &DeliveredTask,
+    ) -> impl Future<Output = Result<(), WorkflowServiceError>> {
+        // A host whose journal is in this process asks it directly. The crossed
+        // transport overrides this, because it holds no journal to ask.
+        async move { journal.release_job(task, lease).await }
+    }
+    /// Read what an attempt of this logical job already committed, if any.
+    ///
+    /// The recovery read for an uncertain settlement, for the same reason: the
+    /// reply a holder lost may have committed, and a holder with no journal
+    /// cannot ask one directly. Absence is a fact rather than a refusal.
+    fn receipt(
+        &self,
+        journal: &AppWorkflows,
+        job: &JobSpec,
+    ) -> impl Future<Output = Result<Option<JobReceipt>, WorkflowServiceError>> {
+        async move { journal.job_receipt(job).await }
+    }
 }
 
 /// A claimed delivery and the journal acceptance that rode with it.
@@ -159,6 +188,30 @@ impl JobTransport for WorkerCoordinator {
         settlement: &Settlement,
     ) -> Result<SettlementReceipt, WorkflowServiceError> {
         self.settle_job(settlement).await.map_err(metadata_error)
+    }
+
+    /// The journal half of a release crosses with the delivery it gives back.
+    async fn release(
+        &self,
+        _journal: &AppWorkflows,
+        lease: &Self::Lease,
+        task: &DeliveredTask,
+    ) -> Result<(), WorkflowServiceError> {
+        self.release_job::<AppJournal>(lease, &task.reported()?)
+            .await
+            .map_err(metadata_error)
+    }
+
+    /// Answered from the journal's own service, so a holder that holds none can
+    /// still learn what an uncertain settlement committed.
+    async fn receipt(
+        &self,
+        _journal: &AppWorkflows,
+        job: &JobSpec,
+    ) -> Result<Option<JobReceipt>, WorkflowServiceError> {
+        self.job_receipt::<AppJournal>(job)
+            .await
+            .map_err(metadata_error)
     }
 
     async fn complete(
@@ -352,7 +405,7 @@ impl<T: JobTransport> DeliverySlot<T> {
         }) {
             Ok(authority) => authority,
             Err(error) => {
-                release(app, &task, &lease, self.options.operation_timeout).await;
+                release(self.transport.as_ref(), app, &task, &lease, self.options.operation_timeout).await;
                 return Err(error);
             }
         };
@@ -366,7 +419,7 @@ impl<T: JobTransport> DeliverySlot<T> {
         let guard = match ExecutionGuard::new(timeout) {
             Ok(guard) => guard,
             Err(error) => {
-                release(app, &task, &lease, self.options.operation_timeout).await;
+                release(self.transport.as_ref(), app, &task, &lease, self.options.operation_timeout).await;
                 return Err(error);
             }
         };
@@ -376,6 +429,7 @@ impl<T: JobTransport> DeliverySlot<T> {
             .and_then(|()| constrain(&guard, &claims))
         {
             release(
+                self.transport.as_ref(),
                 app,
                 &claims.task,
                 &claims.lease,
@@ -392,6 +446,7 @@ impl<T: JobTransport> DeliverySlot<T> {
             Ok(execution) => execution,
             Err(error) => {
                 release(
+                    self.transport.as_ref(),
                     app,
                     &claims.task,
                     &claims.lease,
@@ -440,7 +495,7 @@ impl<T: JobTransport> DeliverySlot<T> {
             execution.0.cancel();
             execution.0.stop().await;
             let (task, lease) = snapshot(&active.claims);
-            release(&active.app, &task, &lease, self.options.operation_timeout).await;
+            release(self.transport.as_ref(), &active.app, &task, &lease, self.options.operation_timeout).await;
         }
         self.active = None;
     }
@@ -526,22 +581,24 @@ async fn run_active<T: JobTransport>(
     match result {
         Ok(Ok(completed)) => Ok(ExecutionResult::Settled(Box::new(completed))),
         Ok(Err(error)) | Err(Err(error)) => {
-            if let Ok(Some(receipt)) = recover(&active.app, &lease, options.operation_timeout).await
+            if let Ok(Some(receipt)) =
+                recover(transport, &active.app, &lease, options.operation_timeout).await
             {
                 Ok(ExecutionResult::Recovered(Box::new(receipt)))
             } else {
                 let task = active.claims.borrow().task.clone();
-                release(&active.app, &task, &lease, options.operation_timeout).await;
+                release(transport, &active.app, &task, &lease, options.operation_timeout).await;
                 Err(active.phase.failure.borrow().clone().unwrap_or(error))
             }
         }
         Err(Ok(control)) => {
-            if let Ok(Some(receipt)) = recover(&active.app, &lease, options.operation_timeout).await
+            if let Ok(Some(receipt)) =
+                recover(transport, &active.app, &lease, options.operation_timeout).await
             {
                 Ok(ExecutionResult::Recovered(Box::new(receipt)))
             } else {
                 let task = active.claims.borrow().task.clone();
-                release(&active.app, &task, &lease, options.operation_timeout).await;
+                release(transport, &active.app, &task, &lease, options.operation_timeout).await;
                 Ok(ExecutionResult::Interrupted(control))
             }
         }
@@ -669,7 +726,7 @@ async fn execute<T: JobTransport>(
             {
                 Ok(completed) => return Ok(completed),
                 Err(error) if retryable(&error) => {
-                    if let Ok(Some(receipt)) = app.job_receipt(&lease.delivery().job).await {
+                    if let Ok(Some(receipt)) = transport.receipt(app, &lease.delivery().job).await {
                         let settlement = receipt.settlement(&lease)?;
                         return Ok(Completed {
                             settlement: transport.settle(&settlement).await?,
@@ -685,21 +742,23 @@ async fn execute<T: JobTransport>(
     .await
 }
 
-async fn recover<L: JobLease>(
+async fn recover<T: JobTransport>(
+    transport: &T,
     app: &AppWorkflows,
-    lease: &L,
+    lease: &T::Lease,
     timeout: Duration,
 ) -> Result<Option<JobReceipt>, WorkflowServiceError> {
-    bounded(timeout, app.job_receipt(&lease.delivery().job)).await
+    bounded(timeout, transport.receipt(app, &lease.delivery().job)).await
 }
 
-async fn release<L: JobLease>(
+async fn release<T: JobTransport>(
+    transport: &T,
     app: &AppWorkflows,
     task: &DeliveredTask,
-    lease: &L,
+    lease: &T::Lease,
     timeout: Duration,
 ) {
-    let _ = bounded(timeout, app.release_job(task, lease)).await;
+    let _ = bounded(timeout, transport.release(app, lease, task)).await;
 }
 
 pub(super) async fn bounded<T>(
