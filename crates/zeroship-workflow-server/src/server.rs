@@ -555,13 +555,14 @@ async fn sweep_assertions(
     }
 }
 
-/// This process's whole maintenance cadence: one bounded pass of the manager's
-/// lanes, then one of this service's own sweep lane when it holds one, every
-/// `interval` until `stopped` or until the future is dropped.
+/// This process's whole maintenance cadence, every `interval` until `stopped` or
+/// until the future is dropped.
 ///
-/// Each pass reports what it did and propagates nothing, so a lane that refuses
-/// never costs the next lane its turn or ends the cadence. The two share the
-/// runtime, so they take their turns in order rather than at once.
+/// One bounded pass of the manager's lanes, then one of this service's own sweep
+/// lane when it holds one. Each pass reports what it did and propagates nothing,
+/// so a lane that refuses never costs the next lane its turn or ends the cadence.
+/// The two share the runtime, so they take their turns in order rather than at
+/// once.
 ///
 /// `sweeps` is absent on a host that is not the sweep authority over its queue,
 /// and then this cadence drives the manager's lanes alone. It is the whole of

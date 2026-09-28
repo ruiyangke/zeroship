@@ -436,7 +436,7 @@ fn the_maintenance_lane_is_on_by_default_and_an_overlay_can_stand_it_down() {
 
     // A misspelling is still refused, so the acceptance above is this key being
     // declared rather than the section admitting anything.
-    let mut misspelled = base.clone();
+    let mut misspelled = base;
     misspelled["workflow"]["maintenance_sweep"] = serde_json::json!(false);
     assert!(!check(&write("sweeps-misspelled.toml", &misspelled))
         .status

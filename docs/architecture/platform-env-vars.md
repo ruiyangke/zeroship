@@ -342,6 +342,7 @@ Every environment name below is `ZEROSHIP_<CANONICAL>` and every overlay path is
 | `workflow.driver_lane_timeout_ms` | operational | `ZEROSHIP_WORKFLOW_DRIVER_LANE_TIMEOUT_MS` | `workflow.driver_lane_timeout_ms` | zeroship-workflow-server `--driver-lane-timeout-ms` | `10000` |
 | `workflow.http_threads` | operational | `ZEROSHIP_WORKFLOW_HTTP_THREADS` | `workflow.http_threads` | zeroship-workflow-server `--http-threads` | `2` |
 | `workflow.listen` | operational | `ZEROSHIP_WORKFLOW_LISTEN` | `workflow.listen` | zeroship-workflow-server `--listen` | `127.0.0.1:9093` |
+| `workflow.maintenance_sweeps` | operational | `ZEROSHIP_WORKFLOW_MAINTENANCE_SWEEPS` | `workflow.maintenance_sweeps` | zeroship-workflow-server `--maintenance-sweeps` | `true` |
 | `workflow.max_connections` | operational | `ZEROSHIP_WORKFLOW_MAX_CONNECTIONS` | `workflow.max_connections` | zeroship-workflow-server `--max-connections` | `1024` |
 | `workflow.max_pending_management` | operational | `ZEROSHIP_WORKFLOW_MAX_PENDING_MANAGEMENT` | `workflow.max_pending_management` | zeroship-workflow-server `--max-pending-management` | `1024` |
 | `workflow.max_request_bytes` | operational | `ZEROSHIP_WORKFLOW_MAX_REQUEST_BYTES` | `workflow.max_request_bytes` | zeroship-workflow-server `--max-request-bytes` | `crate::api::DEFAULT_MAX_REQUEST_BYTES` |
