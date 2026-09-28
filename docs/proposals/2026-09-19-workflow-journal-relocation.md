@@ -1141,6 +1141,32 @@ protocol. This extends a working client rather than inventing one.
      journal records the failure and the quarantine in one transaction and a crash cannot keep one
      without the other.
 
+     **And the settlement carries NO executed registration, deliberately.** A first design had the
+     worker echo back what it loaded, so the journal could compare. That is not evidence: the worker
+     loads by the `deploy_hash` the journal just gave it, and `verify_deployment_manifest`
+     (`crates/zeroship-bundle/src/executable.rs`) refuses bytes whose hash does not match, so a
+     worker cannot have loaded a different deployment and produced a usable artifact - and one that
+     wanted to lie would echo the journal's own value, because that is the only value that passes. An
+     echo from the party being checked, which can hold only one value, adds no fact.
+     The journal already holds the fact it would be checking.
+     `__zeroship_workflow_generations` carries `deploy_id NOT NULL` keyed by `run_id` and
+     `generation`, and `validate_live` (`crates/zeroship-workflow/src/service/tasks.rs`) already
+     refuses when `run.generation != task.generation`. So which deployment a dispatch replays against
+     is reachable from the task, and the settle-side fence is the journal comparing its own past
+     record against its own present state - availability and admission generation re-read fresh,
+     under an update-as-lock requiring exactly one affected row. That cannot be skipped by omission,
+     which an echo can.
+     So the settlement's addition is the quarantine alone: optional, absent in the ordinary case, and
+     byte-identical to today's settlement when nothing was damaged. `accepts_execution()`'s symmetry
+     with the claim reply still holds, and it is now the reason there is no registration field rather
+     than a rule governing one - the claim carries an acceptance for the one executable kind, and the
+     settlement carries no pin because the journal keeps its own. A reader who notices the asymmetry
+     should not restore it by adding a field.
+     One arm sits outside this fence on purpose: a settlement replayed against an already-completed
+     task returns the stored receipt before any re-validation, because there is nothing left to
+     commit, and `fanout`/`propagation`'s `preserve_scope_without_holds` assert exactly that
+     idempotence. Demanding evidence there would fail a replay that must succeed.
+
 
    **And the lane cannot start before the worker narrows, which folds two bullets into one.** The
    contention between two claimants is safe at the mechanism - `lock_scope` serializes and one wins
