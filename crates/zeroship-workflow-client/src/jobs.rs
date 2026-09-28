@@ -6,7 +6,10 @@ use std::time::{Duration, Instant};
 use zeroship_core::{
     service_identity::endpoints,
     typed_id,
-    workflow_coordination::{AssignedScope, FailureCode, PayloadLocation, ReadTaskPayload},
+    workflow_coordination::{
+        AssignedScope, FailureCode, PayloadLocation, PinnedDeployment, ReadTaskPayload,
+        ResolveTaskExecutable,
+    },
     workflow_jobs::{
         Delivery, DeliveryLease, JobLease, JobOperation, JobSpec, Settlement, SettlementReceipt,
         SubmitJob,
@@ -294,6 +297,29 @@ impl WorkerCoordinator {
         typed_id::parse_with_prefix(&located.payload_id, typed_id::WORKFLOW_PAYLOAD_PREFIX)
             .map_err(|_| Error::InvalidResponse)?;
         Ok(located)
+    }
+
+    /// Resolve which deployment a live dispatch replays against.
+    ///
+    /// TWO PHASES, like [`Self::read_task_payload`], and for a harder reason: an
+    /// executable's module source answers to a budget twice the journal reply
+    /// ceiling, so the artifact cannot cross at all. This asks WHICH deployment,
+    /// and the caller loads it from the object store it already holds.
+    ///
+    /// The two fence values in the reply are not for the caller to read. They
+    /// are echoed back with the execution it reports, so the journal can refuse a
+    /// settlement produced against a deployment that was parked or re-admitted
+    /// while creator code ran.
+    ///
+    /// # Errors
+    /// Refuses failed exchanges and the journal's own refusals.
+    pub async fn resolve_task_executable(
+        &self,
+        request: &ResolveTaskExecutable,
+    ) -> Result<PinnedDeployment, Error> {
+        self.transport
+            .post(endpoints::WORKFLOW_TASK_EXECUTABLE, request)
+            .await
     }
 
     fn settled(

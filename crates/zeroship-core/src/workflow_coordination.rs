@@ -376,6 +376,43 @@ pub struct ReadTaskPayload {
     pub reference: WorkflowOutputRef,
 }
 
+/// Resolve which deployment a live dispatch replays against.
+///
+/// THE ARTIFACT DOES NOT CROSS, and here that is structural rather than a
+/// budget choice. A loaded executable carries the creator's module source, whose
+/// own budget is twice the ceiling a reply answers to, so a deployment at its
+/// permitted size could never fit one. What crosses is the PIN: the caller loads
+/// that deployment from the object store it already holds, which is addressed by
+/// the deploy hash and therefore answers with the same immutable bytes either
+/// host would read.
+///
+/// Selector and authority split exactly as [`ReadTaskPayload`]'s do: the app
+/// names the journal to ask, the task credential is what authorizes the answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResolveTaskExecutable {
+    pub app_id: AppId,
+    pub task_id: String,
+    pub token: String,
+}
+
+/// The deployment a run is pinned to, as the journal proved it.
+///
+/// Four fields, and only the first two address the artifact. The other two are
+/// the FENCES the journal checked, echoed back so the settlement that reports an
+/// execution can be refused when either has moved underneath it: a deployment
+/// parked for damage bumps its availability epoch, and re-admission moves the
+/// admission generation. A caller does not interpret them and cannot forge a
+/// useful one -- they are only ever compared against the journal's own rows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PinnedDeployment {
+    pub deploy_id: DeploymentId,
+    pub deploy_hash: String,
+    pub availability_epoch: i64,
+    pub admission_generation: i64,
+}
+
 /// Deliver a signal to a waiting run.
 ///
 /// `request_id` is the idempotency of the delivery: a caller that retries after

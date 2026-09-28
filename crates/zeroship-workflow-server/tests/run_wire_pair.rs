@@ -56,7 +56,7 @@ use zeroship_core::{
     service_peers::{service_issuer, ServiceAuth, ServiceKeyring, CONTROL_SERVICE_NAME},
     workflow_coordination::{
         AssignedScope, ConflictPolicy, CreatorStartOptions, FailureCode, ReadStepOutput,
-        ReadTaskPayload,
+        ReadTaskPayload, ResolveTaskExecutable,
         RegisterWorker, RequestId, RestartOptions, RestartRun, RunFailure, RunId, RunOperation,
         RunScope, RunState, SignalOptions, SignalRun, StartRun, TransitionRun, WorkerId,
         WorkerState,
@@ -184,6 +184,43 @@ impl Fixture {
 
     /// One column of one journal row, so a reply is compared against what the
     /// service stored rather than against itself.
+    /// A column of the seeded deployment, so a caller compares a resolved pin
+    /// against the journal's own row rather than against a second derivation.
+    async fn deploy_column(&self, deploy: &str, column: &str) -> String {
+        self.platform
+            .admin
+            .query_one(
+                &format!(
+                    "SELECT {column} FROM workflow_manager.__zeroship_workflow_deploys \
+                     WHERE app_id=$1 AND id=$2"
+                ),
+                &[&self.app.as_str(), &deploy],
+            )
+            .await
+            .unwrap()
+            .get(0)
+    }
+
+    /// Park a deployment the way a damaged artifact does.
+    ///
+    /// `park_deployment` is what the journal itself runs on a corrupt load, and
+    /// its whole effect on admissibility is this state change -- so a caller
+    /// asserting the availability fence arranges the state rather than arranging
+    /// a corrupt object, which would test the loader instead.
+    async fn park_deployment(&self, deploy: &str) {
+        let parked = self
+            .platform
+            .admin
+            .execute(
+                "UPDATE workflow_manager.__zeroship_workflow_deploys SET state='unavailable' \
+                 WHERE app_id=$1 AND id=$2 AND state='available'",
+                &[&self.app.as_str(), &deploy],
+            )
+            .await
+            .unwrap();
+        assert_eq!(parked, 1, "no available deployment was parked");
+    }
+
     async fn run_column(&self, run: &RunId, column: &str) -> String {
         self.platform
             .admin
@@ -488,5 +525,88 @@ async fn the_client_and_the_service_agree_on_a_task_payload_read() {
             zeroship_workflow_client::Error::Refused(FailureCode::Conflict)
         ),
         "{unknown:?}"
+    );
+}
+
+/// The task executable resolution, client to service, over a real socket.
+///
+/// The ARTIFACT is deliberately not part of this contract: the reply names a
+/// deployment and the caller loads it from its own object store. So what a wire
+/// test can bind is the pin and the fences, and that is what this asserts --
+/// against the `deploys` row the fixture seeded, read back out of the journal
+/// rather than derived a second time here.
+///
+/// THREE ARMS, the same staging split as the payload read. A resolved pin proves
+/// the journal was reached and answered from its own rows. A malformed credential
+/// is refused by the ROUTE before any journal call. And a deployment the journal
+/// has PARKED is refused by the journal itself -- which is the arm that matters
+/// most, because it is the fence a worker loading from its own store could never
+/// apply for itself, and the reason the resolution crosses at all.
+#[ntex::test]
+async fn the_client_and_the_service_agree_on_a_task_executable_resolution() {
+    let fixture = Box::pin(Fixture::new()).await;
+    let run = journal::seed_run(&fixture.platform, &fixture.app).await;
+    // Admission has to be OPEN for a pin to resolve: the journal reads an
+    // `admission_generation` under the hold scope and refuses without one.
+    let deploy = journal::seed_journal_hold(&fixture.platform, &fixture.app).await;
+    let leased = journal::seed_leased_task(
+        &fixture.platform,
+        &fixture.app,
+        &run,
+        fixture.client.worker_id(),
+    )
+    .await;
+    let resolve = || ResolveTaskExecutable {
+        app_id: fixture.app.clone(),
+        task_id: leased.task.clone(),
+        token: leased.token.clone(),
+    };
+
+    let pinned = fixture
+        .client
+        .resolve_task_executable(&resolve())
+        .await
+        .expect("the journal resolves the deployment its own run row pins");
+    assert_eq!(pinned.deploy_id.as_str(), deploy);
+    assert_eq!(
+        pinned.deploy_hash,
+        fixture.deploy_column(&deploy, "hash").await
+    );
+    // The fences travel with the pin, and the caller does not invent them.
+    assert_eq!(pinned.availability_epoch, 0);
+    assert_eq!(pinned.admission_generation, 1);
+
+    // Refused by the ROUTE, before a journal call.
+    let malformed = fixture
+        .client
+        .resolve_task_executable(&ResolveTaskExecutable {
+            token: "not-a-token".to_owned(),
+            ..resolve()
+        })
+        .await
+        .expect_err("a credential that cannot be a token was accepted");
+    assert!(
+        matches!(
+            malformed,
+            zeroship_workflow_client::Error::Refused(FailureCode::Unauthenticated)
+        ),
+        "{malformed:?}"
+    );
+
+    // Refused by the JOURNAL, on the fence a local load cannot see. Parking is
+    // what a damaged artifact leaves behind, and a worker that resolved its own
+    // pin from the object store would happily reload the corrupt bytes.
+    fixture.park_deployment(&deploy).await;
+    let parked = fixture
+        .client
+        .resolve_task_executable(&resolve())
+        .await
+        .expect_err("a parked deployment was still offered for replay");
+    assert!(
+        matches!(
+            parked,
+            zeroship_workflow_client::Error::Refused(FailureCode::Unavailable)
+        ),
+        "{parked:?}"
     );
 }

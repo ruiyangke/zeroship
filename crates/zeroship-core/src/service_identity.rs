@@ -577,6 +577,14 @@ pub mod endpoints {
     /// beside it selects the journal to ask rather than asserting a claim on it.
     pub const WORKFLOW_TASK_PAYLOAD: ServiceEndpoint =
         ServiceEndpoint::new("workflow", "POST", "/v1/tasks/payload");
+    /// Resolve which deployment a running task replays against.
+    ///
+    /// Answers with the PIN and never the artifact. A loaded executable carries
+    /// creator module source under a budget twice this reply ceiling, so the
+    /// bytes could not cross even if a caller wanted them to; the caller loads
+    /// that deployment from the object store it already holds.
+    pub const WORKFLOW_TASK_EXECUTABLE: ServiceEndpoint =
+        ServiceEndpoint::new("workflow", "POST", "/v1/tasks/executable");
     pub const WORKER_DISPATCH: ServiceEndpoint =
         ServiceEndpoint::new("worker", "POST", "/dispatch/{app_id}");
     pub const WORKER_APP_LOGS: ServiceEndpoint =
@@ -741,6 +749,7 @@ pub fn service_allowlist() -> &'static [ServiceAuthorization] {
                     // body is what the journal checks, and this grant only says
                     // a worker is the kind of peer that may present one.
                     endpoints::WORKFLOW_TASK_PAYLOAD,
+                    endpoints::WORKFLOW_TASK_EXECUTABLE,
                     endpoints::CDC_SUBSCRIBE,
                     // Host app reads are role-scoped: an authenticated worker
                     // may request any app's version, environment, and project

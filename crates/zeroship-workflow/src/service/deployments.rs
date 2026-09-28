@@ -18,7 +18,9 @@ use std::{rc::Rc, sync::Arc};
 use zeroship_bundle::{
     verify_deployment_manifest, BlobError, BlobStore, ExecutableError, LoadedWorker,
 };
-use zeroship_core::{app_id::AppId, workflow_jobs::DeploymentId};
+use zeroship_core::{
+    app_id::AppId, workflow_coordination::PinnedDeployment, workflow_jobs::DeploymentId,
+};
 
 /// The normal app artifact store a host holds, with the budget it reads under.
 #[derive(Clone)]
@@ -216,6 +218,84 @@ impl WorkflowService {
     pub fn with_deployments(mut self, deployments: AppDeployments) -> Self {
         self.deployments = Some(deployments);
         self
+    }
+
+    /// Prove which deployment a live dispatch replays against, without reading
+    /// its bytes.
+    ///
+    /// The journal half of [`Self::task_executable`] and nothing else: the same
+    /// claim check, the same run pin, the same availability refusal and the same
+    /// admission generation, answered as a [`PinnedDeployment`] instead of as
+    /// modules. A host holding the artifact store loads that pin itself, which
+    /// is why this needs none -- `artifacts` is never consulted here, so a
+    /// process that holds only the journal can serve it.
+    ///
+    /// THE PIN COMES FROM THE RUN'S OWN ROW, read under the app and run locks
+    /// `authorized_task` takes, and never from anything the caller presents. A
+    /// restart rewrites that column and the matching generation row in one
+    /// transaction (`control::restart`), so the two cannot disagree; it also
+    /// clears the run's `task_id` and bumps the generation, which is what makes
+    /// a dispatch from before the restart fail `validate_live` rather than
+    /// resolve a stale deployment.
+    ///
+    /// NO POST-LOAD RECHECK HAPPENS HERE, because the load is no longer inside
+    /// this call. The two fences this reads are returned with the pin so the
+    /// settlement reporting that execution can be refused if either moved while
+    /// creator code ran -- see the re-validation on the settle path, which
+    /// catches strictly more than this pair ever did.
+    ///
+    /// # Errors
+    /// Rejects stale or foreign claims, missing holds and unavailable
+    /// deployments.
+    pub async fn resolve_task_executable(
+        &self,
+        worker: &WorkerIdentity,
+        task: &str,
+        token: &TaskToken,
+    ) -> Result<PinnedDeployment, WorkflowServiceError> {
+        self.run_bound(|service| {
+            Box::pin(
+                async move { service.resolve_task_executable_inner(worker, task, token).await },
+            )
+        })
+        .await
+    }
+
+    async fn resolve_task_executable_inner(
+        &self,
+        worker: &WorkerIdentity,
+        task: &str,
+        token: &TaskToken,
+    ) -> Result<PinnedDeployment, WorkflowServiceError> {
+        let mut tx = self.begin().await?;
+        let claim = authorized_task(&mut tx, worker, task, token).await?;
+        claim.validate_live()?;
+        let app = claim.app.clone();
+        // The hold scope this app's admission is recorded under. Taken from the
+        // deployments source for the same reason `task_executable` does: the
+        // scope is the holder's, and a caller cannot name one.
+        let source = self.deployments.as_ref().ok_or_else(unavailable)?;
+        let client = source.client(&app)?;
+        let id = claim.run.text("deploy_id")?;
+        let record = deploys::read(&tx, &app, &id)
+            .await?
+            .ok_or_else(unavailable)?;
+        record.available()?;
+        let admission_generation =
+            admission_generation(&tx, &app, &id, &record.hash, client.scope()).await?;
+        claim.validate_at(tx.now().await?)?;
+        tx.commit().await?;
+        Ok(PinnedDeployment {
+            // Parsed where the row is read, so a deployment id this journal
+            // cannot name fails here rather than at the caller that first
+            // needs it typed.
+            deploy_id: DeploymentId::parse_owned(id).map_err(|_| {
+                WorkflowServiceError::Internal("invalid workflow deployment id".into())
+            })?,
+            deploy_hash: record.hash,
+            availability_epoch: record.availability_epoch,
+            admission_generation,
+        })
     }
 
     /// Load the pinned normal app deployment of a live execution claim.

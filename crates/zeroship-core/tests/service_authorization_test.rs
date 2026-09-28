@@ -40,6 +40,7 @@ const CATALOG: &[ServiceEndpoint] = &[
     endpoints::WORKFLOW_RUN_STEP_OUTPUT,
     endpoints::WORKFLOW_RUN_OUTPUT,
     endpoints::WORKFLOW_TASK_PAYLOAD,
+    endpoints::WORKFLOW_TASK_EXECUTABLE,
     endpoints::CONTROL_APP,
     endpoints::CONTROL_APP_ENV,
     endpoints::CONTROL_APP_DATA_KEY,
@@ -283,6 +284,12 @@ fn endpoint_catalog_records_exact_measured_operations() {
             "/v1/tasks/payload",
         ),
         (
+            endpoints::WORKFLOW_TASK_EXECUTABLE,
+            "workflow",
+            "POST",
+            "/v1/tasks/executable",
+        ),
+        (
             endpoints::GATEWAY_BACKCHANNEL_LOGOUT,
             "gateway",
             "POST",
@@ -511,6 +518,9 @@ fn measured_allowlist_is_encoded_and_enforced_row_by_row() {
             // A dispatch locating its own replay edge, authorized by the task
             // credential in the body rather than by a placement.
             endpoints::WORKFLOW_TASK_PAYLOAD,
+            // And which deployment that dispatch replays against. The pin
+            // crosses; the artifact never does.
+            endpoints::WORKFLOW_TASK_EXECUTABLE,
             endpoints::CDC_SUBSCRIBE,
             endpoints::CONTROL_APP,
             endpoints::CONTROL_APP_ENV,

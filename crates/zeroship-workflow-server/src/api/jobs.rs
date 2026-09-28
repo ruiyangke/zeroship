@@ -5,7 +5,10 @@ use std::time::{Duration, Instant};
 use zeroship_core::{
     app_id::AppId,
     service_identity::{endpoints, ServiceEndpoint},
-    workflow_coordination::{AssignedScope, PayloadLocation, ReadTaskPayload, WorkerId},
+    workflow_coordination::{
+        AssignedScope, PayloadLocation, PinnedDeployment, ReadTaskPayload, ResolveTaskExecutable,
+        WorkerId,
+    },
     workflow_jobs::{Settlement, SubmitJob},
     workflow_policy::MAX_JOURNAL_BYTES_CEILING,
 };
@@ -58,6 +61,10 @@ pub fn configure(config: &mut web::ServiceConfig) {
         .service(
             web::resource(endpoints::WORKFLOW_TASK_PAYLOAD.path_template())
                 .route(web::post().to(task_payload)),
+        )
+        .service(
+            web::resource(endpoints::WORKFLOW_TASK_EXECUTABLE.path_template())
+                .route(web::post().to(task_executable)),
         );
 }
 
@@ -389,6 +396,44 @@ async fn task_payload(
                 .await
                 .map_err(journal_error)?;
             Ok(located)
+        }
+        .await,
+    )
+}
+
+/// Resolve which deployment a live dispatch replays against.
+///
+/// Same authority and same selector split as [`task_payload`]: the task
+/// credential in the body authorizes it, the app names the journal, and the
+/// worker identity is substituted from the credential rather than read from the
+/// body -- which is half the task lookup, so another worker's dispatch finds no
+/// row.
+///
+/// THE ARTIFACT IS NOT HERE AND CANNOT BE. A loaded executable carries the
+/// creator's module source under a budget twice `MAX_JOURNAL_BYTES_CEILING`, so
+/// a deployment at its permitted size would not fit a reply; and this process
+/// holds no artifact store to read one from. What crosses is the pin the journal
+/// proved, and the caller loads that deployment from the object store it already
+/// binds -- addressed by the deploy hash, so both hosts resolve identical bytes.
+async fn task_executable(
+    request: web::HttpRequest,
+    state: State<SharedState>,
+    body: web::types::Payload,
+) -> web::HttpResponse {
+    respond(
+        async {
+            let actor = authenticate(&request, &state, endpoints::WORKFLOW_TASK_EXECUTABLE).await?;
+            let command: ResolveTaskExecutable = read_json(&request, body).await?;
+            let token = TaskToken::try_from(command.token).map_err(|_| Error::Unauthenticated)?;
+            let worker = WorkerIdentity::new(actor.id().as_str().to_owned())
+                .map_err(|_| Error::Unauthenticated)?;
+            let journal = journal(&state, &command.app_id).await?;
+            let pinned: PinnedDeployment = journal
+                .service()
+                .resolve_task_executable(&worker, &command.task_id, &token)
+                .await
+                .map_err(journal_error)?;
+            Ok(pinned)
         }
         .await,
     )
