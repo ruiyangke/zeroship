@@ -1126,14 +1126,17 @@ protocol. This extends a working client rather than inventing one.
      `staged`, and `staged` and `referenced` must read as already done and successful the way
      `stage_inner`'s second transaction does, or a retried confirm after a lost acknowledgement
      becomes a failure instead of the ordinary case.
-     Nothing dedupes a retried cross at the index. `__zeroship_workflow_payload_upload_request` is
-     unique on `("app_id","task_id","request_id")`, which enforces nothing while `task_id` is NULL,
-     and the ownerless path is deliberate rather than an oversight. What dedupes is the
-     service-side select on `(app_id, request_id)`, narrowed by the task term only when a task
+     The index dedupes one path and not the other, which is the part a reader gets wrong in the
+     safe-seeming direction. `__zeroship_workflow_payload_upload_request` is unique on
+     `("app_id","task_id","request_id")`, so on the LEASED path, where `task_id` is non-NULL, it
+     does bite and a duplicate insert violates it; on the ownerless path `task_id` is NULL, a
+     unique index enforces nothing over NULL, and the index protects nothing at all. Seeing the
+     index and assuming it covers staging is therefore the wrong reading. What dedupes on both is
+     the service-side select on `(app_id, request_id)`, narrowed by the task term only when a task
      exists, plus the refusal when a request id is reused for different bytes. Crossing keeps that
      select on the service side, so what it adds is an obligation on the caller: a retry resends
      the SAME `RequestId`, which belongs in the endpoint's own contract rather than staying an
-     internal detail.
+     internal detail, and a test of it must assert the lookup rather than the index.
    - **Then the backend**, cheapest first: the three methods whose halves the wire-pair test
      already binds, then `start`, then the two reads as two-phase.
    - **Then the merged heartbeat**, which cannot land until its timeout budget is settled.
@@ -1160,13 +1163,16 @@ protocol. This extends a working client rather than inventing one.
      (`crates/zeroship-core/src/workflow_coordination/lifecycle.rs`) carries hash, size and content
      type and NO object key, so only the `payloads` row locates the object - which is why the
      descriptor-to-id step belongs before this bullet rather than after it.
-     `TaskPayloads::stage` holds its lock across the object write, and it is the one of the four
-     still to cross. The other three are served and bound: `TaskPayloads::read` answers to
-     `/v1/tasks/payload` and the executable RESOLUTION to `/v1/tasks/executable`, and `release_job`
-     and `job_receipt`, reached from `DeliverySlot`'s release, recover and uncertain-reply arms,
-     answer to `/v1/jobs/release` and `/v1/jobs/receipt`. Each of those carries a route, a client
-     method, a grant to `svc/worker` and a row in the pinned authorization table, so none of them is
-     a declared endpoint nothing serves.
+     `TaskPayloads::stage` is the one of the four still crossing, and it crosses in two pieces
+     rather than one, because the lock it holds across the object write is what a boundary cannot
+     hold. The RESERVATION has crossed, at `/v1/tasks/payload/reserve`; what remains is the
+     CONFIRM, folded into the settlement as a counted compare-and-swap. The other three are served
+     and bound: `TaskPayloads::read` answers to `/v1/tasks/payload` and the executable RESOLUTION
+     to `/v1/tasks/executable`, and `release_job` and `job_receipt`, reached from `DeliverySlot`'s
+     release, recover and uncertain-reply arms, answer to `/v1/jobs/release` and
+     `/v1/jobs/receipt`. Each of those carries a route, a client method, a grant to `svc/worker`
+     and a row in the pinned authorization table, so none of them is a declared endpoint nothing
+     serves.
      Severing the journal while any of the four is uncrossed does not move the break, it relocates
      it: a run started through the service's journal is then executed against the creator's and finds
      no task. So `stage` is what the severance waits on, and the read is the shape to copy -
