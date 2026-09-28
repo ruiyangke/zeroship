@@ -1127,6 +1127,16 @@ protocol. This extends a working client rather than inventing one.
      `staged`, and `staged` and `referenced` must read as already done and successful the way
      `stage_inner`'s second transaction does, or a retried confirm after a lost acknowledgement
      becomes a failure instead of the ordinary case.
+     And the confirm has to ride the SETTLEMENT rather than a call of its own, for an ordering
+     reason the fold argument above does not supply. `owned_reference`
+     (`crates/zeroship-workflow/src/service/payloads.rs`), which `promote` resolves a descriptor
+     through, has arms for `staged` and for `referenced` and none for `uploading`, so an outcome
+     naming an object nothing has confirmed is refused as a missing payload. The confirm therefore
+     has to commit in the same transaction as the frontier that references it, ahead of the
+     promotion: a separate call would either commit first and leave a staged orphan behind a failed
+     settlement, or commit after and lose the ordering `promote` needs. That is why the
+     confirmations are a field on the reported execution, empty for the holders that uploaded
+     nothing and absent from the wire when empty.
      The index dedupes one path and not the other, which is the part a reader gets wrong in the
      safe-seeming direction. `__zeroship_workflow_payload_upload_request` is unique on
      `("app_id","task_id","request_id")`, so on the LEASED path, where `task_id` is non-NULL, it
