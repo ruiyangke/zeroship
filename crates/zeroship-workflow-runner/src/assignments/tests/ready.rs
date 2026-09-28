@@ -1,12 +1,8 @@
-//! Request-path publication of prepared app backends and their intents.
+//! Request-path resolution of the app backends a host has published.
 
 use super::*;
-use crate::publication::{self, HostTransport};
 use zeroship_core::{service_identity::endpoints, workflow_coordination::RunFailure};
 use zeroship_workflow::{backend::WorkflowBackend, operations::StartOptions};
-use zeroship_core::workflow_jobs::{
-    Delivery, JobId, JobOperation, JobOutcome, JobSpec, Settlement,
-};
 
 async fn start(backend: &dyn WorkflowBackend) -> Result<String, WorkflowServiceError> {
     backend
@@ -225,106 +221,3 @@ async fn replacement_and_closure_withdraw_published_backends() {
     .await;
 }
 
-/// Readiness publishes a predecessor's intents; a request-path start does not.
-///
-/// The first half is this host's own: an app becoming ready marks it once, so
-/// intents a previous process committed and never published are submitted under
-/// the current assignment.
-///
-/// The second half is what the severance changed. A request-path start now
-/// commits in the SERVICE's journal, so there is no local intent for this host to
-/// publish and nothing marks it. The negative is asserted against the positive
-/// above it, which is what shows the channel was working and simply had nothing
-/// to carry.
-#[compio::test]
-async fn readiness_publishes_predecessor_intents_and_a_crossed_start_marks_nothing() {
-    let fixture = Fixture::new();
-    fixture.factory.deployed(true).await;
-    let scope = scope();
-    let mut exchanges = fixture.scan(std::slice::from_ref(&scope));
-    exchanges.extend(fixture.establish(&scope));
-    exchanges.push(fixture.submission());
-    exchanges.push(fixture.run_call(
-        endpoints::WORKFLOW_RUN_START,
-        &scope,
-        200,
-        json!({"id": run_id(), "state": "queued"}),
-    ));
-    peer(&fixture, exchanges, async |client| {
-        let (consumer, _probe) = fixture.consumer(1);
-        let bindings = fixture.bindings(client, &consumer, 1);
-        bindings.reconcile().await.unwrap();
-        let app = fixture.factory.calls()[0]
-            .runtime
-            .borrow()
-            .as_ref()
-            .unwrap()
-            .app
-            .clone();
-        let leftover = app.pending_jobs(None, 16).await.unwrap();
-        assert_eq!(leftover.len(), 1, "the opening left one unpublished intent");
-        // Readiness marks the app once, so a predecessor's intents publish.
-        let marked = compio::time::timeout(Duration::from_secs(5), bindings.marked())
-            .await
-            .expect("readiness must mark its app for publication");
-        assert_eq!(marked, [scope.app_id.clone()].into());
-        // The control: an app without a ready binding here publishes nothing.
-        bindings.publish_marked([AppId::mint()].into()).await;
-        assert!(fixture.submitted.borrow().is_empty());
-        bindings.publish_marked(marked).await;
-        assert!(app.pending_jobs(None, 16).await.unwrap().is_empty());
-        let submitted = fixture.submitted.borrow().clone();
-        assert_eq!(submitted.len(), 1);
-        assert_eq!(submitted[0]["job"], json!(leftover[0]));
-        assert_eq!(submitted[0]["scope"], json!(scope));
-        // The request path crosses, so the run it starts exists in the service's
-        // journal and this one gains no intent to publish.
-        start(fixture.ready.backend(scope.app_id.clone()).as_ref())
-            .await
-            .unwrap();
-        assert!(
-            compio::time::timeout(Duration::from_secs(1), bindings.marked())
-                .await
-                .is_err(),
-            "a crossed start must leave this host nothing to publish"
-        );
-        assert!(app.pending_jobs(None, 16).await.unwrap().is_empty());
-    })
-    .await;
-}
-
-#[compio::test]
-async fn a_settled_delivery_marks_its_app_for_publication() {
-    let fixture = Fixture::new();
-    let scope = scope();
-    let settlement = Settlement {
-        delivery: Delivery {
-            job: JobSpec {
-                id: JobId::mint(),
-                app_id: scope.app_id.clone(),
-                operation: JobOperation::Reconcile {},
-                available_at: 0.try_into().unwrap(),
-            },
-            worker_id: fixture.worker.clone(),
-            assignment_revision: scope.assignment_revision,
-            attempt: 1.try_into().unwrap(),
-            deadline: 0.try_into().unwrap(),
-        },
-        outcome: JobOutcome::Completed {},
-        successors: Vec::new(),
-    };
-    let exchanges = vec![fixture.settlement(&settlement)];
-    peer(&fixture, exchanges, async |client| {
-        let (wake, marked) = publication::channel();
-        let transport = HostTransport {
-            client,
-            settled: wake,
-        };
-        JobTransport::settle(&transport, &settlement).await.unwrap();
-        let apps = compio::time::timeout(Duration::from_secs(5), marked.next())
-            .await
-            .expect("settlement must mark its app");
-        assert_eq!(apps, [scope.app_id.clone()].into());
-    })
-    .await;
-}

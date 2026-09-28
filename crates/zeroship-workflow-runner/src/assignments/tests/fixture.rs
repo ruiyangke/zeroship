@@ -1,9 +1,7 @@
 use super::*;
-use crate::deployment_fixture::Deployments;
 use crate::delivery::{Claimed, Completed, Renewed};
 use zeroship_workflow::{
-    operations::StartOptions,
-    service::{delivery::DeliveredTask, AppWorkflows, DeployRegistration, RequestId},
+    service::{delivery::DeliveredTask, AppWorkflows},
     WorkflowExecution,
 };
 use compio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
@@ -65,20 +63,6 @@ impl Fixture {
         self.run_call(endpoint, scope, failure.status(), json!(failure))
     }
 
-    /// Accept one settlement exactly as sent and acknowledge it.
-    pub fn settlement(&self, settlement: &Settlement) -> Exchange {
-        Exchange::new(
-            endpoints::WORKFLOW_JOB_SETTLE,
-            json!(settlement),
-            json!(SettlementReceipt {
-                job_id: settlement.delivery.job.id.clone(),
-                app_id: settlement.delivery.job.app_id.clone(),
-                attempt: settlement.delivery.attempt,
-                outcome: settlement.outcome.clone(),
-            }),
-        )
-    }
-
     /// Accept the release a host sends when it gives a placement up.
     ///
     /// The request carries a freshly minted request identity, so it is matched
@@ -87,14 +71,6 @@ impl Fixture {
         Exchange {
             recorded: true,
             ..Exchange::new(endpoints::WORKFLOW_RELEASE, Value::Null, Value::Null)
-        }
-    }
-
-    /// Accept one job submission and acknowledge exactly the submitted job.
-    pub fn submission(&self) -> Exchange {
-        Exchange {
-            echo: Some("job"),
-            ..Exchange::new(endpoints::WORKFLOW_JOB_SUBMIT, Value::Null, Value::Null)
         }
     }
 
@@ -146,8 +122,6 @@ impl Fixture {
                 finished: RefCell::new(BTreeMap::new()),
                 alternative: RefCell::new(None),
                 foreign_backend: Cell::new(false),
-                deployments: RefCell::new(None),
-                leftover: Cell::new(false),
             })),
             policies,
             worker,
@@ -554,8 +528,6 @@ struct FactoryState {
     finished: RefCell<BTreeMap<AppId, oneshot::Sender<()>>>,
     alternative: RefCell<Option<AppId>>,
     foreign_backend: Cell<bool>,
-    deployments: RefCell<Option<Rc<Deployments>>>,
-    leftover: Cell<bool>,
 }
 
 pub(super) struct Opening {
@@ -606,13 +578,6 @@ impl Factory {
         *self.0.client.borrow_mut() = Some(client);
     }
 
-    /// Open creators with an activated deployment of an `Example` workflow.
-    /// With `leftover`, each opening also commits a start whose intent a
-    /// previous process would have left unpublished.
-    pub async fn deployed(&self, leftover: bool) {
-        *self.0.deployments.borrow_mut() = Some(Rc::new(Deployments::new().await));
-        self.0.leftover.set(leftover);
-    }
 
     pub fn completed(&self, app: &AppId) -> oneshot::Receiver<()> {
         let (finished, completed) = oneshot::channel();
@@ -691,30 +656,8 @@ impl CreatorFactory for Factory {
         } else {
             (self.0.policies.clone(), policy.clone())
         };
-        let mut service = creator(self.0.directory.path(), &scope.app_id, policies).await;
-        let deployments = self.0.deployments.borrow().clone();
-        if let Some(deployments) = &deployments {
-            service = service.with_deployments(deployments.binding(&[&scope.app_id]));
-        }
+        let service = creator(self.0.directory.path(), &scope.app_id, policies).await;
         let app = service.register_app(&policy).await?;
-        if let Some(deployments) = &deployments {
-            deployments
-                .activate(
-                    &service,
-                    &scope.app_id,
-                    &DeployRegistration {
-                        id: zeroship_core::typed_id::generate("dep"),
-                        hash: String::new(),
-                        workflows: ["Example".into()].into(),
-                        schedules: Vec::new(),
-                    },
-                )
-                .await?;
-            if self.0.leftover.get() {
-                app.start(&RequestId::mint(), "Example", StartOptions::default())
-                    .await?;
-            }
-        }
         let objects = crate::PayloadObjects::open(zeroship_storage::StorageStore::from_backend(
             Arc::new(zeroship_storage::LocalFs::new(
                 self.0.directory.path().join("objects"),

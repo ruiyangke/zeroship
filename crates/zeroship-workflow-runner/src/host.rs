@@ -8,7 +8,7 @@
 use crate::{
     assignments::{AssignmentBindings, AssignmentOptions, CreatorFactory},
     consumer::{ConsumerOptions, JobConsumer},
-    publication::{self, HostTransport},
+    publication::HostTransport,
     ready::ReadyApps,
 };
 use zeroship_workflow::{service::HostPolicies, WorkflowServiceError};
@@ -122,23 +122,20 @@ impl<F: CreatorFactory<Journal = ()>> WorkerHost<F> {
         {
             return Err(invalid_options());
         }
-        let (wake, marked) = publication::channel();
         let consumer = JobConsumer::new(
             Rc::new(HostTransport {
                 client: client.clone(),
-                settled: wake.clone(),
             }),
             client.worker_id().clone(),
             options.consumer,
         )?;
-        let assignments = AssignmentBindings::with_publication(
+        let assignments = AssignmentBindings::new(
             client.clone(),
             policies,
             consumer.bindings(),
             factory,
             ready,
             options.assignments,
-            (wake, marked),
         )?;
         Ok(Self {
             client,
@@ -249,12 +246,6 @@ async fn drive<F: CreatorFactory>(
             ready(client, capacity, options.registration_interval).await?;
         }
     };
-    let publication = async {
-        loop {
-            let apps = assignments.marked().await;
-            assignments.publish_marked(apps).await;
-        }
-    };
     let work = async {
         futures::join!(
             periodic(options.assignment_interval, async || assignments
@@ -263,7 +254,6 @@ async fn drive<F: CreatorFactory>(
             periodic(options.policy_interval, async || assignments
                 .refresh()
                 .await),
-            publication,
             consumer.run_until(std::future::pending()),
         );
     };

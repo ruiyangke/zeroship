@@ -9,15 +9,13 @@ use crate::{
     consumer::{ConsumerBindings, ConsumerScope},
     delivery::bounded,
     journal_duties::JournalDuties,
-    publication::{self, PublicationWait, PublicationWake},
     ready::ReadyApps,
     remote::RemoteBackend,
     TaskExecutor,
 };
 use zeroship_workflow::{
     service::{
-        publication::AssignedPublisher, AssignedPolicies, HostPolicies, IngressEpochs,
-        PolicyBinding,
+        AssignedPolicies, HostPolicies, IngressEpochs, PolicyBinding,
     },
     WorkflowServiceError,
 };
@@ -29,7 +27,7 @@ use futures::{
 };
 use std::{
     cell::{Cell, RefCell},
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     future::Future,
     rc::Rc,
     sync::Arc,
@@ -167,8 +165,6 @@ pub struct AssignmentBindings<F: CreatorFactory> {
     factory: F,
     options: AssignmentOptions,
     ready: ReadyApps,
-    wake: PublicationWake,
-    marked: PublicationWait,
     entries: RefCell<BTreeMap<AppId, Rc<Entry<F::Journal>>>>,
     scan: Cell<u64>,
     closed: Cell<bool>,
@@ -196,27 +192,6 @@ impl<F: CreatorFactory> AssignmentBindings<F> {
         ready: ReadyApps,
         options: AssignmentOptions,
     ) -> Result<Self, WorkflowServiceError> {
-        Self::with_publication(
-            client,
-            policies,
-            consumer,
-            factory,
-            ready,
-            options,
-            publication::channel(),
-        )
-    }
-
-    /// As [`Self::new`], sharing the publication marks a host's transport sets.
-    pub(crate) fn with_publication(
-        client: WorkerCoordinator,
-        policies: Arc<HostPolicies>,
-        consumer: ConsumerBindings<F::Journal>,
-        factory: F,
-        ready: ReadyApps,
-        options: AssignmentOptions,
-        (wake, marked): (PublicationWake, PublicationWait),
-    ) -> Result<Self, WorkflowServiceError> {
         if options.max_scopes == 0
             || options.max_scopes > consumer.limit()
             || options.operation_timeout.is_zero()
@@ -235,65 +210,10 @@ impl<F: CreatorFactory> AssignmentBindings<F> {
             factory,
             options,
             ready,
-            wake,
-            marked,
             entries: RefCell::new(BTreeMap::new()),
             scan: Cell::new(0),
             closed: Cell::new(false),
         })
-    }
-
-    /// Wait until a request-path mutation or a settled delivery marks apps
-    /// with intents to publish, then take those apps.
-    pub(crate) async fn marked(&self) -> BTreeSet<AppId> {
-        self.marked.next().await
-    }
-
-    /// Submit the pending intents of each marked app that is ready here,
-    /// under its current assignment. Retirement stops an app's pass. Failures
-    /// leave intents for the next pass or the manager's reconciliation job.
-    pub(crate) async fn publish_marked(&self, apps: BTreeSet<AppId>) {
-        let entries: Vec<_> = {
-            let current = self.entries.borrow();
-            apps.iter()
-                .filter_map(|app| current.get(app).cloned())
-                .collect()
-        };
-        let mut passes: FuturesUnordered<_> = entries
-            .iter()
-            .map(|entry| self.publish_entry(entry))
-            .collect();
-        while let Some(result) = passes.next().await {
-            if let Err(error) = result {
-                tracing::warn!(
-                    code = error.code(),
-                    "workflow publication left to manager reconciliation"
-                );
-            }
-        }
-    }
-
-    async fn publish_entry(&self, entry: &Rc<Entry<F::Journal>>) -> Result<(), WorkflowServiceError> {
-        let app = entry
-            .ready
-            .borrow()
-            .as_ref()
-            .map(|ready| ready.runtime.app.clone());
-        // An app that is not ready yet is marked again when it becomes ready.
-        let Some(app) = app else {
-            return Ok(());
-        };
-        let publisher = AssignedPublisher::new(&self.client, entry.policies.scope().clone());
-        // A local binding, so the unfinished half drops before what it borrows.
-        let selected = futures::future::select(
-            entry.stopped.clone(),
-            JournalDuties::drain(&app, &publisher, self.options.operation_timeout).boxed_local(),
-        )
-        .await;
-        match selected {
-            Either::Left(_) => Err(retired()),
-            Either::Right((result, _)) => result,
-        }
     }
 
     /// Permanently close this host's bindings, including pending preparation.
@@ -612,10 +532,11 @@ impl<F: CreatorFactory> AssignmentBindings<F> {
                 runtime.executor.clone(),
             )?,
         };
-        let app = binding.app_id().clone();
-        let (backend, first) = match previous {
-            Some((_, backend)) => (backend, false),
-            None => (runtime.backend.clone(), true),
+        // The backend of a generation already published stays the one published:
+        // a refresh inside one placement replaces neither it nor its consumer.
+        let backend = match previous {
+            Some((_, backend)) => backend,
+            None => runtime.backend.clone(),
         };
         *entry.ready.borrow_mut() = Some(Ready {
             runtime,
@@ -625,10 +546,6 @@ impl<F: CreatorFactory> AssignmentBindings<F> {
         self.publish()?;
         // Admit request ingress last, once delivered work can also be claimed.
         self.ready.install(backend);
-        if first {
-            // A previous process may have committed intents it never published.
-            self.wake.mark(&app);
-        }
         Ok(())
     }
 }
