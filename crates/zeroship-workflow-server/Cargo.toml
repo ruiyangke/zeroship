@@ -32,11 +32,14 @@ zeroship-workflow-manager = { workspace = true }
 zeroship-workflow-schema = { workspace = true }
 zeroship-workflow-client = { workspace = true }
 # The engine, for the creator-facing calls this service answers over its own
-# journal. It reaches no payload storage: `PayloadObjects` and
-# `ObjectStepOutputs` live in `zeroship-workflow-runner`, which
-# `workflow_process_dependencies_follow_crate_ownership` forbids this crate from
-# reaching, so the methods that move payload bytes are not served here.
+# journal and for the sweeps its own lane claims.
 zeroship-workflow = { workspace = true }
+# The payload object store. Blob storage keeps large objects out of the
+# database, so the process that owns the journal is the one that writes them:
+# `crate::payloads` binds the platform namespace here and supplies the writer
+# and the deleter the journal sweeps take as arguments. The S3 feature is on
+# because a deployment's payload store is the shared one its workers read.
+zeroship-storage = { workspace = true, features = ["s3"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

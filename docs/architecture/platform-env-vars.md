@@ -342,6 +342,7 @@ Every environment name below is `ZEROSHIP_<CANONICAL>` and every overlay path is
 | `workflow.driver_lane_timeout_ms` | operational | `ZEROSHIP_WORKFLOW_DRIVER_LANE_TIMEOUT_MS` | `workflow.driver_lane_timeout_ms` | zeroship-workflow-server `--driver-lane-timeout-ms` | `10000` |
 | `workflow.http_threads` | operational | `ZEROSHIP_WORKFLOW_HTTP_THREADS` | `workflow.http_threads` | zeroship-workflow-server `--http-threads` | `2` |
 | `workflow.listen` | operational | `ZEROSHIP_WORKFLOW_LISTEN` | `workflow.listen` | zeroship-workflow-server `--listen` | `127.0.0.1:9093` |
+| `workflow.maintenance_sweeps` | operational | `ZEROSHIP_WORKFLOW_MAINTENANCE_SWEEPS` | `workflow.maintenance_sweeps` | zeroship-workflow-server `--maintenance-sweeps` | `true` |
 | `workflow.max_connections` | operational | `ZEROSHIP_WORKFLOW_MAX_CONNECTIONS` | `workflow.max_connections` | zeroship-workflow-server `--max-connections` | `1024` |
 | `workflow.max_pending_management` | operational | `ZEROSHIP_WORKFLOW_MAX_PENDING_MANAGEMENT` | `workflow.max_pending_management` | zeroship-workflow-server `--max-pending-management` | `1024` |
 | `workflow.max_request_bytes` | operational | `ZEROSHIP_WORKFLOW_MAX_REQUEST_BYTES` | `workflow.max_request_bytes` | zeroship-workflow-server `--max-request-bytes` | `crate::api::DEFAULT_MAX_REQUEST_BYTES` |
@@ -350,6 +351,7 @@ Every environment name below is `ZEROSHIP_<CANONICAL>` and every overlay path is
 | `workflow.replay_sweep_ms` | operational | `ZEROSHIP_WORKFLOW_REPLAY_SWEEP_MS` | `workflow.replay_sweep_ms` | zeroship-workflow-server `--replay-sweep-ms` | `30000` |
 | `workflow.service_key_file` | operational | `ZEROSHIP_WORKFLOW_SERVICE_KEY_FILE` | `workflow.service_key_file` | zeroship-workflow-server `--service-key-file` | empty |
 | `workflow.service_peers_file` | operational | `ZEROSHIP_WORKFLOW_SERVICE_PEERS_FILE` | `workflow.service_peers_file` | zeroship-workflow-server `--service-peers-file` | empty |
+| `workflow.storage_url` | operational | `ZEROSHIP_WORKFLOW_STORAGE_URL` | `workflow.storage_url` | zeroship-workflow-server `--storage-url` | empty |
 | `workflow.worker_ttl_ms` | operational | `ZEROSHIP_WORKFLOW_WORKER_TTL_MS` | `workflow.worker_ttl_ms` | zeroship-workflow-server `--worker-ttl-ms` | `30000` |
 
 <!-- END GENERATED CONFIGURATION CONTRACT -->

@@ -129,7 +129,9 @@ async fn outcome_families(fixture: &Fixture) {
         changed.successors = vec![job(&app, &DeploymentId::mint())];
         refused(fixture, &queue, &authority, &changed, Error::Conflict).await;
         assert_eq!(queue.settle(&authority, &attempt).await.unwrap(), receipt);
-        finish(&queue, &authority, &successor).await;
+        // The successor is a journal sweep, so the lane that owns the queue is
+        // what discharges it; the settlement above was the creator row's.
+        finish_sweep(&queue, &app, &successor).await;
         assert_eq!(faults.acquired.get(), acquired);
         assert_eq!(faults.released.get(), released);
     }

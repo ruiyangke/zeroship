@@ -15,6 +15,7 @@ use zeroship_core::{
     workflow_jobs::{DeploymentId, JobId, JobOperation, JobOutcome, JobSpec},
     workflow_policy::AppPolicy,
 };
+use zeroship_storage::StorageBackendConfig;
 use zeroship_workflow::{
     deploy_registrations::{DeployRegistrationSource, RemoteDeployRegistrations},
     deployment_holds::ServiceHolds,
@@ -26,7 +27,10 @@ use zeroship_workflow_manager::{
     policy::{PolicyObservation, PolicySource},
     recovery::Options as RecoveryOptions,
 };
-use zeroship_workflow_server::sweeps::{MaintenanceLane, Swept};
+use zeroship_workflow_server::{
+    payloads::ServicePayloads,
+    sweeps::{MaintenanceLane, Swept},
+};
 
 /// One observation, so binding installs a real lease rather than a stub.
 #[derive(Debug)]
@@ -288,11 +292,15 @@ async fn the_lane_settles_a_hold_release_control_accepted() {
         )
         .unwrap(),
     ));
+    // The store the lane holds. The release this case drives touches no object,
+    // so the root stays empty; a lane without one could not be composed at all.
+    let objects = tempfile::tempdir().unwrap();
     let lane = MaintenanceLane::new(
         queue.clone(),
         runs,
         policies as Rc<dyn PolicySource>,
         WorkerId::mint(),
+        ServicePayloads::open(&StorageBackendConfig::Local(objects.path().to_owned())).unwrap(),
         MaintenanceOptions::default(),
     )
     .unwrap();

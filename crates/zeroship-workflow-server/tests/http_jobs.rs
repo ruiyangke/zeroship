@@ -8,6 +8,14 @@
 mod platform;
 #[path = "support/app_facts.rs"]
 mod app_facts;
+#[allow(
+    dead_code,
+    reason = "shared journal seeding also serves the creator-facing run suites"
+)]
+#[path = "support/journal.rs"]
+mod journal;
+#[path = "support/holds.rs"]
+mod holds;
 #[path = "support/policy.rs"]
 mod policy_fixture;
 #[allow(
@@ -27,8 +35,17 @@ use ntex::{client::Client, http::StatusCode};
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::time::Duration;
+use zeroship_workflow::service::delivery::{
+    AcceptedJob, ClaimedTask, RenewedTask, ReportedExecution,
+};
+use zeroship_workflow_client::{ClaimedDelivery, RenewDelivery, RenewedDelivery, SettleDelivery};
+use zeroship_data_orm::binding::DbBinding;
+use zeroship_workflow_manager::{
+    maintenance::MaintenanceAuthority, Options as QueueOptions, Queue,
+};
 use zeroship_core::{
     app_id::AppId,
+    schema_name::SchemaName,
     service_assertion::{ServiceAssertionMinter, ServiceIssuer, ServiceSigningKey},
     service_identity::{endpoints, ServiceEndpoint},
     service_peers::{service_issuer, CONTROL_SERVICE_NAME},
@@ -36,12 +53,21 @@ use zeroship_core::{
         AssignedScope, Assignment, RequestId, RunId, RunOperation, WorkerId, AUDIENCE,
     },
     workflow_jobs::{
-        Delivery, DeliveryLease, DeploymentId, JobId, JobOperation, JobOutcome, JobSpec,
+        Delivery, DeploymentId, JobId, JobOperation, JobOutcome, JobSpec,
         ManagementCommand, Settlement, SettlementReceipt, SubmitJob,
     },
     workflow_policy::AppPolicy,
     workflow_schedules::ScheduleId,
 };
+
+/// A renewal request naming no journal task: the caller holds a queue lease and
+/// no task under it, which is every maintenance operation.
+fn renewal(delivery: &Delivery) -> RenewDelivery<ClaimedTask> {
+    RenewDelivery {
+        delivery: delivery.clone(),
+        task: None,
+    }
+}
 
 struct Worker {
     id: WorkerId,
@@ -74,6 +100,21 @@ struct Fixture {
     assignment: Assignment,
     control: ServiceIssuer,
     control_key: ServiceSigningKey,
+    /// The journal run and deployment this service's own journal holds for the
+    /// placed app.
+    ///
+    /// A claim now accepts into that journal in the same exchange, so the app has
+    /// to exist there for any advance job to be claimable at all -- the journal's
+    /// `lock_app_state` refuses an app it has never seen. Seeding is the ARRANGE
+    /// step: nothing asserted below is written by it.
+    run: RunId,
+    deploy: DeploymentId,
+    /// The queue the spawned service owns, opened a second time in this process
+    /// so a sweep can be claimed the way the service's own lane claims one.
+    queue: Queue,
+    /// The in-process authority that stands in for the service's maintenance
+    /// lane. See [`Fixture::swept`] for why a sweep cannot be claimed over HTTP.
+    lane: MaintenanceAuthority,
 }
 impl Fixture {
     async fn new() -> Self {
@@ -89,7 +130,13 @@ impl Fixture {
             .unwrap(),
         );
         let http = Client::new().await;
-        let server = server_process::ServerProcess::start(
+        // No sweep lane on this host. Every case in this target is about a queue
+        // ROUTE -- what submit, claim, renew and settle accept, authenticate and
+        // record -- and the sweep it arranges is arranged so the settle route has
+        // a delivery to discharge. The lane claims under an authority no
+        // placement expiry fences, so a running one would take that row first and
+        // the route under test would never see it.
+        let server = server_process::ServerProcess::without_maintenance_sweeps(
             &platform.runtime_url,
             &peers,
             platform.work.path(),
@@ -104,6 +151,21 @@ impl Fixture {
         let assignment = platform
             .seed_placement(&app, &worker.id, Duration::from_secs(30))
             .await;
+        let run = journal::seed_run(&platform, &app).await;
+        let deploy = DeploymentId::parse(&app.as_str().replacen("app_", "dep_", 1)).unwrap();
+        let queue = Queue::connect(
+            DbBinding::platform(
+                "workflow_manager",
+                "workflow_manager",
+                SchemaName::new("workflow_manager").unwrap(),
+            ),
+            &platform.runtime_url,
+            QueueOptions::default(),
+            holds::client(),
+        )
+        .await
+        .unwrap();
+        let lane = MaintenanceAuthority::new(app, worker.id.clone());
         Self {
             platform,
             http,
@@ -112,6 +174,10 @@ impl Fixture {
             assignment,
             control,
             control_key,
+            run,
+            deploy,
+            queue,
+            lane,
         }
     }
     fn scope(&self) -> AssignedScope {
@@ -157,18 +223,106 @@ impl Fixture {
         assert_eq!(serde_json::from_value::<JobSpec>(body).unwrap(), *job);
     }
     async fn claim(&self, job: &JobSpec) -> Delivery {
+        self.claimed(job).await.0
+    }
+
+    /// One exchange, both halves: the queue lease and, for the one operation that
+    /// hands out a task, the journal acceptance that authorizes executing it.
+    async fn claimed(&self, job: &JobSpec) -> (Delivery, Option<AcceptedJob>) {
         let (status, body) = self
             .post(endpoints::WORKFLOW_JOB_CLAIM, &self.scope())
             .await;
         assert_eq!(status, StatusCode::OK, "{body}");
-        let lease: DeliveryLease = serde_json::from_value(body).unwrap();
+        let claimed: ClaimedDelivery<AcceptedJob> = serde_json::from_value(body).unwrap();
+        let lease = claimed.lease;
         assert!(lease.remaining_ms.get() > 0);
         assert_eq!(lease.delivery.job, *job);
         assert_eq!(lease.delivery.worker_id, self.worker.id);
         assert_eq!(lease.delivery.assignment_revision, self.assignment.revision);
         assert!(lease.delivery.deadline <= self.assignment.expires_at);
-        lease.delivery
+        assert_eq!(
+            claimed.accepted.is_some(),
+            job.operation.accepts_execution(),
+            "a claim carries a journal acceptance for exactly the executable kind"
+        );
+        (lease.delivery, claimed.accepted)
     }
+
+    /// Take the next sweep off this app's queue, in process, under the authority
+    /// the service's own maintenance lane asserts.
+    ///
+    /// THERE IS NO WIRE CLAIM FOR A SWEEP. `WORKFLOW_JOB_CLAIM` claims as
+    /// `Claimant::Placed` (`Coordinator::claim_job`), and that claimant admits
+    /// `advance` alone, so every journal sweep belongs to the lane. The cases
+    /// below are about what the SETTLE route does with a sweep's delivery, and
+    /// `Queue::settle` is not claimant-scoped: it authorizes on the assignment
+    /// and on `settlement.delivery.worker_id`. So the delivery is arranged here
+    /// and exercised over HTTP from there.
+    ///
+    /// The authority carries this fixture's own worker id rather than a fresh
+    /// one, because that is the identity the settle route authenticates. Its
+    /// asserted revision is `1`, which is the revision `seed_placement` records,
+    /// so the placement read behind the settle route resolves the same authority
+    /// this lease names.
+    async fn swept(&self) -> Delivery {
+        assert_eq!(
+            self.post(endpoints::WORKFLOW_JOB_CLAIM, &self.scope())
+                .await,
+            (StatusCode::OK, Value::Null),
+            "the wire claim offers a placed worker no sweep"
+        );
+        let delivery = self
+            .lane
+            .claim(&self.queue, Ok(AppPolicy::default().max_delivery_attempts))
+            .await
+            .unwrap()
+            .expect("the queue holds a sweep for the lane to claim")
+            .delivery()
+            .clone();
+        assert_eq!(delivery.worker_id, self.worker.id);
+        assert_eq!(delivery.assignment_revision, self.assignment.revision);
+        delivery
+    }
+
+    /// As [`Self::swept`], for a case that published the sweep it expects back.
+    async fn sweep(&self, job: &JobSpec) -> Delivery {
+        let delivery = self.swept().await;
+        assert_eq!(delivery.job, *job);
+        delivery
+    }
+
+    /// An advance job for the run this service's journal actually holds, so the
+    /// journal half of its claim hands out a task rather than settling a frontier
+    /// it has never seen.
+    fn executable(&self) -> JobSpec {
+        JobSpec {
+            id: JobId::mint(),
+            app_id: self.assignment.app_id.clone(),
+            operation: JobOperation::Advance {
+                deployment_id: self.deploy.clone(),
+                run_id: self.run.clone(),
+                generation: 0,
+                revision: 1.try_into().unwrap(),
+            },
+            available_at: 1.try_into().unwrap(),
+        }
+    }
+    /// The journal state of one dispatched task, read from the row rather than
+    /// from a reply, so a merged exchange is measured by what it wrote.
+    async fn task_state(&self, task: &str) -> Vec<String> {
+        self.platform
+            .admin
+            .query(
+                "SELECT state FROM workflow_manager.__zeroship_workflow_tasks WHERE id=$1",
+                &[&task],
+            )
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| row.get(0))
+            .collect()
+    }
+
     async fn job_snapshot(&self, job: &JobSpec) -> Vec<String> {
         self.platform
             .admin
@@ -252,10 +406,15 @@ async fn delivery_and_receipts_remain_scoped_across_process_restart_and_placemen
         (StatusCode::OK, Value::Null)
     );
     let (status, body) = fixture
-        .post(endpoints::WORKFLOW_JOB_HEARTBEAT, &original)
+        .post(endpoints::WORKFLOW_JOB_HEARTBEAT, &renewal(&original))
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    let renewed: DeliveryLease = serde_json::from_value(body).unwrap();
+    let renewed: RenewedDelivery<RenewedTask> = serde_json::from_value(body).unwrap();
+    assert!(
+        renewed.renewal.is_none(),
+        "a renewal that named no journal task answers with the queue half alone"
+    );
+    let renewed = renewed.lease;
     assert_eq!(renewed.delivery.job, original.job);
     assert_eq!(renewed.delivery.attempt, original.attempt);
     assert!(renewed.delivery.deadline >= original.deadline);
@@ -369,7 +528,7 @@ async fn assert_foreign_worker_denied(fixture: &Fixture, command: &Settlement) {
         ),
         (
             endpoints::WORKFLOW_JOB_HEARTBEAT,
-            serde_json::to_value(&command.delivery).unwrap(),
+            serde_json::to_value(renewal(&command.delivery)).unwrap(),
         ),
         (
             endpoints::WORKFLOW_JOB_SETTLE,
@@ -584,7 +743,7 @@ async fn queue_routes_authenticate_before_body_and_reject_open_metadata() {
         ),
         (
             endpoints::WORKFLOW_JOB_HEARTBEAT,
-            serde_json::to_value(&delivery).unwrap(),
+            serde_json::to_value(renewal(&delivery)).unwrap(),
         ),
         (
             endpoints::WORKFLOW_JOB_SETTLE,
@@ -617,7 +776,29 @@ async fn queue_routes_authenticate_before_body_and_reject_open_metadata() {
             fixture.post(endpoint, &body).await.0,
             StatusCode::BAD_REQUEST
         );
-        body["customerPayload"] = json!("x".repeat(2048));
+        // EACH ROUTE IS PROBED AGAINST ITS OWN BUDGET. The settlement route
+        // answers to the journal ceiling its outcome batch belongs to rather than
+        // to the service metadata budget, so one shared pad would measure the
+        // metadata budget three times and this one not at all.
+        let settle = endpoint.path_template() == endpoints::WORKFLOW_JOB_SETTLE.path_template();
+        if settle {
+            // IN BOTH DIRECTIONS, because the refusal below cannot tell the two
+            // budgets apart: a body over the larger one is over the smaller one
+            // too. This arm is the one that fails if the settlement route ever
+            // falls back to the service-wide budget -- a pad past THAT budget and
+            // short of this route's is refused for what it says, not its size.
+            body["customerPayload"] = json!("x".repeat(server_process::MAX_REQUEST_BYTES + 1));
+            assert_eq!(
+                fixture.post(endpoint, &body).await.0,
+                StatusCode::BAD_REQUEST
+            );
+        }
+        let budget = if settle {
+            zeroship_workflow_server::api::SETTLE_BODY_BYTES
+        } else {
+            server_process::MAX_REQUEST_BYTES
+        };
+        body["customerPayload"] = json!("x".repeat(budget + 1));
         assert_eq!(
             fixture.post(endpoint, &body).await.0,
             StatusCode::PAYLOAD_TOO_LARGE
@@ -779,6 +960,9 @@ async fn revoking_a_join_signer_denies_its_worker_while_a_sibling_signer_stays_a
     assert_eq!(register_status, StatusCode::OK, "{body}");
     let app_g = AppId::mint();
     policy_fixture::provision(&fixture.platform, &app_g, &AppPolicy::default()).await;
+    // A second app claims here too, and a claim now accepts into this service.s
+    // journal in the same exchange, so this app has to exist there as well.
+    journal::seed_run(&fixture.platform, &app_g).await;
     let assignment_g = fixture
         .platform
         .seed_placement(&app_g, &worker_g.id, Duration::from_secs(30))
@@ -914,13 +1098,11 @@ async fn management_receipt_replay_rechecks_enrollment_after_linkage_reads() {
     )
     .await;
     assert_eq!(accepted.0, StatusCode::OK, "{:?}", accepted.1);
-    let (status, body) = fixture
-        .post(endpoints::WORKFLOW_JOB_CLAIM, &fixture.scope())
-        .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    let lease: DeliveryLease = serde_json::from_value(body).unwrap();
+    // Management is a sweep, so the lane claims it. What this case is about
+    // begins at the settle route below.
+    let delivery = fixture.swept().await;
     assert_eq!(
-        lease.delivery.job.operation,
+        delivery.job.operation,
         JobOperation::Management {
             request_id: request.request_id,
             run_id: request.run_id,
@@ -931,7 +1113,7 @@ async fn management_receipt_replay_rechecks_enrollment_after_linkage_reads() {
         }
     );
     let settlement = Settlement {
-        delivery: lease.delivery,
+        delivery,
         outcome: JobOutcome::Management {
             outcome: ManagementOutcome::NotFound {},
         },
@@ -1073,7 +1255,7 @@ async fn blocked_request(fixture: &Fixture, job: &JobSpec, kind: RequestKind) ->
     }
     let delivery = fixture.claim(job).await;
     if matches!(kind, RequestKind::Heartbeat) {
-        return serde_json::to_value(delivery).unwrap();
+        return serde_json::to_value(renewal(&delivery)).unwrap();
     }
     let command = settlement(&delivery, Vec::new());
     if matches!(kind, RequestKind::Replay) {
@@ -1160,5 +1342,102 @@ async fn replace_enrollment(fixture: &Fixture, public_key: [u8; 32]) {
             &[&fixture.worker.id.as_str(), &public_key.to_vec()],
         ).await.unwrap(),
         1
+    );
+}
+
+/// One exchange carries both halves, at every stage of one delivery.
+///
+/// This is asserted against a live service rather than inferred from the halves:
+/// the claim answers a queue lease AND the task the journal accepted under it,
+/// one renewal extends both leases, and one settlement commits the execution and
+/// answers with the outcome that commit decided. The journal rows read back are
+/// written by the endpoints; the fixture seeds only the run they act on.
+#[ntex::test]
+async fn one_exchange_carries_the_queue_and_journal_halves_of_a_delivery() {
+    let fixture = Fixture::new().await;
+    let job = fixture.executable();
+    fixture.submit(&job).await;
+    let (delivery, accepted) = fixture.claimed(&job).await;
+    let AcceptedJob::Execute {
+        assignment,
+        remaining_ms,
+    } = accepted.expect("an advance job carries a journal acceptance")
+    else {
+        panic!("the journal holds this run, so its acceptance hands out a task")
+    };
+    assert_eq!(assignment.invocation.run_id, fixture.run.as_str());
+    assert_eq!(assignment.invocation.deploy_id, fixture.deploy.as_str());
+    let task = ClaimedTask {
+        id: assignment.id.clone(),
+        token: assignment.token.clone(),
+        remaining_ms,
+    };
+    assert_eq!(
+        fixture.task_state(&assignment.id).await,
+        vec!["leased".to_owned()],
+        "the journal half of the claim wrote the task the reply describes"
+    );
+
+    // ONE RENEWAL, BOTH LEASES. The queue's deadline moves and the journal's
+    // does too, in the one exchange.
+    let (status, body) = fixture
+        .post(
+            endpoints::WORKFLOW_JOB_HEARTBEAT,
+            &RenewDelivery {
+                delivery: delivery.clone(),
+                task: Some(task.clone()),
+            },
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let renewed: RenewedDelivery<RenewedTask> = serde_json::from_value(body).unwrap();
+    assert_eq!(renewed.lease.delivery.job, delivery.job);
+    assert_eq!(renewed.lease.delivery.attempt, delivery.attempt);
+    let renewal = renewed
+        .renewal
+        .expect("a renewal that named a task answers for it");
+    assert_eq!(
+        renewal.control,
+        zeroship_workflow::service::ControlIntent::None,
+        "the renewal carries the run control intent read in its own transaction"
+    );
+    let extended = renewal
+        .extended
+        .expect("admission and dispatch are on, so the renewal extended the task");
+    assert!(extended.deadline > assignment.deadline);
+
+    // THE FRONTIER RIDES THE SETTLEMENT. The outcome is not sent: the journal
+    // decides it when it commits the batch, and it comes back on the receipt.
+    let (status, body) = fixture
+        .post(
+            endpoints::WORKFLOW_JOB_SETTLE,
+            &SettleDelivery {
+                delivery: delivery.clone(),
+                outcome: None,
+                successors: Vec::new(),
+                execution: Some(ReportedExecution {
+                    grant_ms: Some(extended.remaining_ms),
+                    task: ClaimedTask {
+                        remaining_ms: extended.remaining_ms,
+                        ..task
+                    },
+                    confirmed: Vec::new(),
+                    execution: zeroship_workflow::WorkflowExecution::from_runtime_value(
+                        json!({"outcomes":[{"kind":"RunCompleted"}]}),
+                    )
+                    .unwrap(),
+                }),
+            },
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let receipt: SettlementReceipt = serde_json::from_value(body).unwrap();
+    assert_eq!(receipt.job_id, job.id);
+    assert_eq!(receipt.attempt, delivery.attempt);
+    assert_eq!(receipt.outcome, JobOutcome::Completed {});
+    assert_eq!(
+        fixture.task_state(&assignment.id).await,
+        vec!["completed".to_owned()],
+        "the journal half committed before the queue was settled with its outcome"
     );
 }

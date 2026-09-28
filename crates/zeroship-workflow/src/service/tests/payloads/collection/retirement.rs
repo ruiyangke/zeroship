@@ -1,10 +1,8 @@
 use super::*;
-use std::future::ready;
-use zeroship_core::workflow_coordination::{AssignedScope, RegisterWorker, WorkerState};
 use zeroship_workflow_manager::{
-    coordinator::{self, Coordinator},
+    maintenance::MaintenanceAuthority,
     recovery::{self, DutyKind, Recovery, ScopeState},
-    DeliveryGrant,
+    DeliveryGrant, Queue,
 };
 
 /// Every committed intent was delivered and settled by the manager.
@@ -18,27 +16,22 @@ impl crate::service::publication::JobPublisher for Settled {
     }
 }
 
-/// The manager's queue in its own database, with one worker placed on the app.
+/// The manager's queue in its own database, swept by the lane that owns it.
+///
+/// No worker is registered and no placement exists. Collection and closure are
+/// sweeps, so the host that owns the journal is what claims them, and it asserts
+/// its own authority rather than reading one: a claim that succeeds here with no
+/// `assignments` row is that authority working.
 struct Manager {
     _database: crate::service::tests::publication::Manager,
-    coordinator: Coordinator,
+    queue: Queue,
     recovery: Recovery,
-    worker: WorkerId,
-    scope: AssignedScope,
+    authority: MaintenanceAuthority,
 }
 
 impl Manager {
     async fn new(app: &AppId) -> Self {
         let database = crate::service::tests::publication::Manager::new(app).await;
-        let coordinator =
-            Coordinator::new(
-                database.queue.clone(),
-                coordinator::Options::default(),
-                std::rc::Rc::new(zeroship_workflow_manager::eligibility::LocalEligibility::new(
-                    zeroship_workflow_manager::eligibility::ZoneId::default_zone(),
-                )),
-            )
-            .unwrap();
         // Duties fall due at once, so each Collect below is delivered on demand.
         let recovery = Recovery::new(
             database.queue.clone(),
@@ -48,23 +41,6 @@ impl Manager {
             },
         )
         .unwrap();
-        let worker = WorkerId::mint();
-        coordinator
-            .register(
-                &worker,
-                &RegisterWorker {
-                    capacity: 1.try_into().unwrap(),
-                    state: WorkerState::Ready,
-                },
-            )
-            .await
-            .unwrap();
-        // The manager places the app; this worker is its only capacity.
-        let zeroship_workflow_manager::coordinator::Placed::Assigned(assignment) =
-            coordinator.place(app).await.unwrap()
-        else {
-            panic!("the local host is the app's only eligible worker");
-        };
         recovery
             .ensure(
                 app,
@@ -74,21 +50,17 @@ impl Manager {
             .await
             .unwrap();
         Self {
+            queue: database.queue.clone(),
             _database: database,
-            coordinator,
             recovery,
-            worker,
-            scope: AssignedScope {
-                app_id: assignment.app_id,
-                assignment_revision: assignment.revision,
-            },
+            authority: MaintenanceAuthority::new(app.clone(), WorkerId::mint()),
         }
     }
 
     async fn claim(&self, expected: &JobSpec) -> DeliveryGrant {
         let grant = self
-            .coordinator
-            .claim_job(&self.worker, &self.scope, Ok(AppPolicy::default().max_delivery_attempts), || ready(Ok(self.worker.clone())))
+            .authority
+            .claim(&self.queue, Ok(AppPolicy::default().max_delivery_attempts))
             .await
             .unwrap()
             .expect("the manager delivers its maintenance job");
@@ -97,10 +69,8 @@ impl Manager {
     }
 
     async fn settle(&self, receipt: &crate::service::delivery::JobReceipt, grant: &DeliveryGrant) {
-        self.coordinator
-            .settle_job(&self.worker, &receipt.settlement(grant).unwrap(), || {
-                ready(Ok(self.worker.clone()))
-            })
+        self.authority
+            .settle(&self.queue, &receipt.settlement(grant).unwrap())
             .await
             .unwrap();
     }
@@ -109,7 +79,7 @@ impl Manager {
     async fn collect(&self, scope: &AppWorkflows, objects: &Objects) {
         let job = self
             .recovery
-            .dispatch(&self.scope.app_id, DutyKind::Collect)
+            .dispatch(self.authority.app(), DutyKind::Collect)
             .await
             .unwrap()
             .unwrap();
@@ -126,7 +96,7 @@ impl Manager {
     async fn close(&self, scope: &AppWorkflows) -> bool {
         let job = self
             .recovery
-            .begin_close(&self.scope.app_id)
+            .begin_close(self.authority.app())
             .await
             .unwrap()
             .unwrap();
@@ -141,7 +111,7 @@ impl Manager {
 
     async fn state(&self) -> ScopeState {
         self.recovery
-            .responsibility(&self.scope.app_id)
+            .responsibility(self.authority.app())
             .await
             .unwrap()
             .unwrap()

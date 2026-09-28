@@ -42,22 +42,10 @@ use zeroship_core::{
     app_derivation, app_id::AppId, config::PlaintextPeers, schema_name::SchemaName,
     service_peers::ServiceAuth, workflow_coordination::AssignedScope,
 };
-use zeroship_data_orm::{
-    binding::{DbBinding, COLD_START_DEPLOY_TOKEN},
-    encryption::ProjectKeySource,
-};
 use zeroship_data_v8::service::DbService;
 use zeroship_runtime::NativePlugin;
 use zeroship_storage::{StorageBackendConfig, StorageStore};
-use zeroship_workflow::{
-    deployment_holds::{AssignedHolds, RemoteDeploymentHolds},
-    service::{
-        maintenance::MaintenanceOptions,
-        store::HostStorage,
-        AppDeployments, HostPolicies,
-    },
-    WorkflowServiceError,
-};
+use zeroship_workflow::{service::HostPolicies, WorkflowServiceError};
 use zeroship_workflow_client::{Options as ClientOptions, Transport, WorkerCoordinator};
 use zeroship_workflow_runner::{
     assignments::AssignmentOptions,
@@ -133,7 +121,6 @@ impl WorkflowHostConfig {
                     execution_timeout: EXECUTION_TIMEOUT,
                     operation_timeout: OPERATION_TIMEOUT,
                     retry_delay: RETRY_DELAY,
-                    maintenance: MaintenanceOptions::default(),
                 },
             },
             assignments: AssignmentOptions {
@@ -160,40 +147,12 @@ impl WorkflowHostConfig {
 /// Process resources the host composes creator execution from. Every one of
 /// them is already the worker's own: nothing here arrives with a placement.
 #[allow(missing_debug_implementations)]
-/// Which schema an app's workflow journal is installed in.
-///
-/// The journal discriminates tenants by an `app_id` COLUMN, not by schema, so
-/// one installation can hold every app. That is what makes this a choice
-/// rather than a derivation.
-#[derive(Clone, Debug)]
-pub enum JournalLocation {
-    /// One journal per app, in the app's own schema beside its creator tables.
-    CreatorSchema,
-    /// One journal for every app, in a schema the service owns.
-    Service(SchemaName),
-}
-
-impl JournalLocation {
-    /// The schema this app's journal lives in.
-    ///
-    /// # Errors
-    /// Refuses an app whose derived schema name is not a legal identifier.
-    fn schema(&self, app: &AppId) -> Result<SchemaName, WorkflowServiceError> {
-        match self {
-            Self::CreatorSchema => app_schema(app),
-            Self::Service(schema) => Ok(schema.clone()),
-        }
-    }
-}
-
 pub struct HostResources {
     /// The enrolled instance identity every manager and Control call uses.
     pub service_auth: Arc<ServiceAuth>,
     pub control_url: String,
     /// The creator database service `env.db` uses; journals share its login.
     pub db_service: Arc<DbService>,
-    /// Which schema this host installs app journals in.
-    pub journal: JournalLocation,
     /// The creator object store `env.storage` uses; payloads live there.
     pub storage: StorageBackendConfig,
     pub kv_store: Option<zeroship_kv::KvStore>,
@@ -317,20 +276,19 @@ async fn run(
     )
     .map_err(|error| format!("workflow manager client: {error}"))?;
     let worker = client.worker_id().clone();
-    // The SAME enrolled client the host coordinates through. A refused journal is
-    // reported under the worker instance identity that found it, so the manager
-    // can attribute the repair.
-    let repair = Rc::new(client.clone());
     let policies = Arc::new(HostPolicies::default());
-    let provider = ProductionResources::open(resources, config.client_options())?;
+    let provider = ProductionResources::open(resources)?;
+    // The SAME enrolled client the host coordinates through. Every creator call
+    // and every task payload operation crosses on it, so a placement is served
+    // by the identity its requests are signed with.
     let factory = WorkflowCreatorFactory::new(
         provider,
         policies.clone(),
-        &worker,
+        client.clone(),
         TaskPayloadLimits::default(),
+        OPERATION_TIMEOUT,
     )
-    .map_err(|error| format!("workflow creator factory: {error}"))?
-    .with_journal_repair(repair);
+    .map_err(|error| format!("workflow creator factory: {error}"))?;
     let mut host = WorkerHost::new(client, policies, factory, ready, config.host_options())
         .map_err(|error| format!("workflow host: {error}"))?;
     tracing::info!(
@@ -353,10 +311,6 @@ async fn run(
 /// storage and artifacts are the ones this worker serves every request with.
 struct ProductionResources {
     control_url: String,
-    /// The same bounds and plaintext allowance the manager client carries: a
-    /// hold client towards Control is bound by the one list this process has.
-    client_options: ClientOptions,
-    journal: JournalLocation,
     service_auth: Arc<ServiceAuth>,
     db: Arc<DbService>,
     objects: StorageStore,
@@ -366,7 +320,7 @@ struct ProductionResources {
 }
 
 impl ProductionResources {
-    fn open(resources: HostResources, client_options: ClientOptions) -> Result<Self, String> {
+    fn open(resources: HostResources) -> Result<Self, String> {
         let objects = StorageStore::open(&resources.storage)
             .map_err(|error| format!("workflow payload storage: {error}"))?;
         let meter = Some(resources.meter.clone());
@@ -383,11 +337,9 @@ impl ProductionResources {
         peers.push(Arc::new(zeroship_runtime::auth::AuthPlugin));
         Ok(Self {
             control_url: resources.control_url,
-            client_options,
             service_auth: resources.service_auth,
             db: resources.db_service,
             objects,
-            journal: resources.journal,
             blob_store: resources.blob_store,
             envs: resources.envs.clone(),
             contexts: Rc::new(SharedContexts {
@@ -430,29 +382,20 @@ impl WorkflowResourceProvider for ProductionResources {
             sync::put_env_from_json(&self.envs, app.clone(), &env, info.env_version)
                 .map_err(|_| unavailable("workflow app environment is invalid"))?;
         }
-        let schema = self.journal.schema(app)?;
-        let holds = RemoteDeploymentHolds::new(
-            &self.control_url,
-            self.service_auth.clone(),
-            scope,
-            self.client_options.clone(),
-        )?;
-        let deployments = AppDeployments::new(
-            self.blob_store.clone(),
-            usize::try_from(MAX_SOURCE_BYTES)
-                .map_err(|_| unavailable("app source budget is not representable"))?,
-            Rc::new(AssignedHolds::new(Rc::new(holds))),
-        )?;
+        // THE RETENTION HOLD IS THE SERVICE'S. `resolve_task_executable` takes it
+        // from the deployments source bound to the journal it reads, so the hold
+        // that keeps a pinned artifact alive is taken where the pin is resolved.
+        // A second hold from this side would name a scope the service does not
+        // consult.
         Ok(WorkflowResources {
-            storage: HostStorage {
-                connection: self.db.connection().clone(),
-                keys: ProjectKeySource::supplied(self.db.project_keys().clone()),
-                binding: DbBinding::platform(app.as_str(), COLD_START_DEPLOY_TOKEN, schema),
-            },
+            // DERIVED, never selected. The assignment names an app; the schema
+            // that app's data lives in follows from the app id alone, so
+            // placement metadata cannot point an execution at another tenant.
+            schema: app_schema(app)?,
             objects: PayloadObjects::open(self.objects.clone())?,
-            deployments,
-            // No signal-capability key is provisioned to workers yet.
-            signal_authority: None,
+            artifacts: self.blob_store.clone(),
+            max_source_bytes: usize::try_from(MAX_SOURCE_BYTES)
+                .map_err(|_| unavailable("app source budget is not representable"))?,
             contexts: self.contexts.clone(),
         })
     }

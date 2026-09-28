@@ -1,7 +1,6 @@
 use super::*;
-use crate::consumer::{
-    ConsumerBindings, ConsumerOptions, ConsumerScope, JobConsumer,
-};
+use crate::consumer::{ConsumerBindings, ConsumerOptions, ConsumerScope, JobConsumer};
+use crate::PayloadObjects;
 use std::collections::VecDeque;
 use zeroship_core::workflow_jobs::DeploymentId;
 
@@ -50,15 +49,39 @@ impl Queue {
     }
 }
 impl JobTransport for Queue {
-    type Lease = Lease;
-    async fn submit(
+    /// Asked of the journal this host holds, the way the crossed transport asks
+    /// the service that holds it.
+    async fn release(
         &self,
-        _: &AssignedScope,
-        _: &JobSpec,
-    ) -> Result<JobSpec, WorkflowServiceError> {
-        panic!("advance fixture must not publish independently")
+        journal: &Self::Journal,
+        lease: &Self::Lease,
+        task: &zeroship_workflow::service::delivery::DeliveredTask,
+    ) -> Result<(), WorkflowServiceError> {
+        journal.release_job(task, lease).await
     }
-    async fn claim(&self, scope: &AssignedScope) -> Result<Option<Lease>, WorkflowServiceError> {
+    async fn receipt(
+        &self,
+        journal: &Self::Journal,
+        job: &zeroship_core::workflow_jobs::JobSpec,
+    ) -> Result<Option<zeroship_workflow::service::delivery::JobReceipt>, WorkflowServiceError> {
+        journal.job_receipt(job).await
+    }
+    type Lease = Lease;
+    /// This host holds the journal, so an attempt is scoped here rather than
+    /// server-side.
+    type Journal = AppWorkflows;
+    fn scope(
+        &self,
+        journal: &Self::Journal,
+        authority: &zeroship_workflow::service::PolicyAuthority,
+    ) -> Result<Self::Journal, WorkflowServiceError> {
+        scope_journal(journal, authority)
+    }
+    async fn claim(
+        &self,
+        journal: &AppWorkflows,
+        scope: &AssignedScope,
+    ) -> Result<Option<Claimed<Lease>>, WorkflowServiceError> {
         self.claims.borrow_mut().push(scope.clone());
         self.events.send(Event::Claimed).unwrap();
         let gate = self.claim_gate.borrow_mut().take();
@@ -68,14 +91,28 @@ impl JobTransport for Queue {
         if let Some(error) = self.claim_error.borrow_mut().take() {
             return Err(error);
         }
-        Ok(self
+        let Some(lease) = self
             .jobs
             .borrow_mut()
             .get_mut(&scope.app_id)
-            .and_then(VecDeque::pop_front))
+            .and_then(VecDeque::pop_front)
+        else {
+            return Ok(None);
+        };
+        let accepted = if lease.delivery().job.operation.accepts_execution() {
+            Some(journal.accept_job(&lease).await?)
+        } else {
+            None
+        };
+        Ok(Some(Claimed { lease, accepted }))
     }
-    async fn heartbeat(&self, lease: &Lease) -> Result<Lease, WorkflowServiceError> {
-        self.metadata.heartbeat(lease).await
+    async fn heartbeat(
+        &self,
+        journal: &AppWorkflows,
+        lease: &Lease,
+        task: &DeliveredTask,
+    ) -> Result<Renewed<Lease>, WorkflowServiceError> {
+        self.metadata.heartbeat(journal, lease, task).await
     }
     async fn settle(
         &self,
@@ -89,6 +126,22 @@ impl JobTransport for Queue {
             outcome: settlement.outcome.clone(),
         })
     }
+    async fn complete(
+        &self,
+        journal: &AppWorkflows,
+        lease: &Lease,
+        task: &DeliveredTask,
+        execution: WorkflowExecution,
+        confirmed: Vec<zeroship_workflow::service::delivery::PayloadConfirmation>,
+    ) -> Result<Completed, WorkflowServiceError> {
+        assert!(confirmed.is_empty(), "an in-process store confirms its own uploads");
+        let receipt = journal.complete_job(task, lease, execution).await?;
+        let settlement = receipt.settlement(lease)?;
+        Ok(Completed {
+            settlement: JobTransport::settle(self, &settlement).await?,
+            receipt,
+        })
+    }
 }
 fn options(slots: usize) -> ConsumerOptions {
     ConsumerOptions {
@@ -100,13 +153,13 @@ fn options(slots: usize) -> ConsumerOptions {
             execution_timeout: Duration::from_secs(10),
             operation_timeout: Duration::from_secs(1),
             retry_delay: Duration::from_millis(5),
-            maintenance: MaintenanceOptions::default(),
         },
     }
 }
-fn scope(fixture: &Fixture, revision: i64) -> ConsumerScope {
+fn scope(fixture: &Fixture, revision: i64) -> ConsumerScope<AppWorkflows> {
     ConsumerScope::new(
         fixture.app.clone(),
+        fixture.app.binding().clone(),
         AssignedScope {
             app_id: fixture.app.app_id().clone(),
             assignment_revision: revision.try_into().unwrap(),
@@ -115,7 +168,6 @@ fn scope(fixture: &Fixture, revision: i64) -> ConsumerScope {
             probe: fixture.probe.clone(),
             service: fixture.service.clone(),
         }),
-        fixture.objects.clone(),
     )
     .unwrap()
 }
@@ -123,8 +175,8 @@ fn consumer(
     queue: Rc<Queue>,
     worker: &WorkerId,
     slots: usize,
-    scopes: Vec<ConsumerScope>,
-) -> (JobConsumer<Queue>, ConsumerBindings) {
+    scopes: Vec<ConsumerScope<AppWorkflows>>,
+) -> (JobConsumer<Queue>, ConsumerBindings<AppWorkflows>) {
     let consumer = JobConsumer::new(queue, worker.clone(), options(slots)).unwrap();
     let bindings = consumer.bindings();
     bindings.replace(scopes).unwrap();
@@ -632,6 +684,90 @@ struct NativeManager {
 }
 
 impl NativeManager {
+    /// Take the next maintenance row of this app's queue as the lane that owns
+    /// it, and run it over the fixture's journal.
+    ///
+    /// Claim through the maintenance lane, under this fixture's own worker id.
+    ///
+    /// `Claimant::Placed` admits `Work::Creator` alone, so every other class is
+    /// reachable only here. This is the claim half of [`Self::sweep`], for the
+    /// cases that dispatch and settle by hand.
+    async fn lane_claim(
+        &self,
+        journal: &AppWorkflows,
+    ) -> Option<zeroship_workflow_manager::DeliveryGrant> {
+        zeroship_workflow_manager::maintenance::MaintenanceAuthority::new(
+            journal.app_id().clone(),
+            self.worker.clone(),
+        )
+        .claim(
+            self.coordinator.queue(),
+            Ok(AppPolicy::default().max_delivery_attempts),
+        )
+        .await
+        .unwrap()
+    }
+
+    /// The lane asserts its own authority: `Claimant::Placed` denies every sweep,
+    /// so a host claiming a placement can never be handed one, and the retention
+    /// duty this fixture publishes is claimable only here.
+    async fn sweep(
+        &self,
+        journal: &AppWorkflows,
+        objects: &PayloadObjects,
+    ) -> (JobSpec, JobReceipt, SettlementReceipt) {
+        self.sweep_publishing(journal, objects, &super::NoPublication(journal.app_id().clone()))
+            .await
+    }
+
+    /// As [`Self::sweep`], with the publisher the dispatch's own intents reach.
+    ///
+    /// A duty that commits creator work publishes it through a publisher rather
+    /// than on its settlement, so a case that wants the consumer to go on and
+    /// execute that work has to hand the lane one that really submits.
+    async fn sweep_publishing(
+        &self,
+        journal: &AppWorkflows,
+        objects: &PayloadObjects,
+        publisher: &impl zeroship_workflow::service::publication::JobPublisher,
+    ) -> (JobSpec, JobReceipt, SettlementReceipt) {
+        let lane = zeroship_workflow_manager::maintenance::MaintenanceAuthority::new(
+            journal.app_id().clone(),
+            self.worker.clone(),
+        );
+        let queue = self.coordinator.queue();
+        let grant = self
+            .lane_claim(journal)
+            .await
+            .expect("the lane takes the published maintenance row");
+        let job = grant.delivery().job.clone();
+        let MaintenanceOutcome::Settled(receipt) = journal
+            .maintenance_job(
+                &grant,
+                publisher,
+                objects,
+                objects,
+                MaintenanceOptions::default(),
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("the lane's dispatch settles the row it claimed")
+        };
+        // Construct once and retry the same request, the way a lane owes a lost
+        // acknowledgement: the queue commits the first attempt, the reply is
+        // dropped, and the retry must present identical metadata.
+        let settlement = receipt.settlement(&grant).unwrap();
+        let acknowledged = loop {
+            self.requests.borrow_mut().push(settlement.clone());
+            let observed = lane.settle(queue, &settlement).await.unwrap();
+            if !self.lose_ack.replace(false) {
+                break observed;
+            }
+        };
+        (job, *receipt, acknowledged)
+    }
+
     async fn new(fixture: &Fixture) -> Rc<Self> {
         use zeroship_core::workflow_coordination::{RegisterWorker, WorkerState};
         let database = crate::manager_queue::Manager::new(fixture.app.app_id()).await;
@@ -685,40 +821,69 @@ fn manager_error(error: zeroship_workflow_manager::Error) -> WorkflowServiceErro
 }
 
 impl JobTransport for NativeManager {
-    type Lease = zeroship_workflow_manager::DeliveryGrant;
-    async fn submit(
+    /// Asked of the journal this host holds, the way the crossed transport asks
+    /// the service that holds it.
+    async fn release(
         &self,
-        scope: &AssignedScope,
-        job: &JobSpec,
-    ) -> Result<JobSpec, WorkflowServiceError> {
-        self.coordinator
-            .submit_job(
-                &self.worker,
-                &SubmitJob {
-                    scope: scope.clone(),
-                    job: job.clone(),
-                },
-                || async { Ok(self.worker.clone()) },
-            )
-            .await
-            .map_err(manager_error)
+        journal: &Self::Journal,
+        lease: &Self::Lease,
+        task: &zeroship_workflow::service::delivery::DeliveredTask,
+    ) -> Result<(), WorkflowServiceError> {
+        journal.release_job(task, lease).await
+    }
+    async fn receipt(
+        &self,
+        journal: &Self::Journal,
+        job: &zeroship_core::workflow_jobs::JobSpec,
+    ) -> Result<Option<zeroship_workflow::service::delivery::JobReceipt>, WorkflowServiceError> {
+        journal.job_receipt(job).await
+    }
+    type Lease = zeroship_workflow_manager::DeliveryGrant;
+    /// This host holds the journal, so an attempt is scoped here rather than
+    /// server-side.
+    type Journal = AppWorkflows;
+    fn scope(
+        &self,
+        journal: &Self::Journal,
+        authority: &zeroship_workflow::service::PolicyAuthority,
+    ) -> Result<Self::Journal, WorkflowServiceError> {
+        scope_journal(journal, authority)
     }
     async fn claim(
         &self,
+        journal: &AppWorkflows,
         scope: &AssignedScope,
-    ) -> Result<Option<Self::Lease>, WorkflowServiceError> {
-        self.coordinator
+    ) -> Result<Option<Claimed<Self::Lease>>, WorkflowServiceError> {
+        let granted = self
+            .coordinator
             .claim_job(&self.worker, scope, Ok(AppPolicy::default().max_delivery_attempts), || async { Ok(self.worker.clone()) })
             .await
-            .map_err(manager_error)
+            .map_err(manager_error)?;
+        let Some(lease) = granted else {
+            return Ok(None);
+        };
+        let accepted = if lease.delivery().job.operation.accepts_execution() {
+            Some(journal.accept_job(&lease).await?)
+        } else {
+            None
+        };
+        Ok(Some(Claimed { lease, accepted }))
     }
-    async fn heartbeat(&self, lease: &Self::Lease) -> Result<Self::Lease, WorkflowServiceError> {
-        self.coordinator
+    async fn heartbeat(
+        &self,
+        journal: &AppWorkflows,
+        lease: &Self::Lease,
+        task: &DeliveredTask,
+    ) -> Result<Renewed<Self::Lease>, WorkflowServiceError> {
+        let lease = self
+            .coordinator
             .heartbeat_job(&self.worker, lease.delivery(), || async {
                 Ok(self.worker.clone())
             })
             .await
-            .map_err(manager_error)
+            .map_err(manager_error)?;
+        let renewal = journal.heartbeat_job(task, &lease).await?;
+        Ok(Renewed { lease, renewal })
     }
     async fn settle(
         &self,
@@ -735,6 +900,22 @@ impl JobTransport for NativeManager {
         }
         self.settled.send(()).unwrap();
         Ok(receipt)
+    }
+    async fn complete(
+        &self,
+        journal: &AppWorkflows,
+        lease: &Self::Lease,
+        task: &DeliveredTask,
+        execution: WorkflowExecution,
+        confirmed: Vec<zeroship_workflow::service::delivery::PayloadConfirmation>,
+    ) -> Result<Completed, WorkflowServiceError> {
+        assert!(confirmed.is_empty(), "an in-process store confirms its own uploads");
+        let receipt = journal.complete_job(task, lease, execution).await?;
+        let settlement = receipt.settlement(lease)?;
+        Ok(Completed {
+            settlement: JobTransport::settle(self, &settlement).await?,
+            receipt,
+        })
     }
 }
 
@@ -797,7 +978,7 @@ async fn native_manager_delivery_and_lost_ack_finish_through_separate_orm_databa
         assert_eq!(requests.len(), 2);
         assert_eq!(requests[0], requests[1]);
     }
-    assert!(manager.claim(&manager.scope).await.unwrap().is_none());
+    assert!(manager.claim(&fixture.app, &manager.scope).await.unwrap().is_none());
     assert!(fixture.app.pending_jobs(None, 1).await.unwrap().is_empty());
 }
 
@@ -837,10 +1018,20 @@ async fn manager_collect_duty_settles_without_publishing_or_executing_creator_wo
             manager.scope.assignment_revision.get(),
         )])
         .unwrap();
+    // The consumer runs THROUGHOUT, bound to the placement, and is offered
+    // nothing: `Claimant::Placed` admits `Work::Creator` alone, so a row of any
+    // other class is the lane's. Keeping it live is what makes the executor
+    // assertion below say something rather than hold vacuously.
+    let swept = RefCell::new(None);
     finished(consumer.run_until(async {
-        manager.completion.recv_async().await.unwrap();
+        *swept.borrow_mut() = Some(Box::pin(manager.sweep(&fixture.app, &fixture.objects)).await);
     }))
     .await;
+    let (settled_job, settled_receipt, acknowledged) =
+        swept.into_inner().expect("the lane settled the row it claimed");
+    assert_eq!(settled_job, collect, "the lane claimed the published row");
+    assert_eq!(settled_receipt.outcome, JobOutcome::Completed {});
+    assert_eq!(acknowledged.outcome, JobOutcome::Completed {});
     assert_eq!(fixture.probe.starts.get(), 0);
     assert!(!super::collection::has_task(&fixture).await);
     assert_eq!(
@@ -857,7 +1048,7 @@ async fn manager_collect_duty_settles_without_publishing_or_executing_creator_wo
         fixture.app.pending_jobs(None, 1).await.unwrap(),
         std::slice::from_ref(&fixture.job)
     );
-    assert!(manager.claim(&manager.scope).await.unwrap().is_none());
+    assert!(manager.claim(&fixture.app, &manager.scope).await.unwrap().is_none());
     let requests = manager.requests.borrow();
     assert_eq!(requests.len(), 2);
     assert_eq!(requests[0], requests[1]);
@@ -885,10 +1076,20 @@ async fn manager_delivers_committed_fanout_publication_without_executor() {
             manager.scope.assignment_revision.get(),
         )])
         .unwrap();
+    // The consumer runs THROUGHOUT, bound to the placement, and is offered
+    // nothing: `Claimant::Placed` admits `Work::Creator` alone, so a row of any
+    // other class is the lane's. Keeping it live is what makes the executor
+    // assertion below say something rather than hold vacuously.
+    let swept = RefCell::new(None);
     finished(consumer.run_until(async {
-        manager.completion.recv_async().await.unwrap();
+        *swept.borrow_mut() = Some(Box::pin(manager.sweep(&fixture.app, &fixture.objects)).await);
     }))
     .await;
+    let (settled_job, settled_receipt, acknowledged) =
+        swept.into_inner().expect("the lane settled the row it claimed");
+    assert_eq!(settled_job, fanout, "the lane claimed the published row");
+    assert_eq!(settled_receipt.outcome, JobOutcome::Completed {});
+    assert_eq!(acknowledged.outcome, JobOutcome::Completed {});
     assert_eq!(fixture.probe.starts.get(), 0);
     assert!(!super::collection::has_task(&fixture).await);
     assert_eq!(
@@ -905,7 +1106,7 @@ async fn manager_delivers_committed_fanout_publication_without_executor() {
         fixture.app.pending_jobs(None, 1).await.unwrap(),
         std::slice::from_ref(&fixture.job)
     );
-    assert!(manager.claim(&manager.scope).await.unwrap().is_none());
+    assert!(manager.claim(&fixture.app, &manager.scope).await.unwrap().is_none());
     let requests = manager.requests.borrow();
     assert_eq!(requests.len(), 2);
     assert_eq!(requests[0], requests[1]);
@@ -932,10 +1133,20 @@ async fn manager_delivers_committed_propagation_page_without_executor() {
             manager.scope.assignment_revision.get(),
         )])
         .unwrap();
+    // The consumer runs THROUGHOUT, bound to the placement, and is offered
+    // nothing: `Claimant::Placed` admits `Work::Creator` alone, so a row of any
+    // other class is the lane's. Keeping it live is what makes the executor
+    // assertion below say something rather than hold vacuously.
+    let swept = RefCell::new(None);
     finished(consumer.run_until(async {
-        manager.completion.recv_async().await.unwrap();
+        *swept.borrow_mut() = Some(Box::pin(manager.sweep(&fixture.app, &fixture.objects)).await);
     }))
     .await;
+    let (settled_job, settled_receipt, acknowledged) =
+        swept.into_inner().expect("the lane settled the row it claimed");
+    assert_eq!(settled_job, page, "the lane claimed the published row");
+    assert_eq!(settled_receipt.outcome, JobOutcome::Completed {});
+    assert_eq!(acknowledged.outcome, JobOutcome::Completed {});
     assert_eq!(fixture.probe.starts.get(), 0);
     assert_eq!(
         super::propagation::control(&fixture, &child).await,
@@ -955,7 +1166,7 @@ async fn manager_delivers_committed_propagation_page_without_executor() {
             |job| matches!(&job.operation, JobOperation::Advance { run_id, revision, .. }
             if run_id.as_str() == child && revision.get() == 2)
         ));
-    assert!(manager.claim(&manager.scope).await.unwrap().is_none());
+    assert!(manager.claim(&fixture.app, &manager.scope).await.unwrap().is_none());
     let requests = manager.requests.borrow();
     assert_eq!(requests.len(), 2);
     assert_eq!(requests[0], requests[1]);
@@ -998,11 +1209,29 @@ async fn manager_reconciliation_publishes_creator_work_before_the_consumer_execu
             manager.scope.assignment_revision.get(),
         )])
         .unwrap();
+    // Two claimants, one consumer run. The reconciliation is `Work::Maintenance`,
+    // which `Claimant::Placed` denies, so the lane takes it; its settlement
+    // carries the creator Advance, and THAT is what the consumer executes. The
+    // order is the point: the duty publishes creator work before the placement
+    // can be handed any.
+    let swept = RefCell::new(None);
     finished(consumer.run_until(async {
-        manager.completion.recv_async().await.unwrap();
+        *swept.borrow_mut() = Some(
+            Box::pin(manager.sweep_publishing(
+                &fixture.app,
+                &fixture.objects,
+                manager.as_ref(),
+            ))
+            .await,
+        );
         manager.completion.recv_async().await.unwrap();
     }))
     .await;
+    let (settled_job, settled_receipt, acknowledged) =
+        swept.into_inner().expect("the lane settled the duty it claimed");
+    assert_eq!(settled_job, reconciliation);
+    assert_eq!(settled_receipt.outcome, JobOutcome::Waiting {});
+    assert_eq!(acknowledged.outcome, JobOutcome::Waiting {});
     assert_eq!(
         fixture.probe.starts.get(),
         1,
@@ -1020,7 +1249,7 @@ async fn manager_reconciliation_publishes_creator_work_before_the_consumer_execu
         JobOutcome::Waiting {}
     );
     assert!(fixture.app.pending_jobs(None, 1).await.unwrap().is_empty());
-    assert!(manager.claim(&manager.scope).await.unwrap().is_none());
+    assert!(manager.claim(&fixture.app, &manager.scope).await.unwrap().is_none());
     let requests = manager.requests.borrow();
     assert_eq!(requests.len(), 3);
     assert_eq!(requests[0], requests[1]);
@@ -1174,9 +1403,17 @@ async fn closing_watermark_keeps_late_delivered_intents_across_separate_database
     assert!(fixture.app.pending_jobs(None, 1).await.unwrap().is_empty());
 
     let close = recovery.begin_close(&app).await.unwrap().unwrap();
-    let page_grant = manager.claim(&manager.scope).await.unwrap().unwrap();
+    // Both rows are `Work::Maintenance`, so both claims are the lane's: a
+    // placement admits `Work::Creator` alone and would be handed neither.
+    let page_grant = manager
+        .lane_claim(&fixture.app)
+        .await
+        .expect("the lane takes the published page");
     assert_eq!(page_grant.delivery().job, page);
-    let close_grant = manager.claim(&manager.scope).await.unwrap().unwrap();
+    let close_grant = manager
+        .lane_claim(&fixture.app)
+        .await
+        .expect("the lane takes the closure alongside it");
     assert_eq!(close_grant.delivery().job, close);
     let closed = fixture.app.close_job(&close_grant).await.unwrap();
     assert_eq!(
@@ -1248,7 +1485,7 @@ async fn closing_watermark_keeps_late_delivered_intents_across_separate_database
 /// retires exactly once. A crashed first attempt redelivered to another worker
 /// replays the committed creator receipt.
 #[compio::test]
-async fn consumer_closes_retires_once_after_lost_ack_and_redelivery() {
+async fn the_lane_closes_and_retires_once_after_lost_ack_and_redelivery() {
     use zeroship_workflow_manager::recovery::ScopeState;
     let fixture = Fixture::new(AppPolicy::default()).await;
     let app = fixture.app.app_id().clone();
@@ -1271,8 +1508,13 @@ async fn consumer_closes_retires_once_after_lost_ack_and_redelivery() {
             .unwrap();
     }
     let close = recovery.begin_close(&app).await.unwrap().unwrap();
-    // A first worker commits the creator receipt, then crashes before settling.
-    let crashed = manager.claim(&manager.scope).await.unwrap().unwrap();
+    // A first lane worker commits the creator receipt, then crashes before
+    // settling. The claim is the lane's because a closure is `Work::Maintenance`,
+    // which `Claimant::Placed` denies.
+    let crashed = manager
+        .lane_claim(&fixture.app)
+        .await
+        .expect("the lane takes the closure it published");
     assert_eq!(crashed.delivery().job, close);
     let committed = fixture.app.close_job(&crashed).await.unwrap();
     assert_eq!(committed.outcome, JobOutcome::Closed { drained: true });
@@ -1286,19 +1528,12 @@ async fn consumer_closes_retires_once_after_lost_ack_and_redelivery() {
             .unwrap(),
         1
     );
-    let mut consumer =
-        JobConsumer::new(manager.clone(), manager.worker.clone(), options(1)).unwrap();
-    consumer
-        .bindings()
-        .replace(vec![scope(
-            &fixture,
-            manager.scope.assignment_revision.get(),
-        )])
-        .unwrap();
-    finished(consumer.run_until(async {
-        manager.completion.recv_async().await.unwrap();
-    }))
-    .await;
+    // The expired row is redelivered to the lane, whose dispatch replays the
+    // receipt the crashed attempt already committed rather than closing twice.
+    let (redelivered, replayed, _) =
+        Box::pin(manager.sweep(&fixture.app, &fixture.objects)).await;
+    assert_eq!(redelivered, close);
+    assert_eq!(replayed, committed);
     {
         let requests = manager.requests.borrow();
         assert_eq!(requests.len(), 2, "the lost acknowledgement was retried");
@@ -1315,14 +1550,16 @@ async fn consumer_closes_retires_once_after_lost_ack_and_redelivery() {
     let retired = recovery.responsibility(&app).await.unwrap().unwrap();
     assert_eq!(retired.state, ScopeState::Retired);
     assert_eq!(retired.ingress_epoch, Revision::try_from(1).unwrap());
-    assert!(manager.claim(&manager.scope).await.unwrap().is_none());
+    // Settled once: neither claimant is offered it again.
+    assert!(manager.lane_claim(&fixture.app).await.is_none());
+    assert!(manager.claim(&fixture.app, &manager.scope).await.unwrap().is_none());
 }
 
 /// Archive masks admission, dispatch and ingress. The manager refuses to
 /// establish ingress, yet the consumer still delivers the manager-origin Close
 /// to the creator handler, the evidence drains and the scope retires.
 #[compio::test]
-async fn consumer_delivers_close_under_archived_policy_and_the_scope_retires() {
+async fn the_lane_delivers_close_under_archived_policy_and_the_scope_retires() {
     use zeroship_workflow_manager::recovery::ScopeState;
     let fixture = Fixture::new(AppPolicy::default()).await;
     let app = fixture.app.app_id().clone();
@@ -1396,10 +1633,19 @@ async fn consumer_delivers_close_under_archived_policy_and_the_scope_retires() {
             manager.scope.assignment_revision.get(),
         )])
         .unwrap();
+    // A closure is `Work::Maintenance`, so the placement this consumer holds is
+    // offered nothing while the lane claims and settles it. The consumer stays
+    // live for exactly that reason.
+    let swept = RefCell::new(None);
     finished(consumer.run_until(async {
-        manager.completion.recv_async().await.unwrap();
+        *swept.borrow_mut() = Some(Box::pin(manager.sweep(&fixture.app, &fixture.objects)).await);
     }))
     .await;
+    let (settled_job, settled_receipt, acknowledged) =
+        swept.into_inner().expect("the lane settled the closure it claimed");
+    assert_eq!(settled_job, close);
+    assert_eq!(settled_receipt.outcome, JobOutcome::Closed { drained: true });
+    assert_eq!(acknowledged.outcome, JobOutcome::Closed { drained: true });
     assert_eq!(
         fixture.app.job_receipt(&close).await.unwrap().unwrap().outcome,
         JobOutcome::Closed { drained: true }
@@ -1436,13 +1682,17 @@ fn age_queue_hold(manager: &NativeManager, app: &AppId, deployment: &DeploymentI
 }
 
 /// The retention lane's journal release duty reaches the creator engine's hold
-/// release through the delivery dispatch.
+/// release through the maintenance dispatch.
 ///
 /// The operation is never constructed here: the manager's own lane mints it from
-/// a released queue hold, and the delivery slot claims what it published. That is
+/// a released queue hold, and the sweep lane claims what it published. That is
 /// what this binds. Every sweep revalidates its own operation kind, so an arm
 /// pointed at another sweep refuses the delivery instead of releasing the hold,
 /// and the journal keeps the deployment.
+///
+/// It is the LANE that claims it, not a host holding a placement: `release_hold`
+/// is `Work::Maintenance`, and `Claimant::Placed` denies every kind in that
+/// class, so a placed claim answers nothing here at all.
 #[compio::test]
 async fn retention_release_duty_dispatches_to_the_creator_hold_release() {
     let fixture = Fixture::new(AppPolicy::default()).await;
@@ -1489,43 +1739,27 @@ async fn retention_release_duty_dispatches_to_the_creator_hold_release() {
         assert_eq!(retention.completed, 1, "turn {turn}: {retention:?}");
     }
 
-    let grant = manager
-        .claim(&manager.scope)
-        .await
-        .unwrap()
-        .expect("the retention lane published a deliverable release duty");
-    let job = grant.delivery().job.clone();
+    // A host holding a placement answers nothing here: the class the row carries
+    // is one `Claimant::Placed` denies, which is what leaves the row to the lane.
+    assert!(
+        manager
+            .claim(&fixture.app, &manager.scope)
+            .await
+            .unwrap()
+            .is_none(),
+        "a placed claim must not reach a release duty"
+    );
+
+    let (job, creator, acknowledged) =
+        Box::pin(manager.sweep(&fixture.app, &fixture.objects)).await;
     assert_eq!(
         job.operation,
         JobOperation::ReleaseHold {
             deployment_id: deployment.clone()
         },
-        "the lane minted the operation this delivery dispatches"
+        "the lane minted the operation this dispatch runs"
     );
     assert_eq!(job.deployment_id(), None, "a release needs no hold");
-
-    let mut slot = DeliverySlot::new(
-        manager.clone(),
-        Rc::new(Executor {
-            probe: fixture.probe.clone(),
-            service: fixture.service.clone(),
-        }),
-        fixture.objects.clone(),
-        DeliveryOptions {
-            execution_timeout: Duration::from_secs(5),
-            operation_timeout: Duration::from_secs(5),
-            retry_delay: Duration::from_millis(5),
-            maintenance: MaintenanceOptions::default(),
-        },
-    )
-    .unwrap();
-    let DeliveryOutcome::Settled {
-        creator,
-        manager: acknowledged,
-    } = Box::pin(slot.run(&fixture.app, grant)).await.unwrap()
-    else {
-        panic!("a release duty settles without deferring or executing")
-    };
     assert_eq!(creator.job, job);
     assert_eq!(creator.outcome, JobOutcome::Completed {});
     assert_eq!(acknowledged.outcome, JobOutcome::Completed {});
@@ -1537,7 +1771,7 @@ async fn retention_release_duty_dispatches_to_the_creator_hold_release() {
         .await;
     assert_eq!(
         fixture.app.job_receipt(&job).await.unwrap(),
-        Some(*creator),
+        Some(creator),
         "the committed receipt is the release's own"
     );
     assert_eq!(fixture.probe.starts.get(), 0, "a release runs no app code");

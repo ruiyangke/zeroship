@@ -11,8 +11,9 @@ pub use zeroship_id::workflow::{DeploymentId, RequestId, RunId, WorkerId};
 
 mod lifecycle;
 pub use lifecycle::{
-    ConflictPolicy, DeliveredSignal, InvalidRestart, RestartDeploy, RestartOptions, RestartTarget,
-    RestartedRun, RunOperation, RunState, RunStatus, SignalOptions, StartOptions, StartedRun,
+    ConflictPolicy, CreatorStartOptions, DeliveredSignal, InvalidRestart, InvalidStart,
+    PayloadLocation, RestartDeploy, RestartOptions, RestartTarget, RestartedRun, RunOperation,
+    RunState, RunStatus, SignalOptions, StartOptions, StartedRun, StepOutputLocation,
     TransitionedRun, WorkflowOutputRef,
 };
 
@@ -310,6 +311,157 @@ pub struct ManagementReceipt {
 pub struct RunScope {
     pub scope: AssignedScope,
     pub run_id: RunId,
+}
+
+/// Start a run of one workflow of one app, from the value the caller supplied.
+///
+/// `request_id` is minted by the CALLER rather than by the service, because it is
+/// the idempotency of the whole start: the object the value is staged into is
+/// keyed by it too, so a retried start restages to the same object and replays
+/// the same receipt.
+///
+/// NO DEPLOYMENT CROSSES. The service resolves a run's deploy from its own rows,
+/// so naming one here would let a body select the code a run replays against.
+///
+/// `input` is the creator's own value and answers to `AppPolicy::max_input_bytes`,
+/// the same bound `SignalRun::options` answers to. `options` is a
+/// [`CreatorStartOptions`], which has no field for a payload descriptor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StartRun {
+    pub request_id: RequestId,
+    pub scope: AssignedScope,
+    pub workflow_name: String,
+    #[serde(default)]
+    pub input: serde_json::Value,
+    #[serde(default)]
+    pub options: CreatorStartOptions,
+}
+
+/// Locate what one completed step of a run recorded.
+///
+/// The reply is a [`StepOutputLocation`], never the bytes: a payload's ceiling is
+/// larger than a reply's, and this transport has no byte-stream path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReadStepOutput {
+    pub scope: AssignedScope,
+    pub run_id: RunId,
+    pub name: String,
+    pub occurrence: u32,
+}
+
+/// Locate the object one replay edge of a running task names.
+///
+/// The reply is a [`PayloadLocation`], for the reason [`ReadStepOutput`]'s is:
+/// the bytes answer to a payload's ceiling and a reply to a smaller one. The
+/// caller opens the object itself, out of the lock this call takes and releases.
+///
+/// THE APP IS A SELECTOR AND NOT THE AUTHORITY. It names which journal to ask,
+/// and the authority is the task credential, which that journal minted and holds
+/// only a hash of. A caller naming another app's journal reaches one where its
+/// own task and token do not exist, so the selector cannot widen what it may
+/// read -- unlike a placement, which names an app the caller asserts it holds.
+///
+/// `token` IS A STRING because the token's type belongs to the journal crate,
+/// which this one cannot name. The wire bytes are the same either way: that type
+/// serializes as a string already. Parsing it on the CALLEE's side is the point,
+/// since refusing a malformed credential is the callee's to do.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReadTaskPayload {
+    pub app_id: AppId,
+    pub task_id: String,
+    pub token: String,
+    pub reference: WorkflowOutputRef,
+}
+
+/// Resolve which deployment a live dispatch replays against.
+///
+/// THE ARTIFACT DOES NOT CROSS, and here that is structural rather than a
+/// budget choice. A loaded executable carries the creator's module source, whose
+/// own budget is twice the ceiling a reply answers to, so a deployment at its
+/// permitted size could never fit one. What crosses is the PIN: the caller loads
+/// that deployment from the object store it already holds, which is addressed by
+/// the deploy hash and therefore answers with the same immutable bytes either
+/// host would read.
+///
+/// Selector and authority split exactly as [`ReadTaskPayload`]'s do: the app
+/// names the journal to ask, the task credential is what authorizes the answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResolveTaskExecutable {
+    pub app_id: AppId,
+    pub task_id: String,
+    pub token: String,
+}
+
+/// The deployment a run is pinned to, as the journal proved it.
+///
+/// Four fields, and only the first two address the artifact. The other two are
+/// the FENCES the journal checked, echoed back so the settlement that reports an
+/// execution can be refused when either has moved underneath it: a deployment
+/// parked for damage bumps its availability epoch, and re-admission moves the
+/// admission generation. A caller does not interpret them and cannot forge a
+/// useful one -- they are only ever compared against the journal's own rows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PinnedDeployment {
+    pub deploy_id: DeploymentId,
+    pub deploy_hash: String,
+    pub availability_epoch: i64,
+    pub admission_generation: i64,
+}
+
+/// Reserve the row an upload's object will be keyed by.
+///
+/// THE BYTES DO NOT CROSS HERE and never will: this mints or finds a payload id,
+/// and the caller writes the object to the store it already binds. Splitting it
+/// this way is what lets a caller upload at all -- in one process the staging
+/// call holds a lock across the object write so collection cannot race a live
+/// writer, and no request boundary can hold that lock.
+///
+/// `request_id` IS THE IDEMPOTENCY, and the obligation it places on the caller is
+/// real: a retry must send the SAME one. The service deduplicates on
+/// `(app_id, request_id)`, narrowed by the task only when one holds the staging,
+/// and refuses a request id reused for different bytes. A caller that minted a
+/// fresh id per attempt would reserve a new object every time and nothing would
+/// fail -- the unique index cannot catch it, because it covers `task_id` and that
+/// column is NULL for every ownerless upload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReservePayload {
+    pub app_id: AppId,
+    pub task_id: String,
+    pub token: String,
+    pub request_id: RequestId,
+    pub reference: WorkflowOutputRef,
+}
+
+/// What a reservation decided.
+///
+/// Two arms, and neither is a failure: one says write the object, the other says
+/// an earlier attempt already did. A retry after a lost acknowledgement is the
+/// ordinary case rather than an edge, so the caller must handle both as success.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum PayloadReservation {
+    /// Write the object, then confirm. `expires_at` is the deadline the
+    /// reservation was recorded with and must be sent back UNCHANGED: the confirm
+    /// compares against this value, and one recomputed later can drift past the
+    /// collector's fence and compare two different things while still looking
+    /// like a comparison.
+    Reserved {
+        payload_id: String,
+        expires_at: i64,
+    },
+    /// Already uploaded and confirmed. There is no object to write.
+    Staged { payload_id: String },
 }
 
 /// Deliver a signal to a waiting run.

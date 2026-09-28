@@ -19,6 +19,7 @@ v8 = { workspace = true }
 
 [dev-dependencies]
 zeroship-workflow-manager = { workspace = true }
+zeroship-workflow-client = { workspace = true }
 zeroship-data-orm = { workspace = true }
 zeroship-core = { workspace = true }
 zeroship-storage = { workspace = true }

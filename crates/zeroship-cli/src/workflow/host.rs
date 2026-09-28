@@ -1,14 +1,18 @@
-//! The workflow host thread: the creator engine and the ordinary job consumer
-//! over the app's own database and storage. Manager metadata stays on the
-//! manager thread, reached through its client. Neither side opens the other's
-//! storage, and no loop here scans the creator journal for runnable work.
+//! The workflow host thread: the creator engine, the ordinary job consumer and
+//! this process's journal maintenance lane, all over the app's own database and
+//! storage. Manager metadata stays on the manager thread, reached through its
+//! client. Neither side opens the other's storage, and no loop here scans the
+//! creator journal for runnable work - the queue names every row either lane
+//! takes.
 
 #![expect(
     clippy::future_not_send,
     reason = "the workflow host owns its compio thread"
 )]
 
-use super::manager::{self, LocalPublisher, LocalTransport, ManagerClient, ManagerThread};
+use super::manager::{
+    self, LocalPublisher, LocalSweeps, LocalTransport, ManagerClient, ManagerThread,
+};
 use crate::deployment::AppDeployment;
 use futures::{
     future::{Either, LocalBoxFuture, Shared},
@@ -27,8 +31,11 @@ use zeroship_runtime::{NativePlugin, RuntimeLimits};
 use zeroship_workflow::{
     deployment_holds::AssignedHolds,
     service::{
-        schema, store::HostStorage, AppBackend, AppPolicy, AppWorkflows, HostPolicies,
-        IngressEpochs, PolicyBinding, PolicySnapshot, WorkerIdentity, WorkflowService,
+        maintenance::{MaintenanceOptions, MaintenanceOutcome},
+        schema,
+        store::HostStorage,
+        AppBackend, AppPolicy, AppWorkflows, HostPolicies, IngressEpochs, PolicyBinding,
+        PolicySnapshot, WorkerIdentity, WorkflowService,
     },
     WorkflowServiceError,
 };
@@ -45,7 +52,11 @@ const APPLIED_POLL: Duration = Duration::from_millis(20);
 /// Wraps the delivery transport and executor built on the host thread.
 /// The CLI uses both unchanged; tests observe them without another host.
 pub trait Composition: Send + 'static {
-    type Transport: JobTransport + 'static;
+    /// The journal is this process's own, so the transport must be one that
+    /// takes it as a handle. The dev host OPENS the journal it serves -- `api`
+    /// below is that handle -- and hands it to every claim, so a transport
+    /// declaring `()` would be one whose journal is somewhere this host is not.
+    type Transport: JobTransport<Journal = AppWorkflows> + 'static;
 
     fn transport(&self, transport: LocalTransport) -> Self::Transport;
 
@@ -79,7 +90,7 @@ pub struct Settings {
 
 /// A host whose placement, deployment selection and recovery responsibility
 /// are established, ready to run its loops.
-pub struct Opened<T: JobTransport> {
+pub struct Opened<T: JobTransport<Journal = AppWorkflows>> {
     pub api: AppWorkflows,
     pub backend: AppBackend,
     pub executable: Option<LoadedWorker>,
@@ -89,7 +100,7 @@ pub struct Opened<T: JobTransport> {
     pub host: Host<T>,
 }
 
-pub struct Host<T: JobTransport> {
+pub struct Host<T: JobTransport<Journal = AppWorkflows>> {
     api: AppWorkflows,
     manager: ManagerClient,
     thread: ManagerThread,
@@ -98,13 +109,35 @@ pub struct Host<T: JobTransport> {
     objects: PayloadObjects,
     ingress: Rc<LocalIngress>,
     placement: RefCell<Placement>,
+    sweeps: LocalSweeps,
+    bounds: SweepBounds,
     wake: flume::Receiver<()>,
     renew_every: Duration,
 }
 
 struct Placement {
     scope: AssignedScope,
-    binding: ConsumerScope,
+    binding: ConsumerScope<AppWorkflows>,
+}
+
+/// What one turn of the maintenance lane runs under.
+///
+/// The four timing bounds are the consumer's own, because one thread serves both
+/// lanes: a sweep nobody times would spend this host's only runtime on one row,
+/// and both lanes claim, run and settle against the same queue and the same
+/// journal on that thread. The dispatch bounds are the lane's own, since nothing
+/// else in this process dispatches a sweep.
+#[derive(Clone, Copy, Debug)]
+struct SweepBounds {
+    maintenance: MaintenanceOptions,
+    /// Bound on one sweep's operation.
+    execution_timeout: Duration,
+    /// Bound on the claim and the settlement around it.
+    operation_timeout: Duration,
+    /// Delay before claiming again once the queue held no row this lane takes.
+    idle_poll: Duration,
+    /// Delay before claiming again after a refused claim, sweep or settlement.
+    error_backoff: Duration,
 }
 
 type Stop<'a> = Shared<LocalBoxFuture<'a, ()>>;
@@ -214,16 +247,24 @@ pub async fn open<C: Composition>(
         tasks,
         config.payloads,
     )?));
+    let consumer_options = config.consumer_options();
+    let bounds = SweepBounds {
+        maintenance: MaintenanceOptions::default(),
+        execution_timeout: consumer_options.delivery.execution_timeout,
+        operation_timeout: consumer_options.delivery.operation_timeout,
+        idle_poll: consumer_options.idle_poll,
+        error_backoff: consumer_options.error_backoff,
+    };
     let consumer = JobConsumer::new(
         Rc::new(composition.transport(manager.transport(wake_sender.clone(), delivery_ceiling))),
         manager.worker().clone(),
-        config.consumer_options(),
+        consumer_options,
     )?;
     let binding = ConsumerScope::new(
         api.clone(),
+        api.binding().clone(),
         scope.clone(),
         executor.clone(),
-        objects.clone(),
     )?;
     consumer.bindings().replace(vec![binding.clone()])?;
     // A previous process may have committed intents it never published.
@@ -234,6 +275,7 @@ pub async fn open<C: Composition>(
         executable: installed.map(|installed| installed.executable.into_executable()),
         activation: activation.map(|activation| activation.job),
         host: Host {
+            sweeps: manager.sweeps(app, delivery_ceiling),
             api,
             manager,
             thread,
@@ -242,6 +284,7 @@ pub async fn open<C: Composition>(
             objects,
             ingress,
             placement: RefCell::new(Placement { scope, binding }),
+            bounds,
             wake,
             renew_every: config.renew_interval(),
         },
@@ -357,7 +400,7 @@ pub async fn applied(
     })?
 }
 
-impl<T: JobTransport> Host<T> {
+impl<T: JobTransport<Journal = AppWorkflows>> Host<T> {
     /// Consume delivered jobs, renew placement and publish committed intents
     /// until `stop`. Returns after execution joins and the manager stops.
     pub async fn run_until(self, stop: impl std::future::Future<Output = ()>) {
@@ -370,6 +413,8 @@ impl<T: JobTransport> Host<T> {
             objects,
             ingress,
             placement,
+            sweeps,
+            bounds,
             wake,
             renew_every,
         } = self;
@@ -381,7 +426,6 @@ impl<T: JobTransport> Host<T> {
                 &manager,
                 &api,
                 &executor,
-                &objects,
                 &ingress,
                 &bindings,
                 &placement,
@@ -389,6 +433,15 @@ impl<T: JobTransport> Host<T> {
                 stop.clone()
             ),
             publish(&api, &manager, &placement, &wake, stop.clone()),
+            sweep(
+                &api,
+                &manager,
+                &sweeps,
+                &objects,
+                &placement,
+                bounds,
+                stop.clone()
+            ),
         );
         // Executions have joined; nothing new may be placed on this process.
         match compio::time::timeout(renew_every, manager.drain()).await {
@@ -417,9 +470,8 @@ async fn place(
     manager: &ManagerClient,
     api: &AppWorkflows,
     executor: &Rc<dyn TaskExecutor>,
-    objects: &PayloadObjects,
     ingress: &LocalIngress,
-    bindings: &ConsumerBindings,
+    bindings: &ConsumerBindings<AppWorkflows>,
     placement: &RefCell<Placement>,
     every: Duration,
     stop: Stop<'_>,
@@ -458,11 +510,16 @@ async fn place(
             }
         };
         let installed =
-            ConsumerScope::new(api.clone(), next.clone(), executor.clone(), objects.clone())
-                .and_then(|binding| {
-                    bindings.replace(vec![binding.clone()])?;
-                    Ok(binding)
-                });
+            ConsumerScope::new(
+                api.clone(),
+                api.binding().clone(),
+                next.clone(),
+                executor.clone(),
+            )
+            .and_then(|binding| {
+                bindings.replace(vec![binding.clone()])?;
+                Ok(binding)
+            });
         match installed {
             Ok(binding) => {
                 *placement.borrow_mut() = Placement {
@@ -503,6 +560,100 @@ async fn publish(
             }
         }
     }
+}
+
+/// Claim, run and settle this host's journal maintenance rows until `stop`.
+///
+/// The consumer beside this loop claims as `Claimant::Placed`, which admits only
+/// the operation that executes creator code, so every sweep the journal needs
+/// arrives here instead. This is the local host's counterpart of the workflow
+/// service's maintenance driver: the same authority, the same dispatch, and the
+/// journal it sweeps is the one this process already opened.
+///
+/// A refused visit is logged and retried after a backoff. Nothing here is
+/// abandoned by that: the row keeps its lease until it lapses and the queue
+/// offers it again.
+async fn sweep(
+    api: &AppWorkflows,
+    manager: &ManagerClient,
+    sweeps: &LocalSweeps,
+    objects: &PayloadObjects,
+    placement: &RefCell<Placement>,
+    bounds: SweepBounds,
+    stop: Stop<'_>,
+) {
+    loop {
+        let delay = match stopped(
+            stop.clone(),
+            swept(api, manager, sweeps, objects, placement, bounds),
+        )
+        .await
+        {
+            None => return,
+            // A settled row is a reason to look for the next one at once.
+            Some(Ok(true)) => continue,
+            Some(Ok(false)) => bounds.idle_poll,
+            Some(Err(error)) => {
+                tracing::warn!(code = error.code(), "workflow maintenance row retained");
+                bounds.error_backoff
+            }
+        };
+        if stopped(stop.clone(), compio::time::sleep(delay))
+            .await
+            .is_none()
+        {
+            return;
+        }
+    }
+}
+
+/// Take one maintenance row, run what it names and record the outcome it
+/// committed. `true` reports that a row was settled.
+async fn swept(
+    api: &AppWorkflows,
+    manager: &ManagerClient,
+    sweeps: &LocalSweeps,
+    objects: &PayloadObjects,
+    placement: &RefCell<Placement>,
+    bounds: SweepBounds,
+) -> Result<bool, WorkflowServiceError> {
+    let Some(grant) = bounded(bounds.operation_timeout, sweeps.claim()).await? else {
+        return Ok(false);
+    };
+    // The publication seam the reconciliation sweep needs. It is the host's own
+    // placement publisher, because the intents that sweep republishes are the
+    // creator intents this process publishes from the same outbox.
+    let publisher = manager.publisher(placement.borrow().scope.clone());
+    let receipt = match bounded(
+        bounds.execution_timeout,
+        api.maintenance_job(&grant, &publisher, objects, objects, bounds.maintenance),
+    )
+    .await?
+    {
+        MaintenanceOutcome::Settled(receipt) => *receipt,
+        // A fanout page whose predecessor has not finished commits nothing, so
+        // there is no outcome to record.
+        MaintenanceOutcome::Deferred => return Ok(false),
+        // The claim admits exactly the kinds this dispatch has an arm for, so
+        // reaching here means the two disagree about one of them.
+        MaintenanceOutcome::Unclaimed => {
+            return Err(WorkflowServiceError::Internal(
+                "local workflow maintenance claimed an operation its dispatch does not run".into(),
+            ))
+        }
+    };
+    let settlement = receipt.settlement(&grant)?;
+    bounded(bounds.operation_timeout, sweeps.settle(&settlement)).await?;
+    Ok(true)
+}
+
+async fn bounded<T>(
+    timeout: Duration,
+    future: impl std::future::Future<Output = Result<T, WorkflowServiceError>>,
+) -> Result<T, WorkflowServiceError> {
+    compio::time::timeout(timeout, Box::pin(future))
+        .await
+        .map_err(|_| WorkflowServiceError::Timeout)?
 }
 
 async fn publish_pending(

@@ -13,7 +13,7 @@ use zeroship_workflow::{
     engine::{StepOutcome, WorkflowOutputRef},
     operations::{RunState, StartOptions},
     service::{
-        schema, store::OrmStore, AppPolicy, AppWorkflows, PayloadSlot, RequestId, StagedPayload,
+        schema, store::OrmStore, AppPolicy, AppWorkflows, PayloadSlot, RequestId,
         TaskAssignment, TaskToken, WorkerIdentity,
     },
     WorkflowServiceError,
@@ -53,7 +53,7 @@ impl TaskPayloads for LostReceipt {
         request: &RequestId,
         reference: WorkflowOutputRef,
         body: BoxChunkSource,
-    ) -> Result<StagedPayload, WorkflowServiceError> {
+    ) -> Result<crate::payloads::UploadReceipt, WorkflowServiceError> {
         self.requests.borrow_mut().push(request.as_str().to_owned());
         let receipt = self
             .inner
@@ -88,7 +88,7 @@ impl TaskPayloads for LostReceipt {
 /// argument the caller handed in.
 struct SubstitutedReceipt {
     inner: WorkerTasks,
-    answer: Option<StagedPayload>,
+    answer: Option<crate::payloads::UploadReceipt>,
     staged: RefCell<Vec<WorkflowOutputRef>>,
 }
 impl SubstitutedReceipt {
@@ -99,7 +99,7 @@ impl SubstitutedReceipt {
             staged: RefCell::default(),
         }
     }
-    fn answering(inner: &WorkerTasks, answer: &StagedPayload) -> Self {
+    fn answering(inner: &WorkerTasks, answer: &crate::payloads::UploadReceipt) -> Self {
         Self {
             inner: inner.clone(),
             answer: Some(answer.clone()),
@@ -123,7 +123,7 @@ impl TaskPayloads for SubstitutedReceipt {
         request: &RequestId,
         reference: WorkflowOutputRef,
         body: BoxChunkSource,
-    ) -> Result<StagedPayload, WorkflowServiceError> {
+    ) -> Result<crate::payloads::UploadReceipt, WorkflowServiceError> {
         self.staged.borrow_mut().push(reference.clone());
         let receipt = self
             .inner
@@ -227,7 +227,7 @@ async fn run_output_reference_contract(store: Rc<OrmStore>) {
         "the forced value must be one the size rule would have kept inline"
     );
     let task = claim(&scope, &tasks).await;
-    let execution = prepare(&task, json!([{"kind":"RunCompleted","output":value}]))
+    let (execution, _owed) = prepare(&task, json!([{"kind":"RunCompleted","output":value}]))
         .stage(&tasks)
         .await
         .unwrap();
@@ -274,7 +274,7 @@ async fn run_output_reference_contract(store: Rc<OrmStore>) {
     // The control: a run that produced no result references nothing and stages
     // nothing, so the arm above measures the result and not the close.
     let task = claim(&scope, &tasks).await;
-    let execution = prepare(&task, json!([{"kind":"RunCompleted"}]))
+    let (execution, _owed) = prepare(&task, json!([{"kind":"RunCompleted"}]))
         .stage(&tasks)
         .await
         .unwrap();
@@ -314,7 +314,7 @@ async fn run_output_reference_contract(store: Rc<OrmStore>) {
         .await
         .unwrap();
     let task = claim(&budgeted, &tasks).await;
-    let spent = prepare(&task, json!([{"kind":"RunCompleted","output":value}]))
+    let (spent, _owed) = prepare(&task, json!([{"kind":"RunCompleted","output":value}]))
         .stage(&tasks)
         .await
         .unwrap();
@@ -335,7 +335,7 @@ async fn run_output_reference_contract(store: Rc<OrmStore>) {
     // The control for the budget: the same exhausted allowance still closes a
     // run that produced no result, so the refusal above is the object and not
     // the app being out of credit for everything.
-    let execution = prepare(&task, json!([{"kind":"RunCompleted"}]))
+    let (execution, _owed) = prepare(&task, json!([{"kind":"RunCompleted"}]))
         .stage(&tasks)
         .await
         .unwrap();
@@ -371,7 +371,7 @@ async fn output_contract(store: Rc<OrmStore>) {
             &task,
             json!([step(value.clone()), {"kind":"RunCompleted"}]),
         );
-        let execution = prepared.stage(&tasks).await.unwrap();
+        let (execution, _owed) = prepared.stage(&tasks).await.unwrap();
         assert_eq!(stored_rows(store.as_ref(), &task).await, 0);
         tasks
             .complete(&task.id, &task.token, execution)
@@ -400,7 +400,7 @@ async fn output_contract(store: Rc<OrmStore>) {
         saved["outputMode"] = json!(mode);
         saved["outputContentType"] = json!("application/vnd.workflow+json");
         let prepared = prepare(&task, json!([saved]));
-        let execution = prepared.stage(&tasks).await.unwrap();
+        let (execution, _owed) = prepared.stage(&tasks).await.unwrap();
         let StepOutcome::StepCompleted {
             output, output_ref, ..
         } = &execution.outcomes[0]
@@ -450,7 +450,7 @@ async fn output_contract(store: Rc<OrmStore>) {
         prepared.stage(&fault).await,
         Err(WorkflowServiceError::Unavailable(_))
     ));
-    let execution = prepared.stage(&fault).await.unwrap();
+    let (execution, _owed) = prepared.stage(&fault).await.unwrap();
     assert_eq!(fault.requests.borrow().len(), 2);
     assert_eq!(fault.requests.borrow()[0], fault.requests.borrow()[1]);
     assert_eq!(stored_rows(store.as_ref(), &task).await, 1);
@@ -496,6 +496,7 @@ async fn output_contract(store: Rc<OrmStore>) {
     .stage(&tasks)
     .await
     .unwrap()
+    .0
     .outcomes;
     assert!(
         matches!(
@@ -515,6 +516,7 @@ async fn output_contract(store: Rc<OrmStore>) {
         .stage(&tasks)
         .await
         .unwrap()
+        .0
         .outcomes;
     assert!(
         matches!(
@@ -530,6 +532,7 @@ async fn output_contract(store: Rc<OrmStore>) {
         .stage(&tasks)
         .await
         .unwrap()
+        .0
         .outcomes;
     assert!(
         matches!(
@@ -539,7 +542,7 @@ async fn output_contract(store: Rc<OrmStore>) {
         "{bare:?}"
     );
 
-    let execution = prepare(&task, json!([{"kind":"ContinueAsNew","input":value}]))
+    let (execution, _owed) = prepare(&task, json!([{"kind":"ContinueAsNew","input":value}]))
         .stage(&tasks)
         .await
         .unwrap();
@@ -581,7 +584,7 @@ async fn output_contract(store: Rc<OrmStore>) {
             .await
             .unwrap();
         let task = claim(&scope, &tasks).await;
-        let execution = prepare(&task, json!([
+        let (execution, _owed) = prepare(&task, json!([
             step(json!("prefix")),
             {"kind":"StepCompleted","ordinal":1,"name":"large","output":"x".repeat(length),"outputMode":mode},
             {"kind":"RunCompleted","output":"must not commit"}
@@ -650,7 +653,7 @@ async fn output_contract(store: Rc<OrmStore>) {
     // failure as `kind: "run"`, so there is no row to name this step with and
     // the refusal stays the run's verdict.
     let task = claim(&scope, &tasks).await;
-    let execution = prepare(
+    let (execution, _owed) = prepare(
         &task,
         json!([{"kind":"StepCompleted","ordinal":0,"name":"effect",
                 "stepKind":"sideEffect","output":"x".repeat(64)}]),
@@ -699,7 +702,7 @@ async fn output_contract(store: Rc<OrmStore>) {
         LIMITS,
     )
     .unwrap();
-    let result = oversized.stage(&tasks).await.unwrap();
+    let (result, _owed) = oversized.stage(&tasks).await.unwrap();
     // No step owns a whole runtime result, so this one names none.
     assert!(matches!(
         &result.outcomes[..],
@@ -782,7 +785,7 @@ async fn staging_refuses_an_upload_receipt_that_answers_with_another_descriptor(
 
     // The control: the same fake, answering with the receipt it was handed.
     let control = SubstitutedReceipt::passthrough(&tasks);
-    let execution = prepared.stage(&control).await.unwrap();
+    let (execution, _owed) = prepared.stage(&control).await.unwrap();
     assert!(
         matches!(
             &execution.outcomes[0],
@@ -835,7 +838,7 @@ async fn staging_refuses_an_upload_receipt_that_answers_with_another_descriptor(
         "the budget must be one this value cannot fit"
     );
     let task = claim(&budgeted, &tasks).await;
-    let truncated = prepare(&task, json!([step(json!({"large":"x".repeat(64)}))]))
+    let (truncated, _owed) = prepare(&task, json!([step(json!({"large":"x".repeat(64)}))]))
         .stage(&SubstitutedReceipt::passthrough(&tasks))
         .await
         .unwrap();
@@ -905,4 +908,127 @@ fn output_budgets_reject_unusable_limits() {
     ] {
         assert!(limits.validate().is_err());
     }
+}
+
+/// A host that writes across a request boundary: every upload it accepts owes a
+/// confirmation, and one of them is refused for size.
+///
+/// `WorkerTasks` owes nothing, because it holds the object store and confirms
+/// under its own lock -- so a fake is the only way to observe what a severed
+/// host's truncated batch carries.
+struct RemoteLikeTasks {
+    inner: WorkerTasks,
+    /// Refuse the upload at this position in the batch, counting from zero.
+    refuse_at: usize,
+    seen: Cell<usize>,
+}
+#[async_trait(?Send)]
+impl TaskPayloads for RemoteLikeTasks {
+    async fn executable(
+        &self,
+        task: &str,
+        token: &TaskToken,
+    ) -> Result<zeroship_bundle::LoadedWorker, WorkflowServiceError> {
+        TaskPayloads::executable(&self.inner, task, token).await
+    }
+    async fn stage(
+        &self,
+        task: &str,
+        token: &TaskToken,
+        request: &RequestId,
+        reference: WorkflowOutputRef,
+        body: BoxChunkSource,
+    ) -> Result<crate::payloads::UploadReceipt, WorkflowServiceError> {
+        let position = self.seen.replace(self.seen.get() + 1);
+        if position == self.refuse_at {
+            return Err(WorkflowServiceError::PayloadTooLarge);
+        }
+        let receipt = self
+            .inner
+            .stage(task, token, request, reference, body)
+            .await?;
+        Ok(crate::payloads::UploadReceipt {
+            confirm: Some(zeroship_workflow::service::delivery::PayloadConfirmation {
+                payload_id: receipt.id.clone(),
+                expires_at: 1,
+            }),
+            ..receipt
+        })
+    }
+    async fn read(
+        &self,
+        task: &str,
+        token: &TaskToken,
+        reference: &WorkflowOutputRef,
+    ) -> Result<crate::PayloadRead, WorkflowServiceError> {
+        TaskPayloads::read(&self.inner, task, token, reference).await
+    }
+}
+
+/// A batch truncated for size still owes the confirmations of its accepted
+/// prefix.
+///
+/// # What this catches
+///
+/// `Upload::outcome` is recorded BEFORE its owning outcome is pushed, so it is
+/// the index that outcome will occupy, and uploads are gathered in increasing
+/// outcome order. When the upload at index `k` is refused, `outcomes[..k]` -- the
+/// prefix the truncated arm keeps -- therefore contains the owning outcomes of
+/// every earlier upload, and those outcomes carry their descriptors. Returning no
+/// confirmations there would commit a frontier referencing rows still
+/// `uploading`, and `promote` resolves those through `owned_reference`, which has
+/// no `uploading` arm: the settlement would be refused for a missing payload.
+///
+/// TWO UPLOADS AT LEAST, because a single-upload batch cannot see this. With one
+/// upload the kept prefix is empty and carrying nothing is correct, so the bug
+/// hides.
+///
+/// In process this arm was harmless: `stage` confirmed each upload before
+/// returning, so the earlier objects were already `staged`. The contract change
+/// that makes a confirmation something a settlement owes is what makes this
+/// reachable.
+#[compio::test]
+async fn a_batch_truncated_for_size_still_owes_its_accepted_prefix() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("zs-workflow.sqlite");
+    schema::initialize_sqlite(&path).unwrap();
+    let store = Rc::new(sqlite_store(&path).await);
+    let (service, app, _, _deployments) = registered_service(store).await;
+    let objects = PayloadObjects::open(StorageStore::from_backend(Arc::new(LocalFs::new(
+        dir.path(),
+    ))))
+    .unwrap();
+    let scope = service.fixture_app(app.clone());
+    let tasks = service.tasks(
+        WorkerIdentity::new("truncated-prefix".into()).unwrap(),
+        objects.clone(),
+    );
+    let task = claim(&scope, &tasks).await;
+
+    // Two uploads, each forced to an object, and the SECOND refused.
+    let prepared = prepare(
+        &task,
+        json!([
+            step(json!({"first":"x".repeat(96)})),
+            step(json!({"second":"y".repeat(96)})),
+        ]),
+    );
+    let remote = RemoteLikeTasks {
+        inner: tasks.clone(),
+        refuse_at: 1,
+        seen: Cell::new(0),
+    };
+    let (execution, owed) = prepared.stage(&remote).await.unwrap();
+
+    // The prefix was kept and its outcome still names its object.
+    assert!(
+        matches!(&execution.outcomes[..], [StepOutcome::StepCompleted { .. }, StepOutcome::RunFailed { .. }]),
+        "{:?}",
+        execution.outcomes
+    );
+    assert_eq!(
+        owed.len(),
+        1,
+        "the accepted upload's confirmation must survive truncation: {owed:?}"
+    );
 }

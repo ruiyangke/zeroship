@@ -42,18 +42,14 @@ async fn prelimit_barriers(fixture: &Fixture) {
     let recovery = ordinary(&app);
     host.queue.submit(&recovery).await.unwrap();
     let authority = assignment(&app);
-    let first_delivery = host
-        .queue
-        .claim(&authority)
+    let first_delivery = claim_sweep(&host, &authority)
         .await
         .unwrap()
         .unwrap()
         .delivery()
         .clone();
     assert_eq!(first_delivery.job, first_job);
-    let recovered = host
-        .queue
-        .claim(&authority)
+    let recovered = claim_sweep(&host, &authority)
         .await
         .unwrap()
         .unwrap()
@@ -71,7 +67,7 @@ async fn prelimit_barriers(fixture: &Fixture) {
         )
         .await
         .unwrap();
-    assert!(host.queue.claim(&authority).await.unwrap().is_none());
+    nothing_deliverable(&host, &authority).await;
     // A propagation page executes nothing for this run, so the pending
     // blocking commands cannot delay the cancellation it may be finishing.
     let page = JobSpec {
@@ -82,9 +78,7 @@ async fn prelimit_barriers(fixture: &Fixture) {
         ..ordinary(&app)
     };
     host.queue.submit(&page).await.unwrap();
-    let delivered = host
-        .queue
-        .claim(&authority)
+    let delivered = claim_sweep(&host, &authority)
         .await
         .unwrap()
         .unwrap()
@@ -102,7 +96,7 @@ async fn prelimit_barriers(fixture: &Fixture) {
         )
         .await
         .unwrap();
-    assert!(host.queue.claim(&authority).await.unwrap().is_none());
+    nothing_deliverable(&host, &authority).await;
     let ack = Settlement {
         delivery: first_delivery,
         outcome: JobOutcome::Management {
@@ -111,9 +105,7 @@ async fn prelimit_barriers(fixture: &Fixture) {
         successors: vec![],
     };
     host.queue.settle(&authority, &ack).await.unwrap();
-    let second_delivery = host
-        .queue
-        .claim(&authority)
+    let second_delivery = claim_sweep(&host, &authority)
         .await
         .unwrap()
         .unwrap()
@@ -125,7 +117,7 @@ async fn prelimit_barriers(fixture: &Fixture) {
     let before = snapshot(&host).await;
     host.queue.settle(&authority, &ack).await.unwrap();
     assert_eq!(snapshot(&host).await, before);
-    assert!(host.queue.claim(&authority).await.unwrap().is_none());
+    nothing_deliverable(&host, &authority).await;
     host.queue
         .settle(
             &authority,
@@ -185,7 +177,7 @@ async fn damaged(
     let before = snapshot(host).await;
     let acquired = host.holds.acquired.get();
     assert!(matches!(
-        host.queue.claim(authority).await,
+        claim_sweep(host, authority).await,
         Err(Error::Storage)
     ));
     assert_eq!(snapshot(host).await, before);
@@ -286,14 +278,14 @@ async fn substitute_link(host: &Host, authority: &Assignment, spec: &JobSpec, or
         .await
         .unwrap();
     assert!(matches!(
-        host.queue.claim(authority).await,
+        claim_sweep(host, authority).await,
         Err(Error::Storage)
     ));
     let mut substituted = original.clone();
     substituted["id"] = value!(other.id.as_str());
     commands.insert(substituted).await.unwrap();
     assert!(matches!(
-        host.queue.claim(authority).await,
+        claim_sweep(host, authority).await,
         Err(Error::Storage)
     ));
     commands
@@ -309,9 +301,7 @@ async fn settlement_authority(fixture: &Fixture) {
     let request = command(&app, &RunId::mint(), RunOperation::Pause);
     host.manage(&request).await.unwrap();
     let authority = assignment(&app);
-    let delivery = host
-        .queue
-        .claim(&authority)
+    let delivery = claim_sweep(&host, &authority)
         .await
         .unwrap()
         .unwrap()
@@ -488,9 +478,9 @@ async fn allowed_backlog(fixture: &Fixture) {
     let recovery = ordinary(&app);
     host.queue.submit(&recovery).await.unwrap();
     let authority = assignment(&app);
-    let granted = host.queue.claim(&authority).await.unwrap().unwrap();
+    let granted = claim_sweep(&host, &authority).await.unwrap().unwrap();
     assert_eq!(granted.delivery().job, first.unwrap());
-    let granted = host.queue.claim(&authority).await.unwrap().unwrap();
+    let granted = claim_sweep(&host, &authority).await.unwrap().unwrap();
     assert_eq!(granted.delivery().job, recovery);
     assert_eq!(host.holds.acquired.get(), 0);
     let mut pending = rows(&host.database, "management", value!({})).await;

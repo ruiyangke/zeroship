@@ -186,6 +186,24 @@ async fn claim(queue: &Queue, authority: &Assignment) -> Delivery {
         .clone()
 }
 
+/// Claim as the lane in the process that owns the journal. The dispatch order is
+/// one order over the whole queue, but each claimant sees only the kinds it may
+/// take, and a broadcast page is one of the lane's.
+async fn claim_sweep(queue: &Queue, authority: &Assignment) -> Delivery {
+    queue
+        .claim_authorized(
+            &authority.into(),
+            Claimant::Maintenance,
+            Ok(support::delivery_ceiling()),
+            |_| std::future::ready(Ok(authority.clone())),
+        )
+        .await
+        .unwrap()
+        .expect("a deliverable sweep")
+        .delivery()
+        .clone()
+}
+
 async fn expire(database: &Database, delivery: &Delivery) {
     assert_eq!(
         database
@@ -515,10 +533,10 @@ async fn fanout_reorders(fixture: &Fixture) {
     };
     queue.submit(&later).await.unwrap();
     queue.submit(&predecessor).await.unwrap();
-    let deferred = claim(&queue, &authority).await;
+    let deferred = claim_sweep(&queue, &authority).await;
     assert_eq!(deferred.job, later);
     expire(&fixture.database().await, &deferred).await;
-    let earlier = claim(&queue, &authority).await;
+    let earlier = claim_sweep(&queue, &authority).await;
     assert_eq!(earlier.job, predecessor);
     queue
         .settle(
@@ -531,7 +549,7 @@ async fn fanout_reorders(fixture: &Fixture) {
         )
         .await
         .unwrap();
-    let retry = claim(&queue, &authority).await;
+    let retry = claim_sweep(&queue, &authority).await;
     assert_eq!(retry.job, later);
     assert!(retry.attempt > deferred.attempt);
     assert_eq!(retry.job.deployment_id(), None);

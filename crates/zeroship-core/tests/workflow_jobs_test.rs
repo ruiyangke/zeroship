@@ -4,9 +4,10 @@ use std::fmt::Debug;
 use zeroship_core::{
     app_id::AppId,
     workflow_coordination::{
-        AssignedScope, InvalidRestart, ManagementOutcome, ManagementReceipt, RequestId,
-        RestartDeploy, RestartOptions, RestartTarget, RunId, RunOperation, RunState, ScopePage,
-        WorkerId,
+        AssignedScope, ConflictPolicy, CreatorStartOptions, InvalidRestart, InvalidStart,
+        ManagementOutcome, ManagementReceipt, PayloadLocation, RequestId, RestartDeploy,
+        RestartOptions, RestartTarget, RunId, RunOperation, RunState, ScopePage, StartOptions,
+        StartRun, StepOutputLocation, WorkerId,
     },
     workflow_jobs::{
         BroadcastId, Delivery, DeliveryLease, DeploymentId, JobId, JobOperation, JobOutcome,
@@ -588,6 +589,35 @@ fn executable_prerequisites_belong_only_to_operations_that_require_code() {
         }
     }
     assert!(executable && journal_only);
+}
+
+/// One operation kind hands its claimant a task; every other is maintenance the
+/// journal settles from the delivery alone.
+///
+/// This is the rule a merged claim reply's producers and consumers all read, so
+/// it is asserted over the whole enumeration rather than trusted to one caller's
+/// match. Both sides are counted, because a rule that answered the same way for
+/// every kind would satisfy any one-sided assertion and tell a reader nothing.
+#[test]
+fn one_operation_kind_accepts_execution_and_every_other_is_maintenance() {
+    let mut executable = Vec::new();
+    let mut maintenance = Vec::new();
+    for (operation, wire) in operations() {
+        let kind = wire["kind"].as_str().unwrap().to_owned();
+        if operation.accepts_execution() {
+            executable.push(kind);
+        } else {
+            maintenance.push(kind);
+        }
+    }
+    assert!(
+        !executable.is_empty() && executable.iter().all(|kind| kind == "advance"),
+        "only an advance hands out a task: {executable:?}"
+    );
+    assert!(
+        maintenance.len() > 1 && maintenance.iter().all(|kind| kind != "advance"),
+        "every other kind is maintenance, and there is more than one: {maintenance:?}"
+    );
 }
 
 #[test]
@@ -1390,4 +1420,126 @@ fn a_continued_run_is_terminal_and_names_itself_distinctly() {
         "continuedAsNew".parse::<RunState>().unwrap(),
         RunState::ContinuedAsNew
     );
+}
+
+/// A creator-facing start cannot name a payload object, at either boundary it
+/// has.
+///
+/// TWO BOUNDARIES, because a descriptor could arrive two ways and each has its
+/// own fence. On the WIRE, `StartRun::options` is a `CreatorStartOptions`, which
+/// declares no descriptor field and denies unknown ones, so a body carrying
+/// `inputRef` -- at the options or beside them -- is refused by the extractor
+/// that reads it rather than deserialized with the field ignored. In PROCESS,
+/// `StartOptions::creator_subset` refuses options that already carry one instead
+/// of dropping it, so a host narrowing what a creator asked for cannot silently
+/// turn a start that named another app's object into a start that named none.
+///
+/// The controls are the arms that must pass: the same body without the field
+/// decodes, and a `StartOptions` with no descriptor narrows and round-trips
+/// through `with_input` unchanged. Without those, a refusal proves only that
+/// something about the body was wrong.
+#[test]
+fn a_creator_start_cannot_name_a_payload_descriptor() {
+    let start = StartRun {
+        request_id: RequestId::mint(),
+        scope: AssignedScope {
+            app_id: AppId::mint(),
+            assignment_revision: 3.try_into().unwrap(),
+        },
+        workflow_name: "orders".to_owned(),
+        input: json!({"order": 7}),
+        options: CreatorStartOptions {
+            key: Some("order-7".to_owned()),
+            on_conflict: ConflictPolicy::Reject,
+        },
+    };
+    // CONTROL: the untouched body decodes back to itself, so every refusal below
+    // is about the field it added and not about the envelope.
+    let wire = round_trip(&start);
+    let descriptor = json!({"hash":"a".repeat(64),"size":3,"contentType":"application/json"});
+    for path in ["", "/options"] {
+        for field in ["inputRef", "input_ref"] {
+            let mut injected = wire.clone();
+            injected
+                .pointer_mut(path)
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .insert(field.into(), descriptor.clone());
+            refuses::<StartRun>(injected);
+        }
+    }
+    // And a whole `StartOptions` cannot stand in for the creator subset, even
+    // with its descriptor absent: the field is not one this contract declares.
+    let mut substituted = wire.clone();
+    substituted["options"] = serde_json::to_value(StartOptions {
+        input_ref: None,
+        key: None,
+        on_conflict: ConflictPolicy::Join,
+    })
+    .unwrap();
+    assert_eq!(substituted["options"], json!({}), "{substituted}");
+
+    // IN PROCESS: narrowing refuses a descriptor rather than dropping it.
+    let named = StartOptions {
+        input_ref: Some(serde_json::from_value(descriptor).unwrap()),
+        key: Some("order-7".to_owned()),
+        on_conflict: ConflictPolicy::Reject,
+    };
+    assert_eq!(
+        named.clone().creator_subset(),
+        Err(InvalidStart::SuppliedInputRef)
+    );
+    // CONTROL: the same options without the descriptor narrow, and completing
+    // them with the object a host staged returns exactly what was narrowed.
+    let staged = named.input_ref.clone();
+    let creator = StartOptions {
+        input_ref: None,
+        ..named.clone()
+    }
+    .creator_subset()
+    .expect("options naming no object are a creator subset");
+    assert_eq!(creator, start.options);
+    assert_eq!(creator.with_input(staged), named);
+}
+
+/// An output read locates bytes and never carries them.
+///
+/// `StepOutputLocation` has exactly two arms and neither is a byte field: the
+/// inline arm is the journal's own value, and the object arm is a store key and
+/// the descriptor those bytes must satisfy. A reply that added the bytes beside
+/// the location is refused, which is what stops a service answering a
+/// payload-sized body on a journal-sized budget.
+#[test]
+fn an_output_location_names_a_payload_and_carries_no_bytes() {
+    let located = StepOutputLocation::Object {
+        payload: PayloadLocation {
+            payload_id: zeroship_core::typed_id::generate(
+                zeroship_core::typed_id::WORKFLOW_PAYLOAD_PREFIX,
+            ),
+            reference: serde_json::from_value(
+                json!({"hash":"b".repeat(64),"size":11,"contentType":"application/json"}),
+            )
+            .unwrap(),
+        },
+    };
+    let wire = round_trip(&located);
+    assert_eq!(wire["kind"], json!("object"));
+    for field in ["bytes", "body", "content", "value"] {
+        let mut injected = wire.clone();
+        injected
+            .as_object_mut()
+            .unwrap()
+            .insert(field.into(), json!("payload-bytes"));
+        refuses::<StepOutputLocation>(injected);
+    }
+    let inline = StepOutputLocation::Inline {
+        value: json!({"total": 3}),
+    };
+    let wire = round_trip(&inline);
+    assert_eq!(wire["kind"], json!("inline"));
+    // The two arms are not interchangeable: an inline reply cannot carry a
+    // payload key and an object reply cannot carry a value.
+    refuses::<StepOutputLocation>(json!({"kind":"inline","payload":wire}));
+    refuses::<StepOutputLocation>(json!({"kind":"object","value":json!({"total":3})}));
 }

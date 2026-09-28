@@ -398,6 +398,8 @@ pub struct WorkflowSection {
     pub driver_interval_ms: Option<u64>,
     /// Deadline for each lane in a native manager pass.
     pub driver_lane_timeout_ms: Option<u64>,
+    /// Whether this process claims the maintenance rows of the queue it owns.
+    pub maintenance_sweeps: Option<bool>,
     /// Inactivity after which an app's recovery responsibility may close.
     pub closing_idle_ms: Option<u64>,
     /// Bound on a closing attempt's delivery before responsibility reopens.
@@ -416,6 +418,9 @@ pub struct WorkflowSection {
     pub capacity_request_timeout_ms: Option<u64>,
     /// Pause after a capacity reply before the same target is requested again.
     pub capacity_retry_interval_ms: Option<u64>,
+    /// Object-store location for workflow payload objects. It must name the same
+    /// store the deployment's workers name.
+    pub storage_url: Option<String>,
     /// Platform coordination metadata login; no customer database credentials.
     pub database_url: Option<String>,
 }
@@ -1315,6 +1320,41 @@ relay_smtp_tls = "starttls"
             "[worker]\nworkflow_manager = \"https://workflow.example\"\n",
         );
         let err = FileConfig::load(Some(&misspelled.path)).expect_err("unknown worker key");
+        assert!(matches!(err, ConfigError::Parse { .. }), "{err}");
+    }
+
+    // The workflow coordinator's sweep-lane switch is an overlay leaf of the
+    // workflow table, so the shared schema has to accept it with its natural
+    // type. The generated declaration reads the untyped tree, so a key missing
+    // from this section is refused HERE, before the declaration ever sees it.
+    #[test]
+    fn the_workflow_table_accepts_its_maintenance_lane_switch() {
+        for (spelling, expected) in [("false", Some(false)), ("true", Some(true))] {
+            let file = TempFile::write(
+                &format!("workflow-maintenance-{spelling}.toml"),
+                &format!("[workflow]\nmaintenance_sweeps = {spelling}\n"),
+            );
+            let config = FileConfig::load(Some(&file.path)).expect("the switch parses");
+            assert_eq!(config.workflow.maintenance_sweeps, expected);
+        }
+
+        // Absent is its own state, and the section still parses: the binary's own
+        // declaration supplies the default rather than this schema.
+        let bare = TempFile::write("workflow-maintenance-bare.toml", "[workflow]\n");
+        assert_eq!(
+            FileConfig::load(Some(&bare.path))
+                .expect("an empty workflow table parses")
+                .workflow
+                .maintenance_sweeps,
+            None
+        );
+
+        // The control: a misspelled leaf is still refused.
+        let misspelled = TempFile::write(
+            "workflow-maintenance-misspelled.toml",
+            "[workflow]\nmaintenance_sweep = false\n",
+        );
+        let err = FileConfig::load(Some(&misspelled.path)).expect_err("unknown workflow key");
         assert!(matches!(err, ConfigError::Parse { .. }), "{err}");
     }
 

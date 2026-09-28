@@ -19,7 +19,7 @@ async fn fanout_delivery_and_receipts_preserve_scope_without_holds() {
     fixture.submit(&job).await;
     fixture.submit(&job).await;
     assert_fanout_substitution_refused(&fixture, &job, &broadcast).await;
-    let delivery = fixture.claim(&job).await;
+    let delivery = fixture.sweep(&job).await;
     let successor = fanout(&fixture, &broadcast, 2);
     let mut command = settlement(&delivery, vec![successor.clone()]);
     command.outcome = JobOutcome::Management {
@@ -105,7 +105,7 @@ async fn fanout_http_rejects_open_nested_metadata_and_invalid_identity() {
     let broadcast = BroadcastId::mint();
     let job = fanout(&fixture, &broadcast, 1);
     fixture.submit(&job).await;
-    let delivery = fixture.claim(&job).await;
+    let delivery = fixture.sweep(&job).await;
     let successor = fanout(&fixture, &broadcast, 2);
     let submit = serde_json::to_value(SubmitJob {
         scope: fixture.scope(),

@@ -17,6 +17,7 @@ fn config_check_validates_toml_and_flags_without_opening_dependencies() {
             "service_peers_file":dir.path().join("unread-peers"),
             "service_key_file":dir.path().join("unread-workflow-key"),
             "control_url":"https://control.example.test",
+            "storage_url":dir.path().join("payload-objects"),
             "batch_limit":3,
             "driver_interval_ms":250,
             "driver_lane_timeout_ms":1500,
@@ -146,6 +147,7 @@ fn hold_release_grace_outlasts_the_queue_transaction_budget() {
                 "database_url":"postgres://unused@127.0.0.1:1/unreachable",
                 "service_peers_file":"unread-peers", "service_key_file":"unread-key",
                 "control_url":"https://control.example.test",
+                "storage_url":"unread-payload-objects",
                 "database_command_timeout_ms":command_timeout_ms,
             }}))
             .unwrap(),
@@ -175,6 +177,7 @@ fn capacity_bounds_and_pacing_come_from_configuration_and_reject_an_empty_range(
         "database_url":"postgres://unused@127.0.0.1:1/unreachable",
         "service_peers_file":"unread-peers", "service_key_file":"unread-key",
         "control_url":"https://control.example.test",
+        "storage_url":"unread-payload-objects",
         "capacity_min_slots":2,
         "capacity_max_slots":9,
         "capacity_hold_down_ms":7000,
@@ -227,6 +230,7 @@ fn retention_configuration_requires_a_signer_and_unambiguous_control_origin() {
         "database_url":"postgres://unused@127.0.0.1:1/unreachable",
         "service_peers_file":"unread-peers", "service_key_file":"unread-key",
         "control_url":"https://control.example.test",
+        "storage_url":"unread-payload-objects",
     }});
     let resolve = |input: &serde_json::Value| {
         let overlay = toml::from_str(&toml::to_string(input).unwrap()).unwrap();
@@ -311,4 +315,147 @@ fn retention_configuration_requires_a_signer_and_unambiguous_control_origin() {
         malformed["plaintext_peers"] = serde_json::json!([entry]);
         assert!(settings(&malformed).is_err(), "accepted peer {entry}");
     }
+}
+
+/// A payload store is a startup requirement, and an unusable location is
+/// refused where an absent one is.
+///
+/// This service's own lane claims the sweeps that stage and delete payload
+/// objects, so a process with nowhere to put them would take rows it could only
+/// fail. The well-formed arm is the control: each refusal below differs from it
+/// in this one field.
+#[test]
+fn a_payload_store_is_required_and_its_location_is_validated() {
+    let valid = serde_json::json!({"workflow":{
+        "database_url":"postgres://unused@127.0.0.1:1/unreachable",
+        "service_peers_file":"unread-peers", "service_key_file":"unread-key",
+        "control_url":"https://control.example.test",
+        "storage_url":"unread-payload-objects",
+    }});
+    let resolve = |input: &serde_json::Value| {
+        let overlay: toml::Value = toml::from_str(&toml::to_string(input).unwrap()).unwrap();
+        let settings = WorkflowSettings::resolve_config(
+            WorkflowSettingsSources::try_parse_from(["zeroship-workflow-server", "--no-config"])
+                .unwrap(),
+            Some(&overlay),
+        )
+        .unwrap();
+        ServerOptions::resolve(&settings)
+    };
+    assert_eq!(
+        resolve(&valid)
+            .expect("a well-formed location resolves")
+            .storage
+            .kind(),
+        "local"
+    );
+
+    let mut absent = valid.clone();
+    absent["workflow"]
+        .as_object_mut()
+        .unwrap()
+        .remove("storage_url");
+    assert!(resolve(&absent).is_err(), "accepted an absent store");
+    for location in ["", "redis://objects", "file://"] {
+        let mut invalid = valid.clone();
+        invalid["workflow"]["storage_url"] = serde_json::json!(location);
+        assert!(resolve(&invalid).is_err(), "accepted location {location:?}");
+    }
+}
+
+/// The sweep lane is on unless an overlay stands it down, and the overlay key
+/// that stands it down reaches the process.
+///
+/// Both halves matter and they fail differently. A default that resolved off
+/// would leave a deployment's reconciliation, collection, fanout, propagation and
+/// lifecycle rows unswept with nothing red, so the first arm is the guard against
+/// the worst outcome this setting can produce. A key the generated declaration
+/// reads but `zeroship_core::config::WorkflowSection` does not declare is refused
+/// by the shared overlay schema BEFORE the declaration is resolved against it, so
+/// the process arm is what says the setting is reachable the way the others are
+/// rather than only resolvable from an untyped tree.
+#[test]
+fn the_maintenance_lane_is_on_by_default_and_an_overlay_can_stand_it_down() {
+    let base = serde_json::json!({"workflow":{
+        "database_url":"postgres://unused@127.0.0.1:1/unreachable",
+        "service_peers_file":"unread-peers", "service_key_file":"unread-key",
+        "control_url":"https://control.example.test",
+        "storage_url":"unread-payload-objects",
+    }});
+    let resolve = |input: &serde_json::Value| {
+        let overlay: toml::Value = toml::from_str(&toml::to_string(input).unwrap()).unwrap();
+        let settings = WorkflowSettings::resolve_config(
+            WorkflowSettingsSources::try_parse_from(["zeroship-workflow-server", "--no-config"])
+                .unwrap(),
+            Some(&overlay),
+        )
+        .unwrap();
+        ServerOptions::resolve(&settings).unwrap().maintenance_sweeps
+    };
+    assert!(
+        resolve(&base),
+        "a deployment that names nothing must still sweep the queue it owns"
+    );
+    let mut stood_down = base.clone();
+    stood_down["workflow"]["maintenance_sweeps"] = serde_json::json!(false);
+    assert!(!resolve(&stood_down));
+    let mut named_on = base.clone();
+    named_on["workflow"]["maintenance_sweeps"] = serde_json::json!(true);
+    assert!(resolve(&named_on));
+
+    // The shared overlay schema, through the process that loads it. `--no-config`
+    // above never reads a file, so only this arm crosses `WorkflowSection`.
+    let dir = tempfile::tempdir().unwrap();
+    let write = |name: &str, input: &serde_json::Value| {
+        let path = dir.path().join(name);
+        std::fs::write(&path, toml::to_string(input).unwrap()).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        path
+    };
+    let check = |path: &std::path::Path| {
+        Command::new(env!("CARGO_BIN_EXE_zeroship-workflow-server"))
+            .env_clear()
+            .args(["--check-config", "--config"])
+            .arg(path)
+            .output()
+            .unwrap()
+    };
+    // The control, differing only in the key: the same overlay without it boots.
+    let accepted = check(&write("sweeps-absent.toml", &base));
+    assert!(
+        accepted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&accepted.stderr)
+    );
+    let named = check(&write("sweeps-named.toml", &stood_down));
+    assert!(
+        named.status.success(),
+        "an overlay naming workflow.maintenance_sweeps must boot: {}",
+        String::from_utf8_lossy(&named.stderr)
+    );
+
+    // A misspelling is still refused, so the acceptance above is this key being
+    // declared rather than the section admitting anything.
+    let mut misspelled = base;
+    misspelled["workflow"]["maintenance_sweep"] = serde_json::json!(false);
+    assert!(!check(&write("sweeps-misspelled.toml", &misspelled))
+        .status
+        .success());
+
+    // The flag carrier parses the same vocabulary the other boolean settings do,
+    // and refuses what is neither.
+    for value in ["false", "no", "0", "true", "yes", "1"] {
+        let parsed = WorkflowSettingsSources::try_parse_from([
+            "zeroship-workflow-server",
+            "--maintenance-sweeps",
+            value,
+        ]);
+        assert!(parsed.is_ok(), "rejected --maintenance-sweeps {value}");
+    }
+    assert!(WorkflowSettingsSources::try_parse_from([
+        "zeroship-workflow-server",
+        "--maintenance-sweeps",
+        "maybe"
+    ])
+    .is_err());
 }

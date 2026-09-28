@@ -20,7 +20,10 @@ mod journal;
 #[path = "support/platform.rs"]
 mod platform;
 
-use futures::future::LocalBoxFuture;
+use futures::{
+    channel::oneshot,
+    future::{select, Either, LocalBoxFuture},
+};
 use std::{
     cell::RefCell,
     rc::Rc,
@@ -28,22 +31,28 @@ use std::{
 };
 use zeroship_core::{
     app_id::AppId,
-    workflow_coordination::{RunId, WorkerId},
+    workflow_coordination::{RequestId, RunId, WorkerId},
     workflow_jobs::{DeploymentId, JobId, JobOperation, JobOutcome, JobSpec},
     workflow_policy::AppPolicy,
 };
+use zeroship_storage::{backend::ListRequest, Namespace, StorageBackendConfig, StorageStore};
 use zeroship_workflow::{
-    service::{maintenance::MaintenanceOptions, publication::JobPublisher},
-    WorkflowServiceError,
+    service::{maintenance::MaintenanceOptions, publication::JobPublisher, PAYLOAD_NAMESPACE},
+    InputStager, WorkflowServiceError,
 };
 use zeroship_workflow_manager::{
+    capacity::StaticPool,
+    driver::{Driver, Options as DriverOptions},
+    lifecycle::Undeletable,
     policy::{PolicyObservation, PolicySource},
     recovery::Options as RecoveryOptions,
     Error as ManagerError, Queue,
 };
 use zeroship_workflow_server::{
     coordinator::{connect_eligibility, Coordinator, Options},
+    payloads::ServicePayloads,
     runs::RunService,
+    server::drive,
     sweeps::{LaneOptions, LanePublisher, MaintenanceDriver, MaintenanceLane, SweepError, Swept},
 };
 
@@ -89,20 +98,31 @@ impl PolicySource for Source {
 
 struct Fixture {
     platform: platform::Platform,
+    service: Coordinator,
     queue: Queue,
     runs: Rc<RunService>,
     policies: Rc<Source>,
     lane: MaintenanceLane,
+    /// The payload store's root. It outlives every lane this fixture builds, so
+    /// the objects one lane wrote are the objects the next one reads.
+    objects: tempfile::TempDir,
     app: AppId,
 }
 
-/// A lane of this fixture's own, with an identity nothing else holds.
-fn lane(queue: &Queue, runs: &Rc<RunService>, policies: &Rc<Source>) -> MaintenanceLane {
+/// A lane of this fixture's own, with an identity nothing else holds, over the
+/// payload store rooted at `objects`.
+fn lane(
+    queue: &Queue,
+    runs: &Rc<RunService>,
+    policies: &Rc<Source>,
+    objects: &tempfile::TempDir,
+) -> MaintenanceLane {
     MaintenanceLane::new(
         queue.clone(),
         Rc::clone(runs),
         Rc::clone(policies) as Rc<dyn PolicySource>,
         WorkerId::mint(),
+        ServicePayloads::open(&StorageBackendConfig::Local(objects.path().to_owned())).unwrap(),
         MaintenanceOptions::default(),
     )
     .unwrap()
@@ -134,13 +154,16 @@ impl Fixture {
             .unwrap(),
         );
         let policies = Rc::new(Source::default());
+        let objects = tempfile::tempdir().unwrap();
         let app = AppId::mint();
         let fixture = Self {
-            lane: lane(&queue, &runs, &policies),
+            lane: lane(&queue, &runs, &policies, &objects),
             platform,
+            service,
             queue,
             runs,
             policies,
+            objects,
             app: app.clone(),
         };
         fixture.seed(&app).await;
@@ -170,7 +193,68 @@ impl Fixture {
 
     /// Turns over this fixture's queue, under the bounds a host configures.
     fn sweeps(&self, options: LaneOptions) -> MaintenanceDriver {
-        MaintenanceDriver::new(lane(&self.queue, &self.runs, &self.policies), options).unwrap()
+        MaintenanceDriver::new(
+            lane(&self.queue, &self.runs, &self.policies, &self.objects),
+            options,
+        )
+        .unwrap()
+    }
+
+    /// The payload objects an app holds, read through a store of the test's own
+    /// over the same root. Reading them back through the lane's own handle would
+    /// say nothing about where it put them.
+    async fn stored_objects(&self, app: &AppId) -> Vec<(String, Vec<u8>)> {
+        let store =
+            StorageStore::open(&StorageBackendConfig::Local(self.objects.path().to_owned()))
+                .unwrap()
+                .namespace(Namespace::platform(PAYLOAD_NAMESPACE).unwrap());
+        let page = store
+            .list(
+                app.as_str(),
+                ListRequest {
+                    prefix: "",
+                    cursor: None,
+                    limit: 16,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(
+            page.cursor.is_none(),
+            "a case holding more objects than one page has outgrown this probe"
+        );
+        let mut objects = Vec::new();
+        for entry in page.entries {
+            let (bytes, _) = store
+                .get(app.as_str(), &entry.key)
+                .await
+                .unwrap()
+                .expect("a listed object must be readable");
+            objects.push((entry.key, bytes));
+        }
+        objects
+    }
+
+    /// The manager driver this process composes beside the lane.
+    fn driver(&self) -> Driver {
+        Driver::new(
+            self.service.manager.clone(),
+            DriverOptions::default(),
+            Rc::new(Undeletable),
+            Rc::new(StaticPool),
+        )
+        .unwrap()
+    }
+
+    /// Placements recorded for any app. The lane asserts its own authority, so
+    /// this stays empty however long the drive path runs.
+    async fn placements(&self) -> i64 {
+        self.platform
+            .admin
+            .query_one("SELECT COUNT(*) FROM workflow_manager.assignments", &[])
+            .await
+            .unwrap()
+            .get(0)
     }
 
     async fn row(&self, job: &JobId) -> (String, Option<String>, Option<String>) {
@@ -321,6 +405,88 @@ async fn the_lane_claims_and_settles_a_journal_only_maintenance_job() {
     ));
 }
 
+/// The lane claims and settles a sweep that moves payload objects.
+///
+/// Collection is one of the two sweeps that reach the payload store, so this is
+/// the claim the lane could not make while the store was somewhere else. The
+/// creator row submitted first is the control: it sits ahead in the dispatch
+/// order and stays `ready`, so the lane still refuses the one kind it should.
+#[compio::test]
+async fn the_lane_claims_and_settles_a_sweep_that_moves_payload_objects() {
+    let fixture = Box::pin(Fixture::new()).await;
+    let creator = creator_work(&fixture.app);
+    let collection = JobSpec {
+        id: JobId::mint(),
+        app_id: fixture.app.clone(),
+        operation: JobOperation::Collect {},
+        available_at: 0.try_into().unwrap(),
+    };
+    fixture.queue.submit(&creator).await.unwrap();
+    fixture.queue.submit(&collection).await.unwrap();
+
+    let swept = Box::pin(fixture.lane.sweep(&fixture.app)).await.unwrap();
+    let Swept::Settled(receipt) = swept else {
+        panic!("the lane settles a collection page: {swept:?}");
+    };
+    assert_eq!(receipt.job_id, collection.id);
+
+    let (state, _, worker) = fixture.row(&collection.id).await;
+    assert_eq!(state, "settled");
+    assert_eq!(worker.as_deref(), Some(fixture.lane.identity().as_str()));
+    assert_eq!(
+        fixture.row(&creator.id).await.0,
+        "ready",
+        "creator work stays for the claimant that runs it"
+    );
+}
+
+/// The store the lane holds is where a staged run input lands, and the object
+/// carries the value the caller handed it.
+///
+/// `cron_job` is the production caller and it takes this capability as an
+/// argument, so this drives the argument the lane supplies. The object is read
+/// back through a store of the test's own over the same root: what it proves is
+/// that the writer put the bytes where the namespace says they go, which reading
+/// through the lane's own handle could not.
+#[compio::test]
+async fn the_lanes_store_holds_the_run_input_it_staged() {
+    let fixture = Box::pin(Fixture::new()).await;
+    assert!(
+        fixture.stored_objects(&fixture.app).await.is_empty(),
+        "the case measures what staging wrote, so the store must start empty"
+    );
+    let engine = fixture
+        .runs
+        .app(fixture.policies.as_ref(), &fixture.app)
+        .await
+        .unwrap();
+    let input = serde_json::json!({"order": "annual", "items": [1, 2, 3]});
+    let expected = serde_json::to_vec(&input).unwrap();
+
+    let reference = Box::pin(fixture.lane.payloads().stage_input(
+        &engine,
+        &RequestId::mint(),
+        &input,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(reference.size, i64::try_from(expected.len()).unwrap());
+    assert_eq!(reference.content_type.as_deref(), Some("application/json"));
+
+    let objects = fixture.stored_objects(&fixture.app).await;
+    let [(_, bytes)] = objects.as_slice() else {
+        panic!("staging writes exactly one object: {objects:?}");
+    };
+    assert_eq!(bytes, &expected);
+    assert!(
+        fixture
+            .stored_objects(&fixture.neighbour().await)
+            .await
+            .is_empty(),
+        "the object belongs to the app that staged it and to no other"
+    );
+}
+
 /// A maintenance row whose operation needs an artifact source is claimed and
 /// then refused by name.
 ///
@@ -357,6 +523,92 @@ async fn an_operation_without_an_artifact_source_is_refused_by_name() {
     );
     assert_eq!(outcome, None);
     assert_eq!(worker.as_deref(), Some(fixture.lane.identity().as_str()));
+}
+
+/// Wait for `probe` to answer, or fail the case.
+///
+/// A lane the drive path never reaches never settles the row, so the expiry
+/// here is the failure the cases below are built to see.
+async fn until<T>(description: &str, mut probe: impl std::ops::AsyncFnMut() -> Option<T>) -> T {
+    compio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if let Some(answer) = probe().await {
+                return answer;
+            }
+            compio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("the drive path did not {description}"))
+}
+
+/// The running service settles a due maintenance row on its own, and no worker
+/// is ever placed for it.
+///
+/// This drives `drive`, the cadence the process itself runs, rather than calling
+/// the lane: what it binds is that the drive path REACHES the lane. The manager
+/// driver handed to it is the real one the process composes beside the lane, so
+/// the pass this observes is the pass production performs.
+///
+/// The creator row submitted beside the maintenance one is the control for the
+/// claim: it sits ahead in the dispatch order and stays `ready`, so what the
+/// drive path swept was chosen rather than whatever came first.
+#[compio::test]
+async fn the_drive_path_settles_a_due_maintenance_row_without_a_placement() {
+    let fixture = Box::pin(Fixture::new()).await;
+    let creator = creator_work(&fixture.app);
+    let maintenance = sweep(&fixture.app);
+    fixture.queue.submit(&creator).await.unwrap();
+    fixture.queue.submit(&maintenance).await.unwrap();
+    assert_eq!(fixture.row(&maintenance.id).await.0, "ready");
+    assert_eq!(fixture.placements().await, 0);
+
+    let sweeps = fixture.sweeps(LaneOptions {
+        page_limit: 8,
+        lane_timeout: Duration::from_secs(10),
+    });
+    let identity = sweeps.lane().identity().clone();
+    // Held for the whole case: a dropped sender reads as a stop, and the drive
+    // path would then return before taking a single turn.
+    let (_stop, stopped) = oneshot::channel();
+    let driven = select(
+        Box::pin(drive(
+            fixture.driver(),
+            Some(sweeps),
+            Duration::from_millis(20),
+            stopped,
+        )),
+        Box::pin(until("settle the maintenance row", async || {
+            (fixture.row(&maintenance.id).await.0 == "settled").then_some(())
+        })),
+    )
+    .await;
+    assert!(
+        matches!(driven, Either::Right(_)),
+        "the drive path returned before the lane settled anything"
+    );
+
+    let (state, outcome, worker) = fixture.row(&maintenance.id).await;
+    assert_eq!(state, "settled");
+    assert_eq!(
+        outcome,
+        Some(serde_json::to_string(&JobOutcome::Waiting {}).unwrap())
+    );
+    assert_eq!(
+        worker.as_deref(),
+        Some(identity.as_str()),
+        "the row must carry the identity of the lane the drive path drove"
+    );
+    assert_eq!(
+        fixture.row(&creator.id).await.0,
+        "ready",
+        "creator work stays for the claimant that runs it"
+    );
+    assert_eq!(
+        fixture.placements().await,
+        0,
+        "the lane asserts its own authority, so nothing may have placed a worker"
+    );
 }
 
 /// A turn visits at most its page limit, and the next turn continues from where

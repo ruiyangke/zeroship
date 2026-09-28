@@ -1,7 +1,7 @@
 //! V8 lifecycle adapter for the shared workflow runner.
 
 use async_trait::async_trait;
-use std::{future::Future, rc::Rc, task::Poll, time::Duration};
+use std::{cell::RefCell, future::Future, rc::Rc, task::Poll, time::Duration};
 use zeroship_bundle::LoadedWorker;
 use zeroship_runtime::{CancelFlag, EnvSnapshot, RequestCtx, Runtime, WorkflowOutcome};
 use zeroship_workflow_runner::{
@@ -9,7 +9,7 @@ use zeroship_workflow_runner::{
     TaskPayloadReader, TaskPayloads,
 };
 use zeroship_workflow::{
-    service::TaskAssignment,
+    service::{delivery::PayloadConfirmation, TaskAssignment},
     WorkflowExecution, WorkflowInvocation, WorkflowServiceError,
 };
 
@@ -106,6 +106,7 @@ impl TaskExecutor for V8TaskExecutor {
                 self.payload_limits.max_payload_bytes,
             )?),
             output: (self.payloads.clone(), self.payload_limits),
+            owed: RefCell::default(),
         }))
     }
 }
@@ -119,6 +120,7 @@ struct V8Execution {
     budget: ExecutionBudget,
     payloads: Rc<TaskPayloadReader>,
     output: (Rc<dyn TaskPayloads>, TaskPayloadLimits),
+    owed: RefCell<Vec<PayloadConfirmation>>,
 }
 #[async_trait(?Send)]
 impl TaskExecution for V8Execution {
@@ -213,12 +215,24 @@ impl TaskExecution for V8Execution {
                 }
                 // The referenced bytes have landed. The frontier is complete,
                 // and expiry no longer justifies throwing it away.
-                result => {
+                Ok((execution, owed)) => {
                     self.budget.check_authority()?;
-                    return result;
+                    // Held rather than returned, because `TaskExecution::wait`
+                    // answers with the frontier alone: what the settlement owes
+                    // is not part of the frontier and must not travel inside it.
+                    *self.owed.borrow_mut() = owed;
+                    return Ok(execution);
+                }
+                Err(error) => {
+                    self.budget.check_authority()?;
+                    return Err(error);
                 }
             }
         }
+    }
+
+    fn owed_confirmations(&self) -> Vec<PayloadConfirmation> {
+        self.owed.borrow().clone()
     }
 
     fn cancel(&mut self) {

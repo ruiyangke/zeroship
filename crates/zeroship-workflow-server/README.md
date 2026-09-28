@@ -4,7 +4,10 @@ An authenticated host for native workflow coordination. Worker registration,
 app placement, job delivery, wake hints and management persist through the shared ORM in
 `zeroship-workflow-manager`. The server owns HTTP authentication, configuration,
 process lifecycle and startup database-authority checks. It constructs no customer
-execution engine or payload store.
+execution engine. It does hold the payload object store: blob storage keeps large
+objects out of the database, so the process that owns the journal is the one that
+writes them, and the sweeps that stage and collect them are this host's own lane
+to claim.
 
 Before publishing queue dependencies, the manager records its retention intent
 and obtains a deployment hold through Control. The server signs these requests
@@ -121,6 +124,8 @@ recovery instead of leaving a listener attached to a dead verifier connection.
 - `src/coordinator.rs`: provisioned ORM composition and startup authority checks.
 - `../zeroship-workflow-manager/src/coordinator/`: native placement and management.
 - `src/config.rs`: `[workflow]` settings and generated CLI overrides.
+- `src/payloads.rs`: the payload object store and the byte capabilities the sweeps take.
+- `src/sweeps.rs`: this process's own lane over the journal sweeps of its queue.
 - `src/server.rs`: metadata pools, verification, native driver and HTTP lifecycle.
 - `../zeroship-workflow-manager/schema/schema.ts`: the shared migration DSL definition.
 - `tests/coordinator.rs`: native store, fencing and recovery contracts.
@@ -130,6 +135,7 @@ recovery instead of leaving a listener attached to a dead verifier connection.
 - `tests/control_policy.rs`: canonical Control migrations, source-role isolation, publication ordering and bounded caching.
 - `tests/http_schedules.rs`: Control-only publication, immutable replies and schedule replacement without workers.
 - `tests/driver.rs`: process-owned scheduling, collection and retention recovery without workers.
+- `tests/maintenance_lane.rs`: the lane's claims, its staged objects and its bounded turns.
 - `tests/platform_schema.rs`: actual platform migrations and database authority.
 
 Run `cargo test -p zeroship-workflow-server` for the host contracts. Required
@@ -143,10 +149,18 @@ private `workflow.service_key_file`, and `workflow.service_peers_file` containin
 Control's public key. Control's peer bundle must contain the workflow service's
 public key. The Control origin requires HTTPS, except for literal
 loopback addresses and exact origins named in `plaintext_peers`, which is empty
-by default. The host needs no customer connection or payload location.
+by default. The host needs no customer database connection. It does need
+`workflow.storage_url`, and it must name the same object store the deployment's
+workers name: this service writes a run's staged input and an executing run reads
+that object back, so a store only one of them can reach is a run that cannot
+start. Startup refuses an absent or unusable location rather than claiming sweeps
+it could only fail.
 `workflow.driver_interval_ms` controls the delay after a completed pass;
 `workflow.driver_lane_timeout_ms` bounds each lane. `workflow.batch_limit` also
-bounds the candidate page. The closing lane begins closing an app's recovery
+bounds the candidate page. `workflow.maintenance_sweeps` decides whether this
+process composes its own sweep lane at all; it is on, and a host that sets it off
+composes none, for a queue another process is the sweep authority over. The
+closing lane begins closing an app's recovery
 responsibility after `workflow.closing_idle_ms` without activity, or once
 Control archived the app; `workflow.closing_timeout_ms` bounds an attempt, and
 `workflow.closing_backoff_ms` doubles up to `workflow.closing_backoff_max_ms`

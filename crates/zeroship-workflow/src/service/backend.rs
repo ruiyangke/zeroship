@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use futures::{channel::oneshot, future::LocalBoxFuture, FutureExt, StreamExt};
 use serde_json::Value;
 use std::sync::Arc;
-use zeroship_core::app_id::AppId;
+use zeroship_core::{app_id::AppId, workflow_coordination::RunId};
 
 const MAX_QUEUED_REQUESTS: usize = 64;
 const MAX_ACTIVE_REQUESTS: usize = 16;
@@ -44,6 +44,19 @@ impl std::fmt::Debug for AppBackend {
     }
 }
 impl AppBackend {
+    /// Refuse a run id this contract cannot name, before it reaches the journal.
+    ///
+    /// TYPED ON BOTH TIERS. The crossed backend parses one into [`RunId`] because
+    /// its wire type demands it; without the same check here, the in-process tier
+    /// hands unparseable text to SQL and answers `NotFound`, which tells a
+    /// creator their run is missing when their id is malformed. Both tiers refuse
+    /// the same input for the same reason instead.
+    fn run(run_id: &str) -> Result<(), WorkflowServiceError> {
+        RunId::parse(run_id)
+            .map(|_| ())
+            .map_err(|_| WorkflowServiceError::InvalidRequest("invalid workflow run id".into()))
+    }
+
     fn new(api: AppWorkflows, outputs: SharedStepOutputs, inputs: SharedInputStager) -> Self {
         let (requests, receiver) = flume::bounded::<Request>(MAX_QUEUED_REQUESTS);
         let backend = Self {
@@ -229,6 +242,7 @@ impl WorkflowBackend for AppBackend {
         .await
     }
     async fn status(&self, run_id: String) -> Result<RunStatus, WorkflowServiceError> {
+        Self::run(&run_id)?;
         // Status reads existing app history and cannot grant mutation authority.
         self.dispatch(None, move |api| {
             async move { api.status(&run_id).await }.boxed_local()
@@ -240,6 +254,7 @@ impl WorkflowBackend for AppBackend {
         run_id: String,
         options: SignalOptions,
     ) -> Result<DeliveredSignal, WorkflowServiceError> {
+        Self::run(&run_id)?;
         self.mutate(move |api| {
             async move { api.signal(&RequestId::mint(), &run_id, options).await }.boxed_local()
         })
@@ -250,6 +265,7 @@ impl WorkflowBackend for AppBackend {
         run_id: String,
         op: RunOperation,
     ) -> Result<TransitionedRun, WorkflowServiceError> {
+        Self::run(&run_id)?;
         self.mutate(move |api| {
             async move { api.transition(&RequestId::mint(), &run_id, op).await }.boxed_local()
         })
@@ -260,6 +276,7 @@ impl WorkflowBackend for AppBackend {
         run_id: String,
         options: RestartOptions,
     ) -> Result<RestartedRun, WorkflowServiceError> {
+        Self::run(&run_id)?;
         self.mutate(move |api| {
             async move { api.restart(&RequestId::mint(), &run_id, options).await }.boxed_local()
         })
@@ -271,6 +288,7 @@ impl WorkflowBackend for AppBackend {
         name: String,
         occurrence: u32,
     ) -> Result<Vec<u8>, WorkflowServiceError> {
+        Self::run(&run_id)?;
         let outputs = self.outputs.clone();
         self.call(move |api| {
             async move { outputs.read(&api, &run_id, &name, occurrence).await }.boxed_local()
@@ -278,6 +296,7 @@ impl WorkflowBackend for AppBackend {
         .await
     }
     async fn read_output(&self, run_id: String) -> Result<Vec<u8>, WorkflowServiceError> {
+        Self::run(&run_id)?;
         let outputs = self.outputs.clone();
         self.call(move |api| {
             async move { outputs.read_output(&api, &run_id).await }.boxed_local()

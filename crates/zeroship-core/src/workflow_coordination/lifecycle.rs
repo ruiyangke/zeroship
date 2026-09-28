@@ -329,3 +329,93 @@ pub struct StartedRun {
     pub id: String,
     pub state: RunState,
 }
+
+/// Why a start a creator asked for is not one this contract can carry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum InvalidStart {
+    #[error("start options may not name a payload descriptor")]
+    SuppliedInputRef,
+}
+
+/// The start options a creator may name: every field of [`StartOptions`] but
+/// the one that locates a payload object.
+///
+/// `input_ref` HAS NO FIELD HERE, and the absence is the contract rather than an
+/// omission. A descriptor locates one stored object of one app, so a caller who
+/// could name one could point a run at a payload it never staged. The host that
+/// admits a start value is the host that stages it, and it names the object
+/// itself -- which is why a start carries the creator's VALUE across a request
+/// boundary and never a descriptor.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreatorStartOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    #[serde(default, skip_serializing_if = "ConflictPolicy::is_join")]
+    pub on_conflict: ConflictPolicy,
+}
+
+impl CreatorStartOptions {
+    /// Complete these options with the object the admitting host staged, which
+    /// is the only way an `input_ref` is ever set on this path.
+    #[must_use]
+    pub fn with_input(self, input_ref: Option<WorkflowOutputRef>) -> StartOptions {
+        StartOptions {
+            input_ref,
+            key: self.key,
+            on_conflict: self.on_conflict,
+        }
+    }
+}
+
+impl StartOptions {
+    /// Narrow these options to the subset a creator may name.
+    ///
+    /// REFUSES rather than dropping a descriptor already set. Dropping one would
+    /// turn a start that named another app's object into a start that silently
+    /// named none, so the caller could not tell an ignored field from an honoured
+    /// one and neither could a reader of this code.
+    ///
+    /// # Errors
+    /// Rejects options that already name a payload object.
+    pub fn creator_subset(self) -> Result<CreatorStartOptions, InvalidStart> {
+        if self.input_ref.is_some() {
+            return Err(InvalidStart::SuppliedInputRef);
+        }
+        Ok(CreatorStartOptions {
+            key: self.key,
+            on_conflict: self.on_conflict,
+        })
+    }
+}
+
+/// Where a recorded output's bytes are, which is what crosses in place of them.
+///
+/// A payload answers to `AppPolicy::max_payload_bytes` and a reply to
+/// `max_journal_bytes`, which is smaller, so the bytes of an object cannot cross
+/// this transport at all. The key and the descriptor can: the key addresses the
+/// object in the store both hosts bind under the same namespace, and the
+/// descriptor is the contract those bytes must satisfy once opened.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PayloadLocation {
+    pub payload_id: String,
+    pub reference: WorkflowOutputRef,
+}
+
+/// What a completed step recorded, located rather than carried.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum StepOutputLocation {
+    /// The journal holds the value itself and no object was ever written, so the
+    /// value is what locates it. It is journal content, bounded by the same
+    /// `max_journal_bytes` the reply is, because the journal is where it lives.
+    Inline { value: serde_json::Value },
+    /// The journal holds a descriptor, and the bytes are in the object store.
+    Object { payload: PayloadLocation },
+}

@@ -6,6 +6,7 @@
 )]
 
 use crate::TaskPayloads;
+use zeroship_workflow::service::delivery::PayloadConfirmation;
 use zeroship_workflow::{
     engine::{StepOutcome, WorkflowOutputRef},
     execution::decode_runtime_outcomes,
@@ -281,7 +282,24 @@ impl PreparedExecution {
         Ok(result)
     }
 
-    /// Confirm uploads before returning a frontier ready for journal commit.
+    /// Upload this batch and return the frontier ready for journal commit,
+    /// together with any confirmations its settlement still owes.
+    ///
+    /// A host holding the object store confirms each upload under its own lock
+    /// and owes nothing, so the confirmations come back empty. A host writing
+    /// across a request boundary owes one per upload, and they have to reach the
+    /// settlement: `promote` resolves no `uploading` row, so the confirm must
+    /// commit in the same transaction as the frontier that references it.
+    ///
+    /// A REFUSED BATCH STILL OWES ITS ACCEPTED PREFIX. `Upload::outcome` records
+    /// the index its owning outcome WILL occupy, recorded before that outcome is
+    /// pushed, and uploads are gathered in increasing outcome order -- so when the
+    /// upload at index `k` is refused, every earlier upload's owning outcome lies
+    /// inside `outcomes[..k]`, which is the prefix the truncated arm keeps. Those
+    /// outcomes carry their descriptors, so the confirmations gathered so far are
+    /// exactly what that prefix still owes and are returned with it. Dropping them
+    /// would commit a frontier referencing rows still `uploading`, which `promote`
+    /// refuses as a missing payload.
     ///
     /// # Errors
     /// Reports transport failures or lost task authority. Callers may retry
@@ -289,7 +307,8 @@ impl PreparedExecution {
     pub async fn stage(
         &self,
         transport: &dyn TaskPayloads,
-    ) -> Result<WorkflowExecution, WorkflowServiceError> {
+    ) -> Result<(WorkflowExecution, Vec<PayloadConfirmation>), WorkflowServiceError> {
+        let mut owed = Vec::new();
         for upload in &self.uploads {
             let staged = transport
                 .stage(
@@ -301,7 +320,9 @@ impl PreparedExecution {
                 )
                 .await;
             match staged {
-                Ok(receipt) if receipt.reference == upload.reference => {}
+                Ok(receipt) if receipt.reference == upload.reference => {
+                    owed.extend(receipt.confirm);
+                }
                 Ok(_) => {
                     return Err(WorkflowServiceError::Unavailable(
                         "workflow upload receipt changed".into(),
@@ -316,14 +337,17 @@ impl PreparedExecution {
                     outcomes.push(limit_failure(
                         self.outcomes.get(upload.outcome).and_then(limit_step),
                     ));
-                    return Ok(WorkflowExecution { outcomes });
+                    return Ok((WorkflowExecution { outcomes }, owed));
                 }
                 Err(error) => return Err(error),
             }
         }
-        Ok(WorkflowExecution {
-            outcomes: self.outcomes.clone(),
-        })
+        Ok((
+            WorkflowExecution {
+                outcomes: self.outcomes.clone(),
+            },
+            owed,
+        ))
     }
 }
 

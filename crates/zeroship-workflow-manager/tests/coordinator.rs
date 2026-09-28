@@ -32,6 +32,7 @@ use zeroship_data_orm::{
 };
 use zeroship_workflow_manager::{
     coordinator::{Coordinator, Options, Placed},
+    maintenance::MaintenanceAuthority,
     Error, Options as QueueOptions, Queue,
 };
 
@@ -328,7 +329,7 @@ async fn registration_race(
 }
 
 async fn management_receipts(fixture: &Fixture) {
-    let (coordinator, _) = host(
+    let (coordinator, queue) = host(
         fixture,
         Options {
             max_pending_management: 1,
@@ -352,13 +353,24 @@ async fn management_receipts(fixture: &Fixture) {
             .unwrap(),
         None
     );
-    assert!(coordinator
-        .claim_job(&worker, &scope(&other), Ok(support::delivery_ceiling()), || ready(Ok(worker.clone())))
+    // A command is a sweep: no placement takes one, the app it names or another.
+    for placed in [&other, &assignment] {
+        assert!(coordinator
+            .claim_job(&worker, &scope(placed), Ok(support::delivery_ceiling()), || ready(Ok(worker.clone())))
+            .await
+            .unwrap()
+            .is_none());
+    }
+    // The lane of the process that owns the journal takes it, and only for the
+    // app it holds: the foreign app's lane has nothing.
+    assert!(MaintenanceAuthority::new(foreign.clone(), WorkerId::mint())
+        .claim(&queue, Ok(support::delivery_ceiling()))
         .await
         .unwrap()
         .is_none());
-    let delivery = coordinator
-        .claim_job(&worker, &scope(&assignment), Ok(support::delivery_ceiling()), || ready(Ok(worker.clone())))
+    let lane = MaintenanceAuthority::new(app.clone(), WorkerId::mint());
+    let delivery = lane
+        .claim(&queue, Ok(support::delivery_ceiling()))
         .await
         .unwrap()
         .unwrap()
@@ -381,7 +393,7 @@ async fn management_receipts(fixture: &Fixture) {
         },
         successors: vec![],
     };
-    replay_management_receipt(fixture, &coordinator, &worker, &request, &settlement).await;
+    replay_management_receipt(fixture, &queue, &lane, &request, &settlement).await;
     assert!(coordinator
         .manage(&actor, &command(&app))
         .await
@@ -420,29 +432,25 @@ async fn accept_management_receipt(coordinator: &Coordinator, request: &ManageRu
 
 async fn replay_management_receipt(
     fixture: &Fixture,
-    coordinator: &Coordinator,
-    worker: &WorkerId,
+    queue: &Queue,
+    lane: &MaintenanceAuthority,
     request: &ManageRun,
     settlement: &Settlement,
 ) {
+    let app = &request.app_id;
+    // Another holder of the same lane did not take this delivery, so it cannot
+    // discharge it either.
     assert_eq!(
-        coordinator
-            .settle_job(&WorkerId::mint(), settlement, || ready(Ok(worker.clone())))
+        MaintenanceAuthority::new(app.clone(), WorkerId::mint())
+            .settle(queue, settlement)
             .await,
         Err(Error::Denied)
     );
-    let receipt = coordinator
-        .settle_job(worker, settlement, || ready(Ok(worker.clone())))
-        .await
-        .unwrap();
+    let receipt = lane.settle(queue, settlement).await.unwrap();
     let actor = service_issuer(CONTROL_SERVICE_NAME).unwrap();
-    let app = &request.app_id;
-    let (reopened, _) = host(fixture, Options::default()).await;
+    let (reopened, reopened_queue) = host(fixture, Options::default()).await;
     assert_eq!(
-        reopened
-            .settle_job(worker, settlement, || ready(Ok(worker.clone())))
-            .await
-            .unwrap(),
+        lane.settle(&reopened_queue, settlement).await.unwrap(),
         receipt
     );
     let closed = reopened.manage(&actor, request).await.unwrap();
@@ -466,9 +474,7 @@ async fn replay_management_receipt(
         ..settlement.clone()
     };
     assert_eq!(
-        reopened
-            .settle_job(worker, &changed, || ready(Ok(worker.clone())))
-            .await,
+        lane.settle(&reopened_queue, &changed).await,
         Err(Error::Conflict)
     );
 }
@@ -525,7 +531,11 @@ async fn claim_authority(fixture: &Fixture) {
     ));
     assert_ready(&database, &spec).await;
     // The worker gives the placement up; the next visit places the app again
-    // under a higher revision, which retires the original authority.
+    // under a higher revision, which retires the original authority. The refusal
+    // is a CONFLICT rather than a denial: this instance is still the placed one
+    // and the revision it names was superseded, so the next scan reaches the one
+    // that holds. The forged revision above stays denied, because nothing ever
+    // granted it.
     relinquish(&coordinator, &original).await;
     let replacement = place(&coordinator, &app).await;
     assert!(replacement.revision > original.revision);
@@ -535,7 +545,7 @@ async fn claim_authority(fixture: &Fixture) {
                 std::future::ready(Ok(original.worker_id.clone()))
             })
             .await,
-        Err(Error::Denied)
+        Err(Error::Conflict)
     ));
     assert_ready(&database, &spec).await;
     let foreign_worker = Assignment {
@@ -1145,15 +1155,20 @@ async fn propagation_publication(fixture: &Fixture) {
     journal_pages(fixture, "propagate", [page(1), page(2)], [foreign, page(2)]).await;
 }
 
-/// A code-free page operation is worker-published, delivered and settled with
-/// its successor page, without holds or executable and run projections.
+/// A code-free page operation is worker-published, then delivered to the lane
+/// and settled with its successor page, without holds or executable and run
+/// projections.
+///
+/// Publication and delivery part company here: a worker may publish a page,
+/// because the page is a creator intent it produced, and may not run one,
+/// because the page is a sweep of the journal.
 async fn journal_pages(
     fixture: &Fixture,
     kind: &str,
     [first, next]: [JobOperation; 2],
     substitutes: [JobOperation; 2],
 ) {
-    let (coordinator, _) = host(fixture, Options::default()).await;
+    let (coordinator, queue) = host(fixture, Options::default()).await;
     let worker = WorkerId::mint();
     register(&coordinator, &worker, 1).await;
     let assigned = place(&coordinator, &AppId::mint()).await;
@@ -1162,8 +1177,17 @@ async fn journal_pages(
         ..job(&assigned.app_id)
     };
     assert_publication_identity(&coordinator, &worker, &assigned, &spec, substitutes).await;
-    let granted = coordinator
-        .claim_job(&worker, &scope(&assigned), Ok(support::delivery_ceiling()), || ready(Ok(worker.clone())))
+    assert!(
+        coordinator
+            .claim_job(&worker, &scope(&assigned), Ok(support::delivery_ceiling()), || ready(Ok(worker.clone())))
+            .await
+            .unwrap()
+            .is_none(),
+        "the worker that published the page is not the host that runs it"
+    );
+    let lane = MaintenanceAuthority::new(assigned.app_id.clone(), WorkerId::mint());
+    let granted = lane
+        .claim(&queue, Ok(support::delivery_ceiling()))
         .await
         .unwrap()
         .unwrap();
@@ -1183,9 +1207,7 @@ async fn journal_pages(
     let db = fixture.database().await;
     let before = rows(&db, "jobs", value!({"app_id":assigned.app_id.as_str()})).await;
     assert_eq!(
-        coordinator
-            .settle_job(&worker, &settlement, || ready(Ok(worker.clone())))
-            .await,
+        lane.settle(&queue, &settlement).await,
         Err(Error::Invalid)
     );
     assert_eq!(
@@ -1193,17 +1215,8 @@ async fn journal_pages(
         before
     );
     settlement.outcome = JobOutcome::Waiting {};
-    let receipt = coordinator
-        .settle_job(&worker, &settlement, || ready(Ok(worker.clone())))
-        .await
-        .unwrap();
-    assert_eq!(
-        coordinator
-            .settle_job(&worker, &settlement, || ready(Ok(worker.clone())))
-            .await
-            .unwrap(),
-        receipt
-    );
+    let receipt = lane.settle(&queue, &settlement).await.unwrap();
+    assert_eq!(lane.settle(&queue, &settlement).await.unwrap(), receipt);
     let stored = row(&db, "jobs", value!({"id":successor.id.as_str()})).await;
     assert_eq!(stored["operation_kind"], value!(kind));
     assert!(

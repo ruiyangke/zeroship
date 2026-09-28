@@ -130,7 +130,23 @@ async fn mutating_backend_calls_hint_the_host_and_reads_do_not() {
     assert_eq!(hints.load(Ordering::SeqCst), 1);
     client.status(run.id.clone()).await.unwrap();
     assert_eq!(hints.load(Ordering::SeqCst), 1, "reads commit nothing");
-    // A refused mutation still hints: a failed call may follow its commit.
+    // A refused mutation still hints: a failed call may follow its commit. The
+    // run id is WELL-FORMED and absent, so the refusal comes from the journal,
+    // which is the only kind of failure a commit can precede.
+    assert!(client
+        .signal(
+            zeroship_core::workflow_coordination::RunId::mint().as_str().to_owned(),
+            SignalOptions {
+                signal_type: "resume".into(),
+                payload: json!(null),
+            },
+        )
+        .await
+        .is_err());
+    assert_eq!(hints.load(Ordering::SeqCst), 2);
+    // A call refused BEFORE the journal hints nothing. A malformed run id never
+    // reaches a transaction, so there is no commit for a wake to follow, and
+    // hinting would wake the host over work that cannot exist.
     assert!(client
         .signal(
             "run_missing".into(),
@@ -141,7 +157,7 @@ async fn mutating_backend_calls_hint_the_host_and_reads_do_not() {
         )
         .await
         .is_err());
-    assert_eq!(hints.load(Ordering::SeqCst), 2);
+    assert_eq!(hints.load(Ordering::SeqCst), 2, "a boundary refusal commits nothing");
     cloned
         .start("Example".into(), serde_json::Value::Null, StartOptions::default())
         .await

@@ -146,6 +146,40 @@ pub struct JobSpec {
     pub available_at: UnixMillis,
 }
 
+impl JobOperation {
+    /// Whether claiming this operation hands its holder a task to execute.
+    ///
+    /// One kind does. Every other is maintenance, which the journal settles from
+    /// the delivery alone with no task and no executor. A merged claim reply
+    /// therefore carries a journal acceptance for exactly this kind, and the
+    /// producers and consumers of that reply all read the rule from here rather
+    /// than each restating it.
+    ///
+    /// Every kind is named, with no wildcard: a variant added to this enum leaves
+    /// this match non-exhaustive, so whether claiming it hands out a task is
+    /// decided here rather than inherited from an arm that happened to cover it.
+    /// That matters because this is the second place the executable kind is
+    /// encoded - `operations!` in `zeroship-workflow-manager` is the first, where
+    /// the same variant carries `Work::Creator` - and core cannot depend on the
+    /// manager to bind them. An exhaustive match is what makes the drift a build
+    /// failure instead of a maintenance operation that silently claims a task.
+    #[must_use]
+    pub const fn accepts_execution(&self) -> bool {
+        match self {
+            Self::Advance { .. } => true,
+            Self::Activate { .. }
+            | Self::Cron { .. }
+            | Self::Management { .. }
+            | Self::Fanout { .. }
+            | Self::Propagate { .. }
+            | Self::ReleaseHold { .. }
+            | Self::Close { .. }
+            | Self::Reconcile {}
+            | Self::Collect {} => false,
+        }
+    }
+}
+
 impl JobSpec {
     /// The operation's executable prerequisite, if it has one. Journal-only
     /// operations must remain deliverable without acquiring a deployment hold.

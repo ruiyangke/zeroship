@@ -40,6 +40,13 @@ fn main() {
             "max_request_bytes",
             CheckValue::Count(options.max_request_bytes),
         );
+        // The payload store's KIND, not its location: an operator reading this
+        // is checking whether the store is the shared one their workers read,
+        // and a local path here on a multi-node deployment is the answer.
+        report.field(
+            "storage_kind",
+            CheckValue::Plain(options.storage.kind().to_owned()),
+        );
         // Reported whether or not it is set. A security posture that appears in
         // the report only when relaxed cannot be read as "the fence is intact";
         // an empty field says which of the two this deployment is.
