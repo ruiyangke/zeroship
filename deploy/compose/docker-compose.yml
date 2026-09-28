@@ -679,9 +679,19 @@ services:
       ZEROSHIP_PLAINTEXT_PEERS: http://control:9090,http://migrate-server:9091
       ZEROSHIP_WORKFLOW_CONTROL_URL: http://control:9090
       ZEROSHIP_WORKFLOW_MIGRATE_URL: http://migrate-server:9091
+      # THE SAME STORE THE WORKERS MOUNT, at the same path. This service stages
+      # a run's input into it and an executing run reads that object back, so a
+      # store only one of them can reach is a run that cannot start. Its objects
+      # live under the `platform:workflow` namespace, which is disjoint from the
+      # per-app namespaces `env.storage` uses, so one backend serves both
+      # without either reaching the other's keys.
+      ZEROSHIP_WORKFLOW_STORAGE_URL: /data/app-storage
       ZEROSHIP_OBSERVABILITY_LOG_FORMAT: json
     volumes:
       - ../ops/zeroship.toml:/etc/zeroship/zeroship.toml:ro
+      # See ZEROSHIP_WORKFLOW_STORAGE_URL above: the workers' volume, at their
+      # path, because the objects written here are read there.
+      - app-storage:/data/app-storage
       - ${ZEROSHIP_SECRETS_DIR:-./secrets}/svc-workflow.pem:/etc/zeroship/secrets/svc-workflow.pem:ro
       - ${ZEROSHIP_SECRETS_DIR:-./secrets}/service-peers.json:/etc/zeroship/secrets/service-peers.json:ro
     # compio/io_uring, same as every other native service here.

@@ -32,10 +32,18 @@ const CATALOG: &[ServiceEndpoint] = &[
     endpoints::WORKFLOW_JOB_CLAIM,
     endpoints::WORKFLOW_JOB_HEARTBEAT,
     endpoints::WORKFLOW_JOB_SETTLE,
+    endpoints::WORKFLOW_JOB_RELEASE,
+    endpoints::WORKFLOW_JOB_RECEIPT,
+    endpoints::WORKFLOW_RUN_START,
     endpoints::WORKFLOW_RUN_STATUS,
     endpoints::WORKFLOW_RUN_SIGNAL,
     endpoints::WORKFLOW_RUN_TRANSITION,
     endpoints::WORKFLOW_RUN_RESTART,
+    endpoints::WORKFLOW_RUN_STEP_OUTPUT,
+    endpoints::WORKFLOW_RUN_OUTPUT,
+    endpoints::WORKFLOW_TASK_PAYLOAD,
+    endpoints::WORKFLOW_TASK_EXECUTABLE,
+    endpoints::WORKFLOW_TASK_PAYLOAD_RESERVE,
     endpoints::CONTROL_APP,
     endpoints::CONTROL_APP_ENV,
     endpoints::CONTROL_APP_DATA_KEY,
@@ -231,6 +239,24 @@ fn endpoint_catalog_records_exact_measured_operations() {
             "/v1/jobs/settle",
         ),
         (
+            endpoints::WORKFLOW_JOB_RELEASE,
+            "workflow",
+            "POST",
+            "/v1/jobs/release",
+        ),
+        (
+            endpoints::WORKFLOW_JOB_RECEIPT,
+            "workflow",
+            "POST",
+            "/v1/jobs/receipt",
+        ),
+        (
+            endpoints::WORKFLOW_RUN_START,
+            "workflow",
+            "POST",
+            "/v1/runs/start",
+        ),
+        (
             endpoints::WORKFLOW_RUN_STATUS,
             "workflow",
             "POST",
@@ -253,6 +279,36 @@ fn endpoint_catalog_records_exact_measured_operations() {
             "workflow",
             "POST",
             "/v1/runs/restart",
+        ),
+        (
+            endpoints::WORKFLOW_RUN_STEP_OUTPUT,
+            "workflow",
+            "POST",
+            "/v1/runs/step-output",
+        ),
+        (
+            endpoints::WORKFLOW_RUN_OUTPUT,
+            "workflow",
+            "POST",
+            "/v1/runs/output",
+        ),
+        (
+            endpoints::WORKFLOW_TASK_PAYLOAD,
+            "workflow",
+            "POST",
+            "/v1/tasks/payload",
+        ),
+        (
+            endpoints::WORKFLOW_TASK_EXECUTABLE,
+            "workflow",
+            "POST",
+            "/v1/tasks/executable",
+        ),
+        (
+            endpoints::WORKFLOW_TASK_PAYLOAD_RESERVE,
+            "workflow",
+            "POST",
+            "/v1/tasks/payload/reserve",
         ),
         (
             endpoints::GATEWAY_BACKCHANNEL_LOGOUT,
@@ -473,10 +529,26 @@ fn measured_allowlist_is_encoded_and_enforced_row_by_row() {
             endpoints::WORKFLOW_JOB_CLAIM,
             endpoints::WORKFLOW_JOB_HEARTBEAT,
             endpoints::WORKFLOW_JOB_SETTLE,
+            // Handing a task back, and reading what an uncertain settlement
+            // may already have committed.
+            endpoints::WORKFLOW_JOB_RELEASE,
+            endpoints::WORKFLOW_JOB_RECEIPT,
+            endpoints::WORKFLOW_RUN_START,
             endpoints::WORKFLOW_RUN_STATUS,
             endpoints::WORKFLOW_RUN_SIGNAL,
             endpoints::WORKFLOW_RUN_TRANSITION,
             endpoints::WORKFLOW_RUN_RESTART,
+            endpoints::WORKFLOW_RUN_STEP_OUTPUT,
+            endpoints::WORKFLOW_RUN_OUTPUT,
+            // A dispatch locating its own replay edge, authorized by the task
+            // credential in the body rather than by a placement.
+            endpoints::WORKFLOW_TASK_PAYLOAD,
+            // And which deployment that dispatch replays against. The pin
+            // crosses; the artifact never does.
+            endpoints::WORKFLOW_TASK_EXECUTABLE,
+            // And reserving the row an upload is keyed by. The bytes go to the
+            // object store directly; only the reservation crosses.
+            endpoints::WORKFLOW_TASK_PAYLOAD_RESERVE,
             endpoints::CDC_SUBSCRIBE,
             endpoints::CONTROL_APP,
             endpoints::CONTROL_APP_ENV,

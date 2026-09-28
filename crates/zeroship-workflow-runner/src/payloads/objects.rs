@@ -15,7 +15,7 @@ use zeroship_storage::{
 use zeroship_workflow::{
     engine::WorkflowOutputRef,
     service::{
-        validate_reference, AppWorkflows, PayloadDeleter, PayloadOpener, PayloadSlot,
+        input_object, validate_reference, AppWorkflows, PayloadDeleter, PayloadOpener, PayloadSlot,
         PayloadTarget, PayloadWriter, PolicyAuthority, RequestId, StagedPayload, StepOutput,
         TaskToken, WorkerIdentity, WorkflowService,
     },
@@ -33,14 +33,77 @@ impl PayloadObjects {
     /// # Errors
     /// Reports a store that refuses the platform namespace.
     pub fn open(store: StorageStore) -> Result<Self, WorkflowServiceError> {
-        Ok(Self(store.namespace(
-            Namespace::platform("workflow").map_err(storage_error)?,
-        )))
+        Ok(Self(
+            store.namespace(
+                Namespace::platform(zeroship_workflow::service::PAYLOAD_NAMESPACE)
+                    .map_err(storage_error)?,
+            ),
+        ))
+    }
+}
+
+impl PayloadObjects {
+    /// Open the object a journal read already located, under `reference` as its
+    /// contract.
+    ///
+    /// NO OWNERSHIP IS PROVEN HERE, because the journal proved it before it
+    /// answered with this key: the run lock was held across the lookup, the row's
+    /// descriptor was compared against the step's recorded one, and the reply
+    /// carries the pair. This is the second half of a read whose first half ran
+    /// somewhere else, so the caller owes that first half; nothing on this path
+    /// turns a key a caller invented into bytes it may see, because the key comes
+    /// from a reply and the digest in `reference` is what the stream verifies
+    /// against.
+    ///
+    /// Crate-private: the whole-read entry points beside it take a journal handle
+    /// and prove ownership themselves.
+    ///
+    /// # Errors
+    /// Reports a missing or resized object and a malformed descriptor.
+    pub(crate) async fn open_located(
+        &self,
+        app: &AppId,
+        payload_id: &str,
+        reference: &WorkflowOutputRef,
+    ) -> Result<PayloadRead, WorkflowServiceError> {
+        ObjectOpener(self)
+            .open(PayloadTarget {
+                app,
+                id: payload_id,
+                reference,
+                // The policy generation guards the in-process path because the
+                // body outlives the transaction that authorized it. Here the
+                // authorizing transaction committed on the service before the
+                // reply arrived, and the request that carried it was itself
+                // authorized against a freshly observed policy, so there is no
+                // transaction for a body to outlive.
+                authority: None,
+            })
+            .await
     }
 }
 
 #[cfg(test)]
 impl PayloadObjects {
+    /// Put `bytes` at the key `id` for `app`, where staging's writer would.
+    pub(crate) async fn put(
+        &self,
+        app: &AppId,
+        id: &str,
+        bytes: &[u8],
+        content_type: Option<&str>,
+    ) {
+        self.0
+            .put_stream(
+                app.as_str(),
+                id,
+                Box::new(OnceChunk::new(bytes.to_vec().into())),
+                content_type,
+            )
+            .await
+            .unwrap();
+    }
+
     /// A store on a directory that lives as long as the returned guard.
     pub(crate) fn temporary() -> (Self, tempfile::TempDir) {
         let directory = tempfile::tempdir().unwrap();
@@ -148,15 +211,7 @@ impl InputStager for PayloadObjects {
         request: &RequestId,
         input: &serde_json::Value,
     ) -> Result<WorkflowOutputRef, WorkflowServiceError> {
-        let bytes = serde_json::to_vec(input).map_err(|_| {
-            WorkflowServiceError::InvalidRequest("invalid workflow run input".into())
-        })?;
-        let reference = WorkflowOutputRef {
-            hash: zeroship_workflow::service::hash(&bytes),
-            size: i64::try_from(bytes.len()).map_err(|_| WorkflowServiceError::PayloadTooLarge)?,
-            content_type: Some("application/json".into()),
-        };
-        validate_reference(&reference)?;
+        let (bytes, reference) = input_object(input)?;
         api.stage_input(
             request,
             reference.clone(),
@@ -170,9 +225,9 @@ impl InputStager for PayloadObjects {
     }
 }
 
-struct ObjectWriter<'a> {
-    objects: &'a PayloadObjects,
-    body: BoxChunkSource,
+pub(crate) struct ObjectWriter<'a> {
+    pub(crate) objects: &'a PayloadObjects,
+    pub(crate) body: BoxChunkSource,
 }
 #[async_trait(?Send)]
 impl PayloadWriter for ObjectWriter<'_> {

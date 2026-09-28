@@ -14,13 +14,14 @@ use zeroship_core::{
     workflow_coordination::{AssignedScope, WorkerId, AUDIENCE},
     workflow_deployments::{HoldGeneration, HoldReceipt},
     workflow_jobs::{
-        Delivery, DeliveryLease, DeploymentId, JobId, JobOperation, JobOutcome, JobSpec,
+        Delivery, DeploymentId, JobId, JobOperation, JobOutcome, JobSpec,
         Settlement, SettlementReceipt,
     },
     workflow_policy::AppPolicy,
 };
 use zeroship_data_orm::binding::DbBinding;
 use zeroship_workflow_manager::{
+    maintenance::MaintenanceAuthority,
     recovery::{DutyKind, Options as RecoveryOptions, Recovery},
     retention::HoldClient,
     Error, Options, Queue,
@@ -108,7 +109,7 @@ async fn enroll(
     url: &str,
     _control: &Actor,
     app: &AppId,
-) -> (Actor, AssignedScope) {
+) -> (Actor, AssignedScope, WorkerId) {
     let worker = WorkerId::mint();
     let actor = Actor {
         issuer: ServiceIssuer::parse(&format!(
@@ -141,19 +142,36 @@ async fn enroll(
             app_id: app.clone(),
             assignment_revision: assignment.revision,
         },
+        worker,
     )
 }
 
-async fn claim(http: &Client, url: &str, actor: &Actor, scope: &AssignedScope) -> Delivery {
-    let lease: DeliveryLease =
-        serde_json::from_value(post(http, url, actor, endpoints::WORKFLOW_JOB_CLAIM, scope).await)
-            .unwrap();
-    assert_eq!(lease.delivery.job.app_id, scope.app_id);
-    assert_eq!(
-        lease.delivery.assignment_revision,
-        scope.assignment_revision
-    );
-    lease.delivery
+/// Take the next sweep off this app's queue, in process, under the authority the
+/// service's own maintenance lane asserts.
+///
+/// THERE IS NO WIRE CLAIM FOR A SWEEP. `WORKFLOW_JOB_CLAIM` claims as
+/// `Claimant::Placed` (`Coordinator::claim_job`), and that claimant admits
+/// `advance` alone, so reconciliation and collection are the lane's rows. What
+/// this case measures is the settlement, and `Queue::settle` is not
+/// claimant-scoped: it authorizes on the assignment and on
+/// `settlement.delivery.worker_id`. So the lease is taken here and discharged
+/// over HTTP, which is where the exactness under test lives.
+///
+/// The authority carries the enrolled worker's own id, because that is the
+/// identity the settle route authenticates. Its asserted revision is `1`, which
+/// is the revision `seed_placement` records, so the placement read behind that
+/// route resolves the same authority this lease names.
+async fn claim(queue: &Queue, lane: &MaintenanceAuthority, scope: &AssignedScope) -> Delivery {
+    let delivery = lane
+        .claim(queue, Ok(AppPolicy::default().max_delivery_attempts))
+        .await
+        .unwrap()
+        .expect("the queue holds a sweep for the lane to claim")
+        .delivery()
+        .clone();
+    assert_eq!(delivery.job.app_id, scope.app_id);
+    assert_eq!(delivery.assignment_revision, scope.assignment_revision);
+    delivery
 }
 
 async fn settle(
@@ -222,7 +240,7 @@ async fn no_holds(platform: &platform::Platform, app: &AppId) {
     assert_eq!(row.get::<_, i64>(1), 0);
 }
 
-async fn setup(platform: &platform::Platform) -> (Recovery, JobSpec) {
+async fn setup(platform: &platform::Platform) -> (Queue, Recovery, JobSpec) {
     let queue = Queue::connect(
         DbBinding::platform(
             "workflow_manager",
@@ -235,7 +253,7 @@ async fn setup(platform: &platform::Platform) -> (Recovery, JobSpec) {
     )
     .await
     .unwrap();
-    let recovery = Recovery::new(queue, RecoveryOptions::default()).unwrap();
+    let recovery = Recovery::new(queue.clone(), RecoveryOptions::default()).unwrap();
     let app = AppId::mint();
     recovery
         .ensure(&app, &DeploymentId::mint(), 1.try_into().unwrap())
@@ -273,7 +291,7 @@ async fn setup(platform: &platform::Platform) -> (Recovery, JobSpec) {
         recovery.dispatch(&app, DutyKind::Reconcile).await,
         Err(Error::Storage)
     );
-    (recovery, reconcile)
+    (queue, recovery, reconcile)
 }
 
 #[ntex::test]
@@ -284,14 +302,22 @@ async fn collection_is_independent_without_workers_and_continues_from_exact_sett
 }
 
 async fn collection_contract(platform: &platform::Platform) {
-    let (recovery, reconcile) = Box::pin(setup(platform)).await;
+    let (queue, recovery, reconcile) = Box::pin(setup(platform)).await;
     let app = &reconcile.app_id;
     let broken = duty(platform, app, "reconcile").await;
     let (control, peers) = control(platform);
     let http = Client::new().await;
     no_workers(platform).await;
     no_holds(platform, app).await;
-    let mut server = server_process::ServerProcess::start(
+    // No sweep lane on this host. What the case measures is the collect duty --
+    // that it is published with no worker in the deployment, survives process
+    // loss, and continues from the EXACT settlement each page reported -- and
+    // every one of those comes from the manager driver's recovery lane and the
+    // settle route, both of which stay on. The sweep lane only claims rows the
+    // driver has already published, under an authority no placement expiry can
+    // fence, so a running one would take the very page this case has to be the
+    // claimant of and leave the exactness unobservable.
+    let mut server = server_process::ServerProcess::without_maintenance_sweeps(
         &platform.runtime_url,
         &peers,
         platform.work.path(),
@@ -320,6 +346,7 @@ async fn collection_contract(platform: &platform::Platform) {
 
     Box::pin(settlement_contract(
         platform,
+        &queue,
         &http,
         &server.url,
         &control,
@@ -345,6 +372,7 @@ async fn collection_contract(platform: &platform::Platform) {
 
 async fn settlement_contract(
     platform: &platform::Platform,
+    queue: &Queue,
     http: &Client,
     url: &str,
     control: &Actor,
@@ -369,11 +397,12 @@ async fn settlement_contract(
             .unwrap(),
         1
     );
-    let (worker, scope) = enroll(platform, http, url, control, app).await;
-    let delivery = claim(http, url, &worker, &scope).await;
+    let (worker, scope, identity) = enroll(platform, http, url, control, app).await;
+    let lane = MaintenanceAuthority::new(app.clone(), identity);
+    let delivery = claim(queue, &lane, &scope).await;
     assert_eq!(&delivery.job, reconcile);
     settle(http, url, &worker, &completed(delivery)).await;
-    let delivery = claim(http, url, &worker, &scope).await;
+    let delivery = claim(queue, &lane, &scope).await;
     assert_eq!(&delivery.job.id, first);
     assert_eq!(delivery.job.operation, JobOperation::Collect {});
     assert_eq!(delivery.job.deployment_id(), None);
@@ -391,9 +420,9 @@ async fn settlement_contract(
 
     // Reconciliation may have become due while the worker acknowledged its
     // earlier job. Leave that delivery occupied while selecting collection.
-    let delivery = claim(http, url, &worker, &scope).await;
+    let delivery = claim(queue, &lane, &scope).await;
     let delivery = if matches!(delivery.job.operation, JobOperation::Reconcile {}) {
-        claim(http, url, &worker, &scope).await
+        claim(queue, &lane, &scope).await
     } else {
         delivery
     };

@@ -26,7 +26,7 @@ use support::{Backend, Fixture};
 use zeroship_core::{
     app_id::AppId,
     workflow_coordination::{
-        AssignedScope, RegisterWorker, Revision, WorkerId, WorkerState,
+        AssignedScope, RegisterWorker, Revision, RunId, WorkerId, WorkerState,
     },
     workflow_jobs::{
         BroadcastId, DeploymentId, JobId, JobOperation, JobOutcome, JobSpec, Settlement, SubmitJob,
@@ -42,6 +42,7 @@ use zeroship_workflow_manager::{
     coordinator::{self, Coordinator, Placed},
     driver,
     lifecycle::AppLifecycle,
+    maintenance::MaintenanceAuthority,
     policy::{PolicyObservation, PolicySource},
     recovery::{self, Closing, DutyKind, Recovery, Responsibility, ScopeState},
     scheduling::{self, Scheduler},
@@ -139,6 +140,9 @@ struct Host {
     app: AppId,
     worker: WorkerId,
     scope: AssignedScope,
+    /// The lane of the process that owns this queue. A Close is a sweep, so it
+    /// is delivered to the lane and never to the placed worker.
+    lane: MaintenanceAuthority,
 }
 
 /// An activated scope at ingress epoch one, placed on one ready worker.
@@ -168,6 +172,7 @@ async fn host(fixture: &Fixture) -> Host {
         panic!("the app has one eligible worker");
     };
     let host = Host {
+        lane: MaintenanceAuthority::new(app.clone(), WorkerId::mint()),
         queue,
         coordinator,
         app,
@@ -219,11 +224,27 @@ impl Host {
             .unwrap();
     }
 
-    /// Deliver the attempt's Close and settle it with `drained` evidence.
+    /// Deliver the attempt's Close to the lane and settle it with `drained`
+    /// evidence.
     async fn settle_close(&self, close: &JobSpec, drained: bool) {
-        let grant = self.claim().await.expect("closure is delivered");
+        let grant = self
+            .lane
+            .claim(&self.queue, Ok(support::delivery_ceiling()))
+            .await
+            .unwrap()
+            .expect("closure is delivered");
         assert_eq!(&grant.delivery().job, close);
-        self.settle(&grant, JobOutcome::Closed { drained }).await;
+        self.lane
+            .settle(
+                &self.queue,
+                &Settlement {
+                    delivery: grant.delivery().clone(),
+                    outcome: JobOutcome::Closed { drained },
+                    successors: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
     }
 
     async fn publish(&self, job: &JobSpec) -> Result<JobSpec, Error> {
@@ -269,6 +290,21 @@ fn fanout(app: &AppId, available_at: i64) -> JobSpec {
         app_id: app.clone(),
         operation: JobOperation::Fanout {
             broadcast_id: BroadcastId::mint(),
+            revision: revision(1),
+        },
+        available_at: available_at.try_into().unwrap(),
+    }
+}
+
+/// Creator work, which a placed worker is the only claimant of.
+fn advance(app: &AppId, available_at: i64) -> JobSpec {
+    JobSpec {
+        id: JobId::mint(),
+        app_id: app.clone(),
+        operation: JobOperation::Advance {
+            deployment_id: DeploymentId::mint(),
+            run_id: RunId::mint(),
+            generation: 0,
             revision: revision(1),
         },
         available_at: available_at.try_into().unwrap(),
@@ -476,7 +512,7 @@ async fn pacing(fixture: &Fixture) {
 /// counts as an attempt and backs off before the next one.
 async fn deferred(fixture: &Fixture) {
     let host = host(fixture).await;
-    host.publish(&fanout(&host.app, 0)).await.unwrap();
+    host.publish(&advance(&host.app, 0)).await.unwrap();
     let leased = host.claim().await.unwrap();
     let quick = host.recovery(options(TICK, HOUR, HOUR, HOUR));
     rewind(fixture, &host.app, value!({"active_at":0})).await;
@@ -519,7 +555,7 @@ async fn deferred(fixture: &Fixture) {
 async fn abandonment(fixture: &Fixture) {
     let host = host(fixture).await;
     let recovery = host.recovery(options(TICK, HOUR, HOUR, HOUR));
-    let timer = fanout(&host.app, 0);
+    let timer = advance(&host.app, 0);
     host.publish(&timer).await.unwrap();
     let close = recovery.begin_close(&host.app).await.unwrap().unwrap();
     assert!(recovery.abandon(&host.app).await.unwrap());

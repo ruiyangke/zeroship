@@ -14,7 +14,7 @@ use zeroship_workflow::{
     operations::{RunOperation, RunState, SignalOptions, StartOptions},
     service::{
         AppPolicy, AppWorkflows, CompletionReceipt, DeployRegistration, HostPolicies, PayloadSlot,
-        PolicySnapshot, RequestId, StagedPayload, TaskAssignment, TaskToken, WorkerIdentity,
+        PolicySnapshot, RequestId, TaskAssignment, TaskToken, WorkerIdentity,
         WorkflowService,
     },
     WorkflowServiceError,
@@ -432,7 +432,7 @@ impl zeroship_workflow_runner::TaskPayloads for UnavailablePayloads {
         _request: &RequestId,
         _reference: zeroship_workflow::engine::WorkflowOutputRef,
         _body: zeroship_storage::backend::BoxChunkSource,
-    ) -> Result<zeroship_workflow::service::StagedPayload, WorkflowServiceError> {
+    ) -> Result<zeroship_workflow_runner::UploadReceipt, WorkflowServiceError> {
         Err(WorkflowServiceError::Unavailable(
             "fixture payload outage".into(),
         ))
@@ -531,7 +531,7 @@ impl TaskPayloads for UploadProbe {
         request: &RequestId,
         reference: zeroship_workflow::engine::WorkflowOutputRef,
         body: zeroship_storage::backend::BoxChunkSource,
-    ) -> Result<StagedPayload, WorkflowServiceError> {
+    ) -> Result<zeroship_workflow_runner::UploadReceipt, WorkflowServiceError> {
         assert!(!self.loader.probes.borrow().is_empty());
         assert!(
             self.loader
@@ -1179,7 +1179,6 @@ impl Manager {
         fixture: &Fixture,
         slots: usize,
     ) -> zeroship_workflow_runner::consumer::JobConsumer<Self> {
-        use zeroship_workflow::service::maintenance::MaintenanceOptions;
         use zeroship_workflow_runner::{
             consumer::{ConsumerOptions, ConsumerScope, JobConsumer},
             delivery::DeliveryOptions,
@@ -1208,7 +1207,6 @@ impl Manager {
                     execution_timeout: Duration::from_secs(10),
                     operation_timeout: Duration::from_secs(2),
                     retry_delay: Duration::from_millis(5),
-                    maintenance: MaintenanceOptions::default(),
                 },
             },
         )
@@ -1217,9 +1215,9 @@ impl Manager {
             .bindings()
             .replace(vec![ConsumerScope::new(
                 fixture.app.clone(),
+                fixture.app.binding().clone(),
                 self.scope.clone(),
                 executor,
-                fixture.objects.clone(),
             )
             .unwrap()])
             .unwrap();
@@ -1239,43 +1237,71 @@ fn manager_error(error: zeroship_workflow_manager::Error) -> WorkflowServiceErro
 }
 
 impl zeroship_workflow_runner::delivery::JobTransport for Manager {
+    /// Asked of the journal this host holds, the way the crossed transport asks
+    /// the service that holds it.
+    async fn release(
+        &self,
+        journal: &Self::Journal,
+        lease: &Self::Lease,
+        task: &zeroship_workflow::service::delivery::DeliveredTask,
+    ) -> Result<(), WorkflowServiceError> {
+        journal.release_job(task, lease).await
+    }
+    async fn receipt(
+        &self,
+        journal: &Self::Journal,
+        job: &zeroship_core::workflow_jobs::JobSpec,
+    ) -> Result<Option<zeroship_workflow::service::delivery::JobReceipt>, WorkflowServiceError> {
+        journal.job_receipt(job).await
+    }
     type Lease = zeroship_workflow_manager::DeliveryGrant;
+    /// This host holds the journal, so an attempt is scoped here rather than
+    /// server-side.
+    type Journal = zeroship_workflow::service::AppWorkflows;
+    fn scope(
+        &self,
+        journal: &Self::Journal,
+        authority: &zeroship_workflow::service::PolicyAuthority,
+    ) -> Result<Self::Journal, WorkflowServiceError> {
+        zeroship_workflow_runner::delivery::scope_journal(journal, authority)
+    }
 
     async fn claim(
         &self,
+        journal: &zeroship_workflow::service::AppWorkflows,
         scope: &zeroship_core::workflow_coordination::AssignedScope,
-    ) -> Result<Option<Self::Lease>, WorkflowServiceError> {
-        self.coordinator
+    ) -> Result<Option<zeroship_workflow_runner::delivery::Claimed<Self::Lease>>, WorkflowServiceError> {
+        let granted = self
+            .coordinator
             .claim_job(&self.worker, scope, Ok(AppPolicy::default().max_delivery_attempts), || async { Ok(self.worker.clone()) })
             .await
-            .map_err(manager_error)
+            .map_err(manager_error)?;
+        let Some(lease) = granted else {
+            return Ok(None);
+        };
+        let accepted = if lease.delivery().job.operation.accepts_execution() {
+            Some(journal.accept_job(&lease).await?)
+        } else {
+            None
+        };
+        Ok(Some(zeroship_workflow_runner::delivery::Claimed { lease, accepted }))
     }
 
-    async fn submit(
+    async fn heartbeat(
         &self,
-        scope: &zeroship_core::workflow_coordination::AssignedScope,
-        job: &zeroship_core::workflow_jobs::JobSpec,
-    ) -> Result<zeroship_core::workflow_jobs::JobSpec, WorkflowServiceError> {
-        self.coordinator
-            .submit_job(
-                &self.worker,
-                &zeroship_core::workflow_jobs::SubmitJob {
-                    scope: scope.clone(),
-                    job: job.clone(),
-                },
-                || async { Ok(self.worker.clone()) },
-            )
-            .await
-            .map_err(manager_error)
-    }
-
-    async fn heartbeat(&self, lease: &Self::Lease) -> Result<Self::Lease, WorkflowServiceError> {
-        self.coordinator
+        journal: &zeroship_workflow::service::AppWorkflows,
+        lease: &Self::Lease,
+        task: &zeroship_workflow::service::delivery::DeliveredTask,
+    ) -> Result<zeroship_workflow_runner::delivery::Renewed<Self::Lease>, WorkflowServiceError> {
+        let lease = self
+            .coordinator
             .heartbeat_job(&self.worker, lease.delivery(), || async {
                 Ok(self.worker.clone())
             })
             .await
-            .map_err(manager_error)
+            .map_err(manager_error)?;
+        let renewal = journal.heartbeat_job(task, &lease).await?;
+        Ok(zeroship_workflow_runner::delivery::Renewed { lease, renewal })
     }
 
     async fn settle(
@@ -1289,6 +1315,25 @@ impl zeroship_workflow_runner::delivery::JobTransport for Manager {
             .await
             .map_err(manager_error)
     }
+
+    async fn complete(
+        &self,
+        journal: &zeroship_workflow::service::AppWorkflows,
+        lease: &Self::Lease,
+        task: &zeroship_workflow::service::delivery::DeliveredTask,
+        execution: zeroship_workflow::WorkflowExecution,
+        confirmed: Vec<zeroship_workflow::service::delivery::PayloadConfirmation>,
+    ) -> Result<zeroship_workflow_runner::delivery::Completed, WorkflowServiceError> {
+        let receipt = journal
+            .complete_reported_job(task, lease, execution, &confirmed)
+            .await?;
+        let settlement = receipt.settlement(lease)?;
+        Ok(zeroship_workflow_runner::delivery::Completed {
+            settlement: zeroship_workflow_runner::delivery::JobTransport::settle(self, &settlement)
+                .await?,
+            receipt,
+        })
+    }
 }
 
 impl zeroship_workflow::service::publication::JobPublisher for Manager {
@@ -1300,8 +1345,17 @@ impl zeroship_workflow::service::publication::JobPublisher for Manager {
         &self,
         job: &zeroship_core::workflow_jobs::JobSpec,
     ) -> Result<zeroship_core::workflow_jobs::JobSpec, WorkflowServiceError> {
-        zeroship_workflow_runner::delivery::JobTransport::submit(self, &self.scope, job)
+        self.coordinator
+            .submit_job(
+                &self.worker,
+                &zeroship_core::workflow_jobs::SubmitJob {
+                    scope: self.scope.clone(),
+                    job: job.clone(),
+                },
+                || async { Ok(self.worker.clone()) },
+            )
             .await
+            .map_err(manager_error)
     }
 }
 

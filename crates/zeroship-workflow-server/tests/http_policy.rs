@@ -49,9 +49,11 @@ use zeroship_workflow_manager::{
     recovery::Options as RecoveryOptions,
     Error as NativeError,
 };
+use zeroship_storage::StorageBackendConfig;
 use zeroship_workflow_server::{
     auth::{PostgresWorkerRegistry, WorkflowAuth},
     coordinator::{connect_eligibility, Coordinator, Options},
+    payloads::ServicePayloads,
     runs::RunService,
     SharedState, WorkflowHttpState,
 };
@@ -230,6 +232,10 @@ impl Fixture {
             auth,
             policy_source: configured.then(|| source.clone() as Rc<dyn PolicySource>),
             runs,
+            payloads: ServicePayloads::open(&StorageBackendConfig::Local(
+                platform.work.path().join("payloads"),
+            ))
+            .unwrap(),
             journal: None,
         });
         Self {

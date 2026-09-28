@@ -22,7 +22,9 @@ use zeroship_core::{
     workflow_jobs::{JobOperation, JobOutcome, ManagementCommand, Settlement},
     workflow_policy::AppPolicy,
 };
-use zeroship_workflow_manager::{coordinator::Placed, Error};
+use zeroship_workflow_manager::{
+    coordinator::Placed, maintenance::MaintenanceAuthority, Error,
+};
 use zeroship_workflow_server::coordinator::{Coordinator, Error as HostError, Options, SCHEMA_SQL};
 
 type StoredIds = BTreeMap<(String, String, String), String>;
@@ -247,9 +249,13 @@ async fn replicas_fence_placement_retries_and_capacity() {
     let replacement = place(&b, &app).await;
     assert!(replacement.revision > assignment.revision);
     assert_ids_retained(&initial_ids, &fixture.stored_ids().await);
+    // The placement was re-admitted, so the row is live at a HIGHER revision:
+    // this instance is still the placed one and its revision moved, which is the
+    // retryable case. The release-without-replacement case above stays `Denied`,
+    // because there the grant is gone rather than superseded.
     assert_eq!(
         a.manager.renew(&worker, &assigned(&assignment)).await,
-        Err(Error::Denied)
+        Err(Error::Conflict)
     );
     assert_eq!(
         a.manager.assignments(&worker, None).await.unwrap(),
@@ -467,12 +473,33 @@ async fn management_is_durable_bounded_typed_and_assignment_scoped() {
     let assignment = place(&a, &app).await;
     assert_eq!(assignment.worker_id, worker);
     let scope = assigned(&assignment);
-    let grant = b
+    // A lifecycle command is a maintenance row. `claim_job` claims as
+    // `Claimant::Placed`, which admits the creator operation alone, so the placed
+    // worker is offered nothing here and the row belongs to the authority the
+    // owning process asserts. The refusal is the control for the claim below: one
+    // variable differs, and it is the claimant.
+    assert!(b
         .manager
         .claim_job(&worker, &scope, Ok(AppPolicy::default().max_delivery_attempts), || async { Ok(worker.clone()) })
         .await
         .unwrap()
+        .is_none());
+    // The authority carries this app's own placed identity rather than a fresh
+    // one, because `Queue::settle` authorizes on `settlement.delivery.worker_id`
+    // and the settlements below are made under `worker`. Its asserted revision is
+    // `ASSERTED`, which is the revision this first placement holds, so the
+    // placement read behind `settle_job` resolves the authority this lease names.
+    let lane = MaintenanceAuthority::new(app.clone(), worker.clone());
+    let grant = lane
+        .claim(
+            b.manager.queue(),
+            Ok(AppPolicy::default().max_delivery_attempts),
+        )
+        .await
+        .unwrap()
         .unwrap();
+    assert_eq!(grant.delivery().worker_id, worker);
+    assert_eq!(grant.delivery().assignment_revision, assignment.revision);
     assert_eq!(
         grant.delivery().job.operation,
         JobOperation::Management {
@@ -555,6 +582,10 @@ async fn management_is_durable_bounded_typed_and_assignment_scoped() {
         .await
         .unwrap();
     let renewed = place(&a, &app).await;
+    assert_ne!(
+        renewed.revision, assignment.revision,
+        "a re-placement must supersede the revision the settlement above names"
+    );
     // Exact committed settlement remains readable after placement replacement.
     assert_eq!(
         b.manager
@@ -566,11 +597,13 @@ async fn management_is_durable_bounded_typed_and_assignment_scoped() {
     drop(a);
     drop(b);
     let reopened = fixture.options(options).await;
-    let grant = reopened
-        .manager
-        .claim_job(&worker, &assigned(&renewed), Ok(AppPolicy::default().max_delivery_attempts), || async {
-            Ok(worker.clone())
-        })
+    // The same authority over a reopened queue. It is asserted rather than read,
+    // so the replaced placement above neither grants nor withdraws it.
+    let grant = lane
+        .claim(
+            reopened.manager.queue(),
+            Ok(AppPolicy::default().max_delivery_attempts),
+        )
         .await
         .unwrap()
         .unwrap();
@@ -845,6 +878,8 @@ async fn assignment_verification_preserves_leases_and_fences_app_authority() {
             );
         }
     }
+    // An app or an instance with no placement of its own is not the placed
+    // one, and no retry changes that.
     for foreign in [
         VerifyAssignment {
             app_id: AppId::mint(),
@@ -852,10 +887,6 @@ async fn assignment_verification_preserves_leases_and_fences_app_authority() {
         },
         VerifyAssignment {
             worker_id: WorkerId::mint(),
-            ..request.clone()
-        },
-        VerifyAssignment {
-            assignment_revision: (assignment.revision.get() + 1).try_into().unwrap(),
             ..request.clone()
         },
     ] {
@@ -907,6 +938,64 @@ async fn assignment_verification_preserves_leases_and_fences_app_authority() {
     assert_eq!(
         service.manager.verify_assignment(&request).await,
         Err(Error::Denied)
+    );
+}
+
+/// A revision that moved is not a refusal.
+///
+/// `refresh_entry` in `zeroship-workflow-runner` releases a placement as REFUSED
+/// on `PermissionDenied`, and the manager then stops offering that pair to that
+/// instance. A placement whose revision advanced under a caller that WAS
+/// legitimately placed is the opposite case: the next scan installs the revision
+/// that now holds, so it must not arrive as the permanent one. It reaches
+/// creator code through `api/runs.rs` too, where the same distinction decides
+/// whether a caller retries.
+#[compio::test]
+async fn a_moved_assignment_revision_conflicts_rather_than_denying() {
+    let fixture = Fixture::new().await;
+    let service = fixture.service().await;
+    let worker = register_worker(&service, 2).await;
+    let app = AppId::mint();
+    let first = place(&service, &app).await;
+    assert_eq!(first.worker_id, worker);
+    let granted = VerifyAssignment {
+        app_id: app.clone(),
+        worker_id: worker.clone(),
+        assignment_revision: first.revision,
+    };
+    // The control. Without it the refusal below would also pass over a fixture
+    // that never placed anything.
+    assert_eq!(
+        service
+            .manager
+            .verify_assignment(&granted)
+            .await
+            .map(|verified| verified.revision),
+        Ok(first.revision)
+    );
+    service
+        .manager
+        .release(&worker, &release(&first, ReleaseReason::Relinquished))
+        .await
+        .unwrap();
+    let moved = place(&service, &app).await;
+    assert!(moved.revision > first.revision);
+    assert_eq!(
+        service.manager.verify_assignment(&granted).await,
+        Err(Error::Conflict)
+    );
+    // The revision that now holds verifies, so the refusal above is about the
+    // revision rather than about the pair.
+    assert_eq!(
+        service
+            .manager
+            .verify_assignment(&VerifyAssignment {
+                assignment_revision: moved.revision,
+                ..granted.clone()
+            })
+            .await
+            .map(|verified| verified.revision),
+        Ok(moved.revision)
     );
 }
 

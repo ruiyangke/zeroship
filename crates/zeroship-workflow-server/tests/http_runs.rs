@@ -34,13 +34,15 @@ use zeroship_core::{
     },
     service_identity::endpoints,
     workflow_coordination::{
-        AssignedScope, DeliveredSignal, RegisterWorker, RequestId, RestartOptions, RestartRun,
-        RestartedRun, RunFailure, RunId, RunOperation, RunScope, RunState, RunStatus, SignalOptions,
-        SignalRun, TransitionRun, WorkerId, WorkerState, AUDIENCE,
+        AssignedScope, DeliveredSignal, PayloadLocation, ReadStepOutput, RegisterWorker, RequestId,
+        RestartOptions, RestartRun, RestartedRun, RunFailure, RunId, RunOperation, RunScope,
+        RunState, RunStatus, SignalOptions, SignalRun, StartedRun, TransitionRun, WorkerId,
+        WorkerState, AUDIENCE,
     },
     workflow_jobs::DeploymentId,
     workflow_policy::AppPolicy,
 };
+use zeroship_storage::StorageBackendConfig;
 use zeroship_workflow_manager::{
     coordinator::Placed,
     policy::{PolicyObservation, PolicySource},
@@ -50,6 +52,7 @@ use zeroship_workflow_manager::{
 use zeroship_workflow_server::{
     auth::{PostgresWorkerRegistry, WorkflowAuth},
     coordinator::{connect_eligibility, Coordinator, Options},
+    payloads::ServicePayloads,
     runs::RunService,
     SharedState, WorkflowHttpState,
 };
@@ -155,11 +158,18 @@ impl Fixture {
             .await
             .unwrap(),
         );
+        // The real store, on the platform fixture's own work directory, so a
+        // started run's input becomes a real object this case can read back.
+        let payloads = ServicePayloads::open(&StorageBackendConfig::Local(
+            platform.work.path().join("payloads"),
+        ))
+        .unwrap();
         let state = Rc::new(WorkflowHttpState {
             service,
             auth,
             policy_source: Some(source as Rc<dyn PolicySource>),
             runs,
+            payloads,
             journal: None,
         });
         Self {
@@ -300,6 +310,64 @@ impl Fixture {
             .await
             .unwrap();
         assert_eq!(updated, 1, "no app state row to close an epoch in");
+    }
+
+    /// Runs of one workflow this app holds, so an absence claim about a refused
+    /// start is measured rather than assumed.
+    async fn runs_of_workflow(&self, name: &str) -> i64 {
+        self.platform
+            .admin
+            .query_one(
+                "SELECT count(*) FROM workflow_manager.__zeroship_workflow_runs \
+                 WHERE app_id=$1 AND workflow_name=$2",
+                &[&self.app.as_str(), &name],
+            )
+            .await
+            .unwrap()
+            .get(0)
+    }
+
+    /// Give `run`'s current generation a referenced output object, the shape
+    /// `promote` and `attach` leave behind once a completion commits, and return
+    /// the payload key.
+    ///
+    /// Written in SQL because nothing in this process executes a run. The
+    /// columns a located read depends on are the ones asserted against the reply,
+    /// so a row this fixture wrote differently from production would show up as a
+    /// reply that disagrees with the row rather than as a silent pass.
+    async fn seed_output_object(&self, run: &RunId, bytes: &[u8]) -> String {
+        let payload = zeroship_core::typed_id::generate(
+            zeroship_core::typed_id::WORKFLOW_PAYLOAD_PREFIX,
+        );
+        let edge = zeroship_core::typed_id::generate("wjr");
+        let size = i64::try_from(bytes.len()).unwrap();
+        let inserted = self.platform.admin.execute(
+            "INSERT INTO workflow_manager.__zeroship_workflow_payloads\
+             (id,app_id,run_id,generation,request_id,hash,size,content_type,state,created_at,expires_at) \
+             VALUES($1,$2,$3,0,$4,encode(sha256($5::bytea),'hex'),$6,'application/json','referenced',0,0)",
+            &[
+                &payload.as_str(),
+                &self.app.as_str(),
+                &run.as_str(),
+                &RequestId::mint().as_str(),
+                &bytes,
+                &size,
+            ],
+        ).await.unwrap();
+        assert_eq!(inserted, 1);
+        let inserted = self.platform.admin.execute(
+            "INSERT INTO workflow_manager.__zeroship_workflow_payload_refs\
+             (id,app_id,run_id,generation,slot,ordinal,payload_id) \
+             VALUES($1,$2,$3,0,'output',0,$4)",
+            &[
+                &edge.as_str(),
+                &self.app.as_str(),
+                &run.as_str(),
+                &payload.as_str(),
+            ],
+        ).await.unwrap();
+        assert_eq!(inserted, 1);
+        payload
     }
 
     /// Signals of one type this app holds, so an absence claim is measured
@@ -756,4 +824,206 @@ async fn closing_the_journals_epoch_retires_the_carried_forward_one() {
         fixture.manager_epoch().await > established,
         "the closed epoch kept admitting, so nothing rechecked it"
     );
+}
+
+/// `start` admits a run from the creator's VALUE, and the extractor refuses a
+/// body that names a payload object.
+///
+/// The service stages the value into the store it owns and composes the
+/// descriptor from the bytes it serialized, so `input_ref` has no field on the
+/// wire at all. That is the fence this asserts, at the endpoint rather than at
+/// the type: a body carrying `inputRef` beside the creator options is a 400 from
+/// the extractor, before any journal work.
+///
+/// The CONTROL is the same body without that field. It must be SERVED, and its
+/// effect measured in the journal: the run row exists, and it owns an input
+/// payload edge whose object this service wrote. Without that arm the refusal
+/// above would be consistent with a `start` that never worked at all.
+#[ntex::test]
+async fn start_stages_the_creator_value_and_refuses_a_named_payload_object() {
+    let fixture = Box::pin(Fixture::new()).await;
+    // For the deploy row `active_deploy` reads. Its manifest declares `demo`.
+    let _seeded = fixture.seed_run().await;
+    fixture.ensure_recovery().await;
+    let app = test::init_service(
+        web::App::new()
+            .state(fixture.state.clone())
+            .configure(zeroship_workflow_server::configure),
+    )
+    .await;
+
+    let body = |options: serde_json::Value| {
+        serde_json::json!({
+            "requestId": RequestId::mint(),
+            "scope": fixture.scope,
+            "workflowName": "demo",
+            "input": {"order": 7},
+            "options": options,
+        })
+    };
+    let response = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(endpoints::WORKFLOW_RUN_START.path_template())
+            .header("authorization", fixture.authorization())
+            .set_json(&body(serde_json::json!({
+                "inputRef": {"hash": "a".repeat(64), "size": 3, "contentType": "application/json"},
+            })))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let failure: RunFailure = serde_json::from_slice(&test::read_body(response).await).unwrap();
+    assert!(
+        matches!(failure, RunFailure::InvalidRequest { .. }),
+        "{failure:?}"
+    );
+    // Nothing was admitted by the refused call.
+    assert_eq!(fixture.runs_of_workflow("demo").await, 1, "the seeded run");
+
+    // CONTROL: one variable differs, the descriptor the body named.
+    let response = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(endpoints::WORKFLOW_RUN_START.path_template())
+            .header("authorization", fixture.authorization())
+            .set_json(&body(serde_json::json!({"key": "order-7"})))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let started: StartedRun = serde_json::from_slice(&test::read_body(response).await).unwrap();
+    assert_eq!(started.state, RunState::Queued);
+
+    // The effect in the journal: the run this service admitted, and the payload
+    // object its own staging wrote for the value the body carried. The digest is
+    // compared against the bytes rather than against itself, so a descriptor the
+    // service composed over anything else fails here.
+    let expected = serde_json::to_vec(&serde_json::json!({"order": 7})).unwrap();
+    let stored = fixture
+        .platform
+        .admin
+        .query_one(
+            "SELECT r.state, p.hash = encode(sha256($3::bytea),'hex'), p.size, p.state FROM \
+             workflow_manager.__zeroship_workflow_runs r \
+             JOIN workflow_manager.__zeroship_workflow_payload_refs e \
+               ON e.app_id=r.app_id AND e.run_id=r.id AND e.slot='input' \
+             JOIN workflow_manager.__zeroship_workflow_payloads p \
+               ON p.app_id=e.app_id AND p.id=e.payload_id \
+             WHERE r.app_id=$1 AND r.id=$2",
+            &[&fixture.app.as_str(), &started.id, &expected],
+        )
+        .await
+        .unwrap();
+    assert_eq!(stored.get::<_, String>(0), "queued");
+    assert!(
+        stored.get::<_, bool>(1),
+        "the staged object's digest is not over the value the body carried"
+    );
+    assert_eq!(
+        usize::try_from(stored.get::<_, i64>(2)).unwrap(),
+        expected.len()
+    );
+    assert_eq!(stored.get::<_, String>(3), "referenced");
+}
+
+/// An output read answers with what LOCATES the payload, and with no bytes.
+///
+/// The reply is compared against the journal row it came from: the payload key
+/// the object store is addressed by, and the descriptor those bytes must satisfy.
+/// Nothing in the reply carries content, which is what lets a caller holding the
+/// same store open the object itself on a budget this exchange never has to fit.
+///
+/// The CONTROL is a run whose generation owns no output edge. It is refused as
+/// missing, the same absence `status` reports by carrying no descriptor -- so the
+/// located reply above is the edge answering rather than the handler defaulting.
+#[ntex::test]
+async fn a_run_output_read_locates_the_payload_and_carries_no_bytes() {
+    let fixture = Box::pin(Fixture::new()).await;
+    let run = fixture.seed_run().await;
+    let bare = fixture.seed_run().await;
+    let bytes = br#"{"value":"final"}"#;
+    let payload = fixture.seed_output_object(&run, bytes).await;
+    let app = test::init_service(
+        web::App::new()
+            .state(fixture.state.clone())
+            .configure(zeroship_workflow_server::configure),
+    )
+    .await;
+
+    let response = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(endpoints::WORKFLOW_RUN_OUTPUT.path_template())
+            .header("authorization", fixture.authorization())
+            .set_json(&RunScope {
+                scope: fixture.scope.clone(),
+                run_id: run,
+            })
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = test::read_body(response).await;
+    let located: PayloadLocation = serde_json::from_slice(&body).unwrap();
+    assert_eq!(located.payload_id, payload);
+    assert_eq!(
+        located.reference.size,
+        i64::try_from(bytes.len()).unwrap(),
+        "{located:?}"
+    );
+    // The bytes are in the store, not in this reply.
+    assert!(
+        !String::from_utf8_lossy(&body).contains("final"),
+        "the located reply carried the payload's content"
+    );
+
+    // CONTROL: one variable differs, the output edge the generation owns.
+    let response = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(endpoints::WORKFLOW_RUN_OUTPUT.path_template())
+            .header("authorization", fixture.authorization())
+            .set_json(&RunScope {
+                scope: fixture.scope.clone(),
+                run_id: bare,
+            })
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    // And a step this run never recorded is refused the same way, which is what
+    // shows the step endpoint reaches the journal rather than answering by shape.
+    let response = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(endpoints::WORKFLOW_RUN_STEP_OUTPUT.path_template())
+            .header("authorization", fixture.authorization())
+            .set_json(&ReadStepOutput {
+                scope: fixture.scope.clone(),
+                run_id: RunId::parse(&payload_run(&fixture).await).unwrap(),
+                name: "charge".to_owned(),
+                occurrence: 0,
+            })
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+/// The run the fixture seeded first, read back out of the journal so the step
+/// arm names a run this app actually holds rather than a minted one.
+async fn payload_run(fixture: &Fixture) -> String {
+    fixture
+        .platform
+        .admin
+        .query_one(
+            "SELECT id FROM workflow_manager.__zeroship_workflow_runs \
+             WHERE app_id=$1 ORDER BY id LIMIT 1",
+            &[&fixture.app.as_str()],
+        )
+        .await
+        .unwrap()
+        .get(0)
 }

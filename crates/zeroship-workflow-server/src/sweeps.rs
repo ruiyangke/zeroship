@@ -1,14 +1,14 @@
 //! This service's own lane over the maintenance rows of the queue it owns.
 //!
-//! The rows it takes are the journal-only sweeps `maintenance_job` dispatches.
-//! It takes neither the operation that executes creator code nor the sweeps
-//! that move creator bytes. A worker keeps taking those under its placement,
-//! and the claim predicate is what keeps the two hosts off each other's rows.
+//! The rows it takes are every sweep `maintenance_job` dispatches. It does not
+//! take the operation that executes creator code: a placed worker takes that
+//! under its placement, and the claim predicate is what keeps the two hosts off
+//! each other's rows.
 //!
-//! The lane holds no payload store. Bytes belong to the process that holds the
-//! store, and `workflow_process_dependencies_follow_crate_ownership` forbids
-//! this crate both `zeroship-storage` and `zeroship-workflow-runner`, where the
-//! only production implementations live.
+//! The lane holds the payload store, so the sweeps that move creator bytes are
+//! its to run. `crate::payloads` is where this process binds that store, and
+//! the writer and the deleter reach the engine as arguments rather than as
+//! anything the engine holds.
 #![allow(
     clippy::future_not_send,
     reason = "the lane stays on the runtime that opened the journal and the queue"
@@ -20,19 +20,15 @@ use std::{
     time::{Duration, Instant},
 };
 
-use async_trait::async_trait;
 use zeroship_core::{
     app_id::AppId,
     workflow_coordination::WorkerId,
     workflow_jobs::{JobSpec, SettlementReceipt},
 };
 use zeroship_workflow::{
-    backend::InputStager,
-    engine::WorkflowOutputRef,
     service::{
         maintenance::{MaintenanceOptions, MaintenanceOutcome},
         publication::JobPublisher,
-        AppWorkflows, PayloadDeleter, RequestId,
     },
     WorkflowServiceError,
 };
@@ -40,7 +36,7 @@ use zeroship_workflow_manager::{
     maintenance::MaintenanceAuthority, policy::PolicySource, Claimant, Error as ManagerError, Queue,
 };
 
-use crate::runs::RunService;
+use crate::{payloads::ServicePayloads, runs::RunService};
 
 /// What one visit to an app's queue did.
 #[derive(Debug)]
@@ -80,11 +76,13 @@ pub struct MaintenanceLane {
     runs: Rc<RunService>,
     policies: Rc<dyn PolicySource>,
     identity: WorkerId,
+    payloads: ServicePayloads,
     options: MaintenanceOptions,
 }
 
 impl MaintenanceLane {
-    /// `identity` names this process on every row the lane leases.
+    /// `identity` names this process on every row the lane leases, and
+    /// `payloads` is the store the byte-moving sweeps write and delete through.
     ///
     /// # Errors
     /// Refuses an invalid page or batch bound on any maintenance operation.
@@ -93,6 +91,7 @@ impl MaintenanceLane {
         runs: Rc<RunService>,
         policies: Rc<dyn PolicySource>,
         identity: WorkerId,
+        payloads: ServicePayloads,
         options: MaintenanceOptions,
     ) -> Result<Self, WorkflowServiceError> {
         options.validate()?;
@@ -101,8 +100,16 @@ impl MaintenanceLane {
             runs,
             policies,
             identity,
+            payloads,
             options,
         })
+    }
+
+    /// The store this lane stages run inputs into and collects objects from, so
+    /// a caller that composed the lane can reach the same objects its sweeps do.
+    #[must_use]
+    pub const fn payloads(&self) -> &ServicePayloads {
+        &self.payloads
     }
 
     #[must_use]
@@ -140,8 +147,8 @@ impl MaintenanceLane {
             .maintenance_job(
                 &grant,
                 &publisher,
-                &NoPayloadStore,
-                &NoPayloadStore,
+                &self.payloads,
+                &self.payloads,
                 self.options,
             )
             .await
@@ -263,6 +270,13 @@ impl MaintenanceDriver {
             options,
             cursor: Cursor::default(),
         })
+    }
+
+    /// The lane this driver gives turns to, so a caller that composed the driver
+    /// can read the identity every row it leases carries.
+    #[must_use]
+    pub const fn lane(&self) -> &MaintenanceLane {
+        &self.lane
     }
 
     /// Visit one bounded page of the apps holding rows this lane takes.
@@ -417,39 +431,5 @@ impl JobPublisher for LanePublisher<'_> {
                 "workflow maintenance publication was refused: {error:?}"
             ))
         })
-    }
-}
-
-/// The payload capabilities `maintenance_job` takes and this service does not
-/// hold. An operation that asks for one is told so by name.
-///
-/// `Claimant::Maintenance` refuses every kind that asks, so no claim this lane
-/// makes reaches either method. They stay because the dispatch is total and the
-/// claim predicate is the only thing keeping those kinds away from it: if the
-/// two ever disagree about a kind, this answers it rather than a panic or a
-/// silent write the store never made.
-#[derive(Debug)]
-struct NoPayloadStore;
-
-fn no_store() -> WorkflowServiceError {
-    WorkflowServiceError::Unavailable("workflow maintenance holds no payload store".into())
-}
-
-#[async_trait(?Send)]
-impl InputStager for NoPayloadStore {
-    async fn stage_input(
-        &self,
-        _api: &AppWorkflows,
-        _request: &RequestId,
-        _input: &serde_json::Value,
-    ) -> Result<WorkflowOutputRef, WorkflowServiceError> {
-        Err(no_store())
-    }
-}
-
-#[async_trait(?Send)]
-impl PayloadDeleter for NoPayloadStore {
-    async fn delete(&self, _app: &AppId, _id: &str) -> Result<(), WorkflowServiceError> {
-        Err(no_store())
     }
 }

@@ -534,6 +534,30 @@ pub mod endpoints {
         ServiceEndpoint::new("workflow", "POST", "/v1/jobs/heartbeat");
     pub const WORKFLOW_JOB_SETTLE: ServiceEndpoint =
         ServiceEndpoint::new("workflow", "POST", "/v1/jobs/settle");
+    /// Hand a claimed journal task back without settling its delivery.
+    ///
+    /// A release gives up creator work the holder cannot finish. It commits no
+    /// execution, so it is not fenced on deployment admissibility the way a
+    /// completion is: the row reopens and `reclaim` expires it, and the next
+    /// dispatch is gated by `tasks::assign`'s own availability lookup.
+    pub const WORKFLOW_JOB_RELEASE: ServiceEndpoint =
+        ServiceEndpoint::new("workflow", "POST", "/v1/jobs/release");
+    /// Read the committed outcome of one logical job.
+    ///
+    /// The recovery read for an UNCERTAIN settlement: the reply a holder lost may
+    /// have committed, and this is how it learns that without risking a second
+    /// commit. Addressed by the job rather than by an attempt.
+    pub const WORKFLOW_JOB_RECEIPT: ServiceEndpoint =
+        ServiceEndpoint::new("workflow", "POST", "/v1/jobs/receipt");
+    /// Admit a run from a creator's own value.
+    ///
+    /// The value crosses and the payload descriptor does not: the service stages
+    /// the value into the object store it owns and names the object itself, so
+    /// no caller can point a run at an object it did not supply the bytes for.
+    /// The request identity is the caller's, because it is the idempotency of
+    /// the start and of the staging under it.
+    pub const WORKFLOW_RUN_START: ServiceEndpoint =
+        ServiceEndpoint::new("workflow", "POST", "/v1/runs/start");
     /// The creator-facing run calls, answered from the service own journal.
     ///
     /// Addressed by body, like every other endpoint on this service. The body
@@ -550,6 +574,48 @@ pub mod endpoints {
         ServiceEndpoint::new("workflow", "POST", "/v1/runs/transition");
     pub const WORKFLOW_RUN_RESTART: ServiceEndpoint =
         ServiceEndpoint::new("workflow", "POST", "/v1/runs/restart");
+    /// Locate a completed step's recorded output, and a settled run's output.
+    ///
+    /// These answer with a descriptor and a payload key, never with payload
+    /// bytes. A single payload's ceiling is larger than a reply's, and a caller
+    /// holding the same object store opens the object itself once the journal
+    /// has proven which one the step owns.
+    pub const WORKFLOW_RUN_STEP_OUTPUT: ServiceEndpoint =
+        ServiceEndpoint::new("workflow", "POST", "/v1/runs/step-output");
+    pub const WORKFLOW_RUN_OUTPUT: ServiceEndpoint =
+        ServiceEndpoint::new("workflow", "POST", "/v1/runs/output");
+    /// Locate one object a running task's replay edge names.
+    ///
+    /// Answers with a descriptor and a key, for the reason the two above do. What
+    /// authorizes it is the TASK CREDENTIAL in the body, not a placement: a
+    /// dispatch holds one, the journal holds only its hash, and the app named
+    /// beside it selects the journal to ask rather than asserting a claim on it.
+    pub const WORKFLOW_TASK_PAYLOAD: ServiceEndpoint =
+        ServiceEndpoint::new("workflow", "POST", "/v1/tasks/payload");
+    /// Resolve which deployment a running task replays against.
+    ///
+    /// Answers with the PIN and never the artifact. A loaded executable carries
+    /// creator module source under a budget twice this reply ceiling, so the
+    /// bytes could not cross even if a caller wanted them to; the caller loads
+    /// that deployment from the object store it already holds.
+    pub const WORKFLOW_TASK_EXECUTABLE: ServiceEndpoint =
+        ServiceEndpoint::new("workflow", "POST", "/v1/tasks/executable");
+    /// Reserve the row an upload will be keyed by.
+    ///
+    /// The bytes never cross: this answers with a payload id, and the caller
+    /// writes the object to the store it already binds. In one process the
+    /// staging call holds a lock across that write so collection cannot race a
+    /// live writer, and no request boundary can hold it -- which is why the
+    /// reservation and the confirm are separate calls here.
+    ///
+    /// THE CALLER MUST RESEND THE SAME `request_id` ON A RETRY. Deduplication is
+    /// `(app_id, request_id)`, narrowed by the task only when one holds the
+    /// staging, plus a refusal when a request id is reused for different bytes.
+    /// A caller minting a fresh id per attempt reserves a new object each time
+    /// and nothing fails: the unique index covers `task_id`, which is NULL for
+    /// every ownerless upload, and a unique index enforces nothing over NULL.
+    pub const WORKFLOW_TASK_PAYLOAD_RESERVE: ServiceEndpoint =
+        ServiceEndpoint::new("workflow", "POST", "/v1/tasks/payload/reserve");
     pub const WORKER_DISPATCH: ServiceEndpoint =
         ServiceEndpoint::new("worker", "POST", "/dispatch/{app_id}");
     pub const WORKER_APP_LOGS: ServiceEndpoint =
@@ -699,13 +765,25 @@ pub fn service_allowlist() -> &'static [ServiceAuthorization] {
                     endpoints::WORKFLOW_JOB_CLAIM,
                     endpoints::WORKFLOW_JOB_HEARTBEAT,
                     endpoints::WORKFLOW_JOB_SETTLE,
+                    endpoints::WORKFLOW_JOB_RELEASE,
+                    endpoints::WORKFLOW_JOB_RECEIPT,
                     // Creator calls the worker makes on behalf of app code.
                     // The app they may act for is decided by the placement the
                     // manager holds for THIS worker, never by the body.
+                    endpoints::WORKFLOW_RUN_START,
                     endpoints::WORKFLOW_RUN_STATUS,
                     endpoints::WORKFLOW_RUN_SIGNAL,
                     endpoints::WORKFLOW_RUN_TRANSITION,
                     endpoints::WORKFLOW_RUN_RESTART,
+                    endpoints::WORKFLOW_RUN_STEP_OUTPUT,
+                    endpoints::WORKFLOW_RUN_OUTPUT,
+                    // A dispatch reading its own replay edge. Not a creator
+                    // call and not a placement one: the task credential in the
+                    // body is what the journal checks, and this grant only says
+                    // a worker is the kind of peer that may present one.
+                    endpoints::WORKFLOW_TASK_PAYLOAD,
+                    endpoints::WORKFLOW_TASK_EXECUTABLE,
+                    endpoints::WORKFLOW_TASK_PAYLOAD_RESERVE,
                     endpoints::CDC_SUBSCRIBE,
                     // Host app reads are role-scoped: an authenticated worker
                     // may request any app's version, environment, and project

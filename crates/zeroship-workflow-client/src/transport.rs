@@ -127,6 +127,7 @@ impl Transport {
             || base.fragment().is_some()
             || options.timeout.is_zero()
             || options.max_request_bytes == 0
+            || options.max_journal_request_bytes == 0
             || options.max_response_bytes == 0
         {
             return Err(Error::InvalidConfig);
@@ -154,10 +155,11 @@ impl Transport {
         &self,
         endpoint: ServiceEndpoint,
         request: &T,
+        limit: usize,
     ) -> Result<(u16, Vec<u8>), Error> {
         let mut body = BoundedBody {
             bytes: Vec::new(),
-            limit: self.options.max_request_bytes,
+            limit,
         };
         serde_json::to_writer(&mut body, request).map_err(|_| Error::RequestTooLarge)?;
         let token = self
@@ -220,7 +222,28 @@ impl Transport {
         endpoint: ServiceEndpoint,
         request: &T,
     ) -> Result<R, Error> {
-        let (status, bytes) = self.exchange(endpoint, request).await?;
+        let (status, bytes) = self
+            .exchange(endpoint, request, self.options.max_request_bytes)
+            .await?;
+        if status != 200 {
+            return Err(refusal(status, &bytes));
+        }
+        serde_json::from_slice(&bytes).map_err(|_| Error::InvalidResponse)
+    }
+
+    /// Send a request whose body carries a journal quantity rather than a
+    /// creator input, and so answers to a different platform ceiling.
+    ///
+    /// # Errors
+    /// Rejects the same conditions as [`Self::post`].
+    pub(crate) async fn post_journal<T: Serialize, R: DeserializeOwned>(
+        &self,
+        endpoint: ServiceEndpoint,
+        request: &T,
+    ) -> Result<R, Error> {
+        let (status, bytes) = self
+            .exchange(endpoint, request, self.options.max_journal_request_bytes)
+            .await?;
         if status != 200 {
             return Err(refusal(status, &bytes));
         }
@@ -242,7 +265,7 @@ impl Transport {
         request: &T,
     ) -> Result<R, RunError> {
         let (status, bytes) = self
-            .exchange(endpoint, request)
+            .exchange(endpoint, request, self.options.max_request_bytes)
             .await
             .map_err(RunError::Transport)?;
         if status != 200 {

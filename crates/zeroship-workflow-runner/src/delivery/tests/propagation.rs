@@ -1,4 +1,5 @@
 use super::*;
+use zeroship_core::workflow_jobs::{JobId, PropagationId};
 use zeroship_workflow::{operations::RunOperation, service::WorkerIdentity};
 
 /// Settle the fixture's run after it accepted a cascading child. Returns the
@@ -104,11 +105,8 @@ async fn propagation_lost_ack_replays_without_executor_or_storage() {
     let mut lease = fixture.lease.clone();
     lease.delivery.job = page;
     fixture.metadata.lose_ack.set(true);
-    let mut slot = fixture.slot(Duration::from_secs(5));
     let DeliveryOutcome::Settled { creator, manager } =
-        Box::pin(slot.run(&fixture.app, lease.clone()))
-            .await
-            .unwrap()
+        fixture.sweep(lease.clone()).await.unwrap()
     else {
         panic!("a propagation page settles without execution")
     };
@@ -125,7 +123,7 @@ async fn propagation_lost_ack_replays_without_executor_or_storage() {
     lease.expires = Instant::now();
     let DeliveryOutcome::Settled {
         creator: replay, ..
-    } = Box::pin(slot.run(&fixture.app, lease)).await.unwrap()
+    } = fixture.sweep(lease).await.unwrap()
     else {
         panic!("committed propagation replay")
     };
@@ -141,24 +139,28 @@ async fn propagation_lost_ack_replays_without_executor_or_storage() {
         .all(|request| request.successors.is_empty()));
 }
 
+/// Propagation revalidates its own page bound before touching the journal, so
+/// the refusal is the sweep's, not a delivery construction its caller never
+/// reaches.
 #[compio::test]
 async fn propagation_refuses_invalid_page_bounds_before_delivery() {
     let fixture = Fixture::new(AppPolicy::default()).await;
+    let mut lease = fixture.lease.clone();
+    lease.delivery.job.id = JobId::mint();
+    lease.delivery.job.operation = JobOperation::Propagate {
+        propagation_id: PropagationId::mint(),
+        revision: 1.try_into().unwrap(),
+    };
     for page_size in [0, u32::MAX] {
-        let mut options = fixture.slot(Duration::from_secs(5)).options;
-        options.maintenance.propagation =
-            zeroship_workflow::service::propagation::PropagationOptions { page_size };
+        let options = MaintenanceOptions {
+            propagation: zeroship_workflow::service::propagation::PropagationOptions { page_size },
+            ..Default::default()
+        };
         assert!(matches!(
-            DeliverySlot::new(
-                fixture.metadata.clone(),
-                Rc::new(Executor {
-                    probe: fixture.probe.clone(),
-                    service: fixture.service.clone(),
-                }),
-                fixture.objects.clone(),
-                options,
-            ),
+            fixture.sweep_with(lease.clone(), options).await,
             Err(WorkflowServiceError::InvalidRequest(_))
         ));
     }
+    assert_eq!(fixture.probe.starts.get(), 0);
+    assert!(fixture.metadata.requests.borrow().is_empty());
 }

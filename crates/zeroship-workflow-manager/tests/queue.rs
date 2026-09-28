@@ -84,9 +84,9 @@ case!(
     refused_kind_at_the_head
 );
 case!(
-    sqlite_byte_moving_kind_is_left_to_a_claimant_holding_the_store,
-    postgres_byte_moving_kind_is_left_to_a_claimant_holding_the_store,
-    byte_moving_kind_is_left
+    sqlite_journal_sweep_is_left_to_the_claimant_owning_the_journal,
+    postgres_journal_sweep_is_left_to_the_claimant_owning_the_journal,
+    journal_sweep_is_left_to_the_lane
 );
 
 async fn queue(fixture: &Fixture, options: Options) -> Queue {
@@ -161,8 +161,8 @@ fn job(app: &AppId) -> JobSpec {
     }
 }
 
-/// A row whose sweep moves creator bytes: `collect_job` deletes retired payload
-/// objects, so running it needs the payload store as well as the journal.
+/// A row whose sweep moves payload objects: `collect_job` deletes retired ones,
+/// so running it reaches the object store as well as the journal.
 fn collection(app: &AppId) -> JobSpec {
     JobSpec {
         id: JobId::mint(),
@@ -1425,7 +1425,8 @@ async fn claim_timeout_rolls_back(fixture: &Fixture) {
 /// The claim answers one id and never tries the next, so this is the property
 /// that says the refusal happened while candidates were being selected rather
 /// than after one was loaded. The control differs only in the claimant: the
-/// same two rows, claimed by one that refuses nothing, answer the head.
+/// same two rows, claimed by the host that takes the head's kind, answer the
+/// head.
 async fn refused_kind_at_the_head(fixture: &Fixture) {
     let queue = queue(fixture, Options::default()).await;
     let restricted = AppId::mint();
@@ -1444,7 +1445,7 @@ async fn refused_kind_at_the_head(fixture: &Fixture) {
     assert_eq!(claimed.delivery().job, behind);
 
     // The control: the same two rows in the same order, claimed by the host
-    // that refuses neither.
+    // that takes creator work.
     let full = AppId::mint();
     let (control_head, _) = head_then_sweep(&queue, fixture, &full).await;
     let control_authority = assignment(fixture, &full).await;
@@ -1457,7 +1458,7 @@ async fn refused_kind_at_the_head(fixture: &Fixture) {
         )
         .await
         .unwrap()
-        .expect("the head is claimable by a host that refuses nothing");
+        .expect("the head is claimable by the host that runs creator code");
     assert_eq!(control.delivery().job, control_head);
 
     // And the refusal itself: with the maintenance row settled, the head is all
@@ -1486,51 +1487,47 @@ async fn refused_kind_at_the_head(fixture: &Fixture) {
             .claim(&authority)
             .await
             .unwrap()
-            .expect("a host that refuses nothing still takes the head")
+            .expect("the host that runs creator code still takes the head")
             .delivery()
             .job,
         head
     );
 }
 
-/// A claimant that holds no payload store leaves a sweep that moves creator
-/// bytes for one that holds it.
+/// A placed host leaves every journal sweep for the lane that owns the journal,
+/// including the ones that move payload objects.
 ///
-/// The collection row sits at the head of the dispatch order with a journal-only
-/// sweep behind it. The restricted claimant answers the row behind, and once
-/// that is settled it answers nothing while the collection row is still `ready`.
-/// The control differs only in the claimant, which takes that same row out of
-/// that same queue.
+/// The collection row sits at the head of the dispatch order with a creator row
+/// behind it. The placed claimant answers the row behind, and once that is
+/// settled it answers nothing while the collection row is still `ready`. The
+/// control differs only in the claimant, which takes that same row out of that
+/// same queue.
 ///
-/// The refusal set is asserted at the end, against the kinds this file and its
-/// sibling cover: `cron` is the other byte-moving kind, and a hand-written cron
-/// row is deliverable to no claimant at all - it needs an occurrence bound to a
-/// settled activation - so its control belongs where that lifecycle is
-/// available, in `cron_left_to_store_holder` (`tests/scheduling.rs`).
-async fn byte_moving_kind_is_left(fixture: &Fixture) {
+/// Both refusal sets are asserted at the end, against the kinds this file and
+/// its sibling cover. `cron` is the other sweep that moves objects, and a
+/// hand-written cron row is deliverable to no claimant at all - it needs an
+/// occurrence bound to a settled activation - so its control belongs where that
+/// lifecycle is available, in `cron_left_to_the_journal_lane`
+/// (`tests/scheduling.rs`).
+async fn journal_sweep_is_left_to_the_lane(fixture: &Fixture) {
     let queue = queue(fixture, Options::default()).await;
     let app = AppId::mint();
     queue.register_scope(&app).await.unwrap();
     let bytes = collection(&app);
-    let behind = sweep(&app);
+    let behind = job(&app);
     queue.submit(&bytes).await.unwrap();
     queue.submit(&behind).await.unwrap();
     assert!(
         dispatch_order(fixture, &bytes.id).await < dispatch_order(fixture, &behind.id).await,
-        "the byte-moving row must sit at the head for this to measure anything"
+        "the object-moving sweep must sit at the head for this to measure anything"
     );
 
     let authority = assignment(fixture, &app).await;
     let claimed = queue
-        .claim_authorized(
-            &identity(&authority),
-            Claimant::Maintenance,
-            Ok(support::delivery_ceiling()),
-            |_| ready(Ok(authority.clone())),
-        )
+        .claim(&authority)
         .await
         .unwrap()
-        .expect("the journal-only row behind the head is claimable");
+        .expect("the creator row behind the head is claimable");
     assert_eq!(claimed.delivery().job, behind);
     queue
         .settle(&authority, &settlement(claimed.delivery(), vec![]))
@@ -1539,9 +1536,15 @@ async fn byte_moving_kind_is_left(fixture: &Fixture) {
     assert_eq!(
         stored(fixture, &bytes.id).await.unwrap()["state"],
         value!("ready"),
-        "the byte-moving row must still be waiting for a host that holds the store"
+        "the sweep must still be waiting for the host that owns the journal"
     );
     assert!(
+        queue.claim(&authority).await.unwrap().is_none(),
+        "the sweep is all that is left and a placed host answers nothing"
+    );
+
+    // The control: the same row, differing only in who claims it.
+    assert_eq!(
         queue
             .claim_authorized(
                 &identity(&authority),
@@ -1551,32 +1554,34 @@ async fn byte_moving_kind_is_left(fixture: &Fixture) {
             )
             .await
             .unwrap()
-            .is_none(),
-        "the byte-moving row is all that is left and the restricted claimant answers nothing"
-    );
-
-    // The control: the same row, differing only in who claims it.
-    assert_eq!(
-        queue
-            .claim(&authority)
-            .await
-            .unwrap()
-            .expect("a placed host takes the byte-moving row")
+            .expect("the lane takes the sweep")
             .delivery()
             .job,
         bytes
     );
 
-    // The population: the kinds the restricted claimant refuses are the creator
-    // one and the two byte-moving ones, both of which have a control. A third
-    // byte-moving operation classified without one fails here.
-    let mut refused: Vec<&str> = Claimant::Maintenance.denied().collect();
-    refused.sort_unstable();
-    assert_eq!(refused, ["advance", "collect", "cron"]);
+    // The population. The lane refuses creator work alone, and a placed host
+    // refuses every sweep - so a kind classified as neither, or a tenth
+    // operation added without a class, fails here rather than silently landing
+    // on whichever host asked first.
+    let mut lane: Vec<&str> = Claimant::Maintenance.denied().collect();
+    lane.sort_unstable();
+    assert_eq!(lane, ["advance"]);
+    let mut placed: Vec<&str> = Claimant::Placed.denied().collect();
+    placed.sort_unstable();
     assert_eq!(
-        Claimant::Placed.denied().count(),
-        0,
-        "a placed host takes every kind"
+        placed,
+        [
+            "activate",
+            "close",
+            "collect",
+            "cron",
+            "fanout",
+            "management",
+            "propagate",
+            "reconcile",
+            "release_hold",
+        ]
     );
 }
 

@@ -12,11 +12,12 @@ pub use objects::{
     AppPayloads, HostPayloads, ObjectStepOutputs, PayloadObjects, PayloadRead, RunPayloads,
     WorkerPayloads,
 };
+pub(crate) use objects::ObjectWriter;
 
 use crate::WorkerTasks;
 use zeroship_workflow::{
     engine::{JournalStep, WorkflowOutputRef},
-    service::{RequestId, StagedPayload, TaskAssignment, TaskToken},
+    service::{delivery::PayloadConfirmation, RequestId, TaskAssignment, TaskToken},
     validation, WorkflowServiceError,
 };
 use async_trait::async_trait;
@@ -45,7 +46,7 @@ pub trait TaskPayloads {
         request: &RequestId,
         reference: WorkflowOutputRef,
         body: BoxChunkSource,
-    ) -> Result<StagedPayload, WorkflowServiceError>;
+    ) -> Result<UploadReceipt, WorkflowServiceError>;
     async fn read(
         &self,
         task: &str,
@@ -72,11 +73,20 @@ impl TaskPayloads for WorkerTasks {
         request: &RequestId,
         reference: WorkflowOutputRef,
         body: BoxChunkSource,
-    ) -> Result<StagedPayload, WorkflowServiceError> {
-        self.service
+    ) -> Result<UploadReceipt, WorkflowServiceError> {
+        let staged = self
+            .service
             .payloads(&self.objects)
             .stage(&self.worker, task, token, request, reference, body)
-            .await
+            .await?;
+        // This host holds the object store, so staging confirmed under its own
+        // lock before returning and there is nothing left for the settlement to
+        // do. A host that writes across a boundary answers with a confirmation.
+        Ok(UploadReceipt {
+            id: staged.id,
+            reference: staged.reference,
+            confirm: None,
+        })
     }
     async fn read(
         &self,
@@ -281,4 +291,31 @@ impl TaskPayloadReader {
         }
         read.into_bytes(self.max_bytes).await
     }
+}
+
+/// What one upload answered, and whether its settlement still owes a confirm.
+///
+/// # Why this is not `StagedPayload`
+///
+/// `StagedPayload` promises the object is written AND the row says `staged`. A
+/// host holding the object store can promise both, because it confirms under the
+/// same lock it wrote under. A host writing across a request boundary cannot: the
+/// reservation and the confirm are separate calls, and the confirm has to land in
+/// the transaction that commits the frontier referencing the object -- `promote`
+/// resolves no `uploading` row, so an outcome naming an unconfirmed object is
+/// refused as a missing payload.
+///
+/// So `confirm` is the difference between the two hosts, and it is deliberately
+/// not an implementation detail of either: the settlement is what carries it, and
+/// only the host that uploaded knows whether one is owed.
+///
+/// `reference` is answered rather than assumed, so the caller can refuse a
+/// receipt describing another object -- a check that cannot fire in process,
+/// where the descriptor is returned by value from the caller's own argument, and
+/// can over a wire where the reply is decoded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UploadReceipt {
+    pub id: String,
+    pub reference: WorkflowOutputRef,
+    pub confirm: Option<PayloadConfirmation>,
 }

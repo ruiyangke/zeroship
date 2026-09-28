@@ -2,9 +2,10 @@
 //!
 //! `WorkflowBinding::build_instance` mints a native `env.workflows` namespace
 //! per isolate. Each namespace owns an app-scoped Rust backend; credentials
-//! remain in the host. Service bindings validate the immutable runtime identity
-//! before evaluating app code. Ready bindings resolve the backend a workflow
-//! host published for the isolate's own app, on every call.
+//! remain in the host. Service and remote bindings validate the immutable
+//! runtime identity before evaluating app code, because each names one app.
+//! Ready bindings resolve the backend a workflow host published for the
+//! isolate's own app, on every call.
 
 mod error;
 mod executor;
@@ -18,7 +19,7 @@ use std::sync::Arc;
 
 use zeroship_runtime::plugin::{JavaScriptModule, NativePlugin, NativeRegistrar};
 use zeroship_workflow::backend::SharedWorkflowBackend;
-use zeroship_workflow_runner::ready::ReadyApps;
+use zeroship_workflow_runner::{ready::ReadyApps, remote::RemoteBackend};
 
 pub use v8_class::{is_excluded_workflow_property, mint_workflows};
 
@@ -26,6 +27,9 @@ pub use v8_class::{is_excluded_workflow_property, mint_workflows};
 enum WorkflowBackendFactory {
     Service {
         backend: Arc<zeroship_workflow::service::AppBackend>,
+    },
+    Remote {
+        backend: Arc<RemoteBackend>,
     },
     Ready {
         apps: ReadyApps,
@@ -48,6 +52,22 @@ impl WorkflowBinding {
         }
     }
 
+    /// Bind a host that holds no journal to the workflow service over HTTP,
+    /// for the one app the backend's placement scope names.
+    ///
+    /// Identity is checked the same way the service arm's is: the backend names
+    /// one app, so an isolate of another app must not reach it. The ready arm is
+    /// the one that skips the check, because there the runtime's own identity is
+    /// what selects the backend.
+    #[must_use]
+    pub fn remote(backend: RemoteBackend) -> Self {
+        Self {
+            backend: WorkflowBackendFactory::Remote {
+                backend: Arc::new(backend),
+            },
+        }
+    }
+
     /// Bind each isolate to the backend a workflow host published for the
     /// runtime's own app. An isolate of an app that is unknown or not ready
     /// on this process receives a retryable refusal from every call.
@@ -57,7 +77,6 @@ impl WorkflowBinding {
             backend: WorkflowBackendFactory::Ready { apps },
         }
     }
-
 }
 
 impl NativePlugin for WorkflowBinding {
@@ -68,10 +87,16 @@ impl NativePlugin for WorkflowBinding {
         _namespace: v8::Local<'s, v8::Object>,
         _descriptor: Option<&serde_json::Value>,
     ) -> Result<(), String> {
-        if let WorkflowBackendFactory::Service { backend } = &self.backend {
-            if zeroship_runtime::plugin::runtime_app_identity(scope).as_ref()
-                != Some(backend.app_id())
-            {
+        // An app-scoped backend is checked against the runtime it is about to
+        // serve; the ready arm resolves its backend BY that identity, so there is
+        // nothing for it to disagree with.
+        let bound = match &self.backend {
+            WorkflowBackendFactory::Service { backend } => Some(backend.app_id()),
+            WorkflowBackendFactory::Remote { backend } => Some(backend.app_id()),
+            WorkflowBackendFactory::Ready { .. } => None,
+        };
+        if let Some(app) = bound {
+            if zeroship_runtime::plugin::runtime_app_identity(scope).as_ref() != Some(app) {
                 return Err("workflow binding does not match runtime app identity".into());
             }
         }
@@ -123,6 +148,7 @@ impl NativePlugin for WorkflowBinding {
     ) -> Option<v8::Local<'s, v8::Object>> {
         let backend: SharedWorkflowBackend = match &self.backend {
             WorkflowBackendFactory::Service { backend } => backend.clone(),
+            WorkflowBackendFactory::Remote { backend } => backend.clone(),
             // The immutable identity the runtime was built with selects the
             // app; creator-visible environment values cannot.
             WorkflowBackendFactory::Ready { apps } => {

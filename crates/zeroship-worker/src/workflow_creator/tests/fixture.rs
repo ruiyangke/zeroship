@@ -1,16 +1,22 @@
 use super::*;
-use std::{
-    collections::{BTreeMap, HashMap},
-    path::Path,
+use std::collections::{BTreeMap, HashMap};
+use compio::io::{AsyncRead, AsyncWriteExt};
+use zeroship_core::service_assertion::{
+    ServiceIssuer, ServiceTrustBundle, TransportAssertionVerifier,
 };
-use zeroship_core::service_assertion::{ServiceSigningKey, ServiceTrustBundle};
-use zeroship_data_orm::{
-    binding::DbBinding, connection::ConnectionFactory, encryption::ProjectKeySource,
+use zeroship_core::service_peers::{
+    service_issuer, InstanceSigningKey, ServiceAuth, WORKER_SERVICE_NAME,
 };
 use zeroship_runtime::{transport::net_policy::NetPolicy, EnvSnapshot, RuntimeLimits};
 use zeroship_storage::{LocalFs, StorageStore};
 use zeroship_core::workflow_coordination::Revision;
-use zeroship_workflow::service::{schema, DeployRegistration, IngressEpochs, PolicySnapshot};
+use serde_json::{json, Value};
+use zeroship_core::{typed_id, workflow_jobs::DeploymentId};
+use zeroship_workflow::service::{
+    AppPolicy, DeployRegistration, IngressEpochs, PolicySnapshot, TaskAssignment,
+};
+use zeroship_core::workflow_coordination::WorkerId;
+use zeroship_workflow_client::{Options as ClientOptions, WorkerCoordinator};
 
 #[derive(Clone)]
 pub(super) struct Provider(Rc<ProviderState>);
@@ -38,9 +44,6 @@ impl Drop for Resolving {
 impl Provider {
     pub fn resources(&self) -> WorkflowResources {
         self.0.resources.borrow().clone()
-    }
-    pub fn replace(&self, resources: WorkflowResources) {
-        *self.0.resources.borrow_mut() = resources;
     }
     pub fn calls(&self) -> Vec<AssignedScope> {
         self.0.calls.borrow().clone()
@@ -97,7 +100,8 @@ impl WorkflowContextProvider for Contexts {
 }
 
 pub(super) struct Fixture {
-    pub directory: tempfile::TempDir,
+    /// Held so the object and artifact stores outlive the fixture.
+    _directory: tempfile::TempDir,
     pub scope: AssignedScope,
     pub worker: WorkerId,
     pub policies: Arc<HostPolicies>,
@@ -176,33 +180,18 @@ impl Fixture {
             }),
             calls: Cell::new(0),
         });
-        let storage = HostStorage {
-            connection: ConnectionFactory::for_platform_url(&format!(
-                "sqlite:{}",
-                directory.path().join("creator.sqlite").display()
-            ))
-            .unwrap(),
-            keys: ProjectKeySource::unavailable(),
-            binding: DbBinding::platform(app.as_str(), "creator-fixture", schema),
-        };
         let resources = WorkflowResources {
-            storage,
+            schema,
             objects: PayloadObjects::open(StorageStore::from_backend(Arc::new(LocalFs::new(
                 directory.path().join("objects"),
             ))))
             .unwrap(),
-            deployments: deployments.binding(&[&app]),
-            signal_authority: Some(Arc::new(
-                SignalAuthority::new(
-                    Arc::new(ServiceSigningKey::generate()),
-                    ServiceTrustBundle::new(),
-                )
-                .unwrap(),
-            )),
+            artifacts: deployments.source.clone(),
+            max_source_bytes: 1024 * 1024,
             contexts: contexts.clone(),
         };
         Self {
-            directory,
+            _directory: directory,
             scope: scope.clone(),
             worker: WorkerId::mint(),
             policies,
@@ -228,36 +217,12 @@ impl Fixture {
         })
     }
 
-    pub fn factory(&self) -> WorkflowCreatorFactory<Provider> {
-        WorkflowCreatorFactory::new(
-            self.provider.clone(),
-            self.policies.clone(),
-            &self.worker,
-            TaskPayloadLimits::default(),
-        )
-        .unwrap()
-    }
-
-    /// A factory that WILL ask the manager to repair a refused journal, bound to
-    /// an origin nothing answers on.
-    ///
-    /// The unreachable origin is the point: it separates "the repair was
-    /// attempted" from "the repair succeeded", and pins which error an operator
-    /// sees when the manager cannot be reached.
-    pub fn factory_with_unreachable_repair(&self) -> WorkflowCreatorFactory<Provider> {
-        use zeroship_core::service_assertion::{ServiceTrustBundle, TransportAssertionVerifier};
-        use zeroship_core::service_peers::{
-            service_issuer, InstanceSigningKey, ServiceAuth, WORKER_SERVICE_NAME,
-        };
-        use zeroship_workflow_client::{Options as ClientOptions, WorkerCoordinator};
-
+    /// An enrolled client of the worker's own identity, against `origin`.
+    fn client(&self, origin: &str) -> WorkerCoordinator {
         let role = service_issuer(WORKER_SERVICE_NAME).expect("worker issuer");
-        let instance = zeroship_core::service_assertion::ServiceIssuer::parse(&format!(
-            "{}/{}",
-            role.as_str(),
-            self.worker.as_str()
-        ))
-        .expect("worker instance issuer");
+        let instance =
+            ServiceIssuer::parse(&format!("{}/{}", role.as_str(), self.worker.as_str()))
+                .expect("worker instance issuer");
         let keyring = InstanceSigningKey::generate()
             .into_keyring(instance, ServiceTrustBundle::new())
             .expect("worker instance keyring");
@@ -265,36 +230,41 @@ impl Fixture {
             keyring,
             Arc::new(TransportAssertionVerifier::new(ServiceTrustBundle::new())),
         ));
-        // A loopback port nothing binds. These options name no plaintext peer,
-        // so loopback is the one plain-HTTP shape that constructs here and
-        // never connects.
-        let client = WorkerCoordinator::new(
-            "http://127.0.0.1:1",
+        WorkerCoordinator::new(
+            origin,
             auth,
             ClientOptions {
-                timeout: std::time::Duration::from_millis(250),
+                timeout: Duration::from_secs(5),
                 ..ClientOptions::default()
             },
         )
-        .expect("a client against a syntactically valid loopback origin");
-        self.factory().with_journal_repair(std::rc::Rc::new(client))
+        .expect("a client against a syntactically valid loopback origin")
     }
 
-    pub fn assert_storage_unopened(&self) {
-        assert!(
-            self.directory.path().read_dir().unwrap().next().is_none(),
-            "creator connection must not create files before identity validation"
-        );
+    /// A factory whose client reaches a loopback port nothing binds.
+    ///
+    /// For the refusals that happen BEFORE any request: a factory that reached a
+    /// live peer could pass such a test by making a call and being answered,
+    /// which is the opposite of what is being asserted.
+    pub fn factory(&self) -> WorkflowCreatorFactory<Provider> {
+        self.factory_through(self.client("http://127.0.0.1:1"))
     }
 
-    pub async fn provision(&self) {
-        let store = self.provider.resources().storage.open().await.unwrap();
-        schema::initialize_local(&store).await.unwrap();
+    pub fn factory_through(&self, client: WorkerCoordinator) -> WorkflowCreatorFactory<Provider> {
+        WorkflowCreatorFactory::new(
+            self.provider.clone(),
+            self.policies.clone(),
+            client,
+            TaskPayloadLimits::default(),
+            Duration::from_secs(5),
+        )
+        .unwrap()
     }
 
-    pub async fn activate(&self, runtime: &CreatorRuntime, source: &str) -> DeploymentId {
-        let deployment = self
-            .deployments
+    /// Publish a deployment's sources into the artifact store this host loads
+    /// from, and answer with the hash the service would pin a claim to.
+    pub async fn publish(&self, source: &str) -> String {
+        self.deployments
             .publish(
                 &self.scope.app_id,
                 &DeployRegistration {
@@ -306,82 +276,130 @@ impl Fixture {
                 &deployment_fixture::Sources::single(source),
             )
             .await
-            .unwrap();
-        let deployment = DeploymentId::parse(&deployment.id).unwrap();
-        let lease = self.grant(JobSpec {
-            id: JobId::mint(),
-            app_id: self.scope.app_id.clone(),
-            operation: JobOperation::Activate {
-                deployment_id: deployment.clone(),
-                revision: 1.try_into().unwrap(),
-            },
-            available_at: 0.try_into().unwrap(),
-        });
-        assert_eq!(
-            runtime.app.activate_job(&lease).await.unwrap().outcome,
-            JobOutcome::Completed {}
-        );
-        self.deployments
-            .assert_held(&self.scope.app_id, deployment.as_str())
-            .await;
-        deployment
+            .unwrap()
+            .hash
     }
 
-    pub fn grant(&self, job: JobSpec) -> Grant {
-        Grant {
-            delivery: Delivery {
-                job,
-                worker_id: self.worker.clone(),
-                assignment_revision: self.scope.assignment_revision,
-                attempt: 1.try_into().unwrap(),
-                deadline: 0.try_into().unwrap(),
-            },
-            expires: Instant::now() + Duration::from_secs(30),
-        }
-    }
-
-    pub async fn next(&self, app: &zeroship_workflow::service::AppWorkflows, run: &str) -> Grant {
-        for job in app.pending_jobs(None, 16).await.unwrap() {
-            if matches!(&job.operation, JobOperation::Advance { run_id, .. } if run_id.as_str() == run)
-                && app.job_receipt(&job).await.unwrap().is_none()
-            {
-                return self.grant(job);
+    /// A client against a peer that answers every request with `reply`, counting
+    /// them.
+    ///
+    /// The count is the bound that makes an execution test say something: it is
+    /// what separates "the loader crossed for the pin" from "the loader had it
+    /// already", and it is asserted rather than assumed.
+    pub async fn serving(&self, reply: Value) -> Peer {
+        let listener = compio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = self.client(&format!("http://{}", listener.local_addr().unwrap()));
+        let requests = Rc::new(Cell::new(0usize));
+        let counted = requests.clone();
+        let (stop, stopped) = oneshot::channel::<()>();
+        let body = serde_json::to_vec(&reply).unwrap();
+        let handle = compio::runtime::spawn(async move {
+            let mut stopped = stopped;
+            loop {
+                let (mut stream, _) = match futures::future::select(
+                    stopped,
+                    Box::pin(listener.accept()),
+                )
+                .await
+                {
+                    Either::Left(_) => break,
+                    Either::Right((accepted, remaining)) => {
+                        stopped = remaining;
+                        accepted.unwrap()
+                    }
+                };
+                counted.set(counted.get() + 1);
+                let mut seen = Vec::new();
+                loop {
+                    let (read, buffer) = stream.read(Vec::with_capacity(4096)).await.unwrap();
+                    if read == 0 {
+                        break;
+                    }
+                    seen.extend_from_slice(&buffer[..read]);
+                    if seen.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let mut response = format!(
+                    "HTTP/1.1 200 Test\r\nContent-Type: application/json\r\n\
+                     Connection: close\r\nContent-Length: {}\r\n\r\n",
+                    body.len()
+                )
+                .into_bytes();
+                response.extend(body.clone());
+                let _ = stream.write_all(response).await;
             }
+        });
+        Peer {
+            client,
+            requests,
+            stop: Some(stop),
+            handle: Some(handle),
         }
-        panic!("run must publish its next unconsumed Advance");
+    }
+
+    /// The assignment a claim would hand the executor, pinned to `deployment`.
+    ///
+    /// Hand-built, because the journal that builds one is the service's now. What
+    /// it cannot therefore prove is that the service produces this shape -- that
+    /// is bound where the service answers -- and what it does prove is what the
+    /// assembled executor does with one.
+    pub fn assignment(&self, deploy_hash: &str) -> TaskAssignment {
+        serde_json::from_value(json!({
+            "id": typed_id::generate("wft"),
+            "token": "a".repeat(64),
+            "generation": 1,
+            "epoch": 1,
+            "deadline": 10_000,
+            "leaseMs": 5_000,
+            "invocation": {
+                "appId": self.scope.app_id.as_str(),
+                "deployId": typed_id::generate("dep"),
+                "deployHash": deploy_hash,
+                "runId": typed_id::generate(typed_id::WORKFLOW_RUN_PREFIX),
+                "generation": 1,
+                "workflowName": "Example",
+                "phase": "forward",
+                "trigger": {
+                    "input": {"value": "creator-owned-input"},
+                    "startedAt": "2026-01-01T00:00:00Z",
+                    "runId": typed_id::generate(typed_id::WORKFLOW_RUN_PREFIX),
+                    "workflowName": "Example"
+                },
+                "journal": []
+            }
+        }))
+        .unwrap()
     }
 }
 
-pub(super) struct Grant {
-    pub delivery: Delivery,
-    expires: Instant,
+/// A scripted workflow service, and the count of what actually reached it.
+pub(super) struct Peer {
+    pub client: WorkerCoordinator,
+    requests: Rc<Cell<usize>>,
+    stop: Option<oneshot::Sender<()>>,
+    handle: Option<compio::runtime::JoinHandle<()>>,
 }
-impl JobLease for Grant {
-    fn delivery(&self) -> &Delivery {
-        &self.delivery
-    }
-    fn remaining(&self) -> Option<Duration> {
-        self.expires
-            .checked_duration_since(Instant::now())
-            .filter(|remaining| !remaining.is_zero())
+
+impl Peer {
+    /// Stop serving and answer how many requests were made.
+    pub async fn served(mut self) -> usize {
+        drop(self.stop.take());
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.await;
+        }
+        self.requests.get()
     }
 }
 
 pub(super) async fn execute(
-    runtime: &CreatorRuntime,
-    task: &DeliveredTask,
+    runtime: &CreatorRuntime<()>,
+    assignment: &TaskAssignment,
 ) -> Result<zeroship_workflow::WorkflowExecution, WorkflowServiceError> {
-    let guard = ExecutionGuard::new(task.remaining()?.min(Duration::from_secs(5))).unwrap();
-    let mut execution = runtime.executor.start(task.assignment(), guard.budget())?;
+    let guard = ExecutionGuard::new(Duration::from_secs(5)).unwrap();
+    let mut execution = runtime.executor.start(assignment, guard.budget())?;
     let result = execution.wait().await;
     execution.stop().await;
     drop(guard);
     result
-}
-
-pub(super) fn contains_file(directory: &Path) -> bool {
-    directory.read_dir().unwrap().any(|entry| {
-        let path = entry.unwrap().path();
-        path.is_file() || (path.is_dir() && contains_file(&path))
-    })
 }

@@ -41,7 +41,7 @@ use zeroship_workflow::{
     engine::WorkflowOutputRef,
     operations::StartOptions,
     service::{
-        AppPolicy, AppWorkflows, PayloadSlot, PolicySnapshot, RequestId, StagedPayload, TaskToken,
+        AppPolicy, AppWorkflows, PayloadSlot, PolicySnapshot, RequestId, TaskToken,
         WorkerIdentity,
     },
     StepOutputReader, WorkflowServiceError,
@@ -703,7 +703,7 @@ impl TaskPayloads for SubstitutedDescriptor {
         request: &RequestId,
         reference: WorkflowOutputRef,
         body: BoxChunkSource,
-    ) -> Result<StagedPayload, WorkflowServiceError> {
+    ) -> Result<crate::payloads::UploadReceipt, WorkflowServiceError> {
         self.inner
             .stage(task, token, request, reference, body)
             .await

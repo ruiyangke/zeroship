@@ -28,6 +28,40 @@ use zeroship_core::{
     },
 };
 
+pub use jobs::SETTLE_BODY_BYTES;
+
+/// Answers with the payload a proven read located, instead of opening it.
+///
+/// `PayloadOpener` is the seam the engine hands one authorized object through,
+/// and its `Read` is whatever the host makes of that object. A host that holds
+/// the store makes bytes; this one makes the key and the descriptor, so the
+/// journal's proof of which object a caller may read happens here under the
+/// journal's own lock and the object itself is opened by the caller that holds
+/// the same store.
+///
+/// The engine's own guard against a substituted object is unaffected: it compares
+/// the row's descriptor against the recorded one BEFORE this is reached.
+///
+/// Shared by the run reads and the task read because it is the same answer to
+/// the same question, and a second copy of it would be a second thing to keep
+/// in step with `PayloadTarget`.
+struct LocatePayload;
+
+#[async_trait::async_trait(?Send)]
+impl zeroship_workflow::service::PayloadOpener for LocatePayload {
+    type Read = zeroship_core::workflow_coordination::PayloadLocation;
+
+    async fn open(
+        self,
+        target: zeroship_workflow::service::PayloadTarget<'_>,
+    ) -> Result<Self::Read, zeroship_workflow::WorkflowServiceError> {
+        Ok(zeroship_core::workflow_coordination::PayloadLocation {
+            payload_id: target.id.to_owned(),
+            reference: target.reference.clone(),
+        })
+    }
+}
+
 pub const DEFAULT_MAX_REQUEST_BYTES: usize = 64 * 1024;
 pub fn configure(config: &mut web::ServiceConfig) {
     configure_with_limit(config, DEFAULT_MAX_REQUEST_BYTES);

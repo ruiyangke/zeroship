@@ -55,14 +55,17 @@ use zeroship_core::{
     },
     service_peers::{service_issuer, ServiceAuth, ServiceKeyring, CONTROL_SERVICE_NAME},
     workflow_coordination::{
-        AssignedScope, RegisterWorker, RequestId, RestartOptions, RestartRun, RunFailure, RunId,
-        RunOperation, RunScope, RunState, SignalOptions, SignalRun, TransitionRun, WorkerId,
-        WorkerState,
+        AssignedScope, ConflictPolicy, CreatorStartOptions, FailureCode, PayloadReservation,
+        ReadStepOutput, ReadTaskPayload, ReservePayload, ResolveTaskExecutable,
+        RegisterWorker, RequestId, RestartOptions, RestartRun, RunFailure, RunId, RunOperation,
+        Revision, RunScope, RunState, SignalOptions, SignalRun, StartRun, TransitionRun, WorkerId,
+        WorkerState, WorkflowOutputRef,
     },
-    workflow_jobs::DeploymentId,
+    workflow_jobs::{DeploymentId, JobOperation, JobSpec, SubmitJob},
     workflow_policy::AppPolicy,
 };
 use zeroship_workflow_client::{Options as ClientOptions, RunError, WorkerCoordinator};
+use zeroship_workflow::service::delivery::{AcceptedJob, AppJournal, ClaimedTask};
 use zeroship_workflow_manager::recovery::Options as RecoveryOptions;
 use zeroship_workflow_server::coordinator::{connect_eligibility, Coordinator, Options};
 
@@ -182,6 +185,60 @@ impl Fixture {
 
     /// One column of one journal row, so a reply is compared against what the
     /// service stored rather than against itself.
+    /// A column of the seeded deployment, so a caller compares a resolved pin
+    /// against the journal's own row rather than against a second derivation.
+    /// A column of a dispatch row, so a caller compares a release against the
+    /// journal state it produced rather than against the reply alone.
+    async fn task_column(&self, task: &str, column: &str) -> String {
+        self.platform
+            .admin
+            .query_one(
+                &format!(
+                    "SELECT {column} FROM workflow_manager.__zeroship_workflow_tasks \
+                     WHERE app_id=$1 AND id=$2"
+                ),
+                &[&self.app.as_str(), &task],
+            )
+            .await
+            .unwrap()
+            .get(0)
+    }
+
+    async fn deploy_column(&self, deploy: &str, column: &str) -> String {
+        self.platform
+            .admin
+            .query_one(
+                &format!(
+                    "SELECT {column} FROM workflow_manager.__zeroship_workflow_deploys \
+                     WHERE app_id=$1 AND id=$2"
+                ),
+                &[&self.app.as_str(), &deploy],
+            )
+            .await
+            .unwrap()
+            .get(0)
+    }
+
+    /// Park a deployment the way a damaged artifact does.
+    ///
+    /// `park_deployment` is what the journal itself runs on a corrupt load, and
+    /// its whole effect on admissibility is this state change -- so a caller
+    /// asserting the availability fence arranges the state rather than arranging
+    /// a corrupt object, which would test the loader instead.
+    async fn park_deployment(&self, deploy: &str) {
+        let parked = self
+            .platform
+            .admin
+            .execute(
+                "UPDATE workflow_manager.__zeroship_workflow_deploys SET state='unavailable' \
+                 WHERE app_id=$1 AND id=$2 AND state='available'",
+                &[&self.app.as_str(), &deploy],
+            )
+            .await
+            .unwrap();
+        assert_eq!(parked, 1, "no available deployment was parked");
+    }
+
     async fn run_column(&self, run: &RunId, column: &str) -> String {
         self.platform
             .admin
@@ -325,4 +382,469 @@ async fn the_client_and_the_service_agree_on_every_run_call() {
         .await
         .expect_err("restart was served, so this journal now holds its deployment");
     assert_eq!(refused, RunError::Refused(RunFailure::Unavailable {}));
+
+    // WRITE, carrying a creator VALUE and no descriptor. The run the reply names
+    // must be one the journal holds, and the object the service staged for that
+    // value must be the one the run's input edge owns -- so the descriptor came
+    // from the bytes rather than from anything the client could have sent.
+    let started = fixture
+        .client
+        .start_run(&StartRun {
+            request_id: RequestId::mint(),
+            scope: scope(),
+            workflow_name: "demo".to_owned(),
+            input: json!({"order": 7}),
+            options: CreatorStartOptions {
+                key: Some("order-7".to_owned()),
+                on_conflict: ConflictPolicy::Reject,
+            },
+        })
+        .await
+        .unwrap();
+    assert_eq!(started.state, RunState::Queued);
+    let staged = fixture
+        .platform
+        .admin
+        .query_one(
+            "SELECT p.hash = encode(sha256($3::bytea),'hex'), p.state FROM \
+             workflow_manager.__zeroship_workflow_payload_refs e \
+             JOIN workflow_manager.__zeroship_workflow_payloads p \
+               ON p.app_id=e.app_id AND p.id=e.payload_id \
+             WHERE e.app_id=$1 AND e.run_id=$2 AND e.slot='input'",
+            &[
+                &fixture.app.as_str(),
+                &started.id,
+                &serde_json::to_vec(&json!({"order": 7})).unwrap(),
+            ],
+        )
+        .await
+        .unwrap();
+    assert!(
+        staged.get::<_, bool>(0),
+        "the staged input's digest is not over the value the client sent"
+    );
+    assert_eq!(staged.get::<_, String>(1), "referenced");
+
+    // READ, located rather than carried. The run the start admitted returned
+    // nothing, so it owns no output object -- the same absence `status` reports
+    // by carrying no descriptor, and the refusal a located read answers with.
+    let started_run = RunId::parse(&started.id).unwrap();
+    let absent = fixture
+        .client
+        .read_run_output(&RunScope {
+            scope: scope(),
+            run_id: started_run.clone(),
+        })
+        .await
+        .expect_err("a run that returned nothing was answered with a location");
+    assert!(
+        matches!(absent, RunError::Refused(RunFailure::NotFound { .. })),
+        "{absent:?}"
+    );
+    let unrecorded = fixture
+        .client
+        .read_step_output(&ReadStepOutput {
+            scope: scope(),
+            run_id: started_run,
+            name: "charge".to_owned(),
+            occurrence: 0,
+        })
+        .await
+        .expect_err("a step this run never recorded was answered");
+    assert!(
+        matches!(unrecorded, RunError::Refused(RunFailure::NotFound { .. })),
+        "{unrecorded:?}"
+    );
+}
+
+/// The task payload read, client to service, over a real socket.
+///
+/// Separate from the run calls because the AUTHORITY is different in kind: a run
+/// call is authorized by the placement the manager holds for this worker, and
+/// this one by a dispatch credential the journal minted and keeps only a hash
+/// of. Sharing the run test's body would hide that, since the fixture's
+/// placement would satisfy both and neither arm would say which one answered.
+///
+/// THREE ARMS, and the pairing is the point. The located reply proves the
+/// journal was reached and answered from its own rows. The two refusals prove it
+/// was reached for the right reason and refused at different STAGES: a malformed
+/// credential is refused by the route before any journal call, and a well-formed
+/// one naming no dispatch is refused by the journal itself. Two codes from two
+/// stages is what separates "the journal said no" from "the request never got
+/// there" -- which a single refusal arm cannot distinguish, and which is exactly
+/// how a route registered at the wrong path or missing its grant would look.
+///
+/// What this does NOT cover: the bytes. They never cross this call, and opening
+/// the located object is the caller's half, asserted where the object store is.
+#[ntex::test]
+async fn the_client_and_the_service_agree_on_a_task_payload_read() {
+    let fixture = Box::pin(Fixture::new()).await;
+    let run = journal::seed_run(&fixture.platform, &fixture.app).await;
+    let leased = journal::seed_leased_task(
+        &fixture.platform,
+        &fixture.app,
+        &run,
+        fixture.client.worker_id(),
+    )
+    .await;
+
+    let located = fixture
+        .client
+        .read_task_payload(&ReadTaskPayload {
+            app_id: fixture.app.clone(),
+            task_id: leased.task.clone(),
+            token: leased.token.clone(),
+            reference: leased.reference.clone(),
+        })
+        .await
+        .expect("the journal locates the object its own edge names");
+    assert_eq!(located.payload_id, leased.payload);
+    assert_eq!(located.reference, leased.reference);
+
+    // Refused by the ROUTE, before a journal call: the token's own parse.
+    let malformed = fixture
+        .client
+        .read_task_payload(&ReadTaskPayload {
+            app_id: fixture.app.clone(),
+            task_id: leased.task.clone(),
+            token: "not-a-token".to_owned(),
+            reference: leased.reference.clone(),
+        })
+        .await
+        .expect_err("a credential that cannot be a token was accepted");
+    assert!(
+        matches!(
+            malformed,
+            zeroship_workflow_client::Error::Refused(FailureCode::Unauthenticated)
+        ),
+        "{malformed:?}"
+    );
+
+    // Refused by the JOURNAL: a well-formed credential naming no dispatch of
+    // this app. A stale delivery is a conflict rather than a missing URL, which
+    // is the mapping every delivery call shares.
+    let unknown = fixture
+        .client
+        .read_task_payload(&ReadTaskPayload {
+            app_id: fixture.app.clone(),
+            // A WELL-FORMED dispatch id, so the refusal is the lookup's and not the
+            // prefix parse that precedes it.
+            task_id: zeroship_core::typed_id::generate(
+                zeroship_core::typed_id::WORKFLOW_DISPATCH_PREFIX,
+            ),
+            token: leased.token,
+            reference: leased.reference,
+        })
+        .await
+        .expect_err("a dispatch this app never held was answered");
+    assert!(
+        matches!(
+            unknown,
+            zeroship_workflow_client::Error::Refused(FailureCode::Conflict)
+        ),
+        "{unknown:?}"
+    );
+}
+
+/// The task executable resolution, client to service, over a real socket.
+///
+/// The ARTIFACT is deliberately not part of this contract: the reply names a
+/// deployment and the caller loads it from its own object store. So what a wire
+/// test can bind is the pin and the fences, and that is what this asserts --
+/// against the `deploys` row the fixture seeded, read back out of the journal
+/// rather than derived a second time here.
+///
+/// THREE ARMS, the same staging split as the payload read. A resolved pin proves
+/// the journal was reached and answered from its own rows. A malformed credential
+/// is refused by the ROUTE before any journal call. And a deployment the journal
+/// has PARKED is refused by the journal itself -- which is the arm that matters
+/// most, because it is the fence a worker loading from its own store could never
+/// apply for itself, and the reason the resolution crosses at all.
+#[ntex::test]
+async fn the_client_and_the_service_agree_on_a_task_executable_resolution() {
+    let fixture = Box::pin(Fixture::new()).await;
+    let run = journal::seed_run(&fixture.platform, &fixture.app).await;
+    // Admission has to be OPEN for a pin to resolve: the journal reads an
+    // `admission_generation` under the hold scope and refuses without one.
+    let deploy = journal::seed_journal_hold(&fixture.platform, &fixture.app).await;
+    let leased = journal::seed_leased_task(
+        &fixture.platform,
+        &fixture.app,
+        &run,
+        fixture.client.worker_id(),
+    )
+    .await;
+    let resolve = || ResolveTaskExecutable {
+        app_id: fixture.app.clone(),
+        task_id: leased.task.clone(),
+        token: leased.token.clone(),
+    };
+
+    let pinned = fixture
+        .client
+        .resolve_task_executable(&resolve())
+        .await
+        .expect("the journal resolves the deployment its own run row pins");
+    assert_eq!(pinned.deploy_id.as_str(), deploy);
+    assert_eq!(
+        pinned.deploy_hash,
+        fixture.deploy_column(&deploy, "hash").await
+    );
+    // The fences travel with the pin, and the caller does not invent them.
+    assert_eq!(pinned.availability_epoch, 0);
+    assert_eq!(pinned.admission_generation, 1);
+
+    // Refused by the ROUTE, before a journal call.
+    let malformed = fixture
+        .client
+        .resolve_task_executable(&ResolveTaskExecutable {
+            token: "not-a-token".to_owned(),
+            ..resolve()
+        })
+        .await
+        .expect_err("a credential that cannot be a token was accepted");
+    assert!(
+        matches!(
+            malformed,
+            zeroship_workflow_client::Error::Refused(FailureCode::Unauthenticated)
+        ),
+        "{malformed:?}"
+    );
+
+    // Refused by the JOURNAL, on the fence a local load cannot see. Parking is
+    // what a damaged artifact leaves behind, and a worker that resolved its own
+    // pin from the object store would happily reload the corrupt bytes.
+    fixture.park_deployment(&deploy).await;
+    let parked = fixture
+        .client
+        .resolve_task_executable(&resolve())
+        .await
+        .expect_err("a parked deployment was still offered for replay");
+    assert!(
+        matches!(
+            parked,
+            zeroship_workflow_client::Error::Refused(FailureCode::Unavailable)
+        ),
+        "{parked:?}"
+    );
+}
+
+/// The release and receipt pair, client to service, over a real socket.
+///
+/// ONE CASE FOR BOTH, because they are one recovery: a holder that cannot finish
+/// either hands the task back or, after an uncertain settlement, asks what
+/// committed. Driving them together is what shows the pair agrees about the same
+/// delivery rather than each agreeing with the test.
+///
+/// THE RECEIPT IS READ TWICE, before and after the release, and both answers are
+/// `None`. That is the property, not an oversight: a release commits no
+/// execution, so it must not leave an outcome behind. A single read could not
+/// tell "no outcome yet" from "no outcome ever", and the pair of reads is what
+/// makes the absence attributable to the release.
+///
+/// THE RELEASE IS ALSO ASSERTED IDEMPOTENT. `release_job` returns early on a task
+/// already released, so a holder whose acknowledgement was lost may repeat it --
+/// which is the same uncertain-reply situation the receipt read exists for, and
+/// it would be a strange pair if one half tolerated a retry and the other did
+/// not.
+#[ntex::test]
+async fn the_client_and_the_service_agree_on_a_release_and_a_receipt() {
+    let fixture = Box::pin(Fixture::new()).await;
+    let run = journal::seed_run(&fixture.platform, &fixture.app).await;
+    journal::seed_journal_hold(&fixture.platform, &fixture.app).await;
+    // NO SEEDED DISPATCH HERE, deliberately: `tasks::assign` claims a run only
+    // while `runs.task_id` is null, so a hand-seeded task would hold the run and
+    // the claim below would answer deferred instead of handing out work. The
+    // claim creates the dispatch this case releases.
+    let job = JobSpec {
+        id: zeroship_core::workflow_jobs::JobId::mint(),
+        app_id: fixture.app.clone(),
+        operation: JobOperation::Advance {
+            deployment_id: DeploymentId::parse_owned(
+                fixture.app.as_str().replacen("app_", "dep_", 1),
+            )
+            .unwrap(),
+            run_id: run.clone(),
+            generation: 0,
+            revision: Revision::try_from(1).unwrap(),
+        },
+        available_at: 0.try_into().unwrap(),
+    };
+
+    // Nothing has committed, so the recovery read says so as a fact.
+    let before = fixture
+        .client
+        .job_receipt::<AppJournal>(&job)
+        .await
+        .expect("an uncommitted job answers rather than refusing");
+    assert!(before.is_none(), "{before:?}");
+
+    // A REAL CLAIM, because `LeasedJob` has no public constructor and should not:
+    // delivery authority comes from the manager granting it, never from a struct a
+    // caller fills in. So the release is driven against the job this same client
+    // submitted and claimed, which exercises the claim and its journal acceptance
+    // on the way.
+    let submitted = fixture
+        .client
+        .submit_job(&SubmitJob {
+            scope: fixture.scope.clone(),
+            job: job.clone(),
+        })
+        .await
+        .expect("the queue accepts a creator advance");
+    assert_eq!(submitted, job);
+    let claimed = fixture
+        .client
+        .claim_job::<AppJournal>(&fixture.scope)
+        .await
+        .expect("the claim exchange answers")
+        .expect("the submitted advance is claimable");
+    let accepted = claimed
+        .accepted
+        .expect("an advance carries a journal acceptance");
+    let lease = claimed.lease;
+    let AcceptedJob::Execute {
+        assignment,
+        remaining_ms,
+    } = accepted
+    else {
+        panic!("the journal hands out a task for an advance")
+    };
+    let claim = ClaimedTask {
+        id: assignment.id.clone(),
+        token: assignment.token.clone(),
+        remaining_ms,
+    };
+    fixture
+        .client
+        .release_job::<AppJournal>(&lease, &claim)
+        .await
+        .expect("a held task is handed back");
+    assert_eq!(
+        fixture.task_column(&assignment.id, "state").await,
+        "released"
+    );
+
+    // Idempotent: the same release again, as a holder that lost its reply sends.
+    fixture
+        .client
+        .release_job::<AppJournal>(&lease, &claim)
+        .await
+        .expect("a repeated release is an acknowledgement, not a conflict");
+
+    // And a release leaves no outcome behind.
+    let after = fixture
+        .client
+        .job_receipt::<AppJournal>(&job)
+        .await
+        .expect("the receipt read still answers after a release");
+    assert!(after.is_none(), "{after:?}");
+}
+
+/// The payload reservation, client to service, over a real socket.
+///
+/// THE IDEMPOTENCE IS THE POINT, not a side property. The unique index on
+/// `(app_id, task_id, request_id)` enforces nothing while `task_id` is NULL, and
+/// this reservation crosses a wire where retries are expected -- so what stops a
+/// retry reserving a second object is the service's own lookup on
+/// `(app_id, request_id)`. Two reservations under one request id must answer with
+/// the SAME payload id, and this asserts that rather than assuming it.
+///
+/// FOUR ARMS. A first reservation; the same request id again answering the same
+/// id; the same request id with DIFFERENT bytes refused, which is what makes the
+/// dedupe a comparison rather than a blind reuse; and a malformed credential
+/// refused at the route before any journal call.
+///
+/// What this does NOT cover: the object write and the confirm. The bytes never
+/// cross this call, and the confirm's compare-and-swap is asserted where a fence
+/// can be committed between the two.
+#[ntex::test]
+async fn the_client_and_the_service_agree_on_a_payload_reservation() {
+    let fixture = Box::pin(Fixture::new()).await;
+    let run = journal::seed_run(&fixture.platform, &fixture.app).await;
+    let leased = journal::seed_leased_task(
+        &fixture.platform,
+        &fixture.app,
+        &run,
+        fixture.client.worker_id(),
+    )
+    .await;
+    let request = RequestId::mint();
+    let reference = WorkflowOutputRef {
+        hash: "c".repeat(64),
+        size: 7,
+        content_type: Some("application/json".to_owned()),
+    };
+    let reserve = |request: RequestId, reference: WorkflowOutputRef| ReservePayload {
+        app_id: fixture.app.clone(),
+        task_id: leased.task.clone(),
+        token: leased.token.clone(),
+        request_id: request,
+        reference,
+    };
+
+    let first = fixture
+        .client
+        .reserve_task_payload(&reserve(request.clone(), reference.clone()))
+        .await
+        .expect("a live dispatch reserves an upload");
+    let PayloadReservation::Reserved {
+        payload_id,
+        expires_at,
+    } = first
+    else {
+        panic!("a fresh request id has nothing staged against it")
+    };
+    assert!(expires_at > 0, "{expires_at}");
+
+    // The retry contract: same request id, same object.
+    let again = fixture
+        .client
+        .reserve_task_payload(&reserve(request.clone(), reference.clone()))
+        .await
+        .expect("a retried reservation answers rather than refusing");
+    assert_eq!(
+        again,
+        PayloadReservation::Reserved {
+            payload_id: payload_id.clone(),
+            expires_at,
+        }
+    );
+
+    // And the dedupe is a comparison: the same request id for other bytes is a
+    // caller contradicting itself, not a second upload.
+    let substituted = fixture
+        .client
+        .reserve_task_payload(&reserve(
+            request,
+            WorkflowOutputRef {
+                hash: "d".repeat(64),
+                ..reference.clone()
+            },
+        ))
+        .await
+        .expect_err("a request id was reused for another object");
+    assert!(
+        matches!(
+            substituted,
+            zeroship_workflow_client::Error::Refused(FailureCode::Conflict)
+        ),
+        "{substituted:?}"
+    );
+
+    let malformed = fixture
+        .client
+        .reserve_task_payload(&ReservePayload {
+            token: "not-a-token".to_owned(),
+            ..reserve(RequestId::mint(), reference)
+        })
+        .await
+        .expect_err("a credential that cannot be a token was accepted");
+    assert!(
+        matches!(
+            malformed,
+            zeroship_workflow_client::Error::Refused(FailureCode::Unauthenticated)
+        ),
+        "{malformed:?}"
+    );
 }

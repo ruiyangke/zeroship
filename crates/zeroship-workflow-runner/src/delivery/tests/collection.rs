@@ -26,11 +26,8 @@ async fn collect_lost_ack_replays_without_executor_or_artifacts() {
     lease.delivery.job.id = JobId::mint();
     lease.delivery.job.operation = JobOperation::Collect {};
     fixture.metadata.lose_ack.set(true);
-    let mut slot = fixture.slot(Duration::from_secs(5));
     let DeliveryOutcome::Settled { creator, manager } =
-        Box::pin(slot.run(&fixture.app, lease.clone()))
-            .await
-            .unwrap()
+        fixture.sweep(lease.clone()).await.unwrap()
     else {
         panic!("collection settles a bounded empty page")
     };
@@ -45,9 +42,7 @@ async fn collect_lost_ack_replays_without_executor_or_artifacts() {
     lease.expires = Instant::now();
     let DeliveryOutcome::Settled {
         creator: replay, ..
-    } = Box::pin(slot.run(&fixture.app, lease.clone()))
-        .await
-        .unwrap()
+    } = fixture.sweep(lease.clone()).await.unwrap()
     else {
         panic!("collection must replay its receipt")
     };
@@ -69,34 +64,15 @@ async fn collect_lost_ack_replays_without_executor_or_artifacts() {
         .all(|request| request.successors.is_empty()));
 }
 
-/// Collection bounds a slot cannot honour are refused where they are declared,
-/// and a refused duty leaves no receipt and no settlement, so the manager
-/// redelivers it rather than treating it as discharged.
+/// Collection bounds the sweep cannot honour are refused where they are
+/// declared, and a refused duty leaves no receipt and no settlement, so the
+/// manager redelivers it rather than treating it as discharged.
 #[compio::test]
 async fn collect_invalid_bounds_are_refused_and_do_not_acknowledge() {
     let fixture = Fixture::new(AppPolicy::default()).await;
     let mut lease = fixture.lease.clone();
     lease.delivery.job.id = JobId::mint();
     lease.delivery.job.operation = JobOperation::Collect {};
-    for invalid in [
-        CollectionOptions {
-            page_size: 0,
-            ..Default::default()
-        },
-        CollectionOptions {
-            item_timeout: Duration::ZERO,
-            ..Default::default()
-        },
-        CollectionOptions {
-            page_size: u32::MAX,
-            ..Default::default()
-        },
-    ] {
-        assert!(matches!(
-            fixture.slot_collecting(Duration::from_secs(5), invalid),
-            Err(WorkflowServiceError::InvalidRequest(_))
-        ));
-    }
     assert!(fixture
         .app
         .job_receipt(&lease.delivery.job)

@@ -15,8 +15,8 @@ use std::{
 };
 use zeroship_core::{
     app_id::AppId,
-    workflow_coordination::{RegisterWorker, Revision, WorkerId, WorkerState},
-    workflow_jobs::{BroadcastId, JobId, JobOperation, JobSpec},
+    workflow_coordination::{RegisterWorker, Revision, RunId, WorkerId, WorkerState},
+    workflow_jobs::{BroadcastId, DeploymentId, JobId, JobOperation, JobSpec},
 };
 use zeroship_workflow_manager::{
     capacity::{self, CapacityFuture, CapacityProvider, CapacityReply, CapacityRequest, Refusal},
@@ -158,13 +158,30 @@ pub fn options(retry: Duration) -> driver::Options {
     }
 }
 
-/// An intent-producing job that needs no deployment.
+/// A sweep of the journal: claimable work that needs no placement, because the
+/// lane that owns the journal discharges it.
 pub fn fanout(app: &AppId) -> JobSpec {
     JobSpec {
         id: JobId::mint(),
         app_id: app.clone(),
         operation: JobOperation::Fanout {
             broadcast_id: BroadcastId::mint(),
+            revision: revision(1),
+        },
+        available_at: 0.try_into().unwrap(),
+    }
+}
+
+/// Creator work, which is what a placement is for: the sweeps need none, so
+/// only a row like this makes an app due for a worker.
+pub fn advance(app: &AppId) -> JobSpec {
+    JobSpec {
+        id: JobId::mint(),
+        app_id: app.clone(),
+        operation: JobOperation::Advance {
+            deployment_id: DeploymentId::mint(),
+            run_id: RunId::mint(),
+            generation: 0,
             revision: revision(1),
         },
         available_at: 0.try_into().unwrap(),
@@ -211,11 +228,11 @@ impl Host {
         worker
     }
 
-    /// An app in `zone` with claimable work.
+    /// An app in `zone` holding work a placed worker claims.
     pub async fn due(&self, app: &AppId, zone: &ZoneId) -> JobSpec {
         self.facts.app(app, zone);
         self.queue.register_scope(app).await.unwrap();
-        self.queue.submit(&fanout(app)).await.unwrap()
+        self.queue.submit(&advance(app)).await.unwrap()
     }
 
     pub fn driver(&self, retry: Duration, provider: Rc<dyn CapacityProvider>) -> Driver {

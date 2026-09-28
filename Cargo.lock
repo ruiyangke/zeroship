@@ -8001,6 +8001,7 @@ dependencies = [
  "zeroship-metering",
  "zeroship-migrate-server",
  "zeroship-runtime",
+ "zeroship-storage",
  "zeroship-stream",
  "zeroship-workflow",
  "zeroship-workflow-client",
@@ -8809,6 +8810,7 @@ dependencies = [
  "zeroship-core",
  "zeroship-data-orm",
  "zeroship-migrate-server",
+ "zeroship-storage",
  "zeroship-workflow",
  "zeroship-workflow-client",
  "zeroship-workflow-manager",
@@ -8837,6 +8839,7 @@ dependencies = [
  "zeroship-runtime-macros",
  "zeroship-storage",
  "zeroship-workflow",
+ "zeroship-workflow-client",
  "zeroship-workflow-manager",
  "zeroship-workflow-runner",
 ]

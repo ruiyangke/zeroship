@@ -8,6 +8,11 @@ use std::{
     time::Duration,
 };
 
+/// The request-body budget this fixture configures, FAR below the production
+/// default on purpose: a boundary probed against a small cap costs one small
+/// body, and a route that answers to a larger one has to say so.
+pub const MAX_REQUEST_BYTES: usize = 1024;
+
 pub struct ServerProcess {
     child: Child,
     _control: queue_control::Control,
@@ -23,12 +28,44 @@ impl Drop for ServerProcess {
     }
 }
 impl ServerProcess {
+    /// A process configured as a deployment configures one, sweep lane included.
     pub async fn start(
         database: &str,
         peers: &Path,
         directory: &Path,
         name: &str,
         client: &Client,
+    ) -> Self {
+        Self::spawn_with(database, peers, directory, name, client, true).await
+    }
+
+    /// The same process with `workflow.maintenance_sweeps` off, so it composes no
+    /// sweep lane at all.
+    ///
+    /// For a case whose subject is a route, a protocol or a duty rather than the
+    /// lane: the lane asserts its own authority over every maintenance row of
+    /// this queue, so a running one competes with the claim the case makes for
+    /// itself and there is no placement to expire that would stop it. The lane's
+    /// own reach through the real cadence is bound by
+    /// `crates/zeroship-workflow-server/tests/maintenance_lane.rs`, which keeps
+    /// it on.
+    pub async fn without_maintenance_sweeps(
+        database: &str,
+        peers: &Path,
+        directory: &Path,
+        name: &str,
+        client: &Client,
+    ) -> Self {
+        Self::spawn_with(database, peers, directory, name, client, false).await
+    }
+
+    async fn spawn_with(
+        database: &str,
+        peers: &Path,
+        directory: &Path,
+        name: &str,
+        client: &Client,
+        maintenance_sweeps: bool,
     ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
@@ -40,7 +77,14 @@ impl ServerProcess {
             toml::to_string(&serde_json::json!({"workflow":{
                 "listen":address.to_string(),"database_url":database,"service_peers_file":peers,
                 "control_url":control.url(),"service_key_file":control.key_file,
-                "http_threads":2,"max_request_bytes":1024,
+                // The payload store this process stages and collects objects
+                // through. ONE root for every process this fixture starts,
+                // because that is what a deployment owes: an object one replica
+                // wrote is one another replica and the workers must be able to
+                // read. A root per process would model a misconfiguration.
+                "storage_url":directory.join("payload-objects"),
+                "http_threads":2,"max_request_bytes":MAX_REQUEST_BYTES,
+                "maintenance_sweeps":maintenance_sweeps,
             }}))
             .unwrap(),
         );

@@ -1,19 +1,19 @@
 //! Request-path access to the app backends a workflow host has made ready.
 //!
-//! The host publishes an app's [`AppBackend`] only after assignment preparation
+//! The host publishes an app's [`RemoteBackend`] only after assignment preparation
 //! passes its final checks, and retires it synchronously when the assignment is
 //! removed, replaced or closed. Request isolates, on threads other than the
 //! host's, resolve the currently published backend for every call: an unknown
 //! or unready app receives a retryable refusal, and a retired generation is
 //! never reached through this registry again.
 
+use crate::remote::RemoteBackend;
 use zeroship_workflow::{
     backend::{SharedWorkflowBackend, WorkflowBackend},
     operations::{
         DeliveredSignal, RestartOptions, RestartedRun, RunOperation, RunStatus, SignalOptions,
         StartOptions, StartedRun, TransitionedRun,
     },
-    service::{AppBackend, PolicyBinding},
     WorkflowServiceError,
 };
 use async_trait::async_trait;
@@ -21,16 +21,16 @@ use std::{
     collections::BTreeMap,
     sync::{Arc, PoisonError, RwLock},
 };
-use zeroship_core::app_id::AppId;
+use zeroship_core::{app_id::AppId, workflow_coordination::AssignedScope};
 
 /// Apps whose workflow backend the host has published. Clones share one registry.
 ///
 /// Only the owning host installs and retires entries: [`crate::host::WorkerHost`]
 /// after an assignment's final checks. Request threads resolve a backend through
-/// [`Self::backend`]; they cannot obtain an [`AppBackend`] from the registry, and
-/// installing one requires already holding it.
+/// [`Self::backend`]; they cannot obtain a [`RemoteBackend`] from the registry,
+/// and installing one requires already holding it.
 #[derive(Clone, Default)]
-pub struct ReadyApps(Arc<RwLock<BTreeMap<AppId, AppBackend>>>);
+pub struct ReadyApps(Arc<RwLock<BTreeMap<AppId, RemoteBackend>>>);
 
 impl std::fmt::Debug for ReadyApps {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -63,26 +63,34 @@ impl ReadyApps {
 
     /// Publish a prepared backend, replacing any earlier generation for its app.
     /// Call only after the preparation that produced it passed its final checks.
-    pub fn install(&self, backend: AppBackend) {
+    pub fn install(&self, backend: RemoteBackend) {
         self.0
             .write()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(backend.app_id().clone(), backend);
     }
 
-    /// Withdraw `binding`'s generation if it is the one published. A retired
+    /// Withdraw `scope`'s generation if it is the one published. A retired
     /// generation cannot withdraw its replacement.
-    pub fn retire(&self, binding: &PolicyBinding) {
+    ///
+    /// KEYED ON THE PLACEMENT, not on a policy generation, because a backend
+    /// reaching the service over HTTP holds no local policy binding to compare --
+    /// the far end decides what a call is admitted under. That costs nothing
+    /// here: `AssignmentBindings::reconcile` drops an entry only when the scan
+    /// reports a different `assignment_revision`, and within one entry
+    /// `prepare` republishes the backend it already has, so two backends for one
+    /// app never share a revision.
+    pub fn retire(&self, scope: &AssignedScope) {
         let mut apps = self.0.write().unwrap_or_else(PoisonError::into_inner);
         if apps
-            .get(binding.app_id())
-            .is_some_and(|backend| backend.binding().same_binding(binding))
+            .get(&scope.app_id)
+            .is_some_and(|backend| backend.scope() == scope)
         {
-            apps.remove(binding.app_id());
+            apps.remove(&scope.app_id);
         }
     }
 
-    fn current(&self, app: &AppId) -> Result<AppBackend, WorkflowServiceError> {
+    fn current(&self, app: &AppId) -> Result<RemoteBackend, WorkflowServiceError> {
         self.0
             .read()
             .unwrap_or_else(PoisonError::into_inner)

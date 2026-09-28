@@ -8,22 +8,17 @@
 use crate::workflow_runtime::{
     validate_context, WorkerWorkflowRuntimeLoader, WorkflowAppContext, WorkflowContextProvider,
 };
-use std::{future::Future, rc::Rc, sync::Arc};
-use zeroship_core::{
-    app_id::AppId,
-    schema_name::SchemaName,
-    workflow_coordination::{AssignedScope, WorkerId},
-};
+use std::{future::Future, rc::Rc, sync::Arc, time::Duration};
+use zeroship_bundle::BlobStore;
+use zeroship_core::{app_id::AppId, schema_name::SchemaName, workflow_coordination::AssignedScope};
 use zeroship_workflow_runner::{
     assignments::{CreatorFactory, CreatorRuntime},
-    ObjectStepOutputs, PayloadObjects, TaskPayloadLimits, WorkerBinding,
+    remote::RemoteBackend,
+    remote_tasks::RemoteTasks,
+    PayloadObjects, TaskPayloadLimits,
 };
 use zeroship_workflow::{
-    service::{
-        store::HostStorage,
-        AppDeployments, HostPolicies, IngressEpochs, PolicyBinding, SignalAuthority,
-        WorkerIdentity, WorkflowService,
-    },
+    service::{HostPolicies, IngressEpochs, PolicyBinding, WorkerIdentity},
     WorkflowServiceError,
 };
 use zeroship_workflow_client::WorkerCoordinator;
@@ -31,29 +26,34 @@ use zeroship_workflow_v8::V8TaskExecutor;
 
 /// Creator capabilities resolved independently of manager placement metadata.
 ///
-/// Storage is already provisioned and authorized for the requested app. Native
-/// runtime peers must use that same app and creator storage. Deployment clients
-/// carry the current assignment's retention authority; no platform database
-/// connection belongs in these resources. Contexts resolve fresh env, limits,
-/// network policy and native peers for each execution, without replacing the
-/// workflow backend or moving its physical schema.
+/// NO CREATOR DATABASE APPEARS HERE. The journal this app's workflows live in
+/// belongs to the workflow service, and this host reaches it over the same
+/// enrolled client it registers and claims with, so what a placement needs on
+/// this side is the payload object store, the app artifact store, and the
+/// per-execution context. Contexts resolve fresh env, limits, network policy and
+/// native peers for each execution.
 ///
-/// `signal_authority` signs and verifies signal capabilities. Without one the
-/// app's capability issuance and ingestion refuse as unavailable; every other
-/// operation is unaffected.
+/// `schema` is the app's own creator schema, derived by the host from the app
+/// id rather than selected by placement metadata. It is what every execution's
+/// context is checked against, so a context naming another tenant's schema is
+/// refused before any isolate is built.
 #[derive(Clone)]
 pub struct WorkflowResources {
-    pub storage: HostStorage,
+    pub schema: SchemaName,
     pub objects: PayloadObjects,
-    pub deployments: AppDeployments,
-    pub signal_authority: Option<Arc<SignalAuthority>>,
+    /// The artifact store a pinned deployment's bytes are read from. The
+    /// service resolves WHICH deployment a claim is pinned to; this host loads
+    /// it, so the bytes never cross the transport.
+    pub artifacts: Arc<dyn BlobStore>,
+    /// Ceiling on one deployment's source bytes, applied where they are loaded.
+    pub max_source_bytes: usize,
     pub contexts: Rc<dyn WorkflowContextProvider>,
 }
 
 impl std::fmt::Debug for WorkflowResources {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WorkflowResources")
-            .field("app", &self.storage.binding.app_id())
+            .field("schema", &self.schema)
             .finish_non_exhaustive()
     }
 }
@@ -78,11 +78,16 @@ pub trait WorkflowResourceProvider {
 pub struct WorkflowCreatorFactory<P> {
     provider: P,
     policies: Arc<HostPolicies>,
+    /// The enrolled client every creator call and every task payload operation
+    /// crosses on. It is the one this host registers and claims with, so a
+    /// creator call costs one authenticated request and lands in the journal the
+    /// service owns.
+    client: WorkerCoordinator,
     worker: WorkerIdentity,
     payloads: TaskPayloadLimits,
-    /// Asks the manager to bring a refused journal to the version this build
-    /// expects. `None` leaves a refusal terminal, which is what it was before.
-    repair: Option<Rc<WorkerCoordinator>>,
+    /// Bound on one payload object write, the same one the host's other
+    /// per-operation I/O answers to.
+    write_budget: Duration,
 }
 
 impl<P> std::fmt::Debug for WorkflowCreatorFactory<P> {
@@ -96,131 +101,98 @@ impl<P> std::fmt::Debug for WorkflowCreatorFactory<P> {
 impl<P> WorkflowCreatorFactory<P> {
     /// Bind creator assembly to the enrolled worker and its policy registry.
     ///
-    /// Supply the identity from the client used by `WorkerHost`, and the same
-    /// `HostPolicies` registry as its reconciler.
+    /// Supply the SAME client `WorkerHost` coordinates through, and the same
+    /// `HostPolicies` registry as its reconciler. The worker identity is taken
+    /// from that client rather than passed alongside it, so the identity a
+    /// payload operation is authorized under cannot disagree with the one the
+    /// request is signed by.
     ///
     /// # Errors
-    /// Rejects invalid payload limits before resolving creator resources.
+    /// Rejects invalid payload limits and an empty write budget before resolving
+    /// creator resources.
     pub fn new(
         provider: P,
         policies: Arc<HostPolicies>,
-        worker: &WorkerId,
+        client: WorkerCoordinator,
         payloads: TaskPayloadLimits,
+        write_budget: Duration,
     ) -> Result<Self, WorkflowServiceError> {
         payloads.validate()?;
+        if write_budget.is_zero() {
+            return Err(WorkflowServiceError::InvalidRequest(
+                "workflow payload write budget must be positive".into(),
+            ));
+        }
+        let worker = WorkerIdentity::new(client.worker_id().as_str().to_owned())?;
         Ok(Self {
             provider,
             policies,
-            worker: WorkerIdentity::new(worker.as_str().to_owned())?,
+            client,
+            worker,
             payloads,
-            repair: None,
+            write_budget,
         })
-    }
-
-    /// Turn a refused journal into a repair request rather than a dead end.
-    ///
-    /// The host holds no DDL authority - privilege follows the process - so the
-    /// repair is a request to the manager, which owns the journal artifacts and
-    /// sends them to the migration service.
-    #[must_use]
-    pub fn with_journal_repair(mut self, client: Rc<WorkerCoordinator>) -> Self {
-        self.repair = Some(client);
-        self
     }
 }
 
 impl<P: WorkflowResourceProvider> CreatorFactory for WorkflowCreatorFactory<P> {
+    /// No journal handle, because the journal is the workflow service's.
+    ///
+    /// The consumer hands this to the transport on every claim, and the host's
+    /// transport crosses to the service, so there is nothing of this shape to
+    /// hold. `JournalDuties for ()` states which duties that removes.
+    type Journal = ();
+
     async fn open(
         &self,
         scope: &AssignedScope,
         policy: &PolicyBinding,
-        ingress: Rc<dyn IngressEpochs>,
-    ) -> Result<CreatorRuntime, WorkflowServiceError> {
+        _ingress: Rc<dyn IngressEpochs>,
+    ) -> Result<CreatorRuntime<()>, WorkflowServiceError> {
         if policy.app_id() != &scope.app_id {
             return Err(WorkflowServiceError::PermissionDenied);
         }
-        let first = self.build(scope, policy, ingress.clone()).await;
-        let Err(refusal) = first else {
-            return first;
-        };
-        // THE REPAIR PATH. A host refuses a journal whose fingerprint or version
-        // is not the one it was built against, and until this existed that was
-        // terminal: nothing in the system could bring the journal forward, so an
-        // app whose journal predated a schema change simply stopped running.
-        //
-        // The retry is ONCE. A second refusal after a successful provision means
-        // the journal is not merely out of date, and looping would turn a
-        // reportable fault into a hot loop against a creator database.
-        let Some(repair) = self.repair.as_ref() else {
-            return Err(refusal);
-        };
-        let schema = self.provider.resolve(scope).await?.storage.binding.schema().clone();
-        tracing::warn!(
-            app = scope.app_id.as_str(),
-            schema = schema.as_str(),
-            error = %refusal,
-            "workflow host refused the creator journal; asking the manager to provision it"
-        );
-        repair.ensure_journal(schema.as_str()).await.map_err(|error| {
-            tracing::error!(
-                schema = schema.as_str(),
-                %error,
-                "workflow journal repair refused; the original refusal stands"
-            );
-            refusal
-        })?;
-        self.build(scope, policy, ingress).await
-    }
-}
-
-impl<P: WorkflowResourceProvider> WorkflowCreatorFactory<P> {
-    async fn build(
-        &self,
-        scope: &AssignedScope,
-        policy: &PolicyBinding,
-        ingress: Rc<dyn IngressEpochs>,
-    ) -> Result<CreatorRuntime, WorkflowServiceError> {
+        // NO INGRESS IS ATTACHED HERE. `AppWorkflows::with_ingress` gives a local
+        // journal an epoch source, so a fenced acceptance can establish a newer
+        // one inside the caller's own transaction. This host holds no journal to
+        // attach it to, and the service applies its own epoch on each request, so
+        // an epoch asserted from this side would be one nothing rechecks. The
+        // placement's policy lease still establishes: `AssignedPolicies` is the
+        // ingress source, and the host's reconciler drives it.
         self.policies
             .run_bound(policy, async {
                 let resources = self.provider.resolve(scope).await?;
-                if resources.storage.binding.app_id() != scope.app_id.as_str() {
-                    return Err(WorkflowServiceError::PermissionDenied);
-                }
                 let contexts = Rc::new(BoundContexts {
                     app: scope.app_id.clone(),
-                    schema: resources.storage.binding.schema().clone(),
+                    schema: resources.schema.clone(),
                     source: resources.contexts,
                 });
                 contexts.resolve(&scope.app_id)?;
-                let mut service = WorkflowService::open(
-                    Rc::new(resources.storage.open().await?),
-                    self.policies.clone(),
-                )
-                .await?
-                .with_deployments(resources.deployments);
-                if let Some(authority) = resources.signal_authority {
-                    service = service.with_signal_authority(authority);
-                }
-                let app = service.register_app(policy).await?.with_ingress(ingress);
-                let tasks = Rc::new(app.tasks(self.worker.clone(), resources.objects.clone()));
                 // Workflow and request isolates share one client of this app's
-                // engine, bound to the generation being prepared. Its journal
-                // is the creator database this service was opened over.
-                let backend = app.clone().into_backend(
-                    &service,
-                    Arc::new(ObjectStepOutputs::new(
-                        resources.objects.clone(),
-                        self.payloads.max_payload_bytes,
-                    )?),
-                    Arc::new(resources.objects.clone()),
+                // engine, bound to the placement being prepared. Its journal is
+                // the service's, and the far end admits each call under the
+                // generation it observes for this placement.
+                let backend = RemoteBackend::new(
+                    self.client.clone(),
+                    scope.clone(),
+                    resources.objects.clone(),
+                    self.payloads.max_payload_bytes,
                 )?;
+                let tasks = Rc::new(RemoteTasks::new(
+                    self.client.clone(),
+                    scope.app_id.clone(),
+                    resources.objects.clone(),
+                    resources.artifacts.clone(),
+                    resources.max_source_bytes,
+                    self.payloads.max_payload_bytes,
+                    self.write_budget,
+                )?);
                 let loader = Rc::new(WorkerWorkflowRuntimeLoader::new(contexts, backend.clone()));
                 let executor = Rc::new(V8TaskExecutor::new(loader, tasks, self.payloads)?);
                 Ok(CreatorRuntime {
-                    app,
+                    app: (),
                     executor,
                     backend,
-                    objects: resources.objects,
                 })
             })
             .await

@@ -9,8 +9,12 @@ mod propagation;
 use zeroship_workflow::{
     operations::{RunState, StartOptions},
     service::{
-        collection::CollectionOptions, schema, store::OrmStore, AppPolicy, DeployRegistration,
-        HostPolicies, PolicySnapshot, RequestId, TaskAssignment, WorkflowService,
+        collection::CollectionOptions,
+        maintenance::{MaintenanceOptions, MaintenanceOutcome},
+        schema,
+        store::OrmStore,
+        AppPolicy, DeployRegistration, HostPolicies, PolicySnapshot, RequestId, TaskAssignment,
+        WorkflowService,
     },
     WorkflowExecution,
 };
@@ -36,6 +40,41 @@ use crate::{deployment_fixture as deployments, service_binding::ServiceFixture};
 /// Tests that turn on the ratio between a lease and an execution bound derive
 /// their bound from it rather than restating it.
 const MANAGER_LEASE: Duration = Duration::from_secs(20);
+
+/// The claim a transport would have answered for this lease.
+///
+/// A slot receives both halves of one exchange, so a test handing it a lease has
+/// to hand it the acceptance the same exchange would have carried.
+///
+/// FALLIBLE, because the acceptance is part of the exchange now: a journal that
+/// refuses to accept refuses the CLAIM, so a test expecting that refusal asserts
+/// it here rather than on a slot that never receives a delivery.
+async fn claimed<L: JobLease + Clone>(
+    app: &AppWorkflows,
+    lease: L,
+) -> Result<Claimed<L>, WorkflowServiceError> {
+    let accepted = if lease.delivery().job.operation.accepts_execution() {
+        Some(app.accept_job(&lease).await?)
+    } else {
+        None
+    };
+    Ok(Claimed { lease, accepted })
+}
+
+/// The publisher a sweep in this fixture runs under.
+///
+/// The fixture's transport refuses an independent publication, and a sweep
+/// driven here must not reach one either: a test that expects successors asserts
+/// them on the settlements the transport records.
+struct NoPublication(AppId);
+impl zeroship_workflow::service::publication::JobPublisher for NoPublication {
+    fn app_id(&self) -> &AppId {
+        &self.0
+    }
+    async fn submit(&self, _: &JobSpec) -> Result<JobSpec, WorkflowServiceError> {
+        panic!("a sweep fixture must not publish independently")
+    }
+}
 
 #[derive(Clone)]
 struct Lease {
@@ -65,18 +104,56 @@ struct Metadata {
     renewed_late: Cell<bool>,
 }
 impl JobTransport for Metadata {
-    type Lease = Lease;
-    async fn submit(
+    /// Asked of the journal this host holds, the way the crossed transport asks
+    /// the service that holds it.
+    async fn release(
         &self,
-        _: &AssignedScope,
-        _: &JobSpec,
-    ) -> Result<JobSpec, WorkflowServiceError> {
-        panic!("advance fixture must not publish independently")
+        journal: &Self::Journal,
+        lease: &Self::Lease,
+        task: &zeroship_workflow::service::delivery::DeliveredTask,
+    ) -> Result<(), WorkflowServiceError> {
+        journal.release_job(task, lease).await
     }
-    async fn claim(&self, _: &AssignedScope) -> Result<Option<Lease>, WorkflowServiceError> {
+    async fn receipt(
+        &self,
+        journal: &Self::Journal,
+        job: &zeroship_core::workflow_jobs::JobSpec,
+    ) -> Result<Option<zeroship_workflow::service::delivery::JobReceipt>, WorkflowServiceError> {
+        journal.job_receipt(job).await
+    }
+    type Lease = Lease;
+    /// This host holds the journal, so an attempt is scoped here rather than
+    /// server-side.
+    type Journal = AppWorkflows;
+    fn scope(
+        &self,
+        journal: &Self::Journal,
+        authority: &zeroship_workflow::service::PolicyAuthority,
+    ) -> Result<Self::Journal, WorkflowServiceError> {
+        scope_journal(journal, authority)
+    }
+    async fn claim(
+        &self,
+        _: &AppWorkflows,
+        _: &AssignedScope,
+    ) -> Result<Option<Claimed<Lease>>, WorkflowServiceError> {
         panic!("a delivered slot must not claim or discover work")
     }
-    async fn heartbeat(&self, lease: &Lease) -> Result<Lease, WorkflowServiceError> {
+    /// Both halves, in the order a served renewal keeps: the queue's lease
+    /// first, then the journal task under it.
+    ///
+    /// A SUBSTITUTED DELIVERY IS SUBSTITUTED IN THE REPLY, not in the journal
+    /// call. The journal half runs under the delivery this attempt really holds,
+    /// so what the caller then sees is a reply naming a delivery it never asked
+    /// about -- which is the case its own comparison exists to refuse. Renewing
+    /// the journal under the substituted one instead would make the journal
+    /// refuse first and leave that comparison unmeasured.
+    async fn heartbeat(
+        &self,
+        journal: &AppWorkflows,
+        lease: &Lease,
+        task: &DeliveredTask,
+    ) -> Result<Renewed<Lease>, WorkflowServiceError> {
         self.renewals.set(self.renewals.get() + 1);
         if self
             .renewal_deadline
@@ -90,10 +167,14 @@ impl JobTransport for Metadata {
         }
         let mut renewed = lease.clone();
         renewed.expires = Instant::now() + MANAGER_LEASE;
+        let renewal = journal.heartbeat_job(task, &renewed).await?;
         if self.substitute_renewal.get() {
             renewed.delivery.worker_id = WorkerId::mint();
         }
-        Ok(renewed)
+        Ok(Renewed {
+            lease: renewed,
+            renewal,
+        })
     }
     async fn settle(
         &self,
@@ -116,6 +197,25 @@ impl JobTransport for Metadata {
             app_id: settlement.delivery.job.app_id.clone(),
             attempt: settlement.delivery.attempt,
             outcome: settlement.outcome.clone(),
+        })
+    }
+    /// The journal commits first, because its commit is what decides the outcome
+    /// the queue is then settled with. Routed through `settle` so a lost ACK and
+    /// the immutable-metadata assertion still observe the merged path.
+    async fn complete(
+        &self,
+        journal: &AppWorkflows,
+        lease: &Lease,
+        task: &DeliveredTask,
+        execution: WorkflowExecution,
+        confirmed: Vec<zeroship_workflow::service::delivery::PayloadConfirmation>,
+    ) -> Result<Completed, WorkflowServiceError> {
+        assert!(confirmed.is_empty(), "an in-process store confirms its own uploads");
+        let receipt = journal.complete_job(task, lease, execution).await?;
+        let settlement = receipt.settlement(lease)?;
+        Ok(Completed {
+            settlement: JobTransport::settle(self, &settlement).await?,
+            receipt,
         })
     }
 }
@@ -195,7 +295,7 @@ impl TaskExecution for Execution {
             Mode::Failure => {
                 return Err(WorkflowServiceError::InvalidRequest(
                     "injected execution failure".into(),
-                ))
+                ));
             }
             Mode::Pending => std::future::pending().await,
             Mode::RevokedFrontier => {
@@ -395,36 +495,65 @@ impl Fixture {
     }
 
     fn slot(&self, execution_timeout: Duration) -> DeliverySlot<Metadata> {
-        self.slot_collecting(
-            execution_timeout,
-            zeroship_workflow::service::collection::CollectionOptions::default(),
-        )
-        .unwrap()
-    }
-
-    /// A slot whose delivered collection duty runs under `collection`.
-    fn slot_collecting(
-        &self,
-        execution_timeout: Duration,
-        collection: zeroship_workflow::service::collection::CollectionOptions,
-    ) -> Result<DeliverySlot<Metadata>, WorkflowServiceError> {
         DeliverySlot::new(
             self.metadata.clone(),
             Rc::new(Executor {
                 probe: self.probe.clone(),
                 service: self.service.clone(),
             }),
-            self.objects.clone(),
             DeliveryOptions {
                 execution_timeout,
                 operation_timeout: Duration::from_secs(5),
                 retry_delay: Duration::from_millis(5),
-                maintenance: MaintenanceOptions {
-                    collection,
-                    ..MaintenanceOptions::default()
-                },
             },
         )
+        .unwrap()
+    }
+
+    /// Run one maintenance row the way its lane does: dispatch the sweep over
+    /// this fixture's journal and payload store, then settle the delivery with
+    /// the receipt that dispatch committed.
+    ///
+    /// The lane, not a delivery slot, is what claims these rows -
+    /// `Claimant::admits` in `zeroship-workflow-manager` pairs each work class
+    /// with exactly one claimant - so the retry around the settlement is this
+    /// helper's own, matching what a lane owes a lost acknowledgement.
+    async fn sweep(&self, lease: Lease) -> Result<DeliveryOutcome, WorkflowServiceError> {
+        self.sweep_with(lease, MaintenanceOptions::default()).await
+    }
+
+    /// As [`Self::sweep`], under dispatch bounds the caller chooses.
+    async fn sweep_with(
+        &self,
+        lease: Lease,
+        options: MaintenanceOptions,
+    ) -> Result<DeliveryOutcome, WorkflowServiceError> {
+        let publisher = NoPublication(self.app.app_id().clone());
+        let receipt = match self
+            .app
+            .maintenance_job(&lease, &publisher, &self.objects, &self.objects, options)
+            .await?
+        {
+            MaintenanceOutcome::Settled(receipt) => *receipt,
+            MaintenanceOutcome::Deferred => return Ok(DeliveryOutcome::Deferred),
+            MaintenanceOutcome::Unclaimed => {
+                panic!("a sweep fixture must not hand the lane creator work")
+            }
+        };
+        let settlement = receipt.settlement(&lease)?;
+        let manager = loop {
+            match JobTransport::settle(&*self.metadata, &settlement).await {
+                Ok(observed) => break observed,
+                Err(WorkflowServiceError::Timeout) => {
+                    compio::time::sleep(Duration::from_millis(5)).await;
+                }
+                Err(error) => return Err(error),
+            }
+        };
+        Ok(DeliveryOutcome::Settled {
+            creator: Box::new(receipt),
+            manager,
+        })
     }
     async fn task_state(&self) -> String {
         let tx = self.service.begin().await.unwrap();
@@ -445,6 +574,82 @@ impl Fixture {
     }
 }
 
+/// A slot runs creator work and nothing else, so a sweep handed to one is
+/// refused instead of dispatched.
+///
+/// The queue is what makes this unreachable in production: `collect` is
+/// `Work::Maintenance` and `Claimant::Placed` denies that whole class, so a host
+/// holding a placement is never offered the row. This binds the slot's own half
+/// of it -- handed the delivery anyway, it commits nothing and settles nothing
+/// rather than sweeping the journal under a placement's authority.
+///
+/// TWO CONTROLS, because the refusal could otherwise be explained two ways.
+/// The row IS sweepable: dispatched as its lane dispatches it, the same lease
+/// settles and commits a receipt, so the absence asserted above is a real
+/// absence and not an operation that would have failed anyway. And the same
+/// slot, journal and claim path run the app's own advance to a settlement, so
+/// the refusal is attributable to the kind the delivery names.
+#[compio::test]
+async fn a_slot_refuses_a_sweep_rather_than_dispatching_it() {
+    let fixture = Fixture::new(AppPolicy::default()).await;
+    let mut sweep = fixture.lease.clone();
+    sweep.delivery.job.id = zeroship_core::workflow_jobs::JobId::mint();
+    sweep.delivery.job.operation = JobOperation::Collect {};
+    // A distinct attempt number, because the transport holds one settlement per
+    // attempt and asserts a retry cannot change it: the advance control settles
+    // under this lease's original attempt.
+    sweep.delivery.attempt = 2.try_into().unwrap();
+    let claim = claimed(&fixture.app, sweep.clone()).await.unwrap();
+    assert!(
+        claim.accepted.is_none(),
+        "the journal accepts execution for creator work alone"
+    );
+    let mut slot = fixture.slot(Duration::from_secs(5));
+    let refused = Box::pin(slot.run(&fixture.app, fixture.app.binding(), claim)).await;
+    assert!(
+        matches!(refused, Err(WorkflowServiceError::Unavailable(_))),
+        "{refused:?}"
+    );
+    assert!(
+        fixture
+            .app
+            .job_receipt(&sweep.delivery.job)
+            .await
+            .unwrap()
+            .is_none(),
+        "a refused sweep commits no receipt"
+    );
+    assert!(
+        fixture.metadata.requests.borrow().is_empty(),
+        "a refused sweep settles nothing"
+    );
+    assert_eq!(fixture.probe.starts.get(), 0);
+
+    // The row was sweepable all along; only the host that took it was wrong.
+    let DeliveryOutcome::Settled { creator, .. } = fixture.sweep(sweep.clone()).await.unwrap()
+    else {
+        panic!("the lane's dispatch settles the row the slot refused")
+    };
+    assert_eq!(creator.outcome, JobOutcome::Completed {});
+    assert_eq!(
+        fixture.app.job_receipt(&sweep.delivery.job).await.unwrap(),
+        Some(*creator)
+    );
+
+    let advance = fixture.lease.clone();
+    let DeliveryOutcome::Settled { creator, .. } = Box::pin(slot.run(
+        &fixture.app,
+        fixture.app.binding(),
+        claimed(&fixture.app, advance.clone()).await.unwrap(),
+    ))
+    .await
+    .unwrap() else {
+        panic!("the control's creator work settles through the same slot")
+    };
+    assert_eq!(creator.job, advance.delivery.job);
+    assert_eq!(fixture.probe.starts.get(), 1);
+}
+
 #[compio::test]
 async fn unrepresentable_retry_delay_is_rejected_before_execution() {
     let fixture = Fixture::new(AppPolicy::default()).await;
@@ -454,12 +659,10 @@ async fn unrepresentable_retry_delay_is_rejected_before_execution() {
             probe: fixture.probe.clone(),
             service: fixture.service.clone(),
         }),
-        fixture.objects.clone(),
         DeliveryOptions {
             execution_timeout: Duration::from_secs(5),
             operation_timeout: Duration::from_secs(1),
             retry_delay: Duration::MAX,
-            maintenance: MaintenanceOptions::default(),
         },
     );
     assert!(matches!(
@@ -487,7 +690,7 @@ async fn revoked_authority_discards_a_resolved_frontier_instead_of_publishing_it
     fixture.probe.revoke.replace(Some(binding));
     fixture.probe.mode.set(Mode::RevokedFrontier);
     let mut slot = fixture.slot(Duration::from_secs(5));
-    assert!(Box::pin(slot.run(&fixture.app, fixture.lease.clone()))
+    assert!(Box::pin(slot.run(&fixture.app, fixture.app.binding(), claimed(&fixture.app, fixture.lease.clone()).await.unwrap()))
         .await
         .is_err());
     assert_eq!(fixture.probe.starts.get(), 1);
@@ -504,7 +707,7 @@ async fn corrupted_management_outcome_cannot_reexecute_or_acknowledge_advance() 
     let fixture = Fixture::new(AppPolicy::default()).await;
     let mut slot = fixture.slot(Duration::from_secs(5));
     let DeliveryOutcome::Settled { creator, .. } =
-        Box::pin(slot.run(&fixture.app, fixture.lease.clone()))
+        Box::pin(slot.run(&fixture.app, fixture.app.binding(), claimed(&fixture.app, fixture.lease.clone()).await.unwrap()))
             .await
             .unwrap()
     else {
@@ -518,8 +721,12 @@ async fn corrupted_management_outcome_cannot_reexecute_or_acknowledge_advance() 
         value!({"outcome":serde_json::to_string(&JobOutcome::Management { outcome: ManagementOutcome::Denied {} }).unwrap()}),
     ).await.unwrap();
     tx.commit().await.unwrap();
+    // THE REFUSAL IS THE CLAIM'S, because the acceptance rides it. A receipt
+    // whose stored outcome does not answer its operation is refused before any
+    // delivery exists, so no slot ever sees one: what the counters below prove is
+    // that nothing executed and nothing was acknowledged on the strength of it.
     assert!(matches!(
-        Box::pin(slot.run(&fixture.app, fixture.lease.clone())).await,
+        claimed(&fixture.app, fixture.lease.clone()).await,
         Err(WorkflowServiceError::Internal(_))
     ));
     assert_eq!(fixture.probe.starts.get(), 1);
@@ -538,7 +745,7 @@ async fn corrupted_management_outcome_cannot_reexecute_or_acknowledge_advance() 
     tx.commit().await.unwrap();
     let DeliveryOutcome::Settled {
         creator: replay, ..
-    } = Box::pin(slot.run(&fixture.app, fixture.lease.clone()))
+    } = Box::pin(slot.run(&fixture.app, fixture.app.binding(), claimed(&fixture.app, fixture.lease.clone()).await.unwrap()))
         .await
         .unwrap()
     else {
@@ -558,7 +765,7 @@ async fn lost_ack_and_new_attempt_replay_without_executing_again() {
     fixture.metadata.lose_ack.set(true);
     let mut slot = fixture.slot(Duration::from_secs(5));
     let DeliveryOutcome::Settled { creator, manager } =
-        slot.run(&fixture.app, fixture.lease.clone()).await.unwrap()
+        slot.run(&fixture.app, fixture.app.binding(), claimed(&fixture.app, fixture.lease.clone()).await.unwrap()).await.unwrap()
     else {
         panic!("expected committed settlement")
     };
@@ -570,7 +777,7 @@ async fn lost_ack_and_new_attempt_replay_without_executing_again() {
     let mut redelivery = fixture.lease.clone();
     redelivery.delivery.attempt = Revision::try_from(2).unwrap();
     assert!(matches!(
-        slot.run(&fixture.app, redelivery).await.unwrap(),
+        slot.run(&fixture.app, fixture.app.binding(), claimed(&fixture.app, redelivery).await.unwrap()).await.unwrap(),
         DeliveryOutcome::Settled { .. }
     ));
     assert_eq!(fixture.probe.starts.get(), 1);
@@ -591,7 +798,7 @@ async fn paired_renewal_reaches_creator_before_execution_continues() {
     fixture.probe.mode.set(Mode::AfterCreatorRenewal);
     let mut slot = fixture.slot(Duration::from_secs(5));
     assert!(matches!(
-        slot.run(&fixture.app, fixture.lease.clone()).await.unwrap(),
+        slot.run(&fixture.app, fixture.app.binding(), claimed(&fixture.app, fixture.lease.clone()).await.unwrap()).await.unwrap(),
         DeliveryOutcome::Settled { .. }
     ));
     assert!(fixture.metadata.renewals.get() > 0);
@@ -615,7 +822,7 @@ async fn an_execution_bound_below_the_lease_still_renews_inside_the_attempt() {
     // put the first renewal, and below the creator task lease as well.
     let mut slot = fixture.slot(MANAGER_LEASE / 32);
     assert_eq!(
-        slot.run(&fixture.app, fixture.lease.clone())
+        slot.run(&fixture.app, fixture.app.binding(), claimed(&fixture.app, fixture.lease.clone()).await.unwrap())
             .await
             .unwrap_err(),
         WorkflowServiceError::Timeout
@@ -637,7 +844,7 @@ async fn an_attempt_resolved_before_its_renewal_delay_reports_no_renewal() {
     fixture.probe.mode.set(Mode::Complete);
     let mut slot = fixture.slot(MANAGER_LEASE / 32);
     assert!(matches!(
-        slot.run(&fixture.app, fixture.lease.clone()).await.unwrap(),
+        slot.run(&fixture.app, fixture.app.binding(), claimed(&fixture.app, fixture.lease.clone()).await.unwrap()).await.unwrap(),
         DeliveryOutcome::Settled { .. }
     ));
     assert_eq!(fixture.metadata.renewals.get(), 0);
@@ -662,7 +869,7 @@ async fn authority_ending_before_the_lease_still_renews_inside_the_attempt() {
     fixture.shorten_authority(window);
     let mut slot = fixture.slot(MANAGER_LEASE);
     let started = Instant::now();
-    slot.run(&fixture.app, fixture.lease.clone())
+    slot.run(&fixture.app, fixture.app.binding(), claimed(&fixture.app, fixture.lease.clone()).await.unwrap())
         .await
         .unwrap_err();
     // An execution that never resolves on its own ends on the authority window
@@ -691,7 +898,7 @@ async fn authority_shortened_attempt_resolved_first_reports_no_renewal() {
     fixture.shorten_authority(MANAGER_LEASE / 8);
     let mut slot = fixture.slot(MANAGER_LEASE);
     assert!(matches!(
-        slot.run(&fixture.app, fixture.lease.clone()).await.unwrap(),
+        slot.run(&fixture.app, fixture.app.binding(), claimed(&fixture.app, fixture.lease.clone()).await.unwrap()).await.unwrap(),
         DeliveryOutcome::Settled { .. }
     ));
     assert_eq!(fixture.metadata.renewals.get(), 0);
@@ -707,7 +914,7 @@ async fn renewed_authority_does_not_extend_hard_execution_budget() {
     fixture.probe.mode.set(Mode::HardTimeout);
     let mut slot = fixture.slot(Duration::from_secs(2));
     assert!(matches!(
-        slot.run(&fixture.app, fixture.lease.clone()).await,
+        slot.run(&fixture.app, fixture.app.binding(), claimed(&fixture.app, fixture.lease.clone()).await.unwrap()).await,
         Err(WorkflowServiceError::Timeout)
     ));
     assert!(fixture.metadata.renewals.get() > 0);
@@ -733,7 +940,7 @@ async fn cancellation_retains_slot_until_stop_joins_before_release() {
     *fixture.probe.stopping.borrow_mut() = Some(stopping);
     *fixture.probe.stop_gate.borrow_mut() = Some(gate);
     let mut slot = fixture.slot(Duration::from_secs(10));
-    let run = slot.run(&fixture.app, fixture.lease.clone()).boxed_local();
+    let run = slot.run(&fixture.app, fixture.app.binding(), claimed(&fixture.app, fixture.lease.clone()).await.unwrap()).boxed_local();
     let Either::Left((Ok(()), run)) = futures::future::select(observed_start, run).await else {
         panic!("execution must start")
     };
@@ -765,7 +972,7 @@ async fn substituted_renewal_stops_without_ack_or_checkpoint() {
     fixture.metadata.substitute_renewal.set(true);
     let mut slot = fixture.slot(Duration::from_secs(5));
     assert!(matches!(
-        slot.run(&fixture.app, fixture.lease.clone()).await,
+        slot.run(&fixture.app, fixture.app.binding(), claimed(&fixture.app, fixture.lease.clone()).await.unwrap()).await,
         Err(WorkflowServiceError::PermissionDenied)
     ));
     assert!(fixture.metadata.renewals.get() > 0);
@@ -803,7 +1010,7 @@ async fn stalled_native_stop_exhausts_renewal_budget_without_reusing_slot() {
         let mut slot = fixture.slot(Duration::from_secs(10));
         let finalization = Duration::from_millis(800);
         slot.options.operation_timeout = finalization;
-        let run = slot.run(&fixture.app, fixture.lease.clone()).boxed_local();
+        let run = slot.run(&fixture.app, fixture.app.binding(), claimed(&fixture.app, fixture.lease.clone()).await.unwrap()).boxed_local();
         let Either::Left((Ok(()), run)) = futures::future::select(observed_stop, run).await else {
             panic!("native shutdown must reach its explicit barrier")
         };

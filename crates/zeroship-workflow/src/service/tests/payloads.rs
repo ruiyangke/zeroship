@@ -1131,3 +1131,101 @@ async fn child_input_bound(store: Rc<OrmStore>) {
     assert_eq!(child.invocation.workflow_name, "Child");
     assert_eq!(child.invocation.trigger.input_ref, Some(reference(&at)));
 }
+
+/// A confirm that lost its reservation to the collector is refused, not reported
+/// as staged.
+///
+/// # What this catches, and why it was unreachable until the reservation split
+///
+/// In one process staging holds a lock across the object write, so nothing can
+/// claim the reservation mid-upload and the confirm's filter always matches. A
+/// caller that reserves, writes to its own store and confirms afterwards holds no
+/// such lock -- and `fence_payload` commits `uploading` to `deleting` BEFORE
+/// deleting any bytes, so a confirm can arrive after the row is already claimed.
+///
+/// THE COUNT IS THE MECHANISM, not the predicates. An update narrowing its filter
+/// and discarding the result reports success over zero matched rows, leaving a
+/// `staged` row whose object the collector is about to delete. So this drives the
+/// exact order -- reserve, fence, confirm -- and the confirm must refuse.
+///
+/// TWO CONTROLS. An unfenced reservation confirms through the same call, so the
+/// refusal is attributable to the fence rather than to a confirm that refuses
+/// everything. And a confirm carrying a deadline the reservation did not return is
+/// refused as well, which is what a caller recomputing the deadline rather than
+/// carrying it through would send.
+#[compio::test]
+async fn a_confirm_that_lost_its_reservation_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("zs-workflow.sqlite");
+    schema::initialize_sqlite(&path).unwrap();
+    let store = Rc::new(sqlite_store(&path).await);
+    let (service, app, _, _deployments) = registered_service(store).await;
+    let scope = service.fixture_app(app.clone());
+    let worker = WorkerIdentity::new("confirm-race".into()).unwrap();
+    scope
+        .start(&RequestId::mint(), "Example", StartOptions::default())
+        .await
+        .unwrap();
+    let task = service.poll(&worker).await.unwrap().unwrap();
+    let input = reference(br#"{"item":1}"#);
+
+    let reserve = async || {
+        let reserved = service
+            .reserve_task_payload(&worker, &task.id, &task.token, &RequestId::mint(), &input)
+            .await
+            .unwrap();
+        match reserved {
+            zeroship_core::workflow_coordination::PayloadReservation::Reserved {
+                payload_id,
+                expires_at,
+            } => (payload_id, expires_at),
+            other => panic!("a fresh request id reserves its own object: {other:?}"),
+        }
+    };
+
+    let (fenced, fenced_deadline) = reserve().await;
+    // The state `fence_payload` commits before it deletes anything. Arranged
+    // rather than swept, because the sweep first needs the staging window to
+    // lapse and what is under test is the confirm, not the eligibility ahead of
+    // it.
+    {
+        let tx = service.begin().await.unwrap();
+        use zeroship_data_orm::{orm::Entity, value};
+        tx.database()
+            .collection(crate::service::models::payloads::Entity::COLLECTION)
+            .unwrap()
+            .update(
+                value!({"app_id":app.as_str(), "id":fenced.clone()}),
+                value!({"state":"deleting"}),
+            )
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+    }
+    let lost = {
+        let tx = service.begin().await.unwrap();
+        crate::service::payloads::confirm_reported(&tx, &app, &fenced, fenced_deadline).await
+    };
+    assert!(
+        matches!(lost, Err(WorkflowServiceError::Conflict(_))),
+        "{lost:?}"
+    );
+
+    // CONTROL ONE: the same call against an unfenced reservation.
+    let (intact, intact_deadline) = reserve().await;
+    let tx = service.begin().await.unwrap();
+    crate::service::payloads::confirm_reported(&tx, &app, &intact, intact_deadline)
+        .await
+        .expect("an unclaimed reservation confirms");
+    tx.commit().await.unwrap();
+
+    // CONTROL TWO: a deadline the reservation did not return.
+    let (drifted, drifted_deadline) = reserve().await;
+    let tx = service.begin().await.unwrap();
+    let mismatched =
+        crate::service::payloads::confirm_reported(&tx, &app, &drifted, drifted_deadline + 1).await;
+    assert!(
+        matches!(mismatched, Err(WorkflowServiceError::Conflict(_))),
+        "{mismatched:?}"
+    );
+}

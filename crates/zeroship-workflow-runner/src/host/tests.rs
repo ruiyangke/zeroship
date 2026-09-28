@@ -4,7 +4,7 @@ use crate::{
     consumer::ConsumerOptions,
     delivery::DeliveryOptions,
 };
-use zeroship_workflow::service::{maintenance::MaintenanceOptions, PolicyBinding};
+use zeroship_workflow::service::PolicyBinding;
 use futures::{channel::oneshot, future::Either, FutureExt};
 use serde_json::{json, Value};
 use std::{
@@ -28,7 +28,6 @@ fn options() -> HostOptions {
                 execution_timeout: Duration::from_secs(5),
                 operation_timeout: Duration::from_secs(5),
                 retry_delay: Duration::from_secs(1),
-                maintenance: MaintenanceOptions::default(),
             },
         },
         assignments: AssignmentOptions {
