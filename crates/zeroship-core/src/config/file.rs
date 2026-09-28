@@ -329,6 +329,13 @@ pub struct MigrateServerSection {
     pub mutation_rate_limit_burst: Option<u32>,
     /// Sustained mutating requests per minute for one source IP.
     pub mutation_rate_limit_per_minute: Option<u32>,
+    /// Execution zone the provisioning cluster serves; empty resolves it from
+    /// `zeroship.execution_zones`.
+    pub execution_zone: Option<String>,
+    /// Seconds between cluster reconciliation passes; zero disables the loop.
+    pub reconcile_interval_seconds: Option<u64>,
+    /// Issuer-bound peer verification keys for inbound platform-service calls.
+    pub service_peers_file: Option<std::path::PathBuf>,
 }
 
 /// Platform-schema migrate one-shot values supplied by the overlay.
@@ -360,6 +367,9 @@ pub struct WorkflowSection {
     pub service_key_file: Option<PathBuf>,
     /// Control origin for deployment queue retention.
     pub control_url: Option<String>,
+    /// Migration-service origin used to install and upgrade app journals; empty
+    /// disables the journal endpoint.
+    pub migrate_url: Option<String>,
     /// HTTP worker threads.
     pub http_threads: Option<usize>,
     /// Maximum connections per HTTP thread.
@@ -396,6 +406,16 @@ pub struct WorkflowSection {
     pub closing_backoff_ms: Option<u64>,
     /// Ceiling of the doubling closing backoff.
     pub closing_backoff_max_ms: Option<u64>,
+    /// Fewest placement slots an execution zone's capacity target may name.
+    pub capacity_min_slots: Option<i64>,
+    /// Most placement slots an execution zone's capacity target may name.
+    pub capacity_max_slots: Option<i64>,
+    /// Idleness a zone's demand must stay below its target before it shrinks.
+    pub capacity_hold_down_ms: Option<u64>,
+    /// Deadline for one claimed capacity request before it is recorded unavailable.
+    pub capacity_request_timeout_ms: Option<u64>,
+    /// Pause after a capacity reply before the same target is requested again.
+    pub capacity_retry_interval_ms: Option<u64>,
     /// Platform coordination metadata login; no customer database credentials.
     pub database_url: Option<String>,
 }
