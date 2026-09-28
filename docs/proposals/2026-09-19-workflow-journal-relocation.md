@@ -56,18 +56,21 @@ the shared Rust ORM". The store holds a `Database`, a `BackendHandle`, a `DbBind
 `ProjectKeySource`, so journal rows are written through the same ORM, the same binding and the
 same pooled connection as creator data.
 
-**The split is deliberate and documented.**
-`crates/zeroship-workflow-server/src/lib.rs`: "Workflow metadata coordination. Customer workers
-own execution and storage."
+**The split is deliberate and documented, and the header states which side owns what.**
+`crates/zeroship-workflow-server/src/lib.rs`: "Workflow metadata coordination, and the journal the
+creator-facing run calls are answered from. Customer workers own execution; this service owns the
+journal those runs are recorded in."
 
 **The journal lives inside the creator's schema.**
 `crates/zeroship-worker/src/workflow_creator.rs` resolves a binding and takes
 `binding.schema()`; the control-side caller
 (`crates/zeroship-control/src/publication/journal.rs`) derives the same name. The tables are
 `__zeroship_workflow_*` inside that schema, and `crates/zeroship-workflow-schema/schema/schema.ts`
-declares around twenty of them - `app_state`, `payloads`, `broadcasts`, `schedules`,
-`occurrences`, `tasks`, the publication and page tables, the receipt tables - nearly all keyed
-with an `app_id` column.
+declares them through a helper rather than one by one - `app_state`, `payloads`, `broadcasts`,
+`schedules`, `occurrences`, `tasks`, the publication and page tables, the receipt tables - nearly
+all keyed with an `app_id` column. Read that list as a sample and not as the set: count
+`CREATE TABLE` in the generated `crates/zeroship-workflow-schema/schema/postgres.sql`, because
+`schema.ts` builds each table through the same call and no total can be read off it.
 
 **One journal serves many apps already.**
 `crates/zeroship-workflow-schema/src/lib.rs`, under a heading called "The schema is not an app":
@@ -2381,8 +2384,12 @@ part that dates, not the verdict.
   because it reads as protection: the `app_id` column looks like a tenant boundary in a query
   and is only a filter.
 
-- **Do not make the storage seam the RPC boundary.** The store spans roughly twenty tables; the
-  creator-facing backend is seven methods. Move the whole engine, not the store.
+- **Do not make the storage seam the RPC boundary.** The store spans the whole journal schema
+  while the creator-facing backend is one small trait, so the two seams are nowhere near the same
+  size. Count `CREATE TABLE` in the generated
+  `crates/zeroship-workflow-schema/schema/postgres.sql` against the methods on `WorkflowBackend`
+  (`crates/zeroship-workflow/src/backend.rs`) rather than trusting a number written here. Move the
+  whole engine, not the store.
 
 - **Do not leave the journal in a creator schema and grant it explicitly.** That is the interim
   repair for defect 3, and it re-establishes the two ownership defects it was written to work
