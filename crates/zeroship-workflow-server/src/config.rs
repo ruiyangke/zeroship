@@ -54,12 +54,6 @@ pub struct WorkflowSettings {
     #[arg(value_delimiter = ',')]
     #[config(shared = PLAINTEXT_PEERS, default = Vec::new())]
     pub plaintext_peers: Operational<Vec<PlaintextPeer>>,
-    /// Migration-service origin used to install and upgrade app journals.
-    ///
-    /// Empty disables the journal endpoint, loudly: Control and workers are told
-    /// the manager cannot provision rather than being answered as though it had.
-    #[config(name = "workflow.migrate_url", default = String::new())]
-    pub migrate_url: Operational<String>,
     /// Object-store location for workflow payload objects.
     ///
     /// Blob storage keeps large objects out of the database, so this service

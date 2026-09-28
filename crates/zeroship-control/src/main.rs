@@ -1374,15 +1374,6 @@ fn main() -> std::io::Result<()> {
         let hold_state = state.clone();
         let coordinator_url = workflow_coordinator_url.clone();
         let hold_options = coordinator_options.clone();
-        // The deploy path's journal client. Built per serving thread for the
-        // same reason the hold client is: the HTTP client's pooled streams
-        // belong to the thread that opens them. A refusal here cannot be
-        // reached in a process that got this far - `publisher::start` above
-        // built the same client from the same origin and signer, and exits if
-        // it cannot - so this reports a bug rather than a configuration.
-        let journal_url = workflow_coordinator_url.clone();
-        let journal_auth = Arc::clone(&state.service_auth);
-        let journal_options = coordinator_options.clone();
         web::App::new()
             .state(state.clone())
             .state(state.control_pg.clone())
@@ -1393,14 +1384,6 @@ fn main() -> std::io::Result<()> {
                     &coordinator_url,
                     hold_options.clone(),
                 ).await.map(std::rc::Rc::new)
-            })
-            .state_factory(async move || {
-                zeroship_control::publication::DeployJournal::connect(
-                    &journal_url,
-                    journal_auth,
-                    journal_options.clone(),
-                )
-                .map(std::rc::Rc::new)
             })
             // --- Admin API ---
             .service(

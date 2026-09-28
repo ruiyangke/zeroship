@@ -404,7 +404,6 @@ impl Fixture {
                     // This fixture drives deployment holds, not journal
                     // provisioning; a manager without a journal client simply
                     // does not ensure schemas.
-                    journal: None,
                     service,
                     runs,
                     // The store `start` stages a run input into. Nothing here

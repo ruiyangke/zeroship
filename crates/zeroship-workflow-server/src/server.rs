@@ -207,7 +207,6 @@ pub async fn run(settings: WorkflowSettings, options: ServerOptions) -> Result<(
     let verifier = Arc::new(ServiceAssertionVerifier::new(peers, replay.clone()));
     let outbound = Arc::new(ServiceAuth::new(keyring, verifier.clone()));
     let control_url = settings.control_url.get().clone();
-    let migrate_url = settings.migrate_url.get().clone();
     let plaintext_peers = options.plaintext_peers.clone();
     let holds = ControlHolds::new(
         &control_url,
@@ -263,7 +262,6 @@ pub async fn run(settings: WorkflowSettings, options: ServerOptions) -> Result<(
         let auth = auth.clone();
         let outbound = outbound.clone();
         let control_url = control_url.clone();
-        let migrate_url = migrate_url.clone();
         let plaintext_peers = plaintext_peers.clone();
         let observations = observations.clone();
         let storage = storage.clone();
@@ -289,18 +287,6 @@ pub async fn run(settings: WorkflowSettings, options: ServerOptions) -> Result<(
                     )?);
                     let deployments =
                         deployments(&control_url, &outbound, coordinator, &plaintext_peers)?;
-                    // Absent when no migration-service origin is configured. The
-                    // journal endpoint then refuses, rather than answering as
-                    // though a journal had been provisioned.
-                    let journal = if migrate_url.is_empty() {
-                        None
-                    } else {
-                        Some(crate::journal::Journal::new(
-                            &migrate_url,
-                            outbound,
-                            client_options(coordinator, &plaintext_peers),
-                        )?)
-                    };
                     let eligibility = Rc::new(connect_eligibility(&url, coordinator).await?);
                     let service =
                         Coordinator::connect(&url, coordinator, Rc::new(holds), eligibility)
@@ -332,7 +318,6 @@ pub async fn run(settings: WorkflowSettings, options: ServerOptions) -> Result<(
                         // reads back.
                         payloads: ServicePayloads::open(&storage)
                             .map_err(|_| crate::coordinator::Error::Unavailable)?,
-                        journal,
                     }))
                 })
                 .configure(move |config| {

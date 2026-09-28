@@ -186,27 +186,15 @@ handler is `api::deploy`:
    `BlobStore::put_blob_stream` and writes `manifests/<app_id>/<deploy_hash>.json`.
 5. Declared OAuth scopes are validated and the manifest's workflow schedules
    are projected and checked against the scheduler's bounds
-   (`publication::VerifiedDeployment`).
-6. If the manifest declares any workflow, `publication::DeployJournal` asks the
-   manager to bring that app's creator-database journal to the current version
-   (`endpoints::WORKFLOW_JOURNAL_ENSURE`). It is idempotent, so the deploy path
-   calls it every time and Control keeps no record of having done so. A refusal
-   ends the deploy with 503 `workflow_journal_unavailable` before anything is
-   committed; the per-app OAuth client is then reconciled.
-7. One Control catalog transaction (`publication::catalog::accept`): schema
+   (`publication::VerifiedDeployment`). The per-app OAuth client is then
+   reconciled.
+6. One Control catalog transaction (`publication::catalog::accept`): schema
    admission against the app's newest applied migration, the `app_deploys`
    row, the app's current deployment pointer, the next lifecycle revision with
    an activation intent (unless the app is archived), and the command receipt.
 ```
 
-The journal is ensured before that transaction on purpose: the activation
-intent it commits is what tells the manager the deployment exists, so a journal
-provisioned after it would leave a window in which a run is accepted against a
-journal that is absent or behind. A failure fails the deploy rather than being
-queued for retry, because the creator is waiting on the answer and an exact
-resend under the same `Idempotency-Key` repeats the whole path.
-
-Any refusal or failure in step 7 rolls back every write in it. Deploy never
+Any refusal or failure in step 6 rolls back every write in it. Deploy never
 applies migrations: `zeroship migrate` applies them through the migration
 service, against the database rather than the app. Deploy compares no schema -
 an equality test would make one app's migration invalidate every other app on
