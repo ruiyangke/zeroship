@@ -1649,7 +1649,9 @@ protocol. This extends a working client rather than inventing one.
    manifest listing, which is strictly less than the policy authority it already trusts Control
    for. Take the other arm only if a reason appears that the service must see the bytes itself.
 
-6. **Delete the creator-schema path**, and say where each piece lives, because the pieces reach
+6. **DONE. The creator-schema path is deleted, and the exposure with it.** The endpoint that
+   reached no placement, app or zone is gone, with both its grants and the bundle it served. What
+   follows records where each piece lived, because the pieces reached
    wider than the workflow crates and three of the names are shared with code that stays. Only
    once step 5 is green.
 
