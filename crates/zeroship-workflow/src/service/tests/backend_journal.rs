@@ -8,7 +8,12 @@
 
 use super::objects::{Objects, StepOutputs};
 use super::*;
-use crate::{backend::WorkflowBackend, service::AppDeployments};
+use crate::{
+    backend::WorkflowBackend,
+    operations::{RestartOptions, RunOperation, SignalOptions},
+    service::AppDeployments,
+};
+use zeroship_core::workflow_coordination::RunId;
 
 /// A journal this app is registered on with `deploy` active, so its app lock is
 /// takeable there. Both journals in a test carry the same deployment, so the
@@ -154,5 +159,79 @@ async fn into_backend_refuses_a_journal_from_another_policy_registry() {
         other => panic!(
             "a journal from another policy registry must be refused where it is named: {other:?}"
         ),
+    }
+}
+
+/// A malformed run id is refused as malformed, not reported as missing.
+///
+/// BOTH TIERS PARSE. `RemoteBackend` does because its wire type demands a
+/// `RunId`; this one does so a creator debugging locally is told the same thing.
+/// An unparsed id reaches SQL and comes back `NotFound`, which says the run does
+/// not exist when the truth is that the id is not a run id at all.
+///
+/// The control is a WELL-FORMED id this journal does not hold, which must still
+/// answer `NotFound`. Without it a backend that refused everything would pass.
+#[compio::test]
+async fn a_malformed_run_id_is_refused_rather_than_reported_missing() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Rc::new(sqlite_store(&directory.path().join("zs-workflow.sqlite")).await);
+    let deployments = Deployments::new().await;
+    let policies = Arc::new(HostPolicies::default());
+    let app = AppId::mint();
+    let bound = deployments.binding(&[&app]);
+    let deploy = DeployRegistration {
+        id: typed_id::generate("dep"),
+        hash: "a".repeat(64),
+        workflows: ["Example".into()].into(),
+        schedules: Vec::new(),
+    };
+    let service = journal(store, &policies, &deployments, &bound, &app, &deploy).await;
+    let objects = Objects::new();
+    let client = service
+        .fixture_app(app.clone())
+        .into_backend(&service, StepOutputs::shared(&objects, 1024), objects.stager())
+        .unwrap();
+
+    // The control: a run id this contract can name, for a run that is absent.
+    let absent = RunId::mint().as_str().to_owned();
+    assert!(
+        matches!(
+            client.status(absent.clone()).await,
+            Err(WorkflowServiceError::NotFound(_))
+        ),
+        "a well-formed id for an absent run reports it missing"
+    );
+
+    let malformed = "wfr_not_a_run_id".to_owned();
+    for outcome in [
+        client.status(malformed.clone()).await.err(),
+        client
+            .signal(
+                malformed.clone(),
+                SignalOptions {
+                    signal_type: "wake".into(),
+                    payload: serde_json::Value::Null,
+                },
+            )
+            .await
+            .err(),
+        client
+            .transition(malformed.clone(), RunOperation::Cancel)
+            .await
+            .err(),
+        client
+            .restart(malformed.clone(), RestartOptions::default())
+            .await
+            .err(),
+        client
+            .read_step_output(malformed.clone(), "saved".into(), 0)
+            .await
+            .err(),
+        client.read_output(malformed.clone()).await.err(),
+    ] {
+        assert!(
+            matches!(outcome, Some(WorkflowServiceError::InvalidRequest(_))),
+            "a malformed run id must be refused as malformed: {outcome:?}"
+        );
     }
 }
