@@ -1,5 +1,10 @@
-use crate::{cargo, checked, root, Result};
-use std::process::Command;
+use crate::{cargo, checked, script, Result};
+
+/// The example apps whose own suites this area runs, as (directory, package name).
+const EXAMPLE_SUITES: [(&str, &str); 2] = [
+    ("examples/storage-probe", "storage-probe"),
+    ("examples/storage-gallery", "storage-gallery"),
+];
 
 pub fn run() -> Result<()> {
     checked(
@@ -15,13 +20,23 @@ pub fn run() -> Result<()> {
         ]),
         "Rust storage, V8 binding and S3 driver tests",
     )?;
-    for example in ["storage-probe", "storage-gallery"] {
+    for (directory, _) in EXAMPLE_SUITES {
         checked(
-            Command::new("pnpm")
-                .current_dir(root().join("examples").join(example))
-                .arg("test"),
-            &format!("{example} Vitest and Playwright tests"),
+            &mut script(directory, "test"),
+            &format!("{directory} Vitest and Playwright tests"),
         )?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    /// Each example suite runs through Node, and each `test` script it runs
+    /// needs no package manager of its own.
+    #[test]
+    fn the_example_suites_run_without_a_package_manager() {
+        for (directory, package) in super::EXAMPLE_SUITES {
+            crate::script_contract::assert_no_package_manager(directory, package, "test");
+        }
+    }
 }

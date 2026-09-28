@@ -195,6 +195,112 @@ fn cargo() -> Command {
     command
 }
 
+/// A package script in `directory`, run by Node rather than by a package
+/// manager.
+///
+/// A package manager run is not an exec. It first brings the whole workspace's
+/// `node_modules` up to date, and [`root`] is baked in when xtask is compiled,
+/// so an xtask built inside a git worktree aims that install at the worktree. A
+/// worktree's `node_modules` are links into the primary checkout, which is where
+/// the install lands: it repoints the primary checkout's package links at the
+/// worktree's virtual store, and every checkout is then unable to load what it
+/// linked. `node --run` reads the package's own `package.json`, puts that
+/// package's `node_modules/.bin` on `PATH`, and execs the script. It resolves no
+/// workspace, installs nothing, and writes into no other project.
+///
+/// The script must not reach for a package manager either, or the install
+/// returns one level down. Each area asserts that through
+/// [`script_contract::assert_no_package_manager`].
+fn script(directory: &str, name: &str) -> Command {
+    let mut command = Command::new("node");
+    command
+        .current_dir(root().join(directory))
+        .args(["--run", name]);
+    command
+}
+
+/// What a package script xtask names may not do.
+#[cfg(test)]
+pub(crate) mod script_contract {
+    use super::{root, script};
+
+    /// The programs that bring a whole workspace up to date before running
+    /// anything. One inside a script puts that install back underneath
+    /// `node --run`, one level down, where it lands in whichever checkout the
+    /// links resolve to.
+    const PACKAGE_MANAGERS: [&str; 5] = ["pnpm", "npm", "npx", "yarn", "bun"];
+
+    /// Assert the invocation xtask builds for `(directory, name)` runs the
+    /// declared script under Node, in that package, and that the script it will
+    /// run needs no package manager of its own.
+    pub(crate) fn assert_no_package_manager(directory: &str, package: &str, name: &str) {
+        let command = script(directory, name);
+        assert_eq!(
+            command.get_program(),
+            "node",
+            "{directory}'s {name} must run under Node, not a package manager"
+        );
+        let arguments: Vec<_> = command.get_args().collect();
+        assert_eq!(
+            arguments,
+            ["--run", name],
+            "{directory}'s {name} must be the script Node is asked to run"
+        );
+        let workspace = root().join(directory);
+        assert_eq!(
+            command.get_current_dir(),
+            Some(workspace.as_path()),
+            "a script runs in the package that declares it"
+        );
+
+        let manifest = workspace.join("package.json");
+        let text = std::fs::read_to_string(&manifest)
+            .unwrap_or_else(|error| panic!("read {}: {error}", manifest.display()));
+        let manifest: serde_json::Value = serde_json::from_str(&text)
+            .unwrap_or_else(|error| panic!("parse {directory}/package.json: {error}"));
+        assert_eq!(
+            manifest["name"].as_str(),
+            Some(package),
+            "{directory} declares a different package than xtask names"
+        );
+        let scripts = &manifest["scripts"];
+        let body = scripts[name]
+            .as_str()
+            .unwrap_or_else(|| panic!("{directory} declares no {name} script"));
+        assert!(
+            !body.trim().is_empty(),
+            "{directory}'s {name} script is empty, so it asserts nothing"
+        );
+        for hook in [format!("pre{name}"), format!("post{name}")] {
+            assert!(
+                scripts[&hook].is_null(),
+                "`node --run` does not run {hook}, so {directory} would silently \
+                 stop running it; fold it into {name} or call it separately"
+            );
+        }
+        let mut programs = 0;
+        for token in
+            body.split(|character: char| character.is_whitespace() || "&|;()".contains(character))
+        {
+            let program = token.rsplit('/').next().unwrap_or(token);
+            if program.is_empty() {
+                continue;
+            }
+            programs += 1;
+            assert!(
+                !PACKAGE_MANAGERS.contains(&program),
+                "{directory}'s {name} script runs {program}, which installs the \
+                 whole workspace before it runs anything; reach the sub-script \
+                 with `node --run` instead"
+            );
+        }
+        assert!(
+            programs > 0,
+            "{directory}'s {name} script yielded no words to check"
+        );
+    }
+}
+
 fn checked(command: &mut Command, description: &str) -> Result<()> {
     use std::os::unix::process::CommandExt;
     cancelled()?;
