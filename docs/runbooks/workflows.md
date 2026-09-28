@@ -80,9 +80,10 @@ refused by name on this process, not silently skipped.
 A creator run is executed by the `zeroship-worker` that the manager placed the
 app on (`crates/zeroship-worker/src/workflow_host.rs`). That host holds NO
 journal: it reaches the workflow service for every journal fact, and writes
-payload bytes into the platform object store under the `workflow` namespace the
-service names. It receives work only as a job the manager delivered; it runs no
-due-work scan and no maintenance loop of its own.
+payload bytes into the worker's own object store under the reserved
+`platform:workflow` namespace, which creator code cannot address. It receives
+work only as a job the manager delivered; it runs no due-work scan and no
+maintenance loop of its own.
 
 Control publishes deployment lifecycle intents to the manager and arbitrates
 deployment holds. It reaches no creator journal, and there is no advance
