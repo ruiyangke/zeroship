@@ -322,6 +322,7 @@ impl Fleet {
                 "127.0.0.1:{}",
                 url::Url::parse(&manager_url).unwrap().port().unwrap()
             );
+            let payloads = fleet.payload_store();
             fleet.spawn(
                 "workflow",
                 &binaries["zeroship-workflow-server"],
@@ -332,6 +333,10 @@ impl Fleet {
                         fleet.role_url("zeroship_workflow"),
                     ),
                     ("ZEROSHIP_WORKFLOW_CONTROL_URL", fleet.control_url.clone()),
+                    (
+                        "ZEROSHIP_WORKFLOW_STORAGE_URL",
+                        payloads.to_str().unwrap().to_owned(),
+                    ),
                 ],
             );
         }
@@ -401,10 +406,10 @@ impl Fleet {
             ("ZEROSHIP_WORKER_JOIN_TOKEN_FILE", fleet.path("join-token")),
         ];
         if let Some(manager_url) = fleet.manager_url.clone() {
-            // A workflow host stages payloads in the app object store and keeps
-            // creator journals in the app database, so the worker needs both.
-            let payloads = fleet.work.path().join("objects");
-            fs::create_dir_all(&payloads).unwrap();
+            // A workflow host stages payloads in the object store the workflow
+            // service also names, and runs creator code against the app
+            // database, so the worker needs both.
+            let payloads = fleet.payload_store();
             worker_env.push(("ZEROSHIP_WORKER_WORKFLOW_MANAGER_URL", manager_url));
             worker_env.push(("ZEROSHIP_WORKER_WORKFLOW_CAPACITY", "8".into()));
             worker_env.push(("ZEROSHIP_WORKER_WORKFLOW_SLOTS", "2".into()));
@@ -623,6 +628,19 @@ impl Fleet {
         let path = self.work.path().join(name);
         fs::write(&path, contents).unwrap();
         fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    /// The payload object store BOTH the workflow service and the worker name.
+    ///
+    /// `workflow.storage_url` MUST name the same store as `worker.storage_url`
+    /// (`crates/zeroship-workflow-server/src/config.rs`): the service stages a
+    /// run input that an executing run reads back, so two directories fail the
+    /// READ rather than the write, far from the cause. One source here is what
+    /// keeps them from drifting.
+    pub fn payload_store(&self) -> PathBuf {
+        let payloads = self.work.path().join("objects");
+        fs::create_dir_all(&payloads).unwrap();
+        payloads
     }
 
     pub fn role_url(&self, role: &str) -> String {
