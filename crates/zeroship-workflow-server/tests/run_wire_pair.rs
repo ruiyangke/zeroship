@@ -58,13 +58,14 @@ use zeroship_core::{
         AssignedScope, ConflictPolicy, CreatorStartOptions, FailureCode, ReadStepOutput,
         ReadTaskPayload, ResolveTaskExecutable,
         RegisterWorker, RequestId, RestartOptions, RestartRun, RunFailure, RunId, RunOperation,
-        RunScope, RunState, SignalOptions, SignalRun, StartRun, TransitionRun, WorkerId,
+        Revision, RunScope, RunState, SignalOptions, SignalRun, StartRun, TransitionRun, WorkerId,
         WorkerState,
     },
-    workflow_jobs::DeploymentId,
+    workflow_jobs::{DeploymentId, JobOperation, JobSpec, SubmitJob},
     workflow_policy::AppPolicy,
 };
 use zeroship_workflow_client::{Options as ClientOptions, RunError, WorkerCoordinator};
+use zeroship_workflow::service::delivery::{AcceptedJob, AppJournal, ClaimedTask};
 use zeroship_workflow_manager::recovery::Options as RecoveryOptions;
 use zeroship_workflow_server::coordinator::{connect_eligibility, Coordinator, Options};
 
@@ -186,6 +187,23 @@ impl Fixture {
     /// service stored rather than against itself.
     /// A column of the seeded deployment, so a caller compares a resolved pin
     /// against the journal's own row rather than against a second derivation.
+    /// A column of a dispatch row, so a caller compares a release against the
+    /// journal state it produced rather than against the reply alone.
+    async fn task_column(&self, task: &str, column: &str) -> String {
+        self.platform
+            .admin
+            .query_one(
+                &format!(
+                    "SELECT {column} FROM workflow_manager.__zeroship_workflow_tasks \
+                     WHERE app_id=$1 AND id=$2"
+                ),
+                &[&self.app.as_str(), &task],
+            )
+            .await
+            .unwrap()
+            .get(0)
+    }
+
     async fn deploy_column(&self, deploy: &str, column: &str) -> String {
         self.platform
             .admin
@@ -609,4 +627,116 @@ async fn the_client_and_the_service_agree_on_a_task_executable_resolution() {
         ),
         "{parked:?}"
     );
+}
+
+/// The release and receipt pair, client to service, over a real socket.
+///
+/// ONE CASE FOR BOTH, because they are one recovery: a holder that cannot finish
+/// either hands the task back or, after an uncertain settlement, asks what
+/// committed. Driving them together is what shows the pair agrees about the same
+/// delivery rather than each agreeing with the test.
+///
+/// THE RECEIPT IS READ TWICE, before and after the release, and both answers are
+/// `None`. That is the property, not an oversight: a release commits no
+/// execution, so it must not leave an outcome behind. A single read could not
+/// tell "no outcome yet" from "no outcome ever", and the pair of reads is what
+/// makes the absence attributable to the release.
+///
+/// THE RELEASE IS ALSO ASSERTED IDEMPOTENT. `release_job` returns early on a task
+/// already released, so a holder whose acknowledgement was lost may repeat it --
+/// which is the same uncertain-reply situation the receipt read exists for, and
+/// it would be a strange pair if one half tolerated a retry and the other did
+/// not.
+#[ntex::test]
+async fn the_client_and_the_service_agree_on_a_release_and_a_receipt() {
+    let fixture = Box::pin(Fixture::new()).await;
+    let run = journal::seed_run(&fixture.platform, &fixture.app).await;
+    journal::seed_journal_hold(&fixture.platform, &fixture.app).await;
+    // NO SEEDED DISPATCH HERE, deliberately: `tasks::assign` claims a run only
+    // while `runs.task_id` is null, so a hand-seeded task would hold the run and
+    // the claim below would answer deferred instead of handing out work. The
+    // claim creates the dispatch this case releases.
+    let job = JobSpec {
+        id: zeroship_core::workflow_jobs::JobId::mint(),
+        app_id: fixture.app.clone(),
+        operation: JobOperation::Advance {
+            deployment_id: DeploymentId::parse_owned(
+                fixture.app.as_str().replacen("app_", "dep_", 1),
+            )
+            .unwrap(),
+            run_id: run.clone(),
+            generation: 0,
+            revision: Revision::try_from(1).unwrap(),
+        },
+        available_at: 0.try_into().unwrap(),
+    };
+
+    // Nothing has committed, so the recovery read says so as a fact.
+    let before = fixture
+        .client
+        .job_receipt::<AppJournal>(&job)
+        .await
+        .expect("an uncommitted job answers rather than refusing");
+    assert!(before.is_none(), "{before:?}");
+
+    // A REAL CLAIM, because `LeasedJob` has no public constructor and should not:
+    // delivery authority comes from the manager granting it, never from a struct a
+    // caller fills in. So the release is driven against the job this same client
+    // submitted and claimed, which exercises the claim and its journal acceptance
+    // on the way.
+    let submitted = fixture
+        .client
+        .submit_job(&SubmitJob {
+            scope: fixture.scope.clone(),
+            job: job.clone(),
+        })
+        .await
+        .expect("the queue accepts a creator advance");
+    assert_eq!(submitted, job);
+    let claimed = fixture
+        .client
+        .claim_job::<AppJournal>(&fixture.scope)
+        .await
+        .expect("the claim exchange answers")
+        .expect("the submitted advance is claimable");
+    let accepted = claimed
+        .accepted
+        .expect("an advance carries a journal acceptance");
+    let lease = claimed.lease;
+    let AcceptedJob::Execute {
+        assignment,
+        remaining_ms,
+    } = accepted
+    else {
+        panic!("the journal hands out a task for an advance")
+    };
+    let claim = ClaimedTask {
+        id: assignment.id.clone(),
+        token: assignment.token.clone(),
+        remaining_ms,
+    };
+    fixture
+        .client
+        .release_job::<AppJournal>(&lease, &claim)
+        .await
+        .expect("a held task is handed back");
+    assert_eq!(
+        fixture.task_column(&assignment.id, "state").await,
+        "released"
+    );
+
+    // Idempotent: the same release again, as a holder that lost its reply sends.
+    fixture
+        .client
+        .release_job::<AppJournal>(&lease, &claim)
+        .await
+        .expect("a repeated release is an acknowledgement, not a conflict");
+
+    // And a release leaves no outcome behind.
+    let after = fixture
+        .client
+        .job_receipt::<AppJournal>(&job)
+        .await
+        .expect("the receipt read still answers after a release");
+    assert!(after.is_none(), "{after:?}");
 }

@@ -548,6 +548,7 @@ impl zeroship_workflow_client::JobJournal for AppJournal {
     type Acceptance = AcceptedJob;
     type Renewal = RenewedTask;
     type Execution = ReportedExecution;
+    type Receipt = JobReceipt;
 }
 
 /// Re-anchor a remaining duration onto this process's monotonic clock.

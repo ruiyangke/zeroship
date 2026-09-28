@@ -534,6 +534,21 @@ pub mod endpoints {
         ServiceEndpoint::new("workflow", "POST", "/v1/jobs/heartbeat");
     pub const WORKFLOW_JOB_SETTLE: ServiceEndpoint =
         ServiceEndpoint::new("workflow", "POST", "/v1/jobs/settle");
+    /// Hand a claimed journal task back without settling its delivery.
+    ///
+    /// A release gives up creator work the holder cannot finish. It commits no
+    /// execution, so it is not fenced on deployment admissibility the way a
+    /// completion is: the row reopens and `reclaim` expires it, and the next
+    /// dispatch is gated by `tasks::assign`'s own availability lookup.
+    pub const WORKFLOW_JOB_RELEASE: ServiceEndpoint =
+        ServiceEndpoint::new("workflow", "POST", "/v1/jobs/release");
+    /// Read the committed outcome of one logical job.
+    ///
+    /// The recovery read for an UNCERTAIN settlement: the reply a holder lost may
+    /// have committed, and this is how it learns that without risking a second
+    /// commit. Addressed by the job rather than by an attempt.
+    pub const WORKFLOW_JOB_RECEIPT: ServiceEndpoint =
+        ServiceEndpoint::new("workflow", "POST", "/v1/jobs/receipt");
     /// Admit a run from a creator's own value.
     ///
     /// The value crosses and the payload descriptor does not: the service stages
@@ -734,6 +749,8 @@ pub fn service_allowlist() -> &'static [ServiceAuthorization] {
                     endpoints::WORKFLOW_JOB_CLAIM,
                     endpoints::WORKFLOW_JOB_HEARTBEAT,
                     endpoints::WORKFLOW_JOB_SETTLE,
+                    endpoints::WORKFLOW_JOB_RELEASE,
+                    endpoints::WORKFLOW_JOB_RECEIPT,
                     // Creator calls the worker makes on behalf of app code.
                     // The app they may act for is decided by the placement the
                     // manager holds for THIS worker, never by the body.

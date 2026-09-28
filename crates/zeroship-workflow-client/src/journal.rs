@@ -32,6 +32,15 @@ pub trait JobJournal {
     /// What a holder reports for the journal half of a settlement. Its reply
     /// carries no journal half, for the reason recorded below `Exclusive`.
     type Execution: Serialize;
+    /// What the journal answers when asked for a logical job's committed
+    /// outcome.
+    ///
+    /// This is the half a holder reads after an UNCERTAIN settlement: the reply
+    /// it lost may have committed, and the receipt is how it finds out without
+    /// risking a second commit. So it is a read of durable journal state rather
+    /// than a half of any one exchange, which is why it has no envelope of its
+    /// own beside the manager.
+    type Receipt: DeserializeOwned;
 }
 
 /// A claimed delivery and, when the journal accepted the operation it names,
@@ -243,4 +252,32 @@ mod tests {
         published["successors"] = json!([delivery()["job"].clone()]);
         assert_eq!(decoded(published).reported().unwrap_err(), Exclusive);
     }
+}
+
+/// A release request: the delivery whose task is being handed back, and the
+/// task itself.
+///
+/// THE TASK IS NOT OPTIONAL HERE, unlike [`RenewDelivery`]'s. A release gives
+/// back creator work, and an operation with no journal task has none to give:
+/// every maintenance kind settles its delivery instead. So a body carrying no
+/// task is not a maintenance release, it is a malformed one, and the type says
+/// so rather than leaving the server to decide.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReleaseDelivery<C> {
+    pub delivery: Delivery,
+    pub task: C,
+}
+
+/// A request for the committed outcome of one logical job.
+///
+/// ADDRESSED BY THE JOB AND NOT BY THE DELIVERY, because that is what the
+/// question is about: a receipt belongs to the logical job, and the caller is
+/// asking whether ANY attempt committed one -- including the attempt whose reply
+/// it lost. Naming an attempt would ask a narrower question than the recovery
+/// needs.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct JobReceiptQuery {
+    pub job: JobSpec,
 }

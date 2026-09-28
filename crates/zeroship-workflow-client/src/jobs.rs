@@ -1,5 +1,8 @@
 use super::{
-    journal::{ClaimedDelivery, JobJournal, RenewDelivery, RenewedDelivery, SettleDelivery},
+    journal::{
+        ClaimedDelivery, JobJournal, JobReceiptQuery, ReleaseDelivery, RenewDelivery,
+        RenewedDelivery, SettleDelivery,
+    },
     Error, WorkerCoordinator,
 };
 use std::time::{Duration, Instant};
@@ -319,6 +322,59 @@ impl WorkerCoordinator {
     ) -> Result<PinnedDeployment, Error> {
         self.transport
             .post(endpoints::WORKFLOW_TASK_EXECUTABLE, request)
+            .await
+    }
+
+    /// Hand a claimed journal task back without settling its delivery.
+    ///
+    /// A release gives up creator work this holder cannot finish. The delivery
+    /// stays unsettled on purpose: the journal reopens the run, `reclaim` expires
+    /// the released row, and the queue redelivers. So there is no receipt to
+    /// check and nothing to compare -- the reply is the acknowledgement.
+    ///
+    /// # Errors
+    /// Refuses another worker's delivery, an expired grant and failed exchanges.
+    pub async fn release_job<J: JobJournal>(
+        &self,
+        job: &LeasedJob,
+        task: &J::Claim,
+    ) -> Result<(), Error> {
+        if job.delivery.worker_id != self.worker_id {
+            return Err(denied());
+        }
+        job.remaining()?;
+        self.transport
+            .post_journal(
+                endpoints::WORKFLOW_JOB_RELEASE,
+                &ReleaseDelivery {
+                    delivery: job.delivery.clone(),
+                    task,
+                },
+            )
+            .await
+    }
+
+    /// Read the committed outcome of one logical job, if any attempt committed.
+    ///
+    /// THE RECOVERY READ, and the reason it exists is that a settlement whose
+    /// reply was lost may have committed. A holder that retried blindly could
+    /// commit twice; one that gives up could abandon work already done. This
+    /// answers which happened, so the retry can settle the queue half alone.
+    ///
+    /// Absent means no attempt has committed one, which is a fact rather than a
+    /// refusal -- so it is `Ok(None)` and not an error.
+    ///
+    /// # Errors
+    /// Refuses failed exchanges and the journal's own refusals.
+    pub async fn job_receipt<J: JobJournal>(
+        &self,
+        job: &JobSpec,
+    ) -> Result<Option<J::Receipt>, Error> {
+        self.transport
+            .post_journal(
+                endpoints::WORKFLOW_JOB_RECEIPT,
+                &JobReceiptQuery { job: job.clone() },
+            )
             .await
     }
 

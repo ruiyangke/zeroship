@@ -32,6 +32,8 @@ const CATALOG: &[ServiceEndpoint] = &[
     endpoints::WORKFLOW_JOB_CLAIM,
     endpoints::WORKFLOW_JOB_HEARTBEAT,
     endpoints::WORKFLOW_JOB_SETTLE,
+    endpoints::WORKFLOW_JOB_RELEASE,
+    endpoints::WORKFLOW_JOB_RECEIPT,
     endpoints::WORKFLOW_RUN_START,
     endpoints::WORKFLOW_RUN_STATUS,
     endpoints::WORKFLOW_RUN_SIGNAL,
@@ -234,6 +236,18 @@ fn endpoint_catalog_records_exact_measured_operations() {
             "workflow",
             "POST",
             "/v1/jobs/settle",
+        ),
+        (
+            endpoints::WORKFLOW_JOB_RELEASE,
+            "workflow",
+            "POST",
+            "/v1/jobs/release",
+        ),
+        (
+            endpoints::WORKFLOW_JOB_RECEIPT,
+            "workflow",
+            "POST",
+            "/v1/jobs/receipt",
         ),
         (
             endpoints::WORKFLOW_RUN_START,
@@ -508,6 +522,10 @@ fn measured_allowlist_is_encoded_and_enforced_row_by_row() {
             endpoints::WORKFLOW_JOB_CLAIM,
             endpoints::WORKFLOW_JOB_HEARTBEAT,
             endpoints::WORKFLOW_JOB_SETTLE,
+            // Handing a task back, and reading what an uncertain settlement
+            // may already have committed.
+            endpoints::WORKFLOW_JOB_RELEASE,
+            endpoints::WORKFLOW_JOB_RECEIPT,
             endpoints::WORKFLOW_RUN_START,
             endpoints::WORKFLOW_RUN_STATUS,
             endpoints::WORKFLOW_RUN_SIGNAL,

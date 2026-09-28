@@ -15,6 +15,7 @@ use zeroship_core::{
     app_id::AppId,
     typed_id,
     workflow_coordination::{RunId, WorkerId, WorkflowOutputRef},
+    workflow_jobs::JobId,
     workflow_deployments::HoldScope,
 };
 
@@ -181,6 +182,31 @@ pub async fn seed_leased_task(
     // so a fixture id shaped any other way is refused as a task that does not
     // exist -- indistinguishable from the arrangement not being there at all.
     let task = typed_id::generate(typed_id::WORKFLOW_DISPATCH_PREFIX);
+    // The delivery coordinates a dispatch claimed under a job carries.
+    // `authorize_task` compares all three against the delivery a caller presents,
+    // so a task seeded without them can be read from but never released.
+    //
+    // The job SPECIFICATION is written too, and not as decoration: `tasks.job_id`
+    // is a foreign key into `job_receipts`, so a delivered task cannot exist
+    // without its logical job's row, and `Record::receipt` compares that stored
+    // specification against the job a caller names byte for byte. `outcome` stays
+    // NULL, which is what "claimed but not yet committed" looks like.
+    let job = JobId::mint();
+    let attempt: i64 = 1;
+    let assignment_revision: i64 = 1;
+    let specification = serde_json::json!({
+        "id": job.as_str(),
+        "appId": app.as_str(),
+        "operation": {
+            "kind": "advance",
+            "deploymentId": app.as_str().replacen("app_", "dep_", 1),
+            "runId": run.as_str(),
+            "generation": 0,
+            "revision": 1,
+        },
+        "availableAt": 0,
+    })
+    .to_string();
     let payload = typed_id::generate(typed_id::WORKFLOW_PAYLOAD_PREFIX);
     // The shape `TaskToken`'s own parse requires: 64 lowercase hex characters.
     // Anything else is refused as unauthenticated before a lookup happens, so a
@@ -195,9 +221,15 @@ pub async fn seed_leased_task(
     // milliseconds from the database clock.
     let deadline: i64 = 4_000_000_000_000;
     platform.admin.execute(
-        "INSERT INTO workflow_manager.__zeroship_workflow_tasks(id,app_id,run_id,generation,worker,epoch,token_hash,deadline,state,frontier_revision,created_at) \
-         VALUES($1,$2,$3,0,$4,0,$5,$6,'leased',1,0)",
-        &[&task, &app, &run.as_str(), &worker.as_str(), &token_hash, &deadline],
+        "INSERT INTO workflow_manager.__zeroship_workflow_job_receipts(id,app_id,run_id,specification,created_at) \
+         VALUES($1,$2,$3,$4,0)",
+        &[&job.as_str(), &app, &run.as_str(), &specification],
+    ).await.unwrap();
+    platform.admin.execute(
+        "INSERT INTO workflow_manager.__zeroship_workflow_tasks(id,app_id,run_id,generation,worker,epoch,token_hash,deadline,state,frontier_revision,created_at,job_id,delivery_attempt,assignment_revision) \
+         VALUES($1,$2,$3,0,$4,0,$5,$6,'leased',1,0,$7,$8,$9)",
+        &[&task, &app, &run.as_str(), &worker.as_str(), &token_hash, &deadline,
+          &job.as_str(), &attempt, &assignment_revision],
     ).await.unwrap();
     platform
         .admin

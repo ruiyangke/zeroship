@@ -22,7 +22,8 @@ use zeroship_workflow::{
     WorkflowServiceError,
 };
 use zeroship_workflow_client::{
-    ClaimedDelivery, RenewDelivery, RenewedDelivery, Reported, SettleDelivery,
+    ClaimedDelivery, JobReceiptQuery, ReleaseDelivery, RenewDelivery, RenewedDelivery, Reported,
+    SettleDelivery,
 };
 use zeroship_workflow_manager::Error as NativeError;
 
@@ -65,6 +66,14 @@ pub fn configure(config: &mut web::ServiceConfig) {
         .service(
             web::resource(endpoints::WORKFLOW_TASK_EXECUTABLE.path_template())
                 .route(web::post().to(task_executable)),
+        )
+        .service(
+            web::resource(endpoints::WORKFLOW_JOB_RELEASE.path_template())
+                .route(web::post().to(release)),
+        )
+        .service(
+            web::resource(endpoints::WORKFLOW_JOB_RECEIPT.path_template())
+                .route(web::post().to(receipt)),
         );
 }
 
@@ -434,6 +443,79 @@ async fn task_executable(
                 .await
                 .map_err(journal_error)?;
             Ok(pinned)
+        }
+        .await,
+    )
+}
+
+/// Hand a claimed journal task back without settling its delivery.
+///
+/// THE DELIVERY STAYS UNSETTLED, deliberately. A release gives up creator work
+/// the holder cannot finish; the journal marks the task released and makes the
+/// run due, `reclaim` expires that row on the next pass, and the queue
+/// redelivers. Settling here would report an outcome no execution produced.
+///
+/// NOT FENCED ON DEPLOYMENT ADMISSIBILITY, unlike a completion, and that is a
+/// property rather than an omission. A release commits no execution, so there is
+/// nothing to refuse; and refusing it would be actively worse -- a holder whose
+/// deployment was just parked could not give the work back, and the task would
+/// sit leased until its deadline lapsed instead of reopening at once.
+/// `tasks::assign` re-checks deployment availability before the next dispatch, so
+/// the work is not lost and is not replayed against an inadmissible deployment.
+async fn release(
+    request: web::HttpRequest,
+    state: State<SharedState>,
+    body: web::types::Payload,
+) -> web::HttpResponse {
+    let started = Instant::now();
+    respond(
+        async {
+            let _actor = authenticate(&request, &state, endpoints::WORKFLOW_JOB_RELEASE).await?;
+            let command: ReleaseDelivery<ClaimedTask> = read_json(&request, body).await?;
+            let journal = journal(&state, &command.delivery.job.app_id).await?;
+            let grant =
+                ReportedGrant::resume(
+                    command.delivery.clone(),
+                    Some(command.task.remaining_ms),
+                    started,
+                )
+                .map_err(journal_error)?;
+            let claim = TaskClaim::resume(command.task, command.delivery, started)
+                .map_err(journal_error)?;
+            journal
+                .release_job(&claim, &grant)
+                .await
+                .map_err(journal_error)
+        }
+        .await,
+    )
+}
+
+/// Read the committed outcome of one logical job.
+///
+/// ADDRESSED BY THE JOB, and authorized by the app that job names rather than by
+/// a task credential: there is no task to present once an attempt has committed,
+/// which is exactly the case this read exists for. What bounds it is the same
+/// binding every delivery call takes -- the journal of the app the delivery
+/// names -- and `job_receipt` checks the job against that app itself.
+///
+/// ABSENCE IS A FACT, not a refusal: no attempt has committed one yet, so the
+/// reply is a null body rather than an error, and a holder reads it as
+/// "settle nothing, retry".
+async fn receipt(
+    request: web::HttpRequest,
+    state: State<SharedState>,
+    body: web::types::Payload,
+) -> web::HttpResponse {
+    respond(
+        async {
+            let _actor = authenticate(&request, &state, endpoints::WORKFLOW_JOB_RECEIPT).await?;
+            let command: JobReceiptQuery = read_json(&request, body).await?;
+            let journal = journal(&state, &command.job.app_id).await?;
+            journal
+                .job_receipt(&command.job)
+                .await
+                .map_err(journal_error)
         }
         .await,
     )

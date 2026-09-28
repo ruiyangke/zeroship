@@ -173,6 +173,7 @@ fn renewal(delivery: &Delivery) -> Value {
 /// the real payloads and cannot name them even in a test.
 struct AnyJournal;
 impl JobJournal for AnyJournal {
+    type Receipt = serde_json::Value;
     type Claim = Value;
     type Acceptance = Value;
     type Renewal = Value;
