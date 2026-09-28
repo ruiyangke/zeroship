@@ -1084,6 +1084,26 @@ protocol. This extends a working client rather than inventing one.
      that executes creator code, whose only tenant separation is an `app_id` column - so the flag
      has one arm rather than two, and the worker opening no journal is it.
 
+     **And it is gated on the TASK protocol crossing, not only the creator seam.** Measured on the
+     branch: four journal readers sit on the execution path, none of them reached through
+     `WorkflowBackend`, so an HTTP `WorkflowBackend` does not free the worker of its journal.
+     `TaskPayloads::executable` (`crates/zeroship-workflow-runner/src/payloads.rs`) resolves to
+     `WorkflowService::task_executable` and runs on every dispatch from `V8Execution::wait`
+     (`crates/zeroship-workflow-v8/src/executor.rs`), and no endpoint or client method names it.
+     `TaskPayloads::read` runs on every dispatch too, and it cannot be answered from the descriptor
+     alone: `WorkflowOutputRef`
+     (`crates/zeroship-core/src/workflow_coordination/lifecycle.rs`) carries hash, size and content
+     type and NO object key, so only the `payloads` row locates the object - which is why the
+     descriptor-to-id step belongs before this bullet rather than after it.
+     `TaskPayloads::stage` holds its lock across the object write. And `release_job` and
+     `job_receipt`, reached from `DeliverySlot`'s release, recover and uncertain-reply arms, have no
+     endpoints either.
+     So severing the journal while those four are unbuilt does not move the break, it relocates it:
+     a run started through the service's journal is then executed against the creator's and finds no
+     task. The prerequisite is the task protocol, and the read has a shape to copy - `RemoteBackend`
+     already locates a payload on the service and opens it in the runner behind an unchanged
+     signature.
+
 
    **And the lane cannot start before the worker narrows, which folds two bullets into one.** The
    contention between two claimants is safe at the mechanism - `lock_scope` serializes and one wins
