@@ -96,7 +96,8 @@ schema, a `zeroship_workflow_migrator` role and a `zeroship_workflow` login whos
 **The creator-facing seam is small.** `crates/zeroship-workflow/src/backend.rs` defines
 `WorkflowBackend` as `start`, `status`, `signal`, `transition`, `restart`, `read_step_output`
 and `read_output`. `crates/zeroship-workflow-v8/src/lib.rs` already composes it through a
-`WorkflowBackendFactory` with `Service` and `Ready` variants.
+`WorkflowBackendFactory` with `Service`, `Remote` and `Ready` variants, constructed through
+`WorkflowBinding`.
 
 **Durability does not rest on transactions.** `crates/zeroship-workflow/src/execution.rs`:
 executors receive replay, and "step idempotency keys must carry it". Nothing requires a step's
@@ -355,8 +356,8 @@ under-read both the cutover and what it has already moved.
 ## SQLite dev tier
 
 The embedded store stays. `crates/zeroship-workflow/src/service/mod.rs` already says the engine is embedded "in customer
-workers **and local development**", and `WorkflowBackendFactory` already carries both a
-`Service` and a `Ready` variant, so both paths exist by construction rather than by a flag.
+workers **and local development**", and `WorkflowBackendFactory` already carries a `Service` variant beside `Remote` and `Ready`, so
+both paths exist by construction rather than by a flag.
 
 Two consequences to record in `docs/reference/sqlite-divergences.md` rather than leave silent:
 the dev tier keeps the journal in the local file and therefore exercises the SQL store that
@@ -1151,6 +1152,23 @@ protocol. This extends a working client rather than inventing one.
      what the do-not note below forbids - a DSN to the journal database held by the one process
      that executes creator code, whose only tenant separation is an `app_id` column - so the flag
      has one arm rather than two, and the worker opening no journal is it.
+
+     **That arm is built and nothing constructs it, so the severance is a wiring change with a
+     known single site.** `RemoteBackend` (`crates/zeroship-workflow-runner/src/remote.rs`)
+     implements `WorkflowBackend`, and `WorkflowBinding::remote`
+     (`crates/zeroship-workflow-v8/src/lib.rs`) binds a host that holds no journal to the service
+     over HTTP. Neither has a caller anywhere, production or test. Meanwhile
+     `WorkflowBinding::service` has exactly three production callers, and only one of them is the
+     worker: `crates/zeroship-worker/src/workflow_runtime.rs` is the site that becomes `::remote`,
+     while `crates/zeroship-cli/src/workflow.rs` and the push inside
+     `crates/zeroship-workflow-v8/src/loader.rs` stay, because `AppRuntimeLoader` is constructed
+     only by `crates/zeroship-cli/src/workflow/host.rs` - the dev tier, which keeps its journal
+     local by design. `WorkflowBinding::ready`, whose one production caller is
+     `crates/zeroship-worker/src/cache.rs`, is a different arm and is not part of this.
+     So the severance is that one switch plus removing the worker's own journal store, the
+     `HostStorage` that `ProductionResources::resolve` builds. Verify the claim rather than
+     trusting it: list the callers of each `WorkflowBinding` constructor and check that `::remote`
+     has acquired one.
 
      **And it is gated on the TASK protocol crossing, not only the creator seam.** Measured on the
      branch: four journal readers sit on the execution path, none of them reached through
