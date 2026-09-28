@@ -24,8 +24,8 @@ Vitest asserts the operation contract independently for local development and
 S3 deployment, then compares their answers. Playwright loads the browser entry
 and reaches storage through RPC. Each run builds this example in a temporary
 directory and builds the platform binaries. Its Testcontainers fixture owns
-Postgres, MinIO and a test issuer; it applies migrations and deploys through
-the CLI. Deploy artifacts also live in S3.
+Postgres, the Versity S3 gateway and a test issuer; it applies migrations and
+deploys through the CLI. Deploy artifacts also live in S3.
 
 Docker and the repository's built SDKs are required. Install Chromium with
 `pnpm exec playwright install chromium`, or provide

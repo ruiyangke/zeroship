@@ -176,7 +176,7 @@ mod tests {
     #[test]
     fn s3_url_parses_to_remote() {
         let c = StorageBackendConfig::parse(
-            "s3://bucket/storage?provider=minio&endpoint=http://127.0.0.1:9000&region=us-east-1&style=path&dev_http=true",
+            "s3://bucket/storage?provider=generic&endpoint=http://127.0.0.1:9000&region=us-east-1&style=path&dev_http=true",
         )
         .unwrap();
         assert!(c.is_remote());
@@ -188,7 +188,7 @@ mod tests {
     fn malformed_s3_url_is_rejected() {
         // s3:// scheme but missing required region → fail fast.
         assert!(matches!(
-            StorageBackendConfig::parse("s3://bucket/storage?provider=minio&endpoint=http://127.0.0.1:9000&style=path&dev_http=true"),
+            StorageBackendConfig::parse("s3://bucket/storage?provider=generic&endpoint=http://127.0.0.1:9000&style=path&dev_http=true"),
             Err(StorageConfigError::Url(_))
         ));
     }

@@ -168,7 +168,7 @@ pub struct WorkerSettings {
     /// Object-store location for the app `env.storage` namespace.
     ///
     /// A bare path or `file://...` selects the `LocalFs` backend; `s3://...`
-    /// selects the S3 backend (S3/R2/MinIO/Spaces/B2), parsed through the
+    /// selects the S3 backend (S3/R2/Spaces/B2), parsed through the
     /// same grammar as the blob store. Multi-node storage MUST be shared so
     /// an object `put` on one worker node is readable on another: a `LocalFs`
     /// path is a shared volume mounted identically on every replica (the

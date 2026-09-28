@@ -581,10 +581,10 @@ fn e2e_storage_streaming_backpressure_over_cap() {
 
 #[test]
 fn e2e_storage_streaming_s3() {
-    let minio = s3_fixture::Minio::start();
+    let server = s3_fixture::S3Server::start();
     let backend = zeroship_storage::S3::with_tuning(
-        minio.config("v8"),
-        minio.credentials(),
+        server.config("v8"),
+        server.credentials(),
         zeroship_storage::S3UploadTuning::DEFAULTS,
     );
     let store = StorageStore::from_backend(Arc::new(backend));

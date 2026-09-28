@@ -32,7 +32,7 @@ test("large streams preserve wide lengths and checksums with bounded worker memo
     const uploaded = await workerRpc("gallery.putLarge", { key, sizeBytes: SIZE, seed: 7, chunkBytes: 1024 * 1024 }, TIMEOUT);
     expect(uploaded.size).toBe(SIZE);
     expect(uploaded.checksum).toMatch(/^[0-9a-f]+$/);
-    const aws = new AwsClient({ accessKeyId: "minioadmin", secretAccessKey: "minioadmin", service: "s3", region: "us-east-1", retries: 0 });
+    const aws = new AwsClient({ accessKeyId: "zeroship-fixture", secretAccessKey: "zeroship-fixture-secret", service: "s3", region: "us-east-1", retries: 0 });
     const objectUrl = `${storage.endpoint}/${storage.bucket}/${storage.prefix}/${storage.appId}/gallery/${key}`;
     const object = await aws.fetch(objectUrl, { method: "HEAD", signal: AbortSignal.timeout(10_000) });
     expect(object.status).toBe(200);

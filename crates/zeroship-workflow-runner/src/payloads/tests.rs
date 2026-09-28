@@ -252,10 +252,10 @@ async fn run_output_bodies(store: Rc<zeroship_workflow::service::store::OrmStore
 /// filesystem's.
 #[compio::test]
 async fn s3_staged_payloads_round_trip_and_collect() {
-    let minio = crate::s3_fixture::Minio::start();
+    let server = crate::s3_fixture::S3Server::start();
     let directory = tempfile::tempdir().unwrap();
     let objects = PayloadObjects::open(StorageStore::from_backend(Arc::new(
-        zeroship_storage::S3::new(minio.config("payloads"), minio.credentials()),
+        zeroship_storage::S3::new(server.config("payloads"), server.credentials()),
     )))
     .unwrap();
     let store = Rc::new(sqlite_store(&directory.path().join("app.sqlite")).await);

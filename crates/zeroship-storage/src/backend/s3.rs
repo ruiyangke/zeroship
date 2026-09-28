@@ -1,6 +1,6 @@
 //! S3-compatible `Backend` (feature `s3`).
 //!
-//! Covers S3, R2, MinIO, Spaces, B2 — anything speaking the S3 API — over
+//! Covers S3, R2, Spaces, B2 — anything speaking the S3 API — over
 //! the bespoke compio-native [`compio_s3::S3Client`] (hand-rolled SigV4,
 //! cyper transport, zero tokio).
 //!

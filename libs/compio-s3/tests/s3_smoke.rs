@@ -1,19 +1,19 @@
-//! `MinIO`-backed integration smoke test for `compio-s3`.
+//! Integration smoke test for `compio-s3` against a real S3 server.
 //!
-//! This test is **self-contained**: it starts its own `MinIO` container, creates
-//! a bucket, exercises the full v1 client surface (put / get / head / list /
-//! delete plus a multipart round-trip with parts ≥ 5 `MiB`), and tears the
-//! container down. It **REFUSES** when Docker is unavailable: a machine
+//! This test is **self-contained**: it starts its own S3 server container,
+//! creates a bucket, exercises the full v1 client surface (put / get / head /
+//! list / delete plus a multipart round-trip with parts ≥ 5 `MiB`), and tears
+//! the container down. It **REFUSES** when Docker is unavailable: a machine
 //! without Docker gets a named failure saying what to install, never a green
 //! that exercised no client at all.
 
 #![allow(clippy::future_not_send)]
 //!
 //! Run explicitly:
-//!   `cargo test -p compio-s3 --test minio_smoke -- --nocapture`
+//!   `cargo test -p compio-s3 --test s3_smoke -- --nocapture`
 //!
 //! The container is path-style, plaintext HTTP on loopback (`dev_http=true`),
-//! which is the only mode `MinIO` is wired for here.
+//! which is the only mode the fixture is wired for here.
 
 
 use bytes::Bytes;
@@ -23,9 +23,9 @@ use compio_s3::client::{PutOptions, S3Client};
 mod s3_fixture;
 
 #[test]
-fn minio_full_surface_and_multipart() {
-    let minio = s3_fixture::Minio::start();
-    let client = S3Client::new(minio.config("smoke"), minio.credentials());
+fn s3_full_surface_and_multipart() {
+    let server = s3_fixture::S3Server::start();
+    let client = S3Client::new(server.config("smoke"), server.credentials());
     compio::runtime::Runtime::new()
         .expect("compio runtime")
         .block_on(run_smoke(client));

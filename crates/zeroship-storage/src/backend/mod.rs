@@ -2,7 +2,7 @@
 //!
 //! Multiple implementations slot in behind the `Backend` trait:
 //! - `LocalFs` — filesystem-backed, always available (the dev default)
-//! - `S3` — S3/R2/MinIO/Spaces/B2 via S3-API (behind the `s3` feature)
+//! - `S3` — S3/R2/Spaces/B2 via S3-API (behind the `s3` feature)
 //!
 //! Backends are shareable across threads; operation futures stay on the caller's
 //! compio runtime. Rust callers and language bindings receive typed errors.
