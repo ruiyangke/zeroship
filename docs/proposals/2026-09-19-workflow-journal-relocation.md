@@ -1647,7 +1647,10 @@ protocol. This extends a working client rather than inventing one.
    `crates/zeroship-control/src/publication/journal.rs` and its re-export from
    `crates/zeroship-control/src/publication/mod.rs`.
 
-   In the worker: the repair path in `crates/zeroship-worker/src/workflow_creator.rs`.
+   In the worker: the repair path in `crates/zeroship-worker/src/workflow_creator.rs` - which the
+   SEVERANCE drops ahead of this step, because a worker that holds no journal cannot refuse one and
+   so has nothing to ask the manager to repair. Expect this entry to be already gone by the time
+   step 6 runs; if it is still there, the severance did not finish.
 
    In the reference docs: the numbered deploy step in `docs/architecture/control-plane.md` that
    names the endpoint and its `workflow_journal_unavailable` refusal, which renumbers the
