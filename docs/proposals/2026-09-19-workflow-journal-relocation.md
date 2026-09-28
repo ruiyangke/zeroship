@@ -1186,11 +1186,12 @@ protocol. This extends a working client rather than inventing one.
    claims a `management` row over HTTP as `client.claim_job(&scope).await.unwrap().unwrap()`
    immediately after `server.restart`, then asserts WHICH operation it got. A lane admitting that
    same kind makes the assertion a race: driven, it answers `Refused(Unavailable)` at one site and
-   a null lease at another, because the lane took the row. `tests/driver.rs` survives only because
-   its app is absent from `zeroship.apps`, so the policy read fails and the lane never claims - an
-   accident of the fixture, not a property. The radius is wider than the two observed failures:
-   `tests/http_jobs.rs` provisions a policy and claims fanout, propagation, management and activate
-   rows the same way, and cargo stopped before reaching it.
+   a null lease at another, because the lane took the row.
+   `crates/zeroship-workflow-server/tests/driver.rs` survives only because its app is absent from
+   `zeroship.apps`, so the policy read fails and the lane never claims - an accident of the
+   fixture, not a property. The radius is wider than the two observed failures:
+   `crates/zeroship-workflow-server/tests/http_jobs.rs` provisions a policy and claims fanout,
+   propagation, management and activate rows the same way, and cargo stopped before reaching it.
    Making those deterministic wants either `Claimant::Placed` narrowed so a worker stops taking
    journal-only kinds, or those claim contracts rewritten to drop exclusivity. So the lane's start
    and the worker's narrowing are one change, and that change is the flag. The consequence to
