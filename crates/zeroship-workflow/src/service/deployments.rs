@@ -259,23 +259,33 @@ impl WorkflowService {
     /// the caller already holds the app and run locks `authorized_task` took, so
     /// a read inside that transaction is exactly as strong and says what it means.
     ///
-    /// STILL ADMISSIBLE, not UNCHANGED. Nothing recorded an admission generation
-    /// when the artifact was loaded, so this cannot prove that value held steady
-    /// throughout; it proves the deployment is admissible at the moment the
+    /// # Availability, and deliberately NOT admission
+    ///
+    /// This checks that the deployment is still AVAILABLE -- the state a damaged
+    /// artifact leaves behind when `park_deployment` quarantines it -- and does
+    /// not require a live admission hold. The two fail differently and only one
+    /// belongs here. A parked deployment means the artifact that produced this
+    /// result is corrupt, so committing it would record a result derived from
+    /// bytes the journal has disowned. Admission being withdrawn means no NEW work
+    /// should start, which is enforced where work is admitted -- `tasks::assign`
+    /// and the artifact load -- and refusing a commit for it would discard
+    /// creator work that has already run and force a replay.
+    ///
+    /// STILL AVAILABLE, not UNCHANGED. Nothing recorded an availability epoch when
+    /// the artifact was loaded, so this cannot prove the value held steady
+    /// throughout; it proves the deployment is not parked at the moment the
     /// execution commits. That is the property a commit needs and it is all a
     /// caller-free check can claim.
     ///
     /// # Errors
     /// Refuses a run whose pin no longer matches the generation the task is bound
-    /// to, a parked deployment, and a deployment with no current admission.
+    /// to, and a parked deployment.
     pub(crate) async fn admissible_for_commit(
         &self,
         tx: &mut super::store::Transaction,
         claim: &super::tasks::AuthorizedTask,
     ) -> Result<(), WorkflowServiceError> {
         let app = claim.app.clone();
-        let source = self.deployments.as_ref().ok_or_else(unavailable)?;
-        let client = source.client(&app)?;
         // The deployment the generation this task is bound to replays against.
         // `validate_live` has already tied the task to the run.s CURRENT
         // generation, so this is the pin of the execution being committed.
@@ -290,7 +300,6 @@ impl WorkflowService {
             .await?
             .ok_or_else(unavailable)?;
         record.available()?;
-        admission_generation(tx, &app, &pinned, &record.hash, client.scope()).await?;
         Ok(())
     }
 
