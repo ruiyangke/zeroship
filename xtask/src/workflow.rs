@@ -1,5 +1,23 @@
-use crate::{cargo, checked, root, Result};
+use crate::{cargo, checked, root, script, Result};
 use std::process::Command;
+
+/// The SDK packages whose own suites this area runs, as (directory, package name).
+const SDK_SUITES: [(&str, &str); 2] = [
+    ("packages/workflows", "@zeroship/workflows"),
+    (
+        "packages/eslint-plugin-workflow",
+        "@zeroship/eslint-plugin-workflow",
+    ),
+];
+
+/// The example apps whose own suites this area runs, as (directory, package name).
+const EXAMPLE_SUITES: [(&str, &str); 2] = [
+    ("examples/workflow-probe", "workflow-probe"),
+    (
+        "examples/workflows-order",
+        "zeroship-workflows-order-example",
+    ),
+];
 
 pub fn run() -> Result<()> {
     for schema in [
@@ -94,21 +112,29 @@ pub fn run() -> Result<()> {
             ),
         "workflow API, persistence, boot and deployed acceptance tests",
     )?;
-    for package in ["packages/workflows", "packages/eslint-plugin-workflow"] {
+    for (directory, _) in SDK_SUITES {
         checked(
-            Command::new("pnpm")
-                .current_dir(root().join(package))
-                .arg("test"),
-            &format!("{package} tests"),
+            &mut script(directory, "test"),
+            &format!("{directory} tests"),
         )?;
     }
-    for example in ["workflow-probe", "workflows-order"] {
+    for (directory, _) in EXAMPLE_SUITES {
         checked(
-            Command::new("pnpm")
-                .current_dir(root().join("examples").join(example))
-                .arg("test"),
-            &format!("{example} Vitest and Playwright tests"),
+            &mut script(directory, "test"),
+            &format!("{directory} Vitest and Playwright tests"),
         )?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    /// Each SDK and example suite runs through Node, and each `test` script it
+    /// runs needs no package manager of its own.
+    #[test]
+    fn the_javascript_suites_run_without_a_package_manager() {
+        for (directory, package) in super::SDK_SUITES.into_iter().chain(super::EXAMPLE_SUITES) {
+            crate::script_contract::assert_no_package_manager(directory, package, "test");
+        }
+    }
 }
