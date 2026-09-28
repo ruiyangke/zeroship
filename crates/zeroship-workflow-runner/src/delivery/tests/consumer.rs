@@ -1,7 +1,6 @@
 use super::*;
-use crate::consumer::{
-    ConsumerBindings, ConsumerOptions, ConsumerScope, JobConsumer,
-};
+use crate::consumer::{ConsumerBindings, ConsumerOptions, ConsumerScope, JobConsumer};
+use crate::PayloadObjects;
 use std::collections::VecDeque;
 use zeroship_core::workflow_jobs::DeploymentId;
 
@@ -51,13 +50,6 @@ impl Queue {
 }
 impl JobTransport for Queue {
     type Lease = Lease;
-    async fn submit(
-        &self,
-        _: &AssignedScope,
-        _: &JobSpec,
-    ) -> Result<JobSpec, WorkflowServiceError> {
-        panic!("advance fixture must not publish independently")
-    }
     async fn claim(
         &self,
         journal: &AppWorkflows,
@@ -132,7 +124,6 @@ fn options(slots: usize) -> ConsumerOptions {
             execution_timeout: Duration::from_secs(10),
             operation_timeout: Duration::from_secs(1),
             retry_delay: Duration::from_millis(5),
-            maintenance: MaintenanceOptions::default(),
         },
     }
 }
@@ -147,7 +138,6 @@ fn scope(fixture: &Fixture, revision: i64) -> ConsumerScope {
             probe: fixture.probe.clone(),
             service: fixture.service.clone(),
         }),
-        fixture.objects.clone(),
     )
     .unwrap()
 }
@@ -664,6 +654,56 @@ struct NativeManager {
 }
 
 impl NativeManager {
+    /// Take the next maintenance row of this app's queue as the lane that owns
+    /// it, and run it over the fixture's journal.
+    ///
+    /// The lane asserts its own authority: `Claimant::Placed` denies every sweep,
+    /// so a host claiming a placement can never be handed one, and the retention
+    /// duty this fixture publishes is claimable only here.
+    async fn sweep(
+        &self,
+        journal: &AppWorkflows,
+        objects: &PayloadObjects,
+    ) -> (JobSpec, JobReceipt, SettlementReceipt) {
+        let lane = zeroship_workflow_manager::maintenance::MaintenanceAuthority::new(
+            journal.app_id().clone(),
+            self.worker.clone(),
+        );
+        let queue = self.coordinator.queue();
+        let grant = lane
+            .claim(queue, Ok(AppPolicy::default().max_delivery_attempts))
+            .await
+            .unwrap()
+            .expect("the lane takes the published maintenance row");
+        let job = grant.delivery().job.clone();
+        let publisher = super::NoPublication(journal.app_id().clone());
+        let MaintenanceOutcome::Settled(receipt) = journal
+            .maintenance_job(
+                &grant,
+                &publisher,
+                objects,
+                objects,
+                MaintenanceOptions::default(),
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("the lane's dispatch settles the row it claimed")
+        };
+        // Construct once and retry the same request, the way a lane owes a lost
+        // acknowledgement: the queue commits the first attempt, the reply is
+        // dropped, and the retry must present identical metadata.
+        let settlement = receipt.settlement(&grant).unwrap();
+        let acknowledged = loop {
+            self.requests.borrow_mut().push(settlement.clone());
+            let observed = lane.settle(queue, &settlement).await.unwrap();
+            if !self.lose_ack.replace(false) {
+                break observed;
+            }
+        };
+        (job, *receipt, acknowledged)
+    }
+
     async fn new(fixture: &Fixture) -> Rc<Self> {
         use zeroship_core::workflow_coordination::{RegisterWorker, WorkerState};
         let database = crate::manager_queue::Manager::new(fixture.app.app_id()).await;
@@ -718,23 +758,6 @@ fn manager_error(error: zeroship_workflow_manager::Error) -> WorkflowServiceErro
 
 impl JobTransport for NativeManager {
     type Lease = zeroship_workflow_manager::DeliveryGrant;
-    async fn submit(
-        &self,
-        scope: &AssignedScope,
-        job: &JobSpec,
-    ) -> Result<JobSpec, WorkflowServiceError> {
-        self.coordinator
-            .submit_job(
-                &self.worker,
-                &SubmitJob {
-                    scope: scope.clone(),
-                    job: job.clone(),
-                },
-                || async { Ok(self.worker.clone()) },
-            )
-            .await
-            .map_err(manager_error)
-    }
     async fn claim(
         &self,
         journal: &AppWorkflows,
@@ -1501,13 +1524,17 @@ fn age_queue_hold(manager: &NativeManager, app: &AppId, deployment: &DeploymentI
 }
 
 /// The retention lane's journal release duty reaches the creator engine's hold
-/// release through the delivery dispatch.
+/// release through the maintenance dispatch.
 ///
 /// The operation is never constructed here: the manager's own lane mints it from
-/// a released queue hold, and the delivery slot claims what it published. That is
+/// a released queue hold, and the sweep lane claims what it published. That is
 /// what this binds. Every sweep revalidates its own operation kind, so an arm
 /// pointed at another sweep refuses the delivery instead of releasing the hold,
 /// and the journal keeps the deployment.
+///
+/// It is the LANE that claims it, not a host holding a placement: `release_hold`
+/// is `Work::Maintenance`, and `Claimant::Placed` denies every kind in that
+/// class, so a placed claim answers nothing here at all.
 #[compio::test]
 async fn retention_release_duty_dispatches_to_the_creator_hold_release() {
     let fixture = Fixture::new(AppPolicy::default()).await;
@@ -1554,43 +1581,27 @@ async fn retention_release_duty_dispatches_to_the_creator_hold_release() {
         assert_eq!(retention.completed, 1, "turn {turn}: {retention:?}");
     }
 
-    let grant = manager
-        .claim(&fixture.app, &manager.scope)
-        .await
-        .unwrap()
-        .expect("the retention lane published a deliverable release duty");
-    let job = grant.lease.delivery().job.clone();
+    // A host holding a placement answers nothing here: the class the row carries
+    // is one `Claimant::Placed` denies, which is what leaves the row to the lane.
+    assert!(
+        manager
+            .claim(&fixture.app, &manager.scope)
+            .await
+            .unwrap()
+            .is_none(),
+        "a placed claim must not reach a release duty"
+    );
+
+    let (job, creator, acknowledged) =
+        Box::pin(manager.sweep(&fixture.app, &fixture.objects)).await;
     assert_eq!(
         job.operation,
         JobOperation::ReleaseHold {
             deployment_id: deployment.clone()
         },
-        "the lane minted the operation this delivery dispatches"
+        "the lane minted the operation this dispatch runs"
     );
     assert_eq!(job.deployment_id(), None, "a release needs no hold");
-
-    let mut slot = DeliverySlot::new(
-        manager.clone(),
-        Rc::new(Executor {
-            probe: fixture.probe.clone(),
-            service: fixture.service.clone(),
-        }),
-        fixture.objects.clone(),
-        DeliveryOptions {
-            execution_timeout: Duration::from_secs(5),
-            operation_timeout: Duration::from_secs(5),
-            retry_delay: Duration::from_millis(5),
-            maintenance: MaintenanceOptions::default(),
-        },
-    )
-    .unwrap();
-    let DeliveryOutcome::Settled {
-        creator,
-        manager: acknowledged,
-    } = Box::pin(slot.run(&fixture.app, grant)).await.unwrap()
-    else {
-        panic!("a release duty settles without deferring or executing")
-    };
     assert_eq!(creator.job, job);
     assert_eq!(creator.outcome, JobOutcome::Completed {});
     assert_eq!(acknowledged.outcome, JobOutcome::Completed {});
@@ -1602,7 +1613,7 @@ async fn retention_release_duty_dispatches_to_the_creator_hold_release() {
         .await;
     assert_eq!(
         fixture.app.job_receipt(&job).await.unwrap(),
-        Some(*creator),
+        Some(creator),
         "the committed receipt is the release's own"
     );
     assert_eq!(fixture.probe.starts.get(), 0, "a release runs no app code");

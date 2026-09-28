@@ -1179,7 +1179,6 @@ impl Manager {
         fixture: &Fixture,
         slots: usize,
     ) -> zeroship_workflow_runner::consumer::JobConsumer<Self> {
-        use zeroship_workflow::service::maintenance::MaintenanceOptions;
         use zeroship_workflow_runner::{
             consumer::{ConsumerOptions, ConsumerScope, JobConsumer},
             delivery::DeliveryOptions,
@@ -1208,7 +1207,6 @@ impl Manager {
                     execution_timeout: Duration::from_secs(10),
                     operation_timeout: Duration::from_secs(2),
                     retry_delay: Duration::from_millis(5),
-                    maintenance: MaintenanceOptions::default(),
                 },
             },
         )
@@ -1219,7 +1217,6 @@ impl Manager {
                 fixture.app.clone(),
                 self.scope.clone(),
                 executor,
-                fixture.objects.clone(),
             )
             .unwrap()])
             .unwrap();
@@ -1260,24 +1257,6 @@ impl zeroship_workflow_runner::delivery::JobTransport for Manager {
             None
         };
         Ok(Some(zeroship_workflow_runner::delivery::Claimed { lease, accepted }))
-    }
-
-    async fn submit(
-        &self,
-        scope: &zeroship_core::workflow_coordination::AssignedScope,
-        job: &zeroship_core::workflow_jobs::JobSpec,
-    ) -> Result<zeroship_core::workflow_jobs::JobSpec, WorkflowServiceError> {
-        self.coordinator
-            .submit_job(
-                &self.worker,
-                &zeroship_core::workflow_jobs::SubmitJob {
-                    scope: scope.clone(),
-                    job: job.clone(),
-                },
-                || async { Ok(self.worker.clone()) },
-            )
-            .await
-            .map_err(manager_error)
     }
 
     async fn heartbeat(
@@ -1335,8 +1314,17 @@ impl zeroship_workflow::service::publication::JobPublisher for Manager {
         &self,
         job: &zeroship_core::workflow_jobs::JobSpec,
     ) -> Result<zeroship_core::workflow_jobs::JobSpec, WorkflowServiceError> {
-        zeroship_workflow_runner::delivery::JobTransport::submit(self, &self.scope, job)
+        self.coordinator
+            .submit_job(
+                &self.worker,
+                &zeroship_core::workflow_jobs::SubmitJob {
+                    scope: self.scope.clone(),
+                    job: job.clone(),
+                },
+                || async { Ok(self.worker.clone()) },
+            )
             .await
+            .map_err(manager_error)
     }
 }
 

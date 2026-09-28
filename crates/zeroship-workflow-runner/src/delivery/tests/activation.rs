@@ -33,11 +33,8 @@ async fn activation_lost_ack_and_redelivery_never_start_the_executor() {
         original.insert(table, journal_count(&fixture, table).await);
     }
     fixture.metadata.lose_ack.set(true);
-    let mut slot = fixture.slot(Duration::from_secs(5));
     let DeliveryOutcome::Settled { creator, manager } =
-        Box::pin(slot.run(&fixture.app, claimed(&fixture.app, lease.clone()).await.unwrap()))
-            .await
-            .unwrap()
+        fixture.sweep(lease.clone()).await.unwrap()
     else {
         panic!("activation must settle its readiness receipt")
     };
@@ -61,16 +58,12 @@ async fn activation_lost_ack_and_redelivery_never_start_the_executor() {
         .delete_manifest(fixture.app.app_id(), &deployment.hash)
         .await
         .unwrap();
-    drop(slot);
     lease.delivery.attempt = Revision::try_from(2).unwrap();
     lease.expires = Instant::now();
-    let mut restarted = fixture.slot(Duration::from_secs(5));
     let DeliveryOutcome::Settled {
         creator: replayed,
         manager,
-    } = Box::pin(restarted.run(&fixture.app, claimed(&fixture.app, lease.clone()).await.unwrap()))
-        .await
-        .unwrap()
+    } = fixture.sweep(lease.clone()).await.unwrap()
     else {
         panic!("committed activation must replay despite missing artifact")
     };

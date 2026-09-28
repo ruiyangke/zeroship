@@ -21,11 +21,8 @@ async fn management_lost_ack_replays_without_executing_app_code() {
         },
     };
     fixture.metadata.lose_ack.set(true);
-    let mut slot = fixture.slot(Duration::from_secs(5));
     let DeliveryOutcome::Settled { creator, manager } =
-        Box::pin(slot.run(&fixture.app, claimed(&fixture.app, lease.clone()).await.unwrap()))
-            .await
-            .unwrap()
+        fixture.sweep(lease.clone()).await.unwrap()
     else {
         panic!("management must settle the lifecycle result");
     };
@@ -46,9 +43,7 @@ async fn management_lost_ack_replays_without_executing_app_code() {
     let DeliveryOutcome::Settled {
         creator: replay,
         manager,
-    } = Box::pin(slot.run(&fixture.app, claimed(&fixture.app, lease.clone()).await.unwrap()))
-        .await
-        .unwrap()
+    } = fixture.sweep(lease.clone()).await.unwrap()
     else {
         panic!("management must replay the receipt");
     };
@@ -98,9 +93,8 @@ async fn management_denial_settles_without_executor_or_lifecycle_mutation() {
         revision: 1.try_into().unwrap(),
         command: ManagementCommand::RestartStarted { from: None },
     };
-    let mut slot = fixture.slot(Duration::from_secs(5));
     let DeliveryOutcome::Settled { creator, manager } =
-        Box::pin(slot.run(&fixture.app, claimed(&fixture.app, lease).await.unwrap())).await.unwrap()
+        fixture.sweep(lease).await.unwrap()
     else {
         panic!("denial must settle");
     };

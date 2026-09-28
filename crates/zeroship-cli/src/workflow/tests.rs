@@ -847,14 +847,6 @@ impl JobTransport for LossyTransport {
         self.inner.claim(journal, scope).await
     }
 
-    async fn submit(
-        &self,
-        scope: &zeroship_core::workflow_coordination::AssignedScope,
-        job: &zeroship_core::workflow_jobs::JobSpec,
-    ) -> Result<zeroship_core::workflow_jobs::JobSpec, WorkflowServiceError> {
-        self.inner.submit(scope, job).await
-    }
-
     async fn heartbeat(
         &self,
         journal: &zeroship_workflow::service::AppWorkflows,

@@ -5,14 +5,12 @@
     reason = "delivery slots own compio-local resources"
 )]
 
-use crate::{CancelOnDrop, ExecutionGuard, PayloadObjects, TaskExecution, TaskExecutor};
+use crate::{CancelOnDrop, ExecutionGuard, TaskExecution, TaskExecutor};
 use zeroship_workflow::{
     service::{
         delivery::{
             AppJournal, DeliveredTask, JobAcceptance, JobReceipt, ReportedExecution, TaskRenewal,
         },
-        maintenance::{MaintenanceOptions, MaintenanceOutcome},
-        publication::JobPublisher,
         AppWorkflows, ControlIntent, PolicyAuthority,
     },
     WorkflowExecution, WorkflowServiceError,
@@ -26,7 +24,7 @@ use std::{
 };
 use zeroship_core::{
     workflow_coordination::{AssignedScope, FailureCode},
-    workflow_jobs::{Delivery, JobLease, JobSpec, Settlement, SettlementReceipt, SubmitJob},
+    workflow_jobs::{Delivery, JobLease, Settlement, SettlementReceipt},
 };
 use zeroship_workflow_client::{LeasedJob, WorkerCoordinator};
 
@@ -50,11 +48,6 @@ pub trait JobTransport {
         journal: &AppWorkflows,
         scope: &AssignedScope,
     ) -> impl Future<Output = Result<Option<Claimed<Self::Lease>>, WorkflowServiceError>>;
-    fn submit(
-        &self,
-        scope: &AssignedScope,
-        job: &JobSpec,
-    ) -> impl Future<Output = Result<JobSpec, WorkflowServiceError>>;
     fn heartbeat(
         &self,
         journal: &AppWorkflows,
@@ -80,8 +73,10 @@ pub trait JobTransport {
 #[derive(Debug)]
 pub struct Claimed<L> {
     pub lease: L,
-    /// Absent for the maintenance operations, which the journal settles from the
-    /// lease alone with no task and no executor.
+    /// Present for the one operation this port delivers. A claimant holding a
+    /// placement is admitted to creator work alone, so a reply carrying none is
+    /// a transport that dropped half of its own answer rather than a kind this
+    /// slot settles without an executor.
     pub accepted: Option<JobAcceptance>,
 }
 
@@ -101,19 +96,6 @@ pub struct Completed {
 
 impl JobTransport for WorkerCoordinator {
     type Lease = LeasedJob;
-
-    async fn submit(
-        &self,
-        scope: &AssignedScope,
-        job: &JobSpec,
-    ) -> Result<JobSpec, WorkflowServiceError> {
-        self.submit_job(&SubmitJob {
-            scope: scope.clone(),
-            job: job.clone(),
-        })
-        .await
-        .map_err(metadata_error)
-    }
 
     async fn claim(
         &self,
@@ -210,12 +192,10 @@ pub struct DeliveryOptions {
     pub execution_timeout: Duration,
     pub operation_timeout: Duration,
     pub retry_delay: Duration,
-    pub maintenance: MaintenanceOptions,
 }
 
 impl DeliveryOptions {
     pub(super) fn validate(self) -> Result<(), WorkflowServiceError> {
-        self.maintenance.validate()?;
         if self.execution_timeout.is_zero()
             || self.operation_timeout.is_zero()
             || self.retry_delay.is_zero()
@@ -295,7 +275,6 @@ impl<L> Drop for Active<L> {
 pub struct DeliverySlot<T: JobTransport> {
     transport: Rc<T>,
     executor: Rc<dyn TaskExecutor>,
-    objects: PayloadObjects,
     options: DeliveryOptions,
     active: Option<Active<T::Lease>>,
 }
@@ -316,14 +295,12 @@ impl<T: JobTransport> DeliverySlot<T> {
     pub fn new(
         transport: Rc<T>,
         executor: Rc<dyn TaskExecutor>,
-        objects: PayloadObjects,
         options: DeliveryOptions,
     ) -> Result<Self, WorkflowServiceError> {
         options.validate()?;
         Ok(Self {
             transport,
             executor,
-            objects,
             options,
             active: None,
         })
@@ -342,36 +319,13 @@ impl<T: JobTransport> DeliverySlot<T> {
     ) -> Result<DeliveryOutcome, WorkflowServiceError> {
         let Claimed { lease, accepted } = claimed;
         self.drain_interrupted().await;
-        let publisher = Submission {
-            transport: self.transport.as_ref(),
-            scope: AssignedScope {
-                app_id: lease.delivery().job.app_id.clone(),
-                assignment_revision: lease.delivery().assignment_revision,
-            },
-        };
-        let maintenance = bounded(
-            self.options.execution_timeout,
-            app.maintenance_job(
-                &lease,
-                &publisher,
-                &self.objects,
-                &self.objects,
-                self.options.maintenance,
-            ),
-        )
-        .await?;
-        match maintenance {
-            MaintenanceOutcome::Settled(receipt) => {
-                return self.acknowledge(*receipt, &lease).await
-            }
-            MaintenanceOutcome::Deferred => return Ok(DeliveryOutcome::Deferred),
-            MaintenanceOutcome::Unclaimed => {}
-        }
         let authority = app.captured_authority();
-        // The acceptance rode in with the claim. Maintenance answers `Unclaimed`
-        // only for the one operation the journal accepts execution for, so a
-        // claim that reaches here and carried none is a transport that dropped
-        // half of its own reply.
+        // The acceptance rode in with the claim. A claimant holding a placement
+        // is admitted to creator work alone -- `Claimant::admits` in
+        // `zeroship-workflow-manager` pairs each work class with exactly one
+        // claimant -- so the journal accepts execution for every operation this
+        // slot can be handed, and a claim that reaches here carrying none is a
+        // transport that dropped half of its own reply.
         let accepted = accepted.ok_or_else(|| lossy("journal acceptance"))?;
         let task = match accepted {
             JobAcceptance::Deferred => return Ok(DeliveryOutcome::Deferred),
@@ -501,19 +455,6 @@ impl<T: JobTransport> DeliverySlot<T> {
             creator: Box::new(receipt),
             manager,
         })
-    }
-}
-
-struct Submission<'a, T> {
-    transport: &'a T,
-    scope: AssignedScope,
-}
-impl<T: JobTransport> JobPublisher for Submission<'_, T> {
-    fn app_id(&self) -> &zeroship_core::app_id::AppId {
-        &self.scope.app_id
-    }
-    async fn submit(&self, job: &JobSpec) -> Result<JobSpec, WorkflowServiceError> {
-        self.transport.submit(&self.scope, job).await
     }
 }
 

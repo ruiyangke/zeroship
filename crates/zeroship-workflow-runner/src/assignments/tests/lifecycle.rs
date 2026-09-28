@@ -13,7 +13,6 @@ fn options() -> HostOptions {
                 execution_timeout: Duration::from_secs(5),
                 operation_timeout: Duration::from_secs(5),
                 retry_delay: Duration::from_secs(1),
-                maintenance: MaintenanceOptions::default(),
             },
         },
         assignments: AssignmentOptions {

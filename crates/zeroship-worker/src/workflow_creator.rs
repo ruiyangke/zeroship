@@ -220,7 +220,6 @@ impl<P: WorkflowResourceProvider> WorkflowCreatorFactory<P> {
                     app,
                     executor,
                     backend,
-                    objects: resources.objects,
                 })
             })
             .await

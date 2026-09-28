@@ -54,11 +54,8 @@ async fn cron_lost_ack_and_redelivery_publish_once_without_starting_executor() {
         scheduled_at: 1000.try_into().unwrap(),
     };
     fixture.metadata.lose_ack.set(true);
-    let mut slot = fixture.slot(Duration::from_secs(5));
     let DeliveryOutcome::Settled { creator, manager } =
-        Box::pin(slot.run(&fixture.app, claimed(&fixture.app, lease.clone()).await.unwrap()))
-            .await
-            .unwrap()
+        fixture.sweep(lease.clone()).await.unwrap()
     else {
         panic!("cron acceptance must settle its receipt");
     };
@@ -81,11 +78,9 @@ async fn cron_lost_ack_and_redelivery_publish_once_without_starting_executor() {
         .unwrap();
     lease.delivery.attempt = 2.try_into().unwrap();
     lease.expires = Instant::now();
-    drop(slot);
-    let mut slot = fixture.slot(Duration::from_secs(5));
     let DeliveryOutcome::Settled {
         creator: replayed, ..
-    } = Box::pin(slot.run(&fixture.app, claimed(&fixture.app, lease).await.unwrap())).await.unwrap()
+    } = fixture.sweep(lease).await.unwrap()
     else {
         panic!("lost cron ACK must replay the retained outcome");
     };

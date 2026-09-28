@@ -51,11 +51,7 @@ use zeroship_runtime::NativePlugin;
 use zeroship_storage::{StorageBackendConfig, StorageStore};
 use zeroship_workflow::{
     deployment_holds::{AssignedHolds, RemoteDeploymentHolds},
-    service::{
-        maintenance::MaintenanceOptions,
-        store::HostStorage,
-        AppDeployments, HostPolicies,
-    },
+    service::{store::HostStorage, AppDeployments, HostPolicies},
     WorkflowServiceError,
 };
 use zeroship_workflow_client::{Options as ClientOptions, Transport, WorkerCoordinator};
@@ -133,7 +129,6 @@ impl WorkflowHostConfig {
                     execution_timeout: EXECUTION_TIMEOUT,
                     operation_timeout: OPERATION_TIMEOUT,
                     retry_delay: RETRY_DELAY,
-                    maintenance: MaintenanceOptions::default(),
                 },
             },
             assignments: AssignmentOptions {

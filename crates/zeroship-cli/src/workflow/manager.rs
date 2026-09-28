@@ -801,14 +801,6 @@ impl JobTransport for LocalTransport {
         Ok(Some(Claimed { lease, accepted }))
     }
 
-    async fn submit(
-        &self,
-        scope: &AssignedScope,
-        job: &JobSpec,
-    ) -> Result<JobSpec, WorkflowServiceError> {
-        self.client.submit(scope, job).await
-    }
-
     async fn heartbeat(
         &self,
         journal: &AppWorkflows,

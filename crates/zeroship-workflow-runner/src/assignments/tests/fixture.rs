@@ -16,7 +16,7 @@ use zeroship_core::{
     service_identity::{endpoints, verify_service_call, ServiceEndpoint},
     service_peers::{ServiceAuth, ServiceKeyring},
     workflow_coordination::{Assignment, AUDIENCE},
-    workflow_jobs::{JobSpec, Settlement, SettlementReceipt},
+    workflow_jobs::{Settlement, SettlementReceipt},
     workflow_policy::{AppPolicy, EstablishIngress, PolicyLease, PolicyLeaseRequest},
 };
 use zeroship_data_orm::{
@@ -240,7 +240,6 @@ impl Fixture {
                     execution_timeout: Duration::from_secs(5),
                     operation_timeout: Duration::from_secs(5),
                     retry_delay: Duration::from_secs(1),
-                    maintenance: MaintenanceOptions::default(),
                 },
             },
         )
@@ -657,7 +656,6 @@ impl CreatorFactory for Factory {
             app: app.with_ingress(ingress),
             executor: Rc::new(NoExecution),
             backend,
-            objects,
         };
         *opening.runtime.borrow_mut() = Some(runtime.clone());
         if let Some(finished) = self.0.finished.borrow_mut().remove(&scope.app_id) {
@@ -716,13 +714,6 @@ impl JobTransport for Probe {
     ) -> Result<Option<Claimed<Self::Lease>>, WorkflowServiceError> {
         self.claims.borrow_mut().push(scope.clone());
         futures::future::pending().await
-    }
-    async fn submit(
-        &self,
-        _: &AssignedScope,
-        _: &JobSpec,
-    ) -> Result<JobSpec, WorkflowServiceError> {
-        panic!("no delivered job")
     }
     async fn heartbeat(
         &self,

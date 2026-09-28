@@ -9,8 +9,12 @@ mod propagation;
 use zeroship_workflow::{
     operations::{RunState, StartOptions},
     service::{
-        collection::CollectionOptions, schema, store::OrmStore, AppPolicy, DeployRegistration,
-        HostPolicies, PolicySnapshot, RequestId, TaskAssignment, WorkflowService,
+        collection::CollectionOptions,
+        maintenance::{MaintenanceOptions, MaintenanceOutcome},
+        schema,
+        store::OrmStore,
+        AppPolicy, DeployRegistration, HostPolicies, PolicySnapshot, RequestId, TaskAssignment,
+        WorkflowService,
     },
     WorkflowExecution,
 };
@@ -40,8 +44,7 @@ const MANAGER_LEASE: Duration = Duration::from_secs(20);
 /// The claim a transport would have answered for this lease.
 ///
 /// A slot receives both halves of one exchange, so a test handing it a lease has
-/// to hand it the acceptance the same exchange would have carried -- and for a
-/// maintenance operation, the absence of one.
+/// to hand it the acceptance the same exchange would have carried.
 ///
 /// FALLIBLE, because the acceptance is part of the exchange now: a journal that
 /// refuses to accept refuses the CLAIM, so a test expecting that refusal asserts
@@ -56,6 +59,21 @@ async fn claimed<L: JobLease + Clone>(
         None
     };
     Ok(Claimed { lease, accepted })
+}
+
+/// The publisher a sweep in this fixture runs under.
+///
+/// The fixture's transport refuses an independent publication, and a sweep
+/// driven here must not reach one either: a test that expects successors asserts
+/// them on the settlements the transport records.
+struct NoPublication(AppId);
+impl zeroship_workflow::service::publication::JobPublisher for NoPublication {
+    fn app_id(&self) -> &AppId {
+        &self.0
+    }
+    async fn submit(&self, _: &JobSpec) -> Result<JobSpec, WorkflowServiceError> {
+        panic!("a sweep fixture must not publish independently")
+    }
 }
 
 #[derive(Clone)]
@@ -87,13 +105,6 @@ struct Metadata {
 }
 impl JobTransport for Metadata {
     type Lease = Lease;
-    async fn submit(
-        &self,
-        _: &AssignedScope,
-        _: &JobSpec,
-    ) -> Result<JobSpec, WorkflowServiceError> {
-        panic!("advance fixture must not publish independently")
-    }
     async fn claim(
         &self,
         _: &AppWorkflows,
@@ -255,7 +266,7 @@ impl TaskExecution for Execution {
             Mode::Failure => {
                 return Err(WorkflowServiceError::InvalidRequest(
                     "injected execution failure".into(),
-                ))
+                ));
             }
             Mode::Pending => std::future::pending().await,
             Mode::RevokedFrontier => {
@@ -455,36 +466,65 @@ impl Fixture {
     }
 
     fn slot(&self, execution_timeout: Duration) -> DeliverySlot<Metadata> {
-        self.slot_collecting(
-            execution_timeout,
-            zeroship_workflow::service::collection::CollectionOptions::default(),
-        )
-        .unwrap()
-    }
-
-    /// A slot whose delivered collection duty runs under `collection`.
-    fn slot_collecting(
-        &self,
-        execution_timeout: Duration,
-        collection: zeroship_workflow::service::collection::CollectionOptions,
-    ) -> Result<DeliverySlot<Metadata>, WorkflowServiceError> {
         DeliverySlot::new(
             self.metadata.clone(),
             Rc::new(Executor {
                 probe: self.probe.clone(),
                 service: self.service.clone(),
             }),
-            self.objects.clone(),
             DeliveryOptions {
                 execution_timeout,
                 operation_timeout: Duration::from_secs(5),
                 retry_delay: Duration::from_millis(5),
-                maintenance: MaintenanceOptions {
-                    collection,
-                    ..MaintenanceOptions::default()
-                },
             },
         )
+        .unwrap()
+    }
+
+    /// Run one maintenance row the way its lane does: dispatch the sweep over
+    /// this fixture's journal and payload store, then settle the delivery with
+    /// the receipt that dispatch committed.
+    ///
+    /// The lane, not a delivery slot, is what claims these rows -
+    /// `Claimant::admits` in `zeroship-workflow-manager` pairs each work class
+    /// with exactly one claimant - so the retry around the settlement is this
+    /// helper's own, matching what a lane owes a lost acknowledgement.
+    async fn sweep(&self, lease: Lease) -> Result<DeliveryOutcome, WorkflowServiceError> {
+        self.sweep_with(lease, MaintenanceOptions::default()).await
+    }
+
+    /// As [`Self::sweep`], under dispatch bounds the caller chooses.
+    async fn sweep_with(
+        &self,
+        lease: Lease,
+        options: MaintenanceOptions,
+    ) -> Result<DeliveryOutcome, WorkflowServiceError> {
+        let publisher = NoPublication(self.app.app_id().clone());
+        let receipt = match self
+            .app
+            .maintenance_job(&lease, &publisher, &self.objects, &self.objects, options)
+            .await?
+        {
+            MaintenanceOutcome::Settled(receipt) => *receipt,
+            MaintenanceOutcome::Deferred => return Ok(DeliveryOutcome::Deferred),
+            MaintenanceOutcome::Unclaimed => {
+                panic!("a sweep fixture must not hand the lane creator work")
+            }
+        };
+        let settlement = receipt.settlement(&lease)?;
+        let manager = loop {
+            match JobTransport::settle(&*self.metadata, &settlement).await {
+                Ok(observed) => break observed,
+                Err(error) if matches!(error, WorkflowServiceError::Timeout) => {
+                    compio::time::sleep(Duration::from_millis(5)).await;
+                }
+                Err(error) => return Err(error),
+            }
+        };
+        Ok(DeliveryOutcome::Settled {
+            creator: Box::new(receipt),
+            manager,
+        })
     }
     async fn task_state(&self) -> String {
         let tx = self.service.begin().await.unwrap();
@@ -505,6 +545,81 @@ impl Fixture {
     }
 }
 
+/// A slot runs creator work and nothing else, so a sweep handed to one is
+/// refused instead of dispatched.
+///
+/// The queue is what makes this unreachable in production: `collect` is
+/// `Work::Maintenance` and `Claimant::Placed` denies that whole class, so a host
+/// holding a placement is never offered the row. This binds the slot's own half
+/// of it -- handed the delivery anyway, it commits nothing and settles nothing
+/// rather than sweeping the journal under a placement's authority.
+///
+/// TWO CONTROLS, because the refusal could otherwise be explained two ways.
+/// The row IS sweepable: dispatched as its lane dispatches it, the same lease
+/// settles and commits a receipt, so the absence asserted above is a real
+/// absence and not an operation that would have failed anyway. And the same
+/// slot, journal and claim path run the app's own advance to a settlement, so
+/// the refusal is attributable to the kind the delivery names.
+#[compio::test]
+async fn a_slot_refuses_a_sweep_rather_than_dispatching_it() {
+    let fixture = Fixture::new(AppPolicy::default()).await;
+    let mut sweep = fixture.lease.clone();
+    sweep.delivery.job.id = zeroship_core::workflow_jobs::JobId::mint();
+    sweep.delivery.job.operation = JobOperation::Collect {};
+    // A distinct attempt number, because the transport holds one settlement per
+    // attempt and asserts a retry cannot change it: the advance control settles
+    // under this lease's original attempt.
+    sweep.delivery.attempt = 2.try_into().unwrap();
+    let claim = claimed(&fixture.app, sweep.clone()).await.unwrap();
+    assert!(
+        claim.accepted.is_none(),
+        "the journal accepts execution for creator work alone"
+    );
+    let mut slot = fixture.slot(Duration::from_secs(5));
+    let refused = Box::pin(slot.run(&fixture.app, claim)).await;
+    assert!(
+        matches!(refused, Err(WorkflowServiceError::Unavailable(_))),
+        "{refused:?}"
+    );
+    assert!(
+        fixture
+            .app
+            .job_receipt(&sweep.delivery.job)
+            .await
+            .unwrap()
+            .is_none(),
+        "a refused sweep commits no receipt"
+    );
+    assert!(
+        fixture.metadata.requests.borrow().is_empty(),
+        "a refused sweep settles nothing"
+    );
+    assert_eq!(fixture.probe.starts.get(), 0);
+
+    // The row was sweepable all along; only the host that took it was wrong.
+    let DeliveryOutcome::Settled { creator, .. } = fixture.sweep(sweep.clone()).await.unwrap()
+    else {
+        panic!("the lane's dispatch settles the row the slot refused")
+    };
+    assert_eq!(creator.outcome, JobOutcome::Completed {});
+    assert_eq!(
+        fixture.app.job_receipt(&sweep.delivery.job).await.unwrap(),
+        Some(*creator)
+    );
+
+    let advance = fixture.lease.clone();
+    let DeliveryOutcome::Settled { creator, .. } = Box::pin(slot.run(
+        &fixture.app,
+        claimed(&fixture.app, advance.clone()).await.unwrap(),
+    ))
+    .await
+    .unwrap() else {
+        panic!("the control's creator work settles through the same slot")
+    };
+    assert_eq!(creator.job, advance.delivery.job);
+    assert_eq!(fixture.probe.starts.get(), 1);
+}
+
 #[compio::test]
 async fn unrepresentable_retry_delay_is_rejected_before_execution() {
     let fixture = Fixture::new(AppPolicy::default()).await;
@@ -514,12 +629,10 @@ async fn unrepresentable_retry_delay_is_rejected_before_execution() {
             probe: fixture.probe.clone(),
             service: fixture.service.clone(),
         }),
-        fixture.objects.clone(),
         DeliveryOptions {
             execution_timeout: Duration::from_secs(5),
             operation_timeout: Duration::from_secs(1),
             retry_delay: Duration::MAX,
-            maintenance: MaintenanceOptions::default(),
         },
     );
     assert!(matches!(

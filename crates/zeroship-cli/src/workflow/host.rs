@@ -118,10 +118,11 @@ struct Placement {
 
 /// What one turn of the maintenance lane runs under.
 ///
-/// They are the consumer's own bounds, because one thread serves both lanes: a
-/// sweep nobody times would spend this host's only runtime on one row, and the
-/// operation it runs is the same one the consumer's delivery slot bounds with
-/// these values on a served claim.
+/// The four timing bounds are the consumer's own, because one thread serves both
+/// lanes: a sweep nobody times would spend this host's only runtime on one row,
+/// and both lanes claim, run and settle against the same queue and the same
+/// journal on that thread. The dispatch bounds are the lane's own, since nothing
+/// else in this process dispatches a sweep.
 #[derive(Clone, Copy, Debug)]
 struct SweepBounds {
     maintenance: MaintenanceOptions,
@@ -244,7 +245,7 @@ pub async fn open<C: Composition>(
     )?));
     let consumer_options = config.consumer_options();
     let bounds = SweepBounds {
-        maintenance: consumer_options.delivery.maintenance,
+        maintenance: MaintenanceOptions::default(),
         execution_timeout: consumer_options.delivery.execution_timeout,
         operation_timeout: consumer_options.delivery.operation_timeout,
         idle_poll: consumer_options.idle_poll,
@@ -255,12 +256,7 @@ pub async fn open<C: Composition>(
         manager.worker().clone(),
         consumer_options,
     )?;
-    let binding = ConsumerScope::new(
-        api.clone(),
-        scope.clone(),
-        executor.clone(),
-        objects.clone(),
-    )?;
+    let binding = ConsumerScope::new(api.clone(), scope.clone(), executor.clone())?;
     consumer.bindings().replace(vec![binding.clone()])?;
     // A previous process may have committed intents it never published.
     let _ = wake_sender.try_send(());
@@ -421,7 +417,6 @@ impl<T: JobTransport> Host<T> {
                 &manager,
                 &api,
                 &executor,
-                &objects,
                 &ingress,
                 &bindings,
                 &placement,
@@ -466,7 +461,6 @@ async fn place(
     manager: &ManagerClient,
     api: &AppWorkflows,
     executor: &Rc<dyn TaskExecutor>,
-    objects: &PayloadObjects,
     ingress: &LocalIngress,
     bindings: &ConsumerBindings,
     placement: &RefCell<Placement>,
@@ -507,11 +501,10 @@ async fn place(
             }
         };
         let installed =
-            ConsumerScope::new(api.clone(), next.clone(), executor.clone(), objects.clone())
-                .and_then(|binding| {
-                    bindings.replace(vec![binding.clone()])?;
-                    Ok(binding)
-                });
+            ConsumerScope::new(api.clone(), next.clone(), executor.clone()).and_then(|binding| {
+                bindings.replace(vec![binding.clone()])?;
+                Ok(binding)
+            });
         match installed {
             Ok(binding) => {
                 *placement.borrow_mut() = Placement {

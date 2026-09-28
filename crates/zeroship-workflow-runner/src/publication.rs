@@ -25,7 +25,7 @@ use std::{
 use zeroship_core::{
     app_id::AppId,
     workflow_coordination::AssignedScope,
-    workflow_jobs::{JobSpec, Settlement, SettlementReceipt},
+    workflow_jobs::{Settlement, SettlementReceipt},
 };
 use zeroship_workflow_client::{LeasedJob, WorkerCoordinator};
 
@@ -135,14 +135,6 @@ impl JobTransport for HostTransport {
         scope: &AssignedScope,
     ) -> Result<Option<Claimed<LeasedJob>>, WorkflowServiceError> {
         JobTransport::claim(&self.client, journal, scope).await
-    }
-
-    async fn submit(
-        &self,
-        scope: &AssignedScope,
-        job: &JobSpec,
-    ) -> Result<JobSpec, WorkflowServiceError> {
-        JobTransport::submit(&self.client, scope, job).await
     }
 
     async fn heartbeat(

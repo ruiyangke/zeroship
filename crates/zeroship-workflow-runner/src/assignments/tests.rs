@@ -5,7 +5,6 @@ use crate::{
     ExecutionBudget, TaskExecution,
 };
 use zeroship_workflow::service::{
-    maintenance::MaintenanceOptions,
     schema,
     store::{OrmStore, SchemaName},
     PolicySnapshot, TaskAssignment, WorkflowService,

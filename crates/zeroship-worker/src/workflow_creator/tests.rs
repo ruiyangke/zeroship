@@ -28,7 +28,11 @@ use fixture::{execute, install, Fixture};
 /// object and the bytes come from the store the factory supplied. Both halves
 /// are asserted here: the descriptor status hands out is the one whose object
 /// holds these bytes.
-async fn returned_value(runtime: &CreatorRuntime, run: &str) -> serde_json::Value {
+async fn returned_value(
+    runtime: &CreatorRuntime,
+    objects: &PayloadObjects,
+    run: &str,
+) -> serde_json::Value {
     let described = runtime
         .app
         .status(run)
@@ -39,7 +43,7 @@ async fn returned_value(runtime: &CreatorRuntime, run: &str) -> serde_json::Valu
     assert_eq!(described["kind"], "ref", "{described}");
     let bytes = runtime
         .app
-        .payloads(&runtime.objects)
+        .payloads(objects)
         .read(run, 0, PayloadSlot::Output)
         .await
         .unwrap()
@@ -233,7 +237,7 @@ async fn factory_executes_delivered_v8_frontiers_with_its_creator_artifact_and_p
             StartOptions {
                 input_ref: Some(
                     zeroship_workflow::InputStager::stage_input(
-                        &runtime.objects,
+                        &fixture.provider.resources().objects,
                         &runtime.app,
                         &request,
                         &json!({"value":input}),
@@ -272,7 +276,10 @@ async fn factory_executes_delivered_v8_frontiers_with_its_creator_artifact_and_p
         );
         let status = runtime.app.status(&started.id).await.unwrap();
         if status.state == RunState::Completed {
-            assert_eq!(returned_value(&runtime, &started.id).await, json!(input));
+            assert_eq!(
+                returned_value(&runtime, &fixture.provider.resources().objects, &started.id).await,
+                json!(input)
+            );
             finished = true;
             break;
         }
@@ -284,7 +291,7 @@ async fn factory_executes_delivered_v8_frontiers_with_its_creator_artifact_and_p
     );
     let saved = runtime
         .app
-        .payloads(&runtime.objects)
+        .payloads(&fixture.provider.resources().objects)
         .read_step_output(&started.id, "saved", 0)
         .await
         .unwrap()
@@ -350,5 +357,8 @@ async fn dynamic_context_cannot_move_an_installed_creator_to_another_schema() {
         .complete_job(&task, &lease, execution)
         .await
         .unwrap();
-    assert_eq!(returned_value(&runtime, &started.id).await, json!("bound"));
+    assert_eq!(
+        returned_value(&runtime, &fixture.provider.resources().objects, &started.id).await,
+        json!("bound")
+    );
 }

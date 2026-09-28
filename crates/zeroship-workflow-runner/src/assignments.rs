@@ -10,7 +10,7 @@ use crate::{
     delivery::bounded,
     publication::{self, PublicationWait, PublicationWake},
     ready::ReadyApps,
-    PayloadObjects, TaskExecutor,
+    TaskExecutor,
 };
 use zeroship_workflow::{
     service::{
@@ -44,15 +44,12 @@ use zeroship_workflow_client::WorkerCoordinator;
 /// Creator I/O and execution assembled by trusted deployment-host configuration.
 ///
 /// `backend` is the app's workflow client for request isolates. It must come
-/// from `app` itself, so it carries the same policy generation. `objects` is
-/// the payload store this host resolved for the app; payload bytes move only
-/// through it.
+/// from `app` itself, so it carries the same policy generation.
 #[derive(Clone)]
 pub struct CreatorRuntime {
     pub app: AppWorkflows,
     pub executor: Rc<dyn TaskExecutor>,
     pub backend: AppBackend,
-    pub objects: PayloadObjects,
 }
 
 impl std::fmt::Debug for CreatorRuntime {
@@ -598,7 +595,6 @@ impl<F: CreatorFactory> AssignmentBindings<F> {
                 runtime.app.clone(),
                 entry.policies.scope().clone(),
                 runtime.executor.clone(),
-                runtime.objects.clone(),
             )?,
         };
         let app = binding.app_id().clone();

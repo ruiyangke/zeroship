@@ -27,11 +27,7 @@ use std::{
 use zeroship_bundle::LoadedWorker;
 use zeroship_core::app_id::AppId;
 use zeroship_runtime::{NativePlugin, RuntimeLimits};
-use zeroship_workflow::service::{
-    maintenance::MaintenanceOptions,
-    store::HostStorage,
-    AppBackend,
-};
+use zeroship_workflow::service::{store::HostStorage, AppBackend};
 use zeroship_storage::StorageStore;
 use zeroship_workflow_runner::{
     consumer::ConsumerOptions, delivery::DeliveryOptions, PayloadObjects, TaskPayloadLimits,
@@ -206,7 +202,6 @@ impl LocalConfig {
                 execution_timeout: Duration::from_millis(consumer.execution_timeout_ms),
                 operation_timeout: Duration::from_millis(consumer.operation_timeout_ms),
                 retry_delay: Duration::from_millis(consumer.retry_delay_ms),
-                maintenance: MaintenanceOptions::default(),
             },
         }
     }
