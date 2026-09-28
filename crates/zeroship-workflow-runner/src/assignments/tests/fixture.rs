@@ -732,6 +732,7 @@ impl JobTransport for Probe {
         _: &Self::Lease,
         _: &DeliveredTask,
         _: WorkflowExecution,
+        _: Vec<zeroship_workflow::service::delivery::PayloadConfirmation>,
     ) -> Result<Completed, WorkflowServiceError> {
         panic!("no delivered job")
     }

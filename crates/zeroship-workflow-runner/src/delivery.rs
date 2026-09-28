@@ -9,7 +9,8 @@ use crate::{CancelOnDrop, ExecutionGuard, TaskExecution, TaskExecutor};
 use zeroship_workflow::{
     service::{
         delivery::{
-            AppJournal, DeliveredTask, JobAcceptance, JobReceipt, ReportedExecution, TaskRenewal,
+            AppJournal, DeliveredTask, JobAcceptance, JobReceipt, PayloadConfirmation,
+            ReportedExecution, TaskRenewal,
         },
         AppWorkflows, ControlIntent, PolicyAuthority,
     },
@@ -60,12 +61,21 @@ pub trait JobTransport {
         &self,
         settlement: &Settlement,
     ) -> impl Future<Output = Result<SettlementReceipt, WorkflowServiceError>>;
+    /// Commit a frontier, and any upload confirmations its settlement owes.
+    ///
+    /// `confirmed` is EMPTY for a holder whose object store is the journal's own
+    /// process, which confirms each upload under the lock it wrote under. A
+    /// holder writing across a request boundary owes one per upload, and they
+    /// ride this call rather than one of their own because `promote` resolves no
+    /// `uploading` row: the confirm has to commit in the same transaction as the
+    /// frontier that references it.
     fn complete(
         &self,
         journal: &AppWorkflows,
         lease: &Self::Lease,
         task: &DeliveredTask,
         execution: WorkflowExecution,
+        confirmed: Vec<PayloadConfirmation>,
     ) -> impl Future<Output = Result<Completed, WorkflowServiceError>>;
 }
 
@@ -157,11 +167,15 @@ impl JobTransport for WorkerCoordinator {
         lease: &Self::Lease,
         task: &DeliveredTask,
         execution: WorkflowExecution,
+        confirmed: Vec<PayloadConfirmation>,
     ) -> Result<Completed, WorkflowServiceError> {
         let settlement = self
             .settle_execution::<AppJournal>(
                 lease.delivery(),
-                &ReportedExecution::of(lease, task, execution)?,
+                &ReportedExecution {
+                    confirmed,
+                    ..ReportedExecution::of(lease, task, execution)?
+                },
             )
             .await
             .map_err(metadata_error)?;
@@ -634,6 +648,10 @@ async fn execute<T: JobTransport>(
     guard.finish();
     execution.stop().await;
     let outcome = result?;
+    // Read AFTER `wait`, which is when an execution knows what it owes, and
+    // before any retry below: the confirmations are the same on every attempt,
+    // because a retried settlement confirms the same reservations.
+    let confirmed = execution.owed_confirmations();
     // ONE BOUND, BECAUSE ONE CALL: the phase deadline `finalize` just set to
     // `operation_timeout` covers committing the execution and settling the
     // delivery with what that commit decided, retries included.
@@ -646,7 +664,7 @@ async fn execute<T: JobTransport>(
         loop {
             let (task, lease) = snapshot(claims);
             match transport
-                .complete(app, &lease, &task, outcome.clone())
+                .complete(app, &lease, &task, outcome.clone(), confirmed.clone())
                 .await
             {
                 Ok(completed) => return Ok(completed),

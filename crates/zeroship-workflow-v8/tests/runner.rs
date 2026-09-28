@@ -14,7 +14,7 @@ use zeroship_workflow::{
     operations::{RunOperation, RunState, SignalOptions, StartOptions},
     service::{
         AppPolicy, AppWorkflows, CompletionReceipt, DeployRegistration, HostPolicies, PayloadSlot,
-        PolicySnapshot, RequestId, StagedPayload, TaskAssignment, TaskToken, WorkerIdentity,
+        PolicySnapshot, RequestId, TaskAssignment, TaskToken, WorkerIdentity,
         WorkflowService,
     },
     WorkflowServiceError,
@@ -432,7 +432,7 @@ impl zeroship_workflow_runner::TaskPayloads for UnavailablePayloads {
         _request: &RequestId,
         _reference: zeroship_workflow::engine::WorkflowOutputRef,
         _body: zeroship_storage::backend::BoxChunkSource,
-    ) -> Result<zeroship_workflow::service::StagedPayload, WorkflowServiceError> {
+    ) -> Result<zeroship_workflow_runner::UploadReceipt, WorkflowServiceError> {
         Err(WorkflowServiceError::Unavailable(
             "fixture payload outage".into(),
         ))
@@ -531,7 +531,7 @@ impl TaskPayloads for UploadProbe {
         request: &RequestId,
         reference: zeroship_workflow::engine::WorkflowOutputRef,
         body: zeroship_storage::backend::BoxChunkSource,
-    ) -> Result<StagedPayload, WorkflowServiceError> {
+    ) -> Result<zeroship_workflow_runner::UploadReceipt, WorkflowServiceError> {
         assert!(!self.loader.probes.borrow().is_empty());
         assert!(
             self.loader
@@ -1294,8 +1294,11 @@ impl zeroship_workflow_runner::delivery::JobTransport for Manager {
         lease: &Self::Lease,
         task: &zeroship_workflow::service::delivery::DeliveredTask,
         execution: zeroship_workflow::WorkflowExecution,
+        confirmed: Vec<zeroship_workflow::service::delivery::PayloadConfirmation>,
     ) -> Result<zeroship_workflow_runner::delivery::Completed, WorkflowServiceError> {
-        let receipt = journal.complete_job(task, lease, execution).await?;
+        let receipt = journal
+            .complete_reported_job(task, lease, execution, &confirmed)
+            .await?;
         let settlement = receipt.settlement(lease)?;
         Ok(zeroship_workflow_runner::delivery::Completed {
             settlement: zeroship_workflow_runner::delivery::JobTransport::settle(self, &settlement)

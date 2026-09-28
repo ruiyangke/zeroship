@@ -105,7 +105,9 @@ impl JobTransport for Queue {
         lease: &Lease,
         task: &DeliveredTask,
         execution: WorkflowExecution,
+        confirmed: Vec<zeroship_workflow::service::delivery::PayloadConfirmation>,
     ) -> Result<Completed, WorkflowServiceError> {
+        assert!(confirmed.is_empty(), "an in-process store confirms its own uploads");
         let receipt = journal.complete_job(task, lease, execution).await?;
         let settlement = receipt.settlement(lease)?;
         Ok(Completed {
@@ -816,7 +818,9 @@ impl JobTransport for NativeManager {
         lease: &Self::Lease,
         task: &DeliveredTask,
         execution: WorkflowExecution,
+        confirmed: Vec<zeroship_workflow::service::delivery::PayloadConfirmation>,
     ) -> Result<Completed, WorkflowServiceError> {
+        assert!(confirmed.is_empty(), "an in-process store confirms its own uploads");
         let receipt = journal.complete_job(task, lease, execution).await?;
         let settlement = receipt.settlement(lease)?;
         Ok(Completed {

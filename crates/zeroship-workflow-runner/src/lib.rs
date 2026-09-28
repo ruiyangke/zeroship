@@ -26,7 +26,7 @@ pub use budget::{BudgetEnd, ExecutionBudget, ExecutionGuard};
 mod payloads;
 pub use payloads::{
     AppPayloads, HostPayloads, ObjectStepOutputs, PayloadObjects, PayloadRead, RunPayloads,
-    TaskPayloadReader, TaskPayloads, WorkerPayloads,
+    TaskPayloadReader, TaskPayloads, UploadReceipt, WorkerPayloads,
 };
 mod outputs;
 pub use outputs::{PreparedExecution, TaskPayloadLimits};
@@ -56,8 +56,8 @@ use std::{
 };
 use zeroship_workflow::{
     service::{
-        AppWorkflows, CompletionReceipt, ControlIntent, Heartbeat, TaskAssignment, TaskToken,
-        WorkerIdentity, WorkflowService,
+        delivery::PayloadConfirmation, AppWorkflows, CompletionReceipt, ControlIntent, Heartbeat,
+        TaskAssignment, TaskToken, WorkerIdentity, WorkflowService,
     },
     WorkflowExecution, WorkflowServiceError,
 };
@@ -186,6 +186,19 @@ pub trait TaskExecutor {
 pub trait TaskExecution {
     /// Resolve the frontier, without publishing it to the workflow service.
     async fn wait(&mut self) -> Result<WorkflowExecution, WorkflowServiceError>;
+    /// Confirmations this execution's settlement still owes, from uploads it
+    /// reserved and wrote but could not confirm itself.
+    ///
+    /// EMPTY FOR A HOST HOLDING THE OBJECT STORE, which confirms each upload
+    /// under the lock it wrote under. A host writing across a request boundary
+    /// owes one per upload, and they have to reach the settlement rather than a
+    /// call of their own: `promote` resolves no `uploading` row, so the confirm
+    /// must commit in the same transaction as the frontier referencing it.
+    ///
+    /// Read after [`Self::wait`]; before it there is nothing to owe.
+    fn owed_confirmations(&self) -> Vec<PayloadConfirmation> {
+        Vec::new()
+    }
     /// Signal cancellation synchronously and idempotently, including on drop.
     fn cancel(&mut self);
     /// Return only after callbacks and host operations have stopped or their

@@ -864,8 +864,11 @@ impl JobTransport for LocalTransport {
         lease: &DeliveryGrant,
         task: &DeliveredTask,
         execution: WorkflowExecution,
+        confirmed: Vec<zeroship_workflow::service::delivery::PayloadConfirmation>,
     ) -> Result<Completed, WorkflowServiceError> {
-        let receipt = journal.complete_job(task, lease, execution).await?;
+        let receipt = journal
+            .complete_reported_job(task, lease, execution, &confirmed)
+            .await?;
         let settlement = receipt.settlement(lease)?;
         Ok(Completed {
             settlement: JobTransport::settle(self, &settlement).await?,

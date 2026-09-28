@@ -161,9 +161,17 @@ impl JobTransport for HostTransport {
         lease: &LeasedJob,
         task: &DeliveredTask,
         execution: WorkflowExecution,
+        confirmed: Vec<zeroship_workflow::service::delivery::PayloadConfirmation>,
     ) -> Result<Completed, WorkflowServiceError> {
-        let completed =
-            JobTransport::complete(&self.client, journal, lease, task, execution).await?;
+        let completed = JobTransport::complete(
+            &self.client,
+            journal,
+            lease,
+            task,
+            execution,
+            confirmed,
+        )
+        .await?;
         self.settled.mark(&lease.delivery().job.app_id);
         Ok(completed)
     }

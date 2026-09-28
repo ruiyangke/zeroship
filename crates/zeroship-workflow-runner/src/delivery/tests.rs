@@ -181,7 +181,9 @@ impl JobTransport for Metadata {
         lease: &Lease,
         task: &DeliveredTask,
         execution: WorkflowExecution,
+        confirmed: Vec<zeroship_workflow::service::delivery::PayloadConfirmation>,
     ) -> Result<Completed, WorkflowServiceError> {
+        assert!(confirmed.is_empty(), "an in-process store confirms its own uploads");
         let receipt = journal.complete_job(task, lease, execution).await?;
         let settlement = receipt.settlement(lease)?;
         Ok(Completed {
