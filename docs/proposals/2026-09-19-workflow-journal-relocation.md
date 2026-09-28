@@ -56,18 +56,21 @@ the shared Rust ORM". The store holds a `Database`, a `BackendHandle`, a `DbBind
 `ProjectKeySource`, so journal rows are written through the same ORM, the same binding and the
 same pooled connection as creator data.
 
-**The split is deliberate and documented.**
-`crates/zeroship-workflow-server/src/lib.rs`: "Workflow metadata coordination. Customer workers
-own execution and storage."
+**The split is deliberate and documented, and the header states which side owns what.**
+`crates/zeroship-workflow-server/src/lib.rs`: "Workflow metadata coordination, and the journal the
+creator-facing run calls are answered from. Customer workers own execution; this service owns the
+journal those runs are recorded in."
 
 **The journal lives inside the creator's schema.**
 `crates/zeroship-worker/src/workflow_creator.rs` resolves a binding and takes
 `binding.schema()`; the control-side caller
 (`crates/zeroship-control/src/publication/journal.rs`) derives the same name. The tables are
 `__zeroship_workflow_*` inside that schema, and `crates/zeroship-workflow-schema/schema/schema.ts`
-declares around twenty of them - `app_state`, `payloads`, `broadcasts`, `schedules`,
-`occurrences`, `tasks`, the publication and page tables, the receipt tables - nearly all keyed
-with an `app_id` column.
+declares them through a helper rather than one by one - `app_state`, `payloads`, `broadcasts`,
+`schedules`, `occurrences`, `tasks`, the publication and page tables, the receipt tables - nearly
+all keyed with an `app_id` column. Read that list as a sample and not as the set: count
+`CREATE TABLE` in the generated `crates/zeroship-workflow-schema/schema/postgres.sql`, because
+`schema.ts` builds each table through the same call and no total can be read off it.
 
 **One journal serves many apps already.**
 `crates/zeroship-workflow-schema/src/lib.rs`, under a heading called "The schema is not an app":
@@ -93,7 +96,8 @@ schema, a `zeroship_workflow_migrator` role and a `zeroship_workflow` login whos
 **The creator-facing seam is small.** `crates/zeroship-workflow/src/backend.rs` defines
 `WorkflowBackend` as `start`, `status`, `signal`, `transition`, `restart`, `read_step_output`
 and `read_output`. `crates/zeroship-workflow-v8/src/lib.rs` already composes it through a
-`WorkflowBackendFactory` with `Service` and `Ready` variants.
+`WorkflowBackendFactory` with `Service`, `Remote` and `Ready` variants, constructed through
+`WorkflowBinding`.
 
 **Durability does not rest on transactions.** `crates/zeroship-workflow/src/execution.rs`:
 executors receive replay, and "step idempotency keys must carry it". Nothing requires a step's
@@ -107,9 +111,9 @@ data write and its journal record to commit atomically.
 `ALTER SCHEMA ... OWNER TO` the migrator role, and a schema owner's privileges are implicit and
 cannot be revoked. So the schema the platform is actively driving runs against is owned by the
 tenant. `docs/proposals/2026-08-28-migration-record-consolidation.md` accepts exactly this for
-the *migration* journal, on the ground that "it is their database and corrupting it breaks only
-them" - which is true there and false here, because the platform is mid-execution against this
-one.
+the *migration* journal, on the ground that "it is their database and their app, and corrupting it
+breaks only them" - which is true there and false here, because the platform is mid-execution
+against this one.
 
 **2. Dropping a database destroys the journal.** Harmless while one app owns one database.
 Under sharing it destroys the workflow state of every app bound to that database, not just the
@@ -246,11 +250,18 @@ reading and would argue for moving files one at a time.
 
 ### What it does NOT decide
 
-Whether `workflow_manager` should be promoted from a schema in the control database to a
-database of its own. It has its own migrator role, its own login and its own search path
-already, so the promotion is contained and can be made on capacity grounds later. This design
-only requires that the journal live in the workflow service's storage, not which physical
-database that is. See Open 3.
+Not the physical home of `workflow_manager`. Open 3 decides it: every design here assumes the
+service gets a database of its own rather than a schema in the control database, so the journal's
+creator-volume rows never share a store with the control plane. What Open 3 leaves as work rather
+than as a question is the corpus split, because `workflow.database_url` names one store and
+PostgreSQL does not query across databases, so every control read the service makes has to be
+severed before that setting can point anywhere else.
+
+Two things are genuinely left open, and both are recorded where the work is rather than here.
+Where the store-bound engine code lives once the ORM leaves `crates/zeroship-workflow`, which
+step 7 states, because the dev tier keeps `AppBackend` embedded and the obvious home would have
+`zeroship-workflow-v8` reaching the server crate for it. And the per-table fence, which "The
+fence is a separate track, not a gate" keeps beside the steps rather than ahead of them.
 
 ---
 
@@ -308,39 +319,60 @@ coordination metadata login; no customer database credentials". The service has 
 platform state out of customer databases since it was written; the journal is the piece that
 did not move.
 
-**The creator seam is seven methods; the execution seam is its own.** It would be a much larger
-proposal if the storage seam were the RPC boundary, because the store spans roughly twenty
-tables. It is not: the engine's fold is pure and the creator-facing backend is narrow, so the
-whole engine moves server-side and the wire carries `start`, `status`, `signal`, `transition`,
-`restart`, `read_step_output` and `read_output`.
+**The creator seam is narrow; the execution seam is its own.** It would be a much larger proposal
+if the storage seam were the RPC boundary, because the store spans the whole journal schema: count
+`CREATE TABLE` in the generated `crates/zeroship-workflow-schema/schema/postgres.sql` rather than
+trusting a number here. It is not that boundary: the engine's fold is pure and the creator-facing
+backend is narrow, so the whole engine moves server-side and the wire carries `start`, `status`,
+`signal`, `transition`, `restart`, `read_step_output` and `read_output`.
 
-Say plainly that those are the creator-facing surface and not the whole wire. A worker also
-has to be given work and report it, and that path is not a trait at all. `DeliverySlot` in
-`crates/zeroship-workflow-runner/src/delivery.rs` is what production runs, and it calls
-`AppWorkflows::accept_job`, `heartbeat_job` and `complete_job` directly, in process. There is a
-`TaskTransport` trait beside it, but its only consumer, `RunnerSlot`, appears solely in tests -
-do not plan against it, and do not read `WorkerTasks` implementing it as evidence that the
-protocol is already abstracted. `WorkerTasks` is production, in its other role as `TaskPayloads`.
+Say plainly that those are the creator-facing surface and not the whole wire. A worker also has to
+be given work and report it, and that path is not a trait at all. `DeliverySlot` in
+`crates/zeroship-workflow-runner/src/delivery.rs` is what production runs, and its claim,
+heartbeat and completion reach the coordinator rather than a journal the host holds: those methods
+call `claim_job`, `heartbeat_job` and `complete_job` on the client, and the `&AppWorkflows` each
+one still takes is unused, with the comment at the claim giving the reason - a host that reaches
+the manager over HTTP holds no credential to it. `AppJournal` appears there as the type supplying
+the port's associated types, not as a journal the worker opens. What answers those calls lives in
+`crates/zeroship-workflow/src/service/delivery.rs` behind the routes in
+`crates/zeroship-workflow-server/src/api/jobs.rs`, and
+`crates/zeroship-cli/src/workflow/manager.rs` still calls them directly because locally it IS the
+service.
 
-Those three direct calls are what has to cross, and they are the half carrying the durability
-properties: `renewal` in `crates/zeroship-workflow-manager/src/queue.rs` is what advances the
+There is a `TaskTransport` trait beside `DeliverySlot`, but its only consumer, `RunnerSlot`,
+appears solely in tests - do not plan against it, and do not read `WorkerTasks` implementing it as
+evidence that the protocol is already abstracted. `WorkerTasks` is production, in its other role
+as `TaskPayloads`.
+
+Those three calls are the half carrying the durability properties, which is why they crossed ahead
+of the severance: `renewal` in `crates/zeroship-workflow-manager/src/queue.rs` is what advances the
 manager's evidence that an execution began, `complete_job` carries the outcome batch the fold
 consumes, and `settle_attempt` in `crates/zeroship-workflow/src/service/journal.rs` counts a
 reported execution of a run body. A reader who takes the creator seam as the whole surface will
-under-plan the cutover.
+under-read both the cutover and what it has already moved.
 
 ---
 
 ## SQLite dev tier
 
 The embedded store stays. `crates/zeroship-workflow/src/service/mod.rs` already says the engine is embedded "in customer
-workers **and local development**", and `WorkflowBackendFactory` already carries both a
-`Service` and a `Ready` variant, so both paths exist by construction rather than by a flag.
+workers **and local development**", and `WorkflowBackendFactory` already carries a `Service` variant beside `Remote` and `Ready`, so
+both paths exist by construction rather than by a flag.
 
 Two consequences to record in `docs/reference/sqlite-divergences.md` rather than leave silent:
 the dev tier keeps the journal in the local file and therefore exercises the SQL store that
 production no longer uses, so a dev-tier pass is not evidence about the production write path;
-and `SCHEMA_PLACEHOLDER` survives for that tier alone.
+and the dev tier binds no schema at all, so it exercises none of the substitution the PostgreSQL
+path depends on. `SCHEMA_PLACEHOLDER` belongs to the PostgreSQL artifact, not to this tier:
+`the_sqlite_artifact_needs_no_binding` (`crates/zeroship-workflow-schema/src/lib.rs`) asserts the
+SQLite SQL must not carry it, while `the_template_still_carries_the_placeholder` in the same module
+requires the PostgreSQL template to.
+
+Write those rows when the severance lands, not before. That page states what is true of the two
+tiers now, one row at a time with the consequence for a caller, and the first of these is not true
+until production stops reaching the creator-schema store. Its neighbour is the existing
+"Platform tables in your database" row, which already explains why `__zeroship_` tables sit in the
+creator's own file on this tier.
 
 ---
 
@@ -532,8 +564,9 @@ protocol. This extends a working client rather than inventing one.
    `execute`, and `acknowledge` settles the receipt it returned.
 
    **Take the heartbeat first; its server half waits.** Production journals per app
-   into the creator's own schema - `JournalLocation::CreatorSchema` in
-   `crates/zeroship-worker/src/main.rs` - while `RunService` holds one platform
+   into the creator's own schema - `app_schema` in
+   `crates/zeroship-worker/src/workflow_host.rs`, which composes
+   `app_derivation::schema_name(app)` - while `RunService` holds one platform
    `workflow_manager` schema, so a merged server handler would have no rows to touch. The
    client, wire and DTO halves land green; leave
    `crates/zeroship-workflow-server/src/api/jobs.rs` alone until the cutover animates it.
@@ -1070,31 +1103,82 @@ protocol. This extends a working client rather than inventing one.
      (`crates/zeroship-workflow/src/deployment_holds/mod.rs`), which mints an asserted client per
      app and scopes each to the one app it was asked for.
    - **Then the payload reserve and confirm**, since `start` and `stage` share that one
-     mechanism, and the confirm must gain the `state` and `expires_at` predicates it does not
-     need while a lock is held across the write. Predicates alone do not make it a compare and
-     swap. The confirm discards its update's result today
-     (`crates/zeroship-workflow/src/service/payloads.rs`), so narrowing the filter without
-     reading the count would turn a lost reservation into a silent success - a row nothing
-     matched, reported as staged. The arm it needs is already the idiom in this crate:
-     `if !matches!(changed, Output::Count(1))`, in
+     mechanism. What the lock across the write actually holds is mutual exclusion between the
+     WRITER and the COLLECTOR, which its own comment says
+     (`crates/zeroship-workflow/src/service/payloads.rs`): a bounded upload holds it until the
+     store finishes, so GC cannot race a live writer. So the question a crossing has to answer is
+     not whether the confirm can move, it is what replaces that exclusion - and the answer is that
+     the collector already fences durably instead of relying on the lock. `fence_payload`
+     (`crates/zeroship-workflow/src/service/payloads/collection.rs`) moves the row `uploading` to
+     `deleting` under a compare-and-swap guarded by `changed_once` and COMMITS that transition
+     before `collect_payload_checked` calls `deleter.delete`, so a confirm comparing and swapping
+     on `state = "uploading"` and the deadline the reserve wrote cannot win once the collector has
+     claimed the row. The one thing exclusion additionally bought, bytes landing after the row is
+     gone, is already designed for: that module's header records a two-deletion tombstone with a
+     resweep one staging window away, expressly because an upload dispatched by a dead writer may
+     still arrive.
+     So the confirm becomes a counted compare-and-swap, and the count is the mechanism rather than
+     a precaution. The confirm discards its update's result today, so narrowing the filter without
+     reading the count would turn a confirm that LOST to the fence into a silent success: a row
+     nothing matched, reported as staged, whose bytes the collector is about to delete. The arm it
+     needs is already the idiom in this crate: `if !matches!(changed, Output::Count(1))`, in
      `crates/zeroship-workflow/src/service/delivery.rs` and
-     `crates/zeroship-workflow/src/service/activation.rs`, where the filter carries the state the
-     caller expects and the count is what proves the swap happened.
+     `crates/zeroship-workflow/src/service/activation.rs`. The predicate gates only `uploading` to
+     `staged`, and `staged` and `referenced` must read as already done and successful the way
+     `stage_inner`'s second transaction does, or a retried confirm after a lost acknowledgement
+     becomes a failure instead of the ordinary case.
+     And the confirm has to ride the SETTLEMENT rather than a call of its own, for an ordering
+     reason the fold argument above does not supply. `owned_reference`
+     (`crates/zeroship-workflow/src/service/payloads.rs`), which `promote` resolves a descriptor
+     through, has arms for `staged` and for `referenced` and none for `uploading`, so an outcome
+     naming an object nothing has confirmed is refused as a missing payload. The confirm therefore
+     has to commit in the same transaction as the frontier that references it, ahead of the
+     promotion: a separate call would either commit first and leave a staged orphan behind a failed
+     settlement, or commit after and lose the ordering `promote` needs. That is why the
+     confirmations are a field on the reported execution, empty for the holders that uploaded
+     nothing and absent from the wire when empty.
+     The index dedupes one path and not the other, which is the part a reader gets wrong in the
+     safe-seeming direction. `__zeroship_workflow_payload_upload_request` is unique on
+     `("app_id","task_id","request_id")`, so on the LEASED path, where `task_id` is non-NULL, it
+     does bite and a duplicate insert violates it; on the ownerless path `task_id` is NULL, a
+     unique index enforces nothing over NULL, and the index protects nothing at all. Seeing the
+     index and assuming it covers staging is therefore the wrong reading. What dedupes on both is
+     the service-side select on `(app_id, request_id)`, narrowed by the task term only when a task
+     exists, plus the refusal when a request id is reused for different bytes. Crossing keeps that
+     select on the service side, so what it adds is an obligation on the caller: a retry resends
+     the SAME `RequestId`, which belongs in the endpoint's own contract rather than staying an
+     internal detail, and a test of it must assert the lookup rather than the index.
    - **Then the backend**, cheapest first: the three methods whose halves the wire-pair test
      already binds, then `start`, then the two reads as two-phase.
    - **Then the merged heartbeat**, which cannot land until its timeout budget is settled.
-   - **Then the worker stops holding a journal**, which is the flag and is bigger than the enum.
-     Flipping `JournalLocation::CreatorSchema` to `Service(..)` does NOT point the worker at the
-     service's journal: `ProductionResources::resolve`
-     (`crates/zeroship-worker/src/workflow_host.rs`) builds its `HostStorage` over
-     `self.db.connection()`, the CREATOR database, whichever schema the enum picks, while
-     `RunService::connect` opens `workflow_manager` through
-     `ConnectionFactory::for_platform_url`. The arms differ by schema, not by database. So the
+   - **Then the worker stops holding a journal**, which is the flag and is bigger than a schema
+     switch. There is no two-armed choice left to flip, because the one that existed collapsed:
+     `ProductionResources::resolve` (`crates/zeroship-worker/src/workflow_host.rs`) builds its
+     `HostStorage` over `self.db.connection()`, the CREATOR database, composing the schema with
+     `app_schema`, while `RunService::connect` opens `workflow_manager` through
+     `ConnectionFactory::for_platform_url`. A schema switch differs by schema, not by database. So the
      flag is either repointing the worker's journal connection at the platform database, or the
      worker opening no journal at all and reaching the service over HTTP. The first of those is
      what the do-not note below forbids - a DSN to the journal database held by the one process
      that executes creator code, whose only tenant separation is an `app_id` column - so the flag
      has one arm rather than two, and the worker opening no journal is it.
+
+     **That arm is built and nothing constructs it, so the severance is a wiring change with a
+     known single site.** `RemoteBackend` (`crates/zeroship-workflow-runner/src/remote.rs`)
+     implements `WorkflowBackend`, and `WorkflowBinding::remote`
+     (`crates/zeroship-workflow-v8/src/lib.rs`) binds a host that holds no journal to the service
+     over HTTP. Neither has a caller anywhere, production or test. Meanwhile
+     `WorkflowBinding::service` has exactly three production callers, and only one of them is the
+     worker: `crates/zeroship-worker/src/workflow_runtime.rs` is the site that becomes `::remote`,
+     while `crates/zeroship-cli/src/workflow.rs` and the push inside
+     `crates/zeroship-workflow-v8/src/loader.rs` stay, because `AppRuntimeLoader` is constructed
+     only by `crates/zeroship-cli/src/workflow/host.rs` - the dev tier, which keeps its journal
+     local by design. `WorkflowBinding::ready`, whose one production caller is
+     `crates/zeroship-worker/src/cache.rs`, is a different arm and is not part of this.
+     So the severance is that one switch plus removing the worker's own journal store, the
+     `HostStorage` that `ProductionResources::resolve` builds. Verify the claim rather than
+     trusting it: list the callers of each `WorkflowBinding` constructor and check that `::remote`
+     has acquired one.
 
      **And it is gated on the TASK protocol crossing, not only the creator seam.** Measured on the
      branch: four journal readers sit on the execution path, none of them reached through
@@ -1107,13 +1191,16 @@ protocol. This extends a working client rather than inventing one.
      (`crates/zeroship-core/src/workflow_coordination/lifecycle.rs`) carries hash, size and content
      type and NO object key, so only the `payloads` row locates the object - which is why the
      descriptor-to-id step belongs before this bullet rather than after it.
-     `TaskPayloads::stage` holds its lock across the object write, and it is the one of the four
-     still to cross. The other three are served and bound: `TaskPayloads::read` answers to
-     `/v1/tasks/payload` and the executable RESOLUTION to `/v1/tasks/executable`, and `release_job`
-     and `job_receipt`, reached from `DeliverySlot`'s release, recover and uncertain-reply arms,
-     answer to `/v1/jobs/release` and `/v1/jobs/receipt`. Each of those carries a route, a client
-     method, a grant to `svc/worker` and a row in the pinned authorization table, so none of them is
-     a declared endpoint nothing serves.
+     `TaskPayloads::stage` is the one of the four still crossing, and it crosses in two pieces
+     rather than one, because the lock it holds across the object write is what a boundary cannot
+     hold. The RESERVATION has crossed, at `/v1/tasks/payload/reserve`; what remains is the
+     CONFIRM, folded into the settlement as a counted compare-and-swap. The other three are served
+     and bound: `TaskPayloads::read` answers to `/v1/tasks/payload` and the executable RESOLUTION
+     to `/v1/tasks/executable`, and `release_job` and `job_receipt`, reached from `DeliverySlot`'s
+     release, recover and uncertain-reply arms, answer to `/v1/jobs/release` and
+     `/v1/jobs/receipt`. Each of those carries a route, a client method, a grant to `svc/worker`
+     and a row in the pinned authorization table, so none of them is a declared endpoint nothing
+     serves.
      Severing the journal while any of the four is uncrossed does not move the break, it relocates
      it: a run started through the service's journal is then executed against the creator's and finds
      no task. So `stage` is what the severance waits on, and the read is the shape to copy -
@@ -1169,9 +1256,18 @@ protocol. This extends a working client rather than inventing one.
      `generation`, and `validate_live` (`crates/zeroship-workflow/src/service/tasks.rs`) already
      refuses when `run.generation != task.generation`. So which deployment a dispatch replays against
      is reachable from the task, and the settle-side fence is the journal comparing its own past
-     record against its own present state - availability and admission generation re-read fresh,
-     under an update-as-lock requiring exactly one affected row. That cannot be skipped by omission,
-     which an echo can.
+     record against its own present state. What it re-reads is AVAILABILITY, and deliberately not
+     admission: a parked deployment means the bytes that produced the result are disowned, so
+     committing would record a result derived from an artifact the journal has quarantined, while
+     withdrawn admission means no NEW work should start - which is enforced where work is admitted,
+     at `tasks::assign` and the artifact load. Refusing a commit for withdrawn admission would
+     discard creator work that has already run and force a replay, so the fence must not check it.
+     The read is a LOCKED READ rather than an update-as-lock, because the comparison no longer
+     crosses a request boundary and the caller already holds the app and run locks `authorized_task`
+     took; inside that transaction a read is exactly as strong and says what it means. And it is
+     still-available rather than unchanged, since nothing records an availability epoch at load, so
+     a caller-free check can only claim the deployment is not parked at the moment of the commit.
+     That cannot be skipped by omission, which an echo can.
      So the settlement's addition is the quarantine alone: optional, absent in the ordinary case, and
      byte-identical to today's settlement when nothing was damaged. `accepts_execution()`'s symmetry
      with the claim reply still holds, and it is now the reason there is no registration field rather
@@ -1180,7 +1276,10 @@ protocol. This extends a working client rather than inventing one.
      should not restore it by adding a field.
      One arm sits outside this fence on purpose: a settlement replayed against an already-completed
      task returns the stored receipt before any re-validation, because there is nothing left to
-     commit, and `fanout`/`propagation`'s `preserve_scope_without_holds` assert exactly that
+     commit, and `fanout_delivery_and_receipts_preserve_scope_without_holds`
+     (`crates/zeroship-workflow-server/tests/http_jobs/fanout.rs`) and
+     `propagation_delivery_and_receipts_preserve_scope_without_holds`
+     (`crates/zeroship-workflow-server/tests/http_jobs/propagation.rs`) assert exactly that
      idempotence. Demanding evidence there would fail a replay that must succeed.
 
 
@@ -1505,8 +1604,9 @@ protocol. This extends a working client rather than inventing one.
    **Three shared names must not follow the deletion, and a tree-wide search for any of them
    argues for deleting far too much.** `SCHEMA_PLACEHOLDER` names two different constants: the
    private charter token above, which goes, and the public quoted DDL token in
-   `crates/zeroship-workflow-schema/src/lib.rs`, which stays, for the reason given under the
-   design and again under the SQLite dev tier. `ensure_journal` also names
+   `crates/zeroship-workflow-schema/src/lib.rs`, which stays because the PostgreSQL template ships
+   carrying it and the platform migration binds the target schema into it, quoted; the do-not note
+   below pins both halves with tests. `ensure_journal` also names
    `MigrationBackend::ensure_journal` across the `zeroship-migrate-*` crates, which creates the
    migration stamp table and is unrelated to the workflow journal; it is most of what searching
    the name returns. `SchemaBundleOutcome` and the rest of
@@ -1545,6 +1645,59 @@ protocol. This extends a working client rather than inventing one.
    it from the engine is what this step means: once the `service/` tree has moved to the
    service, the engine holds no store and needs no ORM. It is the last step because nothing
    earlier makes the engine storeless, not because it is hard.
+
+
+   **This step's precondition is unowned work, and it is worth naming before someone reaches this
+   step and finds it blocked.** Nothing above moves the `service/` tree. Step 5's last bullet stops
+   the WORKER from holding a journal, which is not the same as the engine ceasing to hold one. For
+   `crates/zeroship-workflow/Cargo.toml` to stop declaring the ORM, no file in that crate may name
+   `zeroship_data_orm`, and most of the files under `crates/zeroship-workflow/src/service/` do,
+   while nothing outside `service/` in that crate names it at all. That containment is what makes
+   the tree the unit in practice even though part of it is already ORM-free. Measure both halves
+   rather than trusting a count written here.
+
+   The callers outside the engine split, and the split decides how much has to move. The
+   store-bound ones are what the severance removes: `crates/zeroship-worker/src/workflow_runtime.rs`
+   and the runner's `outputs.rs` and `payloads/objects.rs` reach the embedded service, and a worker
+   that holds no journal cannot construct what they ask for. The type-only ones carry no store and
+   need not follow it: `crates/zeroship-control/src/publication/command.rs` and
+   `crates/zeroship-control/src/deployment_hold_api.rs` name `BundleDeclarations`,
+   `DeployRegistration` and `DeployRegistrationRequest`, which are declaration shapes rather than
+   journal access.
+
+   **What is NOT settled is the destination, and the dev tier is why.** `AppBackend` is store-bound,
+   and `crates/zeroship-workflow-v8/src/lib.rs` composes it through
+   `WorkflowBackendFactory::service`, which the embedded tier still needs because the SQLite dev
+   tier keeps the journal local by design. So the store-bound code cannot move behind the service's
+   HTTP surface; it has to live somewhere both the service and the local host reach.
+   `crates/zeroship-workflow-server/Cargo.toml` already declares the ORM, which makes it the
+   obvious home, but putting it there means `zeroship-workflow-v8` reaches the server crate for
+   `AppBackend`. Settle that before starting the move rather than during it.
+
+   **And the move is not a clean lift, because the engine's own central trait names a store-bound
+   type.** `crates/zeroship-workflow/src/backend.rs` - the file that defines `WorkflowBackend`,
+   the narrow creator-facing seam this whole design turns on - takes
+   `&crate::service::AppWorkflows` in four of its method signatures, and `AppWorkflows`
+   (`crates/zeroship-workflow/src/service/app.rs`) holds a `WorkflowService`, which holds the
+   store. So the engine cannot be storeless while `backend.rs` names that type, and only two files
+   outside `service/` reach into it at all: `backend.rs` and
+   `crates/zeroship-workflow/src/deploy_registrations.rs`.
+
+   The two references are not the same problem. `RequestId` is only a re-export -
+   `crates/zeroship-workflow/src/service/types.rs` re-exports
+   `zeroship_core::workflow_coordination::RequestId` - so that one is an import redirected at the
+   leaf it already came from. `AppWorkflows` is the real coupling.
+
+   That points at a shape worth weighing against putting the code in the server crate, because it
+   avoids the inversion: move `service/` together with `backend.rs` and `deploy_registrations.rs`
+   into a crate of their own, leaving `crates/zeroship-workflow/src/engine.rs` and the pure fold
+   behind. Nothing outside `service/` in that crate reaches it other than those two files, so the
+   new crate would depend on the engine and not the reverse, and the server, `zeroship-workflow-v8`,
+   `zeroship-cli` and `zeroship-control` would all depend on the new crate rather than
+   `zeroship-workflow-v8` depending on the server. Whether that crate is wanted, and what it is
+   called, is still the open decision; what is now measured is that the alternative to it is a
+   dependency edge from a V8 binding to a service binary, and that either way `AppWorkflows` has to
+   be dealt with rather than lifted.
 
 **Latency is not the gate; payload is, and its bound is settled.** Open 1 holds the answer and
 names `crates/zeroship-workflow-client/tests/round_trip_cost.rs` as the instrument: re-run it
@@ -2062,13 +2215,14 @@ part that dates, not the verdict.
 
    **Nothing in the database scopes any of it.** The journal declares no role, no row-level
    security and no grant (`crates/zeroship-workflow-schema/schema/schema.ts`). What binds the
-   handle is the schema the host composes and a check in Rust. `JournalLocation`
-   (`crates/zeroship-worker/src/workflow_host.rs`) answers `CreatorSchema` through
-   `app_derivation::schema_name`, which returns the app id, so a schema holds a single app; its
-   other arm is one journal "for every app, in a schema the service owns". `Transaction::check_app`
+   handle is the schema the host composes and a check in Rust. `app_schema`
+   (`crates/zeroship-worker/src/workflow_host.rs`) composes it through
+   `app_derivation::schema_name`, which returns the app id, so a schema holds a single app. A
+   service-owned journal is instead one journal for every app, in a schema the service owns.
+   `Transaction::check_app`
    (`crates/zeroship-workflow/src/service/store.rs`) refuses a foreign app, and engages only
    where a policy binding is set, while `OrmStore::begin` in the same file sets none and the
-   worker holds the store. Under that other arm the Rust check is the whole fence, which is Why
+   worker holds the store. Under a service-owned journal the Rust check is the whole fence, which is Why
    it is this way seen from the worker's side.
 
    **What it would hold afterwards is its task and the reply.** `accept_job` answers a
@@ -2354,8 +2508,12 @@ part that dates, not the verdict.
   because it reads as protection: the `app_id` column looks like a tenant boundary in a query
   and is only a filter.
 
-- **Do not make the storage seam the RPC boundary.** The store spans roughly twenty tables; the
-  creator-facing backend is seven methods. Move the whole engine, not the store.
+- **Do not make the storage seam the RPC boundary.** The store spans the whole journal schema
+  while the creator-facing backend is one small trait, so the two seams are nowhere near the same
+  size. Count `CREATE TABLE` in the generated
+  `crates/zeroship-workflow-schema/schema/postgres.sql` against the methods on `WorkflowBackend`
+  (`crates/zeroship-workflow/src/backend.rs`) rather than trusting a number written here. Move the
+  whole engine, not the store.
 
 - **Do not leave the journal in a creator schema and grant it explicitly.** That is the interim
   repair for defect 3, and it re-establishes the two ownership defects it was written to work
@@ -2365,10 +2523,19 @@ part that dates, not the verdict.
   model. Any future step that relies on a journal record and a data write committing together
   is relying on something that has never been true and cannot be true across processes.
 
-- **Do not keep `SCHEMA_PLACEHOLDER` on the PostgreSQL path "for symmetry".** One fixed schema
-  needs no substitution, and a placeholder that is always replaced with the same value is a
-  seam inviting a caller to pass something else. It survives for SQLite because that tier has a
-  genuine reason.
+- **Do not delete `SCHEMA_PLACEHOLDER` from the PostgreSQL path.** It is that artifact's binding
+  seam rather than a symmetry with SQLite, and the direction is the opposite of what a reader
+  might guess: the generated PostgreSQL template ships carrying it and the platform migration
+  substitutes the target schema in, quoted, while the SQLite artifact has no schema to bind and
+  must not carry it at all. Both halves are pinned in
+  `crates/zeroship-workflow-schema/src/lib.rs` - `the_template_still_carries_the_placeholder`
+  requires the template to keep it and to leave none behind once bound, and
+  `the_sqlite_artifact_needs_no_binding` requires the SQLite SQL to be free of it. A fixed target
+  schema does not remove the need, and the QUOTED form is the reason: `STAMP_TABLE` is
+  `__zeroship_workflow_schema_version`, which contains the placeholder's bare word, so
+  substituting unquoted would rewrite the stamp table's name along with the schema.
+  `substitution_matches_the_orm_quoting_rule` holds the substitution to `zeroship_data_orm`'s own
+  quoting rule, which is what keeps the one caller-supplied name reaching generated DDL narrow.
 
 - **Do not split claimants by which host holds the payload store.** Blob storage keeps large
   objects out of the database, so the process that owns the journal owns the store those objects
@@ -2389,7 +2556,11 @@ part that dates, not the verdict.
 ## History
 
 `docs/proposals/2026-08-28-app-database-decoupling.md` is the sibling that makes defect 4 real
-and defect 3 urgent; its Open 3 is closed by this document.
+and defect 3 urgent. What this document answers there is that document's own claim - "This
+deletion breaks the workflow journal, and the ordering is load-bearing" - and not one of its
+numbered Open items, none of which concerns the journal. Its History cites this one in return,
+for "the workflow journal leaving creator schemas, which this design requires before its column
+grants land".
 `docs/proposals/2026-08-28-migration-record-consolidation.md` sets the rule this one deliberately
 departs from: a creator-owned journal is correct for migrations, where corruption breaks only
 the creator, and wrong for workflows, where the platform is executing against it.
