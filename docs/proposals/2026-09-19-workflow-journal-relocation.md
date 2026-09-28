@@ -859,7 +859,9 @@ protocol. This extends a working client rather than inventing one.
    are already decoupled by a commit on that path, and the manager already owns when it runs.
    It is separate, smaller work carrying its own contract.
 
-5. **Cut the worker over to the remote variants, and own what step 4 does not.** This is the
+5. **DONE. The worker holds no journal; every journal fact crosses.** All four execution-path
+   readers cross, the flip is made, and `ProductionResources::resolve` builds no store. What follows
+   records why it took the shape it did. This is the
    flag day, and step 4's server half is inside it rather than before it.
 
    **An HTTP `WorkflowBackend`, which is not the easy half.** Only `AppBackend`
