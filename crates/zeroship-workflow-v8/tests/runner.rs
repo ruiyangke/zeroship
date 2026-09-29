@@ -147,6 +147,9 @@ struct Fixture {
     app: AppWorkflows,
     objects: PayloadObjects,
     loader: Rc<Loader>,
+    /// The hash of the deploy this fixture activated, so a case can reach the
+    /// manifest an assignment names without polling for a task to read it off.
+    deploy_hash: String,
 }
 impl Fixture {
     async fn new(source: &str) -> Self {
@@ -202,6 +205,7 @@ impl Fixture {
         Self {
             directory: dir,
             deployments,
+            deploy_hash: declaration.hash,
             app: api.clone(),
             service: service.clone(),
             objects: objects.clone(),
@@ -1083,6 +1087,14 @@ async fn drive_until_disposed(
     .is_ok()
 }
 
+/// How long a case drives delivery when what it asserts is what the host did
+/// while it could not finish.
+///
+/// Long enough for a claim to be delivered and attempted, and well inside the
+/// manager's lease, so a case counting what happened once sees one attempt
+/// rather than a redelivery.
+const DRIVE_WINDOW: Duration = Duration::from_secs(1);
+
 /// Drive delivery for a fixed window, for the cases whose run never settles.
 ///
 /// A payload outage leaves the frontier retryable on purpose, so there is no
@@ -1290,7 +1302,6 @@ async fn replay_loads_retained_dependencies_after_redeploy_and_host_restart() {
 
 #[compio::test]
 async fn missing_executable_never_constructs_an_app_isolate() {
-    use zeroship_workflow_runner::TaskTransport;
     let fixture =
         Fixture::new("throw new Error('must not evaluate'); export class Example {}").await;
     let run = fixture
@@ -1298,25 +1309,18 @@ async fn missing_executable_never_constructs_an_app_isolate() {
         .start(&RequestId::mint(), "Example", StartOptions::default())
         .await
         .unwrap();
-    let tasks = fixture
-        .service
-        .tasks(
-            WorkerIdentity::new("inspect-executable".into()).unwrap(),
-            fixture.objects.clone(),
-        );
-    let task = tasks.poll().await.unwrap().unwrap();
     assert!(fixture
         .deployments
         .source
-        .delete_manifest(fixture.app.app_id(), &task.invocation.deploy_hash)
+        .delete_manifest(fixture.app.app_id(), &fixture.deploy_hash)
         .await
         .unwrap());
-    tasks.release(&task.id, &task.token).await.unwrap();
-    assert!(matches!(
-        fixture.runner(Duration::from_secs(5)).run_once().await,
-        Err(WorkflowServiceError::Unavailable(_))
-    ));
+    let manager = Manager::new(&fixture).await;
+    let mut consumer = manager.consumer(&fixture, 1);
+    drive_for(&fixture, &manager, &mut consumer, DRIVE_WINDOW).await;
     assert!(fixture.loader.probes.borrow().is_empty());
+    // An executable the host cannot load is not the creator's failure, so the
+    // frontier stays retryable rather than settling the run.
     assert!(!fixture
         .app
         .status(&run.id)
@@ -1324,7 +1328,25 @@ async fn missing_executable_never_constructs_an_app_isolate() {
         .unwrap()
         .state
         .is_terminal());
-    assert!(tasks.poll().await.unwrap().is_none());
+}
+
+#[compio::test]
+async fn an_available_executable_constructs_an_app_isolate() {
+    // The control for the case above: the same drive over the same run and the
+    // same window, differing only in whether the manifest the assignment names
+    // is still there. Without it, an empty `probes` would prove the host built
+    // no isolate OR that nothing was ever delivered to it.
+    let fixture =
+        Fixture::new("throw new Error('must not evaluate'); export class Example {}").await;
+    fixture
+        .app
+        .start(&RequestId::mint(), "Example", StartOptions::default())
+        .await
+        .unwrap();
+    let manager = Manager::new(&fixture).await;
+    let mut consumer = manager.consumer(&fixture, 1);
+    drive_for(&fixture, &manager, &mut consumer, DRIVE_WINDOW).await;
+    assert!(!fixture.loader.probes.borrow().is_empty());
 }
 
 /// A native manager queue delivering to one trusted worker, as the CLI host
