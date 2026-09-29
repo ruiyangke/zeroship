@@ -139,9 +139,9 @@ fn workflow_host_dry_run(settings: &[&str]) -> Output {
 /// The workflow host is optional, and a configured one must be able to run.
 ///
 /// Every manager exchange is signed with this instance's enrolled key, so the
-/// origin is part of that credential's trust boundary; and the host prepares
-/// creator journals in the worker's own database and stages payloads in its own
-/// object store. A worker that bound its port and then registered capacity it
+/// origin is part of that credential's trust boundary; and the host runs
+/// creator code against the worker's own database and stages payloads in its
+/// own object store. A worker that bound its port and then registered capacity it
 /// could never serve would strand every placement the manager gave it, so each
 /// of these is a refusal, not a warning. `--check-config` reaches the same gate,
 /// which is why the refusals are observable without binding anything.
