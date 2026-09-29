@@ -53,21 +53,17 @@ thiserror = { workspace = true }
 # best-effort RESET ROLE). A facade, no runtime.
 tracing = { workspace = true }
 
-[features]
-# TEST-ONLY. Publishes `backend::recording`, the canned `SqlSession` this crate's own
-# unit tests drive, so the ENGINE's integration tests can drive the SAME double. Five
-# tests over that recorder also drive `MigrationEngine` / `AppliedPlan` /
-# `history_via_backend`, which a vendor crate cannot reach (the engine depends on this
-# crate, so the edge back is a cycle), and a SECOND copy of the recorder is the hazard
-# this avoids: its canned rows are the shared premise of both suites and two copies
-# drift silently.
-#
-# `zeroship-migrate` names it under `[dev-dependencies]` only. Resolver 3 keeps
-# dev-dependency features out of the normal build, so a shipping
-# `zeroship-migrate-postgres` compiles none of it.
-testing = []
-
 [dev-dependencies]
+# TEST-ONLY: the canned `SqlSession` this crate's own unit tests drive. The ENGINE's
+# integration tests drive the SAME object, because tests over that recorder also
+# reach `MigrationEngine` / `AppliedPlan` / `history_via_backend`, which a vendor
+# crate cannot name (the engine depends on this crate, so the edge back is a cycle).
+# A second copy of the recorder is the hazard the shared crate avoids: its canned
+# rows are the premise of both suites and two copies drift silently.
+#
+# It reaches the contract and the IR, never this crate, so the edge runs one way and
+# a shipping `zeroship-migrate-postgres` links none of it.
+zeroship-migrate-postgres-recording = { workspace = true }
 # TEST-ONLY: the `MigrationBackend` surface is `async`, so the unit tests that drive
 # it spin a throwaway compio run loop per test (zero tokio), exactly as the engine's
 # own async-apply harness does. NO shipped code in this crate links it.

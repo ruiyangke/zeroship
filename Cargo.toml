@@ -10,8 +10,8 @@ exclude = [
 # ---------------------------------------------------------------------------
 # Shared package metadata
 # ---------------------------------------------------------------------------
-# The migration-engine crates inherit these three keys rather than repeating
-# them nine times. Every other crate in this workspace states its own, so this
+# The migration-engine crates inherit these three keys rather than each
+# repeating them. Every other crate in this workspace states its own, so this
 # table serves the engine alone and adding it changed nothing for the rest.
 [workspace.package]
 version = "0.1.0"
@@ -234,6 +234,12 @@ zeroship-migrate-core = { path = "crates/zeroship-migrate-core" }
 zeroship-migrate-postgres = { path = "crates/zeroship-migrate-postgres" }
 zeroship-migrate-sqlite = { path = "crates/zeroship-migrate-sqlite" }
 zeroship-migrate-mysql = { path = "crates/zeroship-migrate-mysql" }
+# The two vendors' canned `SqlSession` doubles. DEV-ONLY: every entry that names
+# either of these is a `[dev-dependencies]` entry, in the vendor crate whose SQL
+# the double records and in the engine whose apply paths the same double drives.
+# A normal-dependency entry on either is a shipped crate linking a test double.
+zeroship-migrate-postgres-recording = { path = "crates/zeroship-migrate-postgres-recording" }
+zeroship-migrate-mysql-recording = { path = "crates/zeroship-migrate-mysql-recording" }
 zeroship-data-v8 = { path = "crates/zeroship-data-v8" }
 zeroship-storage = { path = "crates/zeroship-storage", default-features = false }
 zeroship-storage-v8 = { path = "crates/zeroship-storage-v8" }

@@ -35,12 +35,6 @@ pub(crate) mod session;
 /// [`MigrationBackend`](zeroship_migrate_backend::backend::MigrationBackend).
 pub mod status_sql;
 
-/// The canned `SqlSession` this backend's tests drive, shared with the engine's
-/// integration tests through the `testing` feature. See its own header for why it
-/// is not simply `#[cfg(test)]`.
-#[cfg(any(test, feature = "testing"))]
-pub mod recording;
-
 use zeroship_migrate_backend::backend::{
     CrossDeployObligations, JournalFuture, MigrationBackend, ProjectLockAcquisition,
     PROJECT_LOCK_TRY_ATTEMPTS, PROJECT_LOCK_TRY_BACKOFF,
@@ -961,17 +955,18 @@ impl<D: SqlSession> CrossDeployObligations for PostgresBackend<'_, D> {
 }
 
 /// Genericity proof: the apply path monomorphizes over a
-/// **non-compio** [`SqlSession`] driver. An in-crate recording driver records the
-/// SQL of every WRITE verb, and - the read side being widened to the
-/// driver-neutral [`Row`]/[`DbError`] - RETURNS canned `Row`s from
+/// **non-compio** [`SqlSession`] driver. The `zeroship-migrate-postgres-recording`
+/// driver records the SQL of every WRITE verb, and - the read side being widened to
+/// the driver-neutral [`Row`]/[`DbError`] - RETURNS canned `Row`s from
 /// its read verbs. This proves `PostgresBackend<'a, D>` is genuinely generic AND
 /// that a host driver can build return values without a `compio_postgres::Row`.
 #[cfg(test)]
-#[cfg(test)]
 mod recording_session_genericity {
     use super::*;
-    use crate::backend::recording::{canned_journal_row, InFlightGuard, RecordingSession};
     use std::sync::atomic::AtomicBool;
+    use zeroship_migrate_postgres_recording::{
+        canned_journal_row, InFlightGuard, RecordingSession,
+    };
 
     use zeroship_migrate_backend::driver::{Bind, Row, Value};
     use zeroship_migrate_backend::requirements::{DatabaseFeature, DatabaseRequirements};

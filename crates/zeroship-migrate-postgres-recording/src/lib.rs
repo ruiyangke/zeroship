@@ -1,27 +1,30 @@
-//! The canned [`SqlSession`] this backend's tests drive, and the plan steps they
-//! feed it.
+//! # `zeroship-migrate-postgres-recording` - the canned PostgreSQL [`SqlSession`]
 //!
-//! # Why this is a `feature`d module and not `#[cfg(test)]`
+//! The non-compio, host-shaped [`SqlSession`] the PostgreSQL apply path is driven
+//! over in tests, and the plan steps fed to it.
 //!
-//! Two suites need this one double, and they cannot be in the same crate.
+//! # Why this is a crate and not a `#[cfg(test)]` module
 //!
-//! Most of what it proves is vendor-internal - which SQL this backend emits, in
+//! Two suites drive this one double, and they cannot be in the same crate.
+//!
+//! What it proves about the vendor - which SQL `zeroship-migrate-postgres` emits, in
 //! which order, with which binds, and that the generic apply path is genuinely
-//! driver-neutral - and that stays here, as unit tests beside the code. Five of them
-//! additionally drive the ENGINE (`MigrationEngine::apply_plan_with_...`,
-//! `AppliedPlan`, `ops::status::history_via_backend`), and those cannot live in a
-//! vendor crate at all: `zero-migrate` depends on this crate, so the edge back is a
-//! cycle Cargo refuses. They are integration tests OF THE ENGINE driving a
-//! PostgreSQL backend, and they live in `zero-migrate/tests/pg_engine/`.
+//! driver-neutral - belongs beside that code, as unit tests in that crate. What it
+//! proves about the ENGINE (`MigrationEngine::apply_plan_with_...`, `AppliedPlan`,
+//! `ops::status::history_via_backend`) cannot live in a vendor crate at all:
+//! `zeroship-migrate` depends on `zeroship-migrate-postgres`, so the edge back is a
+//! cycle Cargo refuses. Those are integration tests OF THE ENGINE driving a
+//! PostgreSQL backend, and they live in `zeroship-migrate/tests/pg_engine/`.
 //!
-//! A second copy of the recorder over there would be the real hazard: its canned
-//! catalog and journal rows are the shared premise of both suites, and two copies
-//! drift silently - one suite would go on asserting against a row shape the other
-//! had already corrected. So there is ONE recorder, and the engine's test tree
-//! reaches it through the `testing` feature, which `zero-migrate` turns on in its
-//! `[dev-dependencies]` only. Resolver 3 keeps dev-dependency features out of the
-//! normal build, so nothing here is compiled into a shipping
-//! `zeroship-migrate-postgres`.
+//! A copy of the recorder on each side is the real hazard: its canned catalog and
+//! journal rows are the shared premise of both suites, and two copies drift silently
+//! - one suite would go on asserting against a row shape the other had already
+//! corrected. So there is ONE recorder, it lives here, and both sides name this
+//! crate under `[dev-dependencies]`.
+//!
+//! This crate reaches the contract (`zeroship-migrate-backend`) and the IR
+//! (`zeroship-migrate-ir`) and neither the vendor nor the engine, so the dependency
+//! edges run one way from both of its users and nothing shipped can link it.
 
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, Ordering};

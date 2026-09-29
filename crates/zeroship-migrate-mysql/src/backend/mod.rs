@@ -43,12 +43,6 @@ pub(crate) mod journal_sql;
 /// host mocking this journal answers the collation probe from the same list the
 /// bootstrap checks. Two hand-copied mirrors of it already drifted the moment a
 /// table was added.
-/// The canned `SqlSession` this backend's tests drive, shared with the engine's
-/// integration tests through the `testing` feature. See its own header for why it
-/// is not simply `#[cfg(test)]`.
-#[cfg(any(test, feature = "testing"))]
-pub mod recording;
-
 pub use journal_sql::BINARY_IDENTITY_COLUMNS;
 pub(crate) mod primary_key_sql;
 pub(crate) mod session;
@@ -1176,11 +1170,11 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
 /// it is indistinguishable from a bug here.
 #[cfg(test)]
 mod render_tests {
-    use super::recording::*;
     use super::*;
     use zeroship_migrate_backend::backend::ProjectLockHolder;
     use zeroship_migrate_backend::driver::{Bind, Row, Value};
     use zeroship_migrate_ir::probe::{GuardDir, GuardProbe};
+    use zeroship_migrate_mysql_recording::*;
 
     /// The backend reports the MySQL dialect, the `?` placeholder style, and
     /// non-transactional DDL (auto-commit => two-phase path for every migration).

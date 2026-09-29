@@ -33,22 +33,20 @@ tracing = { workspace = true }
 # PDP's types. A pure LEAF with no SQL dependencies.
 zeroship-migrate-policy = { workspace = true }
 
-[features]
-# TEST-ONLY. Publishes `backend::recording`, the canned `SqlSession` this crate's
-# own unit tests drive, so the ENGINE's integration tests can drive the SAME double.
-# Fourteen tests over that recorder also drive `apply_with_lock_backend` /
-# `MigrationEngine` / `diff_snapshots` / `fold_ops`, which a vendor crate cannot
-# reach (the engine depends on this crate, so the edge back is a cycle), and a
-# SECOND copy of the recorder is the hazard this avoids: its canned
-# `information_schema` rows are the shared premise of both suites and two copies
+[dev-dependencies]
+# TEST-ONLY: the canned `SqlSession` this crate's own unit tests drive. The ENGINE's
+# integration tests drive the SAME object, because tests over that recorder also
+# reach `apply_with_lock_backend` / `MigrationEngine` / `diff_snapshots` / `fold_ops`,
+# which a vendor crate cannot name (the engine depends on this crate, so the edge back
+# is a cycle). A second copy of the recorder is the hazard the shared crate avoids:
+# its canned `information_schema` rows are the premise of both suites and two copies
 # drift silently.
 #
-# `zeroship-migrate` names it under `[dev-dependencies]` only. Resolver 3 keeps
-# dev-dependency features out of the normal build, so a shipping
-# `zeroship-migrate-mysql` compiles none of it.
-testing = []
-
-[dev-dependencies]
+# The recorder crate names THIS one, for `MysqlInflightDdlMarker`. This entry is the
+# edge back and it is a DEV edge, which Cargo resolves: this crate's lib compiles
+# without the recorder, the recorder compiles against that lib, and this crate's test
+# targets compile against both. A shipping `zeroship-migrate-mysql` links none of it.
+zeroship-migrate-mysql-recording = { workspace = true }
 # TEST-ONLY: the async apply/backend surface is `async`, so the unit tests that
 # drive it spin a throwaway compio run loop per test (zero tokio), exactly as the
 # engine's own async-apply harness does.

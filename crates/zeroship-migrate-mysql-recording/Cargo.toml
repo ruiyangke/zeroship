@@ -1,0 +1,24 @@
+[package]
+name = "zeroship-migrate-mysql-recording"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The canned MySQL SqlSession both halves of zeroship-migrate's MySQL test coverage drive: the vendor's own unit tests in zeroship-migrate-mysql and the engine's integration tests in zeroship-migrate/tests/mysql_engine. A DEV-ONLY crate - both sides name it under [dev-dependencies]."
+
+[dependencies]
+# The CONTRACT the double implements and the vocabulary its canned rows are built
+# from: the `SqlSession` seam itself, `Bind`/`Row`/`Value`/`DbError`, the
+# `DatabaseRequirements`/`DatabaseFeature` answers and the `BindValue` shape.
+zeroship-migrate-backend = { workspace = true }
+# The migration identity the canned journal answers are keyed on: `MigrationId`,
+# `Checksum`, `MigrationFlags`, `Migration` and the `GuardProbe` vocabulary.
+zeroship-migrate-ir = { workspace = true }
+# `MysqlInflightDdlMarker` is this vendor's own operator-recovery type, and the
+# canned inflight marker IS one - the double cannot fake the shape the backend
+# reads back. The edge from the vendor to here is a `[dev-dependency]`, so the
+# vendor's shipped lib compiles without this crate, this crate compiles against
+# that lib, and the vendor's test targets compile against both.
+zeroship-migrate-mysql = { workspace = true }
+
+[lints]
+workspace = true

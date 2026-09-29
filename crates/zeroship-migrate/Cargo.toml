@@ -70,19 +70,16 @@ zeroship-migrate-policy = { workspace = true }
 # constraint to prove the bytes the author emitted are bytes PostgreSQL accepts.
 # pg_query carries a C build dep (libpg_query).
 pg_query = "6"
-# TEST-ONLY FEATURES on crates this manifest already depends on. Each publishes that
-# vendor's canned `SqlSession` recorder, which the vendor's own unit tests drive — and
-# which the suites here drive while ALSO driving `apply_with_lock_backend` /
-# `MigrationEngine` / `diff_snapshots` / `fold_ops`. Those four are the engine's, so
-# those tests cannot live in the vendor crate (the edge back is a cycle Cargo refuses)
-# — and a second copy of a recorder over here would be worse than the feature: its
-# canned `information_schema` rows are the shared premise of both suites, and two
-# copies drift silently.
-#
-# Resolver 3 keeps dev-dependency features out of the normal build, so a shipping
-# `zeroship-migrate` compiles none of it.
-zeroship-migrate-mysql = { workspace = true, features = ["testing"] }
-zeroship-migrate-postgres = { workspace = true, features = ["testing"] }
+# TEST-ONLY. Each vendor's canned `SqlSession` recorder. The suites here drive one of
+# these while ALSO driving `apply_with_lock_backend` / `MigrationEngine` /
+# `diff_snapshots` / `fold_ops`. Those four are the engine's, so those tests cannot
+# live in the vendor crate (the edge back is a cycle Cargo refuses) - and a second
+# copy of a recorder over here would be worse: its canned `information_schema` rows
+# are the shared premise of both suites, and two copies drift silently. So each
+# recorder is ONE object in a crate of its own, which the vendor's unit tests and
+# these suites both name under `[dev-dependencies]`.
+zeroship-migrate-mysql-recording = { workspace = true }
+zeroship-migrate-postgres-recording = { workspace = true }
 # TEST-ONLY: the SEAM-generic async apply/backend surface is `async`, so the test
 # harness drives it on a runtime. `#[compio::test]` spins a throwaway compio run loop
 # per test (zero tokio) to `.await` the seam-generic apply/journal/drift/status paths

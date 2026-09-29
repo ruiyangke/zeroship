@@ -1,31 +1,37 @@
-//! The canned [`SqlSession`] the MySQL backend's tests drive, and the catalog rows
-//! they feed it.
+//! # `zeroship-migrate-mysql-recording` - the canned MySQL [`SqlSession`]
 //!
-//! # Why this is a `feature`d module and not `#[cfg(test)]`
+//! The non-compio, host-shaped [`SqlSession`] the MySQL apply path is driven over in
+//! tests, and the catalog rows fed to it.
 //!
-//! Two suites need this one double, and they cannot be in the same crate.
+//! # Why this is a crate and not a `#[cfg(test)]` module
 //!
-//! Most of what it proves is vendor-internal - which SQL the backend emits, in which
-//! order, with which binds - and that stays here, as unit tests beside the code.
-//! Fourteen of them additionally drive the ENGINE (`apply_with_lock_backend`,
-//! `MigrationEngine`, `diff_snapshots`, `fold_ops`) over the same recorder, and those
-//! cannot live in a vendor crate at all: `zero-migrate` depends on this crate, so the
-//! edge back is a cycle Cargo refuses. They are integration tests OF THE ENGINE
-//! driving a MySQL backend, and they live in `zero-migrate/tests/mysql_engine/`.
+//! Two suites drive this one double, and they cannot be in the same crate.
 //!
-//! A second copy of the recorder over there would be the real hazard: its canned
+//! What it proves about the vendor - which SQL `zeroship-migrate-mysql` emits, in
+//! which order, with which binds - belongs beside that code, as unit tests in that
+//! crate. What it proves about the ENGINE (`apply_with_lock_backend`,
+//! `MigrationEngine`, `diff_snapshots`, `fold_ops`) cannot live in a vendor crate at
+//! all: `zeroship-migrate` depends on `zeroship-migrate-mysql`, so the edge back is a
+//! cycle Cargo refuses. Those are integration tests OF THE ENGINE driving a MySQL
+//! backend, and they live in `zeroship-migrate/tests/mysql_engine/`.
+//!
+//! A copy of the recorder on each side is the real hazard: its canned
 //! `information_schema` rows are the shared premise of both suites, and two copies
 //! drift silently - one suite would go on asserting against a catalog shape the other
-//! had already corrected. So there is ONE recorder, and the engine's test tree reaches
-//! it through the `testing` feature, which `zero-migrate` turns on in its
-//! `[dev-dependencies]` only. Resolver 3 keeps dev-dependency features out of the
-//! normal build, so nothing here is compiled into a shipping `zeroship-migrate-mysql`.
+//! had already corrected. So there is ONE recorder, it lives here, and both sides
+//! name this crate under `[dev-dependencies]`.
+//!
+//! [`MysqlInflightDdlMarker`] is the vendor's own operator-recovery type and a canned
+//! marker IS one, so this crate names `zeroship-migrate-mysql`. The edge from that
+//! crate back to here is a `[dev-dependency]`, which Cargo resolves: the vendor's lib
+//! compiles without this crate, this crate compiles against that lib, and the
+//! vendor's test targets compile against both. Nothing shipped links any of it.
 //!
 //! It returns canned rows for the reads the MySQL apply path issues: `GET_LOCK(...)`
 //! -> a single `got=1` row (lock acquired); the `information_schema.triggers`
 //! existence probe -> empty (so `ensure_journal` creates every trigger); the journal
-//! net-state reads -> empty. It is the MySQL analogue of the PG backend's in-crate
-//! `RecordingSession` genericity proof.
+//! net-state reads -> empty. It is the MySQL analogue of
+//! `zeroship-migrate-postgres-recording`.
 
 use std::cell::RefCell;
 
@@ -34,8 +40,7 @@ use zeroship_migrate_backend::requirements::{DatabaseFeature, DatabaseRequiremen
 use zeroship_migrate_backend::step::BindValue;
 use zeroship_migrate_ir::migration::{Checksum, Migration, MigrationFlags, MigrationId};
 use zeroship_migrate_ir::probe::GuardProbe;
-
-use super::MysqlInflightDdlMarker;
+use zeroship_migrate_mysql::MysqlInflightDdlMarker;
 
 /// The MySQL connection id the canned holder probe reports. Distinct from the
 /// `performance_schema` thread id the lock rows carry, because the reply must
@@ -47,8 +52,8 @@ pub const HOLDER_CONNECTION_ID: i64 = 113_110;
 /// `GET_LOCK(...)` -> a single `got=1` row (lock acquired); the
 /// `information_schema.triggers` existence probe -> empty (so `ensure_journal`
 /// creates every trigger); the journal net-state reads -> empty. This is the
-/// MySQL analogue of the PG backend's in-crate `RecordingSession` genericity
-/// proof.
+/// MySQL analogue of `zeroship-migrate-postgres-recording`'s `RecordingSession`
+/// genericity proof.
 #[derive(Debug)]
 pub struct RecordingSession {
     pub log: RefCell<Vec<String>>,

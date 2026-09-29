@@ -1,16 +1,16 @@
-//! The five recorder-driven tests that drive the ENGINE, not the PostgreSQL backend.
+//! The recorder-driven tests that drive the ENGINE, not the PostgreSQL backend.
 //!
 //! They came out of `apply/backend/postgres/mod.rs` with the rest of the execution
 //! half, and they are the ones that could not follow it into
 //! `zeroship-migrate-postgres`: each drives `MigrationEngine`, `AppliedPlan` or
-//! `ops::status::history_via_backend`, which are the engine's, and `zero-migrate`
+//! `ops::status::history_via_backend`, which are the engine's, and `zeroship-migrate`
 //! depends on `zeroship-migrate-postgres`, so a vendor crate reaching back is a cycle
 //! Cargo refuses.
 //!
-//! They drive the SAME recorder the eight vendor-internal ones do, reached through
-//! `zeroship-migrate-postgres`'s `testing` feature. A second copy of that canned catalog
-//! is the hazard the feature exists to avoid: its rows are the shared premise of
-//! both suites and two copies drift silently.
+//! They drive the SAME recorder the vendor-internal ones do, reached through
+//! `zeroship-migrate-postgres-recording` - a dev-only crate both sides name. A copy of
+//! that canned catalog on each side is the hazard one shared crate avoids: its rows
+//! are the shared premise of both suites and two copies drift silently.
 
 use crate::support;
 
@@ -26,10 +26,10 @@ use zeroship_migrate_backend::executor::{ApplyError, LockMode};
 use zeroship_migrate_backend::requirements::DatabaseFeature;
 use zeroship_migrate_backend::step::PlanStep;
 use zeroship_migrate_ir::migration::{Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId};
-use zeroship_migrate_postgres::backend::recording::{
+use zeroship_migrate_postgres::backend::{journal_sql, status_sql, PostgresBackend};
+use zeroship_migrate_postgres_recording::{
     canned_journal_row, plan_backfill_step, plan_dml_step, RecordingSession,
 };
-use zeroship_migrate_postgres::backend::{journal_sql, status_sql, PostgresBackend};
 
 async fn apply_recorded_plan(
     rec: &RecordingSession,

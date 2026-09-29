@@ -8286,8 +8286,10 @@ dependencies = [
  "zeroship-migrate-core",
  "zeroship-migrate-ir",
  "zeroship-migrate-mysql",
+ "zeroship-migrate-mysql-recording",
  "zeroship-migrate-policy",
  "zeroship-migrate-postgres",
+ "zeroship-migrate-postgres-recording",
  "zeroship-migrate-sqlite",
 ]
 
@@ -8361,7 +8363,17 @@ dependencies = [
  "uuid",
  "zeroship-migrate-backend",
  "zeroship-migrate-ir",
+ "zeroship-migrate-mysql-recording",
  "zeroship-migrate-policy",
+]
+
+[[package]]
+name = "zeroship-migrate-mysql-recording"
+version = "0.1.0"
+dependencies = [
+ "zeroship-migrate-backend",
+ "zeroship-migrate-ir",
+ "zeroship-migrate-mysql",
 ]
 
 [[package]]
@@ -8422,6 +8434,15 @@ dependencies = [
  "zeroship-migrate-backend",
  "zeroship-migrate-ir",
  "zeroship-migrate-policy",
+ "zeroship-migrate-postgres-recording",
+]
+
+[[package]]
+name = "zeroship-migrate-postgres-recording"
+version = "0.1.0"
+dependencies = [
+ "zeroship-migrate-backend",
+ "zeroship-migrate-ir",
 ]
 
 [[package]]

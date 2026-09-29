@@ -16,11 +16,11 @@
 //!
 //! # The recorder is the SAME object, not a copy
 //!
-//! Both halves drive `zeroship_migrate_mysql::backend::recording::RecordingSession` and
-//! its canned `information_schema` rows. That shared premise is the whole reason it is
-//! published through the vendor crate's `testing` feature instead of copied over here:
-//! two copies of a canned catalog drift silently, and one suite would go on asserting
-//! against a table shape the other had already corrected.
+//! Both halves drive `zeroship_migrate_mysql_recording::RecordingSession` and its
+//! canned `information_schema` rows. That shared premise is the whole reason the
+//! recorder sits in a dev-only crate both sides name instead of being copied over
+//! here: two copies of a canned catalog drift silently, and one suite would go on
+//! asserting against a table shape the other had already corrected.
 
 use serde_json::json;
 use zeroship_migrate::apply::backend::MigrationBackend;
@@ -36,8 +36,8 @@ use zeroship_migrate::model::ir::{
 };
 use zeroship_migrate::model::snapshot::{IdDefaultSnapshot, SchemaSnapshot};
 use zeroship_migrate::render::plan::DatabaseFeature;
-use zeroship_migrate_mysql::backend::recording::*;
 use zeroship_migrate_mysql::MysqlBackend;
+use zeroship_migrate_mysql_recording::*;
 
 use crate::support;
 
