@@ -23,7 +23,6 @@ zeroship-data-orm = { workspace = true }
 zeroship-kv = { workspace = true, features = ["redis"] }
 zeroship-kv-v8 = { workspace = true }
 zeroship-metering = { workspace = true }
-zeroship-stream = { workspace = true }
 zeroship-storage = { workspace = true, features = ["s3"] }
 zeroship-storage-v8 = { workspace = true }
 zeroship-workflow = { workspace = true }
@@ -51,15 +50,11 @@ tracing = { workspace = true }
 zeroship-workflow-manager = { workspace = true }
 # Shared deployment fixtures implement the native hold-client test adapter.
 async-trait = { workspace = true }
-# The fixture uses the migration service's journal schema provisioner.
-zeroship-migrate-server = { workspace = true }
 # Parse generated configuration and compose private migration host settings.
 toml = { workspace = true }
 # Rust fixtures own PostgreSQL, Redis and temporary storage.
 tempfile = { workspace = true }
 testcontainers = { version = "0.28", default-features = false, features = ["blocking", "watchdog"] }
-tar = { workspace = true }
-zstd = { workspace = true }
 # The peer-boot fixture derives deterministic Ed25519 public keys for the
 # JWKS-shaped peer documents.
 ed25519-dalek = { workspace = true }

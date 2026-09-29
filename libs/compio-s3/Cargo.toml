@@ -11,8 +11,6 @@ http = { workspace = true }
 bytes = { workspace = true }
 url = { workspace = true }
 futures = { workspace = true }
-async-trait = { workspace = true }
-thiserror = { workspace = true }
 tracing = { workspace = true }
 
 # Crypto / encoding for hand-rolled SigV4 + content addressing

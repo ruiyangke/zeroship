@@ -1340,7 +1340,6 @@ dependencies = [
 name = "compio-s3"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "base64",
  "bytes",
  "compio",
@@ -1354,7 +1353,6 @@ dependencies = [
  "quick-xml",
  "sha2 0.10.9",
  "testcontainers",
- "thiserror 2.0.18",
  "time",
  "tracing",
  "url",
@@ -5731,31 +5729,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "serial_test"
-version = "3.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "699f4197115b8a7e7ff19c9a315a4bd6fffec26cc4626ef45ecaea389e081c6d"
-dependencies = [
- "futures-executor",
- "futures-util",
- "log",
- "once_cell",
- "parking_lot",
- "serial_test_derive",
-]
-
-[[package]]
-name = "serial_test_derive"
-version = "3.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "94e153fc76e1c6a068703d6d29c508a0b15c061c4b7e43da59cc097bc342673c"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.117",
-]
-
-[[package]]
 name = "sha1"
 version = "0.10.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7814,24 +7787,16 @@ dependencies = [
 name = "zeroship-authn"
 version = "0.1.0"
 dependencies = [
- "base64",
- "chrono",
  "compio",
  "compio-postgres",
- "ed25519-dalek",
  "futures",
- "jsonwebtoken",
  "ntex",
- "rand 0.8.5",
- "serde",
  "serde_json",
- "sha2 0.10.9",
  "tempfile",
  "testcontainers",
  "toml 0.8.23",
  "tracing",
  "url",
- "uuid",
  "zeroship-authz",
  "zeroship-core",
 ]
@@ -7956,7 +7921,6 @@ dependencies = [
  "bitflags",
  "bytes",
  "chrono",
- "chrono-tz",
  "clap",
  "compio",
  "compio-postgres",
@@ -7973,11 +7937,9 @@ dependencies = [
  "ntex",
  "rand 0.8.5",
  "rcgen",
- "rusqlite",
  "rustls",
  "serde",
  "serde_json",
- "serial_test",
  "sha2 0.10.9",
  "subtle",
  "tar",
@@ -8007,7 +7969,6 @@ dependencies = [
  "zeroship-workflow-client",
  "zeroship-workflow-manager",
  "zeroship-workflow-server",
- "zeroship-workflow-v8",
  "zstd",
 ]
 
@@ -8029,7 +7990,6 @@ dependencies = [
  "ipnet",
  "jsonwebtoken",
  "linkme",
- "lru 0.12.5",
  "ntex",
  "parking_lot",
  "rand 0.8.5",
@@ -8107,7 +8067,6 @@ dependencies = [
  "flume 0.11.1",
  "futures",
  "hkdf",
- "hmac 0.12.1",
  "indexmap 2.14.0",
  "num-bigint",
  "rusqlite",
@@ -8163,7 +8122,6 @@ dependencies = [
  "zeroship-data-orm",
  "zeroship-metering",
  "zeroship-migrate",
- "zeroship-migrate-policy",
  "zeroship-migrate-postgres",
  "zeroship-migrate-server",
  "zeroship-migrate-sqlite",
@@ -8249,7 +8207,6 @@ dependencies = [
  "serde_json",
  "tempfile",
  "testcontainers",
- "uuid",
  "v8",
  "zeroship-core",
  "zeroship-id",
@@ -8325,7 +8282,6 @@ dependencies = [
  "url",
  "uuid",
  "zeroship-core",
- "zeroship-id",
  "zeroship-migrate-backend",
  "zeroship-migrate-core",
  "zeroship-migrate-ir",
@@ -8357,7 +8313,6 @@ dependencies = [
  "base64",
  "futures",
  "hex",
- "hmac 0.12.1",
  "indexmap 2.14.0",
  "rusqlite",
  "schemars 1.2.1",
@@ -8552,7 +8507,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha1",
- "sha2 0.10.9",
  "socket2",
  "tracing",
  "trybuild",
@@ -8604,7 +8558,6 @@ dependencies = [
  "serde_json",
  "tempfile",
  "testcontainers",
- "uuid",
  "v8",
  "zeroship-core",
  "zeroship-metering",
@@ -8644,7 +8597,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
- "tar",
  "tempfile",
  "testcontainers",
  "toml 0.8.23",
@@ -8658,17 +8610,14 @@ dependencies = [
  "zeroship-kv",
  "zeroship-kv-v8",
  "zeroship-metering",
- "zeroship-migrate-server",
  "zeroship-runtime",
  "zeroship-storage",
  "zeroship-storage-v8",
- "zeroship-stream",
  "zeroship-workflow",
  "zeroship-workflow-client",
  "zeroship-workflow-manager",
  "zeroship-workflow-runner",
  "zeroship-workflow-v8",
- "zstd",
 ]
 
 [[package]]
@@ -8805,7 +8754,6 @@ dependencies = [
  "zeroship-authn",
  "zeroship-core",
  "zeroship-data-orm",
- "zeroship-migrate-server",
  "zeroship-storage",
  "zeroship-workflow",
  "zeroship-workflow-client",
@@ -8819,7 +8767,6 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "compio",
- "rusqlite",
  "serde",
  "serde_json",
  "sha2 0.10.9",
