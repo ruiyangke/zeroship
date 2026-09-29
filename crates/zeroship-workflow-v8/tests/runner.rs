@@ -376,7 +376,10 @@ async fn native_runner_reads_replay_payloads_through_its_task_authority() {
     .await;
     let run = prepare_payload(&fixture, false).await;
     let manager = Manager::new(&fixture).await;
-    let done = advance_until_suspended(&fixture, &manager, &run, Duration::from_secs(5)).await;
+    let mut consumer = manager.consumer(&fixture, 1);
+    let done =
+        advance_until_suspended(&fixture, &manager, &mut consumer, &run, Duration::from_secs(5))
+            .await;
     assert_eq!(done.state, RunState::Completed);
     assert_eq!(
         returned_value(&fixture, &run).await,
@@ -395,13 +398,47 @@ async fn native_runner_hydrates_continuation_input_before_entering_v8() {
     // delivers is the SUCCESSOR run. Naming it is what the slot loop left
     // implicit: it polled for any runnable task and returned whichever receipt
     // came last, so the state it asserted was the successor's by accident.
-    let first = advance_until_suspended(&fixture, &manager, &run, Duration::from_secs(5)).await;
-    assert_eq!(first.state, RunState::ContinuedAsNew);
-    let next = first
-        .continued_as_new_run_id
-        .expect("a continued close names the run it handed its work to");
-    let done = advance_until_suspended(&fixture, &manager, &next, Duration::from_secs(5)).await;
-    assert_eq!(done.state, RunState::Completed);
+    // Both links are settled by ONE consumer run. Two `run_until` calls would
+    // make the second wait out the claim the first was still settling, which is
+    // a flake rather than a property of the code.
+    let mut consumer = manager.consumer(&fixture, 1);
+    let successor = std::cell::RefCell::new(None);
+    let outcome = std::cell::RefCell::new(None);
+    let within = compio::time::timeout(
+        Duration::from_secs(20),
+        consumer.run_until(async {
+            let mut watched = run.clone();
+            loop {
+                manager.publish(&fixture.app).await;
+                let status = fixture.app.status(&watched).await.unwrap();
+                match status.state {
+                    RunState::Queued | RunState::Running => {}
+                    RunState::ContinuedAsNew => {
+                        let next = status
+                            .continued_as_new_run_id
+                            .clone()
+                            .expect("a continued close names the run it handed its work to");
+                        *successor.borrow_mut() = Some(next.clone());
+                        watched = next;
+                    }
+                    _ => {
+                        *outcome.borrow_mut() = Some(status);
+                        return;
+                    }
+                }
+                compio::time::sleep(Duration::from_millis(2)).await;
+            }
+        }),
+    )
+    .await;
+    assert!(within.is_ok(), "the continuation chain never settled");
+    let next = successor
+        .into_inner()
+        .expect("the staged input belongs to a continuation, so a successor must exist");
+    assert_eq!(
+        outcome.into_inner().expect("a settled run has a status").state,
+        RunState::Completed
+    );
     assert_eq!(
         returned_value(&fixture, &next).await,
         json!({"secret":"retained"})
@@ -713,9 +750,12 @@ async fn native_runner_stores_large_root_results_in_service_owned_payloads() {
         .start(&RequestId::mint(), "Example", StartOptions::default())
         .await
         .unwrap();
-    let mut runner = fixture.runner_with_output_limits(Duration::from_secs(5), OUTPUT_LIMITS);
+    let manager = Manager::new(&fixture).await;
+    let mut consumer = manager.consumer_with_limits(&fixture, 1, OUTPUT_LIMITS);
     assert_eq!(
-        slot_advance_until_suspended(&mut runner).await.state,
+        advance_until_suspended(&fixture, &manager, &mut consumer, &run.id, Duration::from_secs(5))
+            .await
+            .state,
         RunState::Completed
     );
     let bytes = fixture
@@ -751,9 +791,12 @@ async fn inline_output_limit_commits_a_terminal_workflow_failure() {
         .start(&RequestId::mint(), "Example", StartOptions::default())
         .await
         .unwrap();
-    let mut runner = fixture.runner_with_output_limits(Duration::from_secs(5), OUTPUT_LIMITS);
+    let manager = Manager::new(&fixture).await;
+    let mut consumer = manager.consumer_with_limits(&fixture, 1, OUTPUT_LIMITS);
     assert_eq!(
-        slot_advance_until_suspended(&mut runner).await.state,
+        advance_until_suspended(&fixture, &manager, &mut consumer, &run.id, Duration::from_secs(5))
+            .await
+            .state,
         RunState::Failed
     );
     let error = fixture.app.status(&run.id).await.unwrap().error.unwrap();
@@ -788,8 +831,12 @@ async fn caught_step_output(length: usize) -> (RunState, serde_json::Value) {
         .start(&RequestId::mint(), "Example", StartOptions::default())
         .await
         .unwrap();
-    let mut runner = fixture.runner_with_output_limits(Duration::from_secs(5), OUTPUT_LIMITS);
-    let state = slot_advance_until_suspended(&mut runner).await.state;
+    let manager = Manager::new(&fixture).await;
+    let mut consumer = manager.consumer_with_limits(&fixture, 1, OUTPUT_LIMITS);
+    let state =
+        advance_until_suspended(&fixture, &manager, &mut consumer, &run.id, Duration::from_secs(5))
+            .await
+            .state;
     let output = returned_value(&fixture, &run.id).await;
     fixture.assert_disposed().await;
     (state, output)
@@ -943,22 +990,11 @@ async fn slot_advance_until_suspended(runner: &mut RunnerSlot) -> CompletionRece
 async fn advance_until_suspended(
     fixture: &Fixture,
     manager: &Rc<Manager>,
+    consumer: &mut zeroship_workflow_runner::consumer::JobConsumer<Manager>,
     run: &str,
     bound: Duration,
-) -> RunStatus {
-    advance_under_limits(fixture, manager, run, bound, TaskPayloadLimits::default()).await
-}
-
-/// The same drive under explicit payload bounds.
-async fn advance_under_limits(
-    fixture: &Fixture,
-    manager: &Rc<Manager>,
-    run: &str,
-    bound: Duration,
-    limits: TaskPayloadLimits,
 ) -> RunStatus {
     let settled = std::cell::RefCell::new(None);
-    let mut consumer = manager.consumer_with_limits(fixture, 1, limits);
     let within = compio::time::timeout(
         bound,
         consumer.run_until(async {
@@ -995,8 +1031,10 @@ async fn control_bounded_loop_completes_when_the_deadline_allows_it() {
         .await
         .unwrap();
     let manager = Manager::new(&fixture).await;
+    let mut consumer = manager.consumer(&fixture, 1);
     let done =
-        advance_until_suspended(&fixture, &manager, &run.id, Duration::from_secs(30)).await;
+        advance_until_suspended(&fixture, &manager, &mut consumer, &run.id, Duration::from_secs(30))
+            .await;
     assert_eq!(done.state, RunState::Completed);
     assert_eq!(
         *fixture.loader.markers.0.lock().unwrap(),
@@ -1139,8 +1177,15 @@ async fn replay_loads_retained_dependencies_after_redeploy_and_host_restart() {
         .await
         .unwrap();
     let manager = Manager::new(&fixture).await;
-    let receipt =
-        advance_until_suspended(&fixture, &manager, &old_run, Duration::from_secs(5)).await;
+    let mut consumer = manager.consumer(&fixture, 1);
+    let receipt = advance_until_suspended(
+        &fixture,
+        &manager,
+        &mut consumer,
+        &old_run,
+        Duration::from_secs(5),
+    )
+    .await;
     assert_eq!(receipt.state, RunState::Completed);
     assert_eq!(
         returned_value(&fixture, &old_run).await,
