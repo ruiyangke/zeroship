@@ -515,14 +515,13 @@ async fn payload_outage_interrupts_app_code_and_leaves_the_frontier_retryable() 
     )
     .await;
     let run = prepare_payload(&fixture, false).await;
-    let tasks = Rc::new(
-        fixture
-            .service
-            .tasks(
-                WorkerIdentity::new("local-v8-worker".into()).unwrap(),
-                fixture.objects.clone(),
-            ),
-    );
+    // The outage consumes a delivery it cannot finish, so the recovery below
+    // waits on the manager redelivering it.
+    let manager = Manager::with_delivery_lease(&fixture, Duration::from_secs(1)).await;
+    let tasks = Rc::new(fixture.app.tasks(
+        WorkerIdentity::new(manager.worker.as_str().to_owned()).unwrap(),
+        fixture.objects.clone(),
+    ));
     let executor = Rc::new(
         V8TaskExecutor::new(
             fixture.loader.clone(),
@@ -531,16 +530,15 @@ async fn payload_outage_interrupts_app_code_and_leaves_the_frontier_retryable() 
         )
         .unwrap(),
     );
-    let mut runner = RunnerSlot::new(tasks, executor, Duration::from_secs(5)).unwrap();
-    let result = runner.run_once().await;
-    assert_eq!(
-        result.unwrap_err(),
-        WorkflowServiceError::Unavailable("fixture payload outage".into())
+    let mut outage = manager.consumer_with_executor(&fixture, 1, executor);
+    drive_for(&fixture, &manager, &mut outage, Duration::from_secs(2)).await;
+    assert!(
+        fixture.loader.markers.0.lock().unwrap().is_empty(),
+        "app code ran despite a replay payload it could not read"
     );
-    assert!(fixture.loader.markers.0.lock().unwrap().is_empty());
     assert!(!fixture.app.status(&run).await.unwrap().state.is_terminal());
     fixture.assert_disposed().await;
-    let manager = Manager::new(&fixture).await;
+    drop(outage);
     let mut consumer = manager.consumer(&fixture, 1);
     let done =
         advance_until_suspended(&fixture, &manager, &mut consumer, &run, Duration::from_secs(20))
@@ -1290,6 +1288,16 @@ struct Manager {
 
 impl Manager {
     async fn new(fixture: &Fixture) -> Rc<Self> {
+        Self::with_delivery_lease(fixture, zeroship_workflow_manager::Options::default().lease).await
+    }
+
+    /// The same manager with the delivery lease named.
+    ///
+    /// A delivery the host consumed but could not finish comes back when THIS
+    /// lease lapses - not when the creator task lease does - so a case that waits
+    /// for a redelivery has to outlast it, and the default puts it half a minute
+    /// out.
+    async fn with_delivery_lease(fixture: &Fixture, lease: Duration) -> Rc<Self> {
         use zeroship_core::workflow_coordination::{
             AssignedScope, RegisterWorker, WorkerId, WorkerState,
         };
@@ -1297,7 +1305,10 @@ impl Manager {
         let queue = fixture
             .deployments
             .platform
-            .queue(zeroship_workflow_manager::Options::default())
+            .queue(zeroship_workflow_manager::Options {
+                lease,
+                ..zeroship_workflow_manager::Options::default()
+            })
             .await
             .unwrap();
         let coordinator = Coordinator::new(
