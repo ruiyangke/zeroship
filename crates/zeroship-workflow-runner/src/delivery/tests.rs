@@ -1,4 +1,5 @@
 use super::*;
+use crate::journal_fixture::PostgresFixture;
 mod activation;
 mod collection;
 mod consumer;
@@ -432,9 +433,23 @@ impl Fixture {
         .await
         .unwrap();
         schema::initialize_local(&store).await.unwrap();
+        Self::build_over(Rc::new(store), directory, policy, leased).await
+    }
+
+    /// The same fixture over a store the caller opened, so a case can put this
+    /// journal on `PostgreSQL`.
+    ///
+    /// `initialize_local` above is the SQLite half of schema installation, so a
+    /// caller arriving here has provisioned its own.
+    async fn build_over(
+        store: Rc<OrmStore>,
+        directory: tempfile::TempDir,
+        policy: AppPolicy,
+        leased: Option<Duration>,
+    ) -> Self {
         let deployments = deployments::Deployments::new().await;
         let app_id = AppId::mint();
-        let service = WorkflowService::open(Rc::new(store), Arc::new(HostPolicies::default()))
+        let service = WorkflowService::open(store, Arc::new(HostPolicies::default()))
             .await
             .unwrap()
             .with_deployments(deployments.binding(&[&app_id]));
@@ -775,9 +790,14 @@ async fn corrupted_management_outcome_cannot_reexecute_or_acknowledge_advance() 
     );
 }
 
-#[compio::test]
-async fn lost_ack_and_new_attempt_replay_without_executing_again() {
-    let fixture = Fixture::new(AppPolicy::default()).await;
+/// A lost acknowledgement is recovered rather than re-executed, and a
+/// redelivery of the same work replays the committed receipt.
+///
+/// Run against both journals the service supports. The recovery reads a receipt
+/// the journal committed, so the dialect that commits it is part of the claim: a
+/// contract asserted on SQLite alone would say nothing about the one a
+/// deployment runs.
+async fn replay_contract(fixture: Fixture) {
     fixture.metadata.lose_ack.set(true);
     let mut slot = fixture.slot(Duration::from_secs(5));
     let DeliveryOutcome::Settled { creator, manager } =
@@ -802,6 +822,26 @@ async fn lost_ack_and_new_attempt_replay_without_executing_again() {
         fixture.app.job_receipt(&fixture.job).await.unwrap(),
         Some(*creator)
     );
+}
+
+#[compio::test]
+async fn sqlite_lost_ack_and_new_attempt_replay_without_executing_again() {
+    replay_contract(Fixture::new(AppPolicy::default()).await).await;
+}
+
+#[compio::test]
+async fn postgres_lost_ack_and_new_attempt_replay_without_executing_again() {
+    let postgres = PostgresFixture::start().await;
+    replay_contract(
+        Fixture::build_over(
+            Rc::new(postgres.store.clone()),
+            tempfile::tempdir().unwrap(),
+            AppPolicy::default(),
+            None,
+        )
+        .await,
+    )
+    .await;
 }
 
 #[compio::test]
