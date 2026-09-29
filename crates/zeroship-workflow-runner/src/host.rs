@@ -42,12 +42,18 @@ pub struct HostOptions {
 /// The host thread carries ONE unbroken call chain: the coordination lanes,
 /// the delivered-job path, the journal engine, the ORM and the database
 /// driver, plus the creator's own start path when applying a frontier that
-/// spawns a child. It also enters V8 to run creator workflow bodies, and V8
-/// derives its own limit from whatever is left. The platform default thread
-/// stack is not a budget anyone chose for that chain, and overrunning it
-/// aborts the entire process rather than failing one job - every app placed on
-/// the worker goes down with it. Reserved address space is not resident
-/// memory: pages commit only as the chain touches them.
+/// spawns a child. The platform default thread stack is not a budget anyone
+/// chose for that chain, and overrunning it aborts the entire process rather
+/// than failing one job - every app placed on the worker goes down with it.
+/// Reserved address space is not resident memory: pages commit only as the
+/// chain touches them.
+///
+/// This bounds the RUST chain only. The thread also enters V8 to run creator
+/// workflow bodies, and V8 sizes its own JS stack from its default rather than
+/// from this reservation, measured at the depth the isolate is created - which
+/// on the delivered-job path is already deep. Raising this number does not give
+/// creator code more room, and V8's budget cannot be raised on its own without
+/// every thread that enters V8 reserving a stack that covers it.
 pub const STACK_BYTES: usize = 16 * 1024 * 1024;
 
 /// The thread a workflow host runs on, named for operators and carrying the
