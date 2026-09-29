@@ -1030,8 +1030,27 @@ async fn advance_until(
     bound: Duration,
     done: impl Fn(&RunStatus) -> bool,
 ) -> RunStatus {
+    drive_until(fixture, manager, consumer, run, bound, done)
+        .await
+        .unwrap_or_else(|| panic!("the run stayed runnable for {bound:?}; delivery never settled it"))
+}
+
+/// The same drive, answering `None` when the state never arrived.
+///
+/// For a case whose claim is that a run does NOT settle, reading the status once
+/// after the host cut the job proves nothing: the host commits a failure AFTER
+/// disposing the isolate, so a status read at that moment is early either way.
+/// Waiting the bound out and finding nothing is the assertion.
+async fn drive_until(
+    fixture: &Fixture,
+    manager: &Rc<Manager>,
+    consumer: &mut zeroship_workflow_runner::consumer::JobConsumer<Manager>,
+    run: &str,
+    bound: Duration,
+    done: impl Fn(&RunStatus) -> bool,
+) -> Option<RunStatus> {
     let settled = std::cell::RefCell::new(None);
-    let within = compio::time::timeout(
+    let _ = compio::time::timeout(
         bound,
         consumer.run_until(async {
             loop {
@@ -1046,13 +1065,7 @@ async fn advance_until(
         }),
     )
     .await;
-    assert!(
-        within.is_ok(),
-        "the run stayed runnable for {bound:?}; delivery never settled it"
-    );
-    settled
-        .into_inner()
-        .expect("a settled run has a status")
+    settled.into_inner()
 }
 
 /// Drive delivery until every isolate the loader handed out is released, and
@@ -1830,7 +1843,7 @@ async fn native_runner_reloads_v8_to_resume_a_durable_signal_wait() {
 }
 
 #[compio::test]
-async fn native_runner_timeout_disposes_v8_before_reusing_its_slot() {
+async fn an_execution_timeout_disposes_v8_before_reusing_the_slot() {
     let fixture = Fixture::new(
         r#"
         export class Example {
@@ -1849,12 +1862,12 @@ async fn native_runner_timeout_disposes_v8_before_reusing_its_slot() {
         .await;
     // Leave room for ordinary journal I/O when reusing the slot. The blocked
     // callback remains pending until the execution budget interrupts it.
-    let mut runner = fixture.runner(Duration::from_secs(1));
-    assert!(matches!(
-        runner.run_once().await,
-        Err(WorkflowServiceError::Timeout)
-    ));
-    fixture.assert_disposed().await;
+    let manager = Manager::new(&fixture).await;
+    let mut consumer = manager.consumer_bounding_execution(&fixture, 1, Duration::from_secs(1));
+    assert!(
+        drive_until_disposed(&fixture, &manager, &mut consumer, Duration::from_secs(4)).await,
+        "the execution bound must cut the pending callback and dispose its isolate"
+    );
     fixture
         .app
         .transition(&RequestId::mint(), &blocked.id, RunOperation::Cancel)
@@ -1863,8 +1876,18 @@ async fn native_runner_timeout_disposes_v8_before_reusing_its_slot() {
     let next = fixture
         .start(json!({"hang":false}))
         .await;
-    let done = slot_advance_until_suspended(&mut runner).await;
-    assert_eq!(done.run_id, next.id);
+    // The SAME consumer, so what is asserted is that the slot the cut job held
+    // takes another one.
+    let done = advance_until(
+        &fixture,
+        &manager,
+        &mut consumer,
+        &next.id,
+        Duration::from_secs(10),
+        |status| status.state == RunState::Completed,
+    )
+    .await;
+    assert_eq!(done.state, RunState::Completed);
     assert_eq!(returned_value(&fixture, &next.id).await, json!("finished"));
     fixture.assert_disposed().await;
 }
@@ -1872,7 +1895,7 @@ async fn native_runner_timeout_disposes_v8_before_reusing_its_slot() {
 /// A step that never settles, under a `StepConfig.timeout` the trigger chooses.
 ///
 /// Two bounds can end this body: the step timeout the dispatcher arms, and the
-/// host's per-job execution timeout, which `RunnerSlot` carries and which no
+/// host's per-job execution bound, which delivery carries and which no
 /// creator can see. The pair below differs only in which of the two is smaller.
 const HANGING_STEP: &str = r"
     export class Example {
@@ -1908,15 +1931,24 @@ async fn a_step_timeout_over_the_execution_bound_never_fires() {
     // the execution bound. The host's deadline reaches the job first, so the
     // step timeout the creator configured is never the reason recorded.
     let fixture = Fixture::new(HANGING_STEP).await;
-    fixture
-        .start(json!({"timeout":"10m"}))
-        .await;
-    let mut runner = fixture.runner(Duration::from_secs(1));
-    assert!(matches!(
-        runner.run_once().await,
-        Err(WorkflowServiceError::Timeout)
-    ));
-    fixture.assert_disposed().await;
+    let run = fixture.start(json!({"timeout":"10m"})).await;
+    let manager = Manager::new(&fixture).await;
+    let mut consumer = manager.consumer_bounding_execution(&fixture, 1, Duration::from_secs(1));
+    // The bound cuts the job and delivery retries it, so the drive outlasts
+    // several attempts. None of them may record the creator's step timeout.
+    let settled = drive_until(
+        &fixture,
+        &manager,
+        &mut consumer,
+        &run.id,
+        Duration::from_secs(6),
+        |status| !matches!(status.state, RunState::Queued | RunState::Running),
+    )
+    .await;
+    assert_eq!(
+        settled, None,
+        "the host's bound cut the job, so nothing may settle the run"
+    );
 }
 
 #[path = "support/orm.rs"]
