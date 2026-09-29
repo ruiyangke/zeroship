@@ -1637,8 +1637,17 @@ async fn native_runner_reloads_v8_to_resume_a_durable_signal_wait() {
         .start(&RequestId::mint(), "Example", StartOptions::default())
         .await
         .unwrap();
-    let mut runner = fixture.runner(Duration::from_secs(5));
-    let waiting = slot_advance_until_suspended(&mut runner).await;
+    let manager = Manager::new(&fixture).await;
+    let mut consumer = manager.consumer(&fixture, 1);
+    let waiting = advance_until(
+        &fixture,
+        &manager,
+        &mut consumer,
+        &run.id,
+        Duration::from_secs(20),
+        |status| status.state == RunState::Waiting,
+    )
+    .await;
     assert_eq!(waiting.state, RunState::Waiting);
     fixture.assert_disposed().await;
     let before_signal = fixture.loader.probes.borrow().len();
@@ -1654,7 +1663,15 @@ async fn native_runner_reloads_v8_to_resume_a_durable_signal_wait() {
         )
         .await
         .unwrap();
-    let done = slot_advance_until_suspended(&mut runner).await;
+    let done = advance_until(
+        &fixture,
+        &manager,
+        &mut consumer,
+        &run.id,
+        Duration::from_secs(20),
+        |status| status.state == RunState::Completed,
+    )
+    .await;
     assert_eq!(done.state, RunState::Completed);
     assert_eq!(
         returned_value(&fixture, &run.id).await,
