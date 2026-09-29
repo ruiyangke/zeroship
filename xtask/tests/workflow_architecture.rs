@@ -4,14 +4,16 @@ use std::process::Command;
 
 /// The journal's schema crate must reach NOTHING else in the workspace.
 ///
-/// That is the whole reason it exists. The migration service and the workflow
-/// manager both depend on it, and a leaf lets them hold the journal's artifacts
-/// while inheriting nothing else - which is what the schema-bundle path bought.
+/// `zeroship-workflow-server` and `zeroship-workflow` hold its generated
+/// artifacts, and a leaf lets a party hold them while inheriting nothing else.
+/// The `PostgreSQL` journal is installed by
+/// `db/migrations-ts/20260919000000_workflow_journal.ts`, which reads
+/// `schema/postgres.sql` off disk rather than through this crate, so the leaf is
+/// also what keeps the artifacts usable by a party that links no Rust at all.
 ///
 /// What a service may link BESIDE the artifacts is a separate question with its
-/// own answer: `workflow_process_dependencies_follow_crate_ownership` above
-/// names `zeroship-workflow-runner` and `zeroship-storage` as the edges the
-/// manager and the server may not have, and says nothing about the engine.
+/// own answer: `workflow_process_dependencies_follow_crate_ownership` below
+/// names the edges each process may not have, and says nothing about the engine.
 ///
 /// An `include_str!` reaching out of the crate directory is what this replaced,
 /// and Cargo could not see that. It can see this.
