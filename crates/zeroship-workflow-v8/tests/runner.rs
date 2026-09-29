@@ -872,7 +872,19 @@ async fn a_step_output_inside_the_inline_budget_never_reaches_the_catch() {
 const DEADLINE: Duration = Duration::from_secs(3);
 const DEADLINE_MS: i64 = 3_000;
 
-async fn assert_deadline_interrupts(source: &str, timeout: Duration, policy: AppPolicy) {
+/// Drive a burning workflow past `bound` and assert the host cut it short.
+///
+/// The watchdog's proof is the marker list, not a returned error: delivery
+/// leaves a timed-out claim retryable rather than answering the caller, so what
+/// a caller could observe is that the loop was ENTERED and never reached its
+/// final native effect.
+///
+/// The drive window is fixed at just past [`DEADLINE`], not derived from
+/// `bound`. That is what lets a case name a bound the interrupt must BEAT: a
+/// window inside `bound` leaves the confirmed lease as the only thing that
+/// could have cut the run. It also stays well inside the manager's lease, so
+/// the single attempt asserted here is the only one.
+async fn assert_deadline_interrupts(source: &str, bound: Duration, policy: AppPolicy) {
     // Disable the CPU timer: only the host's monotonic deadline may interrupt.
     let fixture = Fixture::with_limits(&format!("{BURN}\n{source}"), None, policy).await;
     let run = fixture
@@ -880,11 +892,12 @@ async fn assert_deadline_interrupts(source: &str, timeout: Duration, policy: App
         .start(&RequestId::mint(), "Example", StartOptions::default())
         .await
         .unwrap();
-    let mut runner = fixture.runner(timeout);
-    let result = runner.run_once().await;
+    let manager = Manager::new(&fixture).await;
+    let mut consumer = manager.consumer_bounding_execution(&fixture, 1, bound);
+    let window = DEADLINE + Duration::from_secs(2);
     assert!(
-        matches!(result, Err(WorkflowServiceError::Timeout)),
-        "{result:?}"
+        drive_until_disposed(&fixture, &manager, &mut consumer, window).await,
+        "the host must cut the loop and dispose its isolate within {window:?}"
     );
     assert_eq!(
         *fixture.loader.markers.0.lock().unwrap(),
@@ -1036,6 +1049,38 @@ async fn advance_until(
     settled
         .into_inner()
         .expect("a settled run has a status")
+}
+
+/// Drive delivery until every isolate the loader handed out is released, and
+/// answer whether that happened inside `bound`.
+///
+/// For a run the host must CUT, disposal is the observable event and the time it
+/// takes is the assertion. Asserting only that the isolate ended up disposed
+/// proves nothing about which bound cut the run: the app's confirmed lease and
+/// the manager's delivery lease would both release it eventually, and a case
+/// naming a shorter bound would pass on their strength.
+async fn drive_until_disposed(
+    fixture: &Fixture,
+    manager: &Rc<Manager>,
+    consumer: &mut zeroship_workflow_runner::consumer::JobConsumer<Manager>,
+    bound: Duration,
+) -> bool {
+    compio::time::timeout(
+        bound,
+        consumer.run_until(async {
+            loop {
+                manager.publish(&fixture.app).await;
+                let probes = fixture.loader.probes.borrow();
+                if !probes.is_empty() && probes.iter().all(|probe| probe.strong_count() == 0) {
+                    return;
+                }
+                drop(probes);
+                compio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }),
+    )
+    .await
+    .is_ok()
 }
 
 /// Drive delivery for a fixed window, for the cases whose run never settles.
@@ -1376,6 +1421,31 @@ impl Manager {
         );
         self.consumer_with_executor(fixture, slots, executor)
     }
+    /// The same consumer under an explicit execution bound, for the cases that
+    /// assert what the host does to a job that outlives it.
+    ///
+    /// Delivery bounds an execution by the EARLIER of this and the confirmed
+    /// lease's deadline, so a case can name which of the two it is about.
+    fn consumer_bounding_execution(
+        self: &Rc<Self>,
+        fixture: &Fixture,
+        slots: usize,
+        execution_timeout: Duration,
+    ) -> zeroship_workflow_runner::consumer::JobConsumer<Self> {
+        let tasks = Rc::new(
+            fixture
+                .app
+                .tasks(
+                    WorkerIdentity::new(self.worker.as_str().to_owned()).unwrap(),
+                    fixture.objects.clone(),
+                ),
+        );
+        let executor = Rc::new(
+            V8TaskExecutor::new(fixture.loader.clone(), tasks, TaskPayloadLimits::default())
+                .unwrap(),
+        );
+        self.consumer_over(fixture, slots, executor, execution_timeout)
+    }
     /// The same consumer over an executor the caller built, for the cases that
     /// wrap the payload seam in a probe.
     fn consumer_with_executor(
@@ -1383,6 +1453,15 @@ impl Manager {
         fixture: &Fixture,
         slots: usize,
         executor: Rc<V8TaskExecutor>,
+    ) -> zeroship_workflow_runner::consumer::JobConsumer<Self> {
+        self.consumer_over(fixture, slots, executor, Duration::from_secs(10))
+    }
+    fn consumer_over(
+        self: &Rc<Self>,
+        fixture: &Fixture,
+        slots: usize,
+        executor: Rc<V8TaskExecutor>,
+        execution_timeout: Duration,
     ) -> zeroship_workflow_runner::consumer::JobConsumer<Self> {
         use zeroship_workflow_runner::{
             consumer::{ConsumerOptions, ConsumerScope, JobConsumer},
@@ -1397,7 +1476,7 @@ impl Manager {
                 idle_poll: Duration::from_millis(5),
                 error_backoff: Duration::from_millis(10),
                 delivery: DeliveryOptions {
-                    execution_timeout: Duration::from_secs(10),
+                    execution_timeout,
                     operation_timeout: Duration::from_secs(2),
                     retry_delay: Duration::from_millis(5),
                 },
