@@ -12,7 +12,7 @@ use crate::{
     },
     service_binding::ServiceFixture,
     ObjectStepOutputs, PayloadObjects, PayloadRead, RunPayloads, TaskPayloadReader, TaskPayloads,
-    TaskTransport, WorkerBinding, WorkerPayloads, WorkerTasks,
+    WorkerBinding, WorkerPayloads, WorkerTasks,
 };
 use futures::{
     future::{select, Either},
@@ -747,10 +747,8 @@ async fn replay_refuses_a_payload_read_that_answers_with_another_descriptor() {
     .unwrap();
     let (service, app, _, _deployments) = Box::pin(registered_service(store)).await;
     let scope = service.fixture_app(app);
-    let tasks = service.tasks(
-        WorkerIdentity::new("descriptor-guard".into()).unwrap(),
-        objects,
-    );
+    let worker = WorkerIdentity::new("descriptor-guard".into()).unwrap();
+    let tasks = service.tasks(worker.clone(), objects);
 
     let named = br#"{"value":"original"}"#.to_vec();
     let swapped = br#"{"value":"replaced"}"#.to_vec();
@@ -767,7 +765,7 @@ async fn replay_refuses_a_payload_read_that_answers_with_another_descriptor() {
         .start(&RequestId::mint(), "Example", StartOptions::default())
         .await
         .unwrap();
-    let task = tasks.poll().await.unwrap().unwrap();
+    let task = service.poll(&worker).await.unwrap().unwrap();
     for bytes in [&named, &swapped, &longer] {
         tasks
             .stage(
@@ -780,8 +778,8 @@ async fn replay_refuses_a_payload_read_that_answers_with_another_descriptor() {
             .await
             .unwrap();
     }
-    tasks
-        .complete(
+    service
+        .complete(&worker, 
             &task.id,
             &task.token,
             execution(json!([
@@ -792,7 +790,7 @@ async fn replay_refuses_a_payload_read_that_answers_with_another_descriptor() {
         )
         .await
         .unwrap();
-    let replay = tasks.poll().await.unwrap().unwrap();
+    let replay = service.poll(&worker).await.unwrap().unwrap();
 
     let budget = 256;
     assert!(

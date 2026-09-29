@@ -4,7 +4,7 @@ use crate::{
         journal_row_count, leased_policy, registered_service, sqlite_store, PostgresFixture,
     },
     service_binding::ServiceFixture,
-    PayloadObjects, PayloadRead, RunPayloads, TaskPayloadReader, TaskPayloads, TaskTransport,
+    PayloadObjects, PayloadRead, RunPayloads, TaskPayloadReader, TaskPayloads,
     WorkerBinding, WorkerTasks,
 };
 use serde_json::json;
@@ -14,7 +14,7 @@ use zeroship_workflow::{
     operations::{RunState, StartOptions},
     service::{
         schema, store::OrmStore, AppPolicy, AppWorkflows, PayloadSlot, RequestId,
-        TaskAssignment, TaskToken, WorkerIdentity,
+        TaskAssignment, TaskToken, WorkerIdentity, WorkflowService,
     },
     WorkflowServiceError,
 };
@@ -149,12 +149,16 @@ fn descriptor(bytes: &[u8]) -> WorkflowOutputRef {
     }
 }
 
-async fn claim(app: &AppWorkflows, tasks: &WorkerTasks) -> TaskAssignment {
+async fn claim(
+    app: &AppWorkflows,
+    service: &WorkflowService,
+    worker: &WorkerIdentity,
+) -> TaskAssignment {
     let run = app
         .start(&RequestId::mint(), "Example", StartOptions::default())
         .await
         .unwrap();
-    let task = tasks.poll().await.unwrap().unwrap();
+    let task = service.poll(worker).await.unwrap().unwrap();
     assert_eq!(task.invocation.run_id, run.id);
     task
 }
@@ -215,10 +219,8 @@ async fn run_output_reference_contract(store: Rc<OrmStore>) {
         PayloadObjects::open(StorageStore::from_backend(Arc::new(LocalFs::new(dir.path()))))
             .unwrap();
     let scope = service.fixture_app(app.clone());
-    let tasks = service.tasks(
-        WorkerIdentity::new("run-output-writer".into()).unwrap(),
-        objects.clone(),
-    );
+    let worker = WorkerIdentity::new("run-output-writer".into()).unwrap();
+    let tasks = service.tasks(worker.clone(), objects.clone());
 
     let value = json!({"ok":true});
     let encoded = serde_json::to_vec(&value).unwrap();
@@ -226,7 +228,7 @@ async fn run_output_reference_contract(store: Rc<OrmStore>) {
         encoded.len() < LIMITS.max_inline_bytes,
         "the forced value must be one the size rule would have kept inline"
     );
-    let task = claim(&scope, &tasks).await;
+    let task = claim(&scope, &service, &worker).await;
     let (execution, _owed) = prepare(&task, json!([{"kind":"RunCompleted","output":value}]))
         .stage(&tasks)
         .await
@@ -239,8 +241,8 @@ async fn run_output_reference_contract(store: Rc<OrmStore>) {
     assert_eq!(descriptor.size, i64::try_from(encoded.len()).unwrap());
     assert_eq!(descriptor.content_type.as_deref(), Some("application/json"));
     assert_eq!(stored_rows(store.as_ref(), &task).await, 1);
-    let receipt = tasks
-        .complete(&task.id, &task.token, execution)
+    let receipt = service
+        .complete(&worker, &task.id, &task.token, execution)
         .await
         .unwrap();
     assert_eq!(receipt.state, RunState::Completed);
@@ -273,7 +275,7 @@ async fn run_output_reference_contract(store: Rc<OrmStore>) {
 
     // The control: a run that produced no result references nothing and stages
     // nothing, so the arm above measures the result and not the close.
-    let task = claim(&scope, &tasks).await;
+    let task = claim(&scope, &service, &worker).await;
     let (execution, _owed) = prepare(&task, json!([{"kind":"RunCompleted"}]))
         .stage(&tasks)
         .await
@@ -290,8 +292,8 @@ async fn run_output_reference_contract(store: Rc<OrmStore>) {
         execution.outcomes[0]
     );
     assert_eq!(stored_rows(store.as_ref(), &task).await, 0);
-    let receipt = tasks
-        .complete(&task.id, &task.token, execution)
+    let receipt = service
+        .complete(&worker, &task.id, &task.token, execution)
         .await
         .unwrap();
     assert_eq!(receipt.state, RunState::Completed);
@@ -313,16 +315,16 @@ async fn run_output_reference_contract(store: Rc<OrmStore>) {
         )
         .await
         .unwrap();
-    let task = claim(&budgeted, &tasks).await;
+    let task = claim(&budgeted, &service, &worker).await;
     let (spent, _owed) = prepare(&task, json!([{"kind":"RunCompleted","output":value}]))
         .stage(&tasks)
         .await
         .unwrap();
-    tasks
-        .complete(&task.id, &task.token, spent)
+    service
+        .complete(&worker, &task.id, &task.token, spent)
         .await
         .unwrap();
-    let task = claim(&budgeted, &tasks).await;
+    let task = claim(&budgeted, &service, &worker).await;
     assert!(
         matches!(
             prepare(&task, json!([{"kind":"RunCompleted","output":value}]))
@@ -340,8 +342,8 @@ async fn run_output_reference_contract(store: Rc<OrmStore>) {
         .await
         .unwrap();
     assert_eq!(
-        tasks
-            .complete(&task.id, &task.token, execution)
+        service
+            .complete(&worker, &task.id, &task.token, execution)
             .await
             .unwrap()
             .state,
@@ -356,25 +358,23 @@ async fn output_contract(store: Rc<OrmStore>) {
         PayloadObjects::open(StorageStore::from_backend(Arc::new(LocalFs::new(dir.path()))))
             .unwrap();
     let scope = service.fixture_app(app.clone());
-    let tasks = service.tasks(
-        WorkerIdentity::new("output-writer".into()).unwrap(),
-        objects.clone(),
-    );
+    let worker = WorkerIdentity::new("output-writer".into()).unwrap();
+    let tasks = service.tasks(worker.clone(), objects.clone());
 
     // A step value inside the inline budget needs no payload object, including
     // JSON null. The run's own result is outside that claim - it is staged
     // whatever it weighs - so these batches close their run empty-handed and
     // `every_run_output_is_a_payload_reference` holds the other half.
     for value in [json!({"small":true}), Value::Null] {
-        let task = claim(&scope, &tasks).await;
+        let task = claim(&scope, &service, &worker).await;
         let prepared = prepare(
             &task,
             json!([step(value.clone()), {"kind":"RunCompleted"}]),
         );
         let (execution, _owed) = prepared.stage(&tasks).await.unwrap();
         assert_eq!(stored_rows(store.as_ref(), &task).await, 0);
-        tasks
-            .complete(&task.id, &task.token, execution)
+        service
+            .complete(&worker, &task.id, &task.token, execution)
             .await
             .unwrap();
         let bytes = scope
@@ -390,7 +390,7 @@ async fn output_contract(store: Rc<OrmStore>) {
 
     // Small explicit references and automatic large results use the same path.
     for mode in ["auto", "ref", "blob", "stream"] {
-        let task = claim(&scope, &tasks).await;
+        let task = claim(&scope, &service, &worker).await;
         let value = if mode == "auto" {
             json!("x".repeat(64))
         } else {
@@ -412,19 +412,19 @@ async fn output_contract(store: Rc<OrmStore>) {
             output_ref.as_ref().unwrap().content_type.as_deref(),
             Some("application/vnd.workflow+json")
         );
-        tasks
-            .complete(&task.id, &task.token, execution)
+        service
+            .complete(&worker, &task.id, &task.token, execution)
             .await
             .unwrap();
-        let replay = tasks.poll().await.unwrap().unwrap();
+        let replay = service.poll(&worker).await.unwrap().unwrap();
         let reader = TaskPayloadReader::new(Rc::new(tasks.clone()), &replay, 256).unwrap();
         assert_eq!(
             serde_json::from_slice::<Value>(&reader.read_step_output("saved", 0).await.unwrap())
                 .unwrap(),
             value
         );
-        tasks
-            .complete(
+        service
+            .complete(&worker, 
                 &replay.id,
                 &replay.token,
                 crate::journal_fixture::execution(json!([{"kind":"RunCompleted"}])),
@@ -435,7 +435,7 @@ async fn output_contract(store: Rc<OrmStore>) {
 
     // A lost receipt retries the durable upload identity and deduplicates a
     // shared step/root value before the journal admits either reference.
-    let task = claim(&scope, &tasks).await;
+    let task = claim(&scope, &service, &worker).await;
     let value = json!({"large":"x".repeat(64)});
     let prepared = prepare(
         &task,
@@ -454,8 +454,8 @@ async fn output_contract(store: Rc<OrmStore>) {
     assert_eq!(fault.requests.borrow().len(), 2);
     assert_eq!(fault.requests.borrow()[0], fault.requests.borrow()[1]);
     assert_eq!(stored_rows(store.as_ref(), &task).await, 1);
-    let receipt = tasks
-        .complete(&task.id, &task.token, execution)
+    let receipt = service
+        .complete(&worker, &task.id, &task.token, execution)
         .await
         .unwrap();
     assert_eq!(receipt.state, RunState::Completed);
@@ -483,7 +483,7 @@ async fn output_contract(store: Rc<OrmStore>) {
     // `max_inline_bytes`, where a step output would stay in the journal. The
     // step beside them is the control: the same batch, the same small value,
     // and it is still carried inline, so this is the arm and not the budget.
-    let task = claim(&scope, &tasks).await;
+    let task = claim(&scope, &service, &worker).await;
     let small = json!({"n":1});
     assert!(serde_json::to_vec(&small).unwrap().len() < LIMITS.max_inline_bytes);
     let outcomes = prepare(
@@ -546,17 +546,17 @@ async fn output_contract(store: Rc<OrmStore>) {
         .stage(&tasks)
         .await
         .unwrap();
-    let continued = tasks
-        .complete(&task.id, &task.token, execution)
+    let continued = service
+        .complete(&worker, &task.id, &task.token, execution)
         .await
         .unwrap();
-    let replay = tasks.poll().await.unwrap().unwrap();
+    let replay = service.poll(&worker).await.unwrap().unwrap();
     assert_eq!(continued.run_id, task.invocation.run_id);
     assert_ne!(replay.invocation.run_id, continued.run_id);
     let reader = TaskPayloadReader::new(Rc::new(tasks.clone()), &replay, 256).unwrap();
     assert_eq!(reader.input().await.unwrap(), Some(value));
-    tasks
-        .complete(
+    service
+        .complete(&worker, 
             &replay.id,
             &replay.token,
             crate::journal_fixture::execution(json!([{"kind":"RunCompleted"}])),
@@ -583,7 +583,7 @@ async fn output_contract(store: Rc<OrmStore>) {
             )
             .await
             .unwrap();
-        let task = claim(&scope, &tasks).await;
+        let task = claim(&scope, &service, &worker).await;
         let (execution, _owed) = prepare(&task, json!([
             step(json!("prefix")),
             {"kind":"StepCompleted","ordinal":1,"name":"large","output":"x".repeat(length),"outputMode":mode},
@@ -598,8 +598,8 @@ async fn output_contract(store: Rc<OrmStore>) {
             "revision {revision}: {:?}",
             execution.outcomes[1]
         );
-        let receipt = tasks
-            .complete(&task.id, &task.token, execution)
+        let receipt = service
+            .complete(&worker, &task.id, &task.token, execution)
             .await
             .unwrap();
         // The refused step owns a journal row, so the run is forward work
@@ -619,7 +619,7 @@ async fn output_contract(store: Rc<OrmStore>) {
         assert_eq!(stored_rows(store.as_ref(), &task).await, 0);
 
         // What the body is handed next names the step that busted the budget.
-        let resumed = tasks.poll().await.unwrap().unwrap();
+        let resumed = service.poll(&worker).await.unwrap().unwrap();
         assert_eq!(resumed.invocation.run_id, task.invocation.run_id);
         let refused = resumed
             .invocation
@@ -634,8 +634,8 @@ async fn output_contract(store: Rc<OrmStore>) {
         let error = refused.error.clone().unwrap();
         assert_eq!(error["type"], "LimitExceededError");
         // A body that does not catch it still rests the run on the same class.
-        tasks
-            .complete(
+        service
+            .complete(&worker, 
                 &resumed.id,
                 &resumed.token,
                 crate::journal_fixture::execution(json!([{"kind":"RunFailed","error":error}])),
@@ -652,7 +652,7 @@ async fn output_contract(store: Rc<OrmStore>) {
     // `sideEffect` output over the same budget. The journal records a named
     // failure as `kind: "run"`, so there is no row to name this step with and
     // the refusal stays the run's verdict.
-    let task = claim(&scope, &tasks).await;
+    let task = claim(&scope, &service, &worker).await;
     let (execution, _owed) = prepare(
         &task,
         json!([{"kind":"StepCompleted","ordinal":0,"name":"effect",
@@ -674,15 +674,15 @@ async fn output_contract(store: Rc<OrmStore>) {
         execution.outcomes
     );
     assert_eq!(
-        tasks
-            .complete(&task.id, &task.token, execution)
+        service
+            .complete(&worker, &task.id, &task.token, execution)
             .await
             .unwrap()
             .state,
         RunState::Failed
     );
 
-    let task = claim(&scope, &tasks).await;
+    let task = claim(&scope, &service, &worker).await;
     for outcomes in [
         json!([step(json!("x".repeat(64))), {"kind":"RunCompleted","outputMode":"blob"}]),
         json!([{ "kind":"StepCompleted","ordinal":0,"name":"invalid","outputMode":"unknown" }]),
@@ -712,7 +712,7 @@ async fn output_contract(store: Rc<OrmStore>) {
             ..
         }]
     ));
-    tasks.complete(&task.id, &task.token, result).await.unwrap();
+    service.complete(&worker, &task.id, &task.token, result).await.unwrap();
 }
 
 /// A staging call answered with a receipt for another object is refused, and
@@ -748,10 +748,8 @@ async fn staging_refuses_an_upload_receipt_that_answers_with_another_descriptor(
     .unwrap();
     let (service, app, other, _deployments) = Box::pin(registered_service(store.clone())).await;
     let scope = service.fixture_app(app);
-    let tasks = service.tasks(
-        WorkerIdentity::new("receipt-guard".into()).unwrap(),
-        objects,
-    );
+    let worker = WorkerIdentity::new("receipt-guard".into()).unwrap();
+    let tasks = service.tasks(worker.clone(), objects);
 
     let value = json!({"large":"x".repeat(64)});
     let encoded = serde_json::to_vec(&value).unwrap();
@@ -759,7 +757,7 @@ async fn staging_refuses_an_upload_receipt_that_answers_with_another_descriptor(
         encoded.len() > LIMITS.max_inline_bytes,
         "the batch must own an upload for the transport to answer for"
     );
-    let task = claim(&scope, &tasks).await;
+    let task = claim(&scope, &service, &worker).await;
 
     // The substitute: an object of this same task, staged on its own name, and
     // not the one any batch below hands the transport.
@@ -810,8 +808,8 @@ async fn staging_refuses_an_upload_receipt_that_answers_with_another_descriptor(
     // The control's batch still commits, so the run is not left mid-flight and
     // the second app below is the only one with a task to claim.
     assert_eq!(
-        tasks
-            .complete(&task.id, &task.token, execution)
+        service
+            .complete(&worker, &task.id, &task.token, execution)
             .await
             .unwrap()
             .state,
@@ -837,7 +835,7 @@ async fn staging_refuses_an_upload_receipt_that_answers_with_another_descriptor(
         i64::try_from(encoded.len()).unwrap() > 16,
         "the budget must be one this value cannot fit"
     );
-    let task = claim(&budgeted, &tasks).await;
+    let task = claim(&budgeted, &service, &worker).await;
     let (truncated, _owed) = prepare(&task, json!([step(json!({"large":"x".repeat(64)}))]))
         .stage(&SubstitutedReceipt::passthrough(&tasks))
         .await
@@ -999,11 +997,9 @@ async fn a_batch_truncated_for_size_still_owes_its_accepted_prefix() {
     ))))
     .unwrap();
     let scope = service.fixture_app(app.clone());
-    let tasks = service.tasks(
-        WorkerIdentity::new("truncated-prefix".into()).unwrap(),
-        objects.clone(),
-    );
-    let task = claim(&scope, &tasks).await;
+    let worker = WorkerIdentity::new("truncated-prefix".into()).unwrap();
+    let tasks = service.tasks(worker.clone(), objects.clone());
+    let task = claim(&scope, &service, &worker).await;
 
     // Two uploads, each forced to an object, and the SECOND refused.
     let prepared = prepare(

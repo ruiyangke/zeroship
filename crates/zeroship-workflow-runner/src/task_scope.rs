@@ -7,7 +7,7 @@ use crate::{
     deployment_fixture::Deployments,
     journal_fixture::{leased_policy, registered_service, sqlite_store, PostgresFixture},
     service_binding::ServiceFixture,
-    PayloadObjects, TaskPayloads, TaskTransport, WorkerBinding,
+    PayloadObjects, TaskPayloads, WorkerBinding,
 };
 use std::rc::Rc;
 use zeroship_core::typed_id;
@@ -25,7 +25,6 @@ async fn start(
     service: &WorkflowService,
     app: &AppWorkflows,
     worker: &WorkerIdentity,
-    objects: &PayloadObjects,
 ) -> TaskAssignment {
     deployments
         .activate(
@@ -43,7 +42,7 @@ async fn start(
     app.start(&RequestId::mint(), "Example", StartOptions::default())
         .await
         .unwrap();
-    let task = app.tasks(worker.clone(), objects.clone()).poll().await.unwrap().unwrap();
+    let task = service.poll(worker).await.unwrap().unwrap();
     assert_eq!(task.invocation.app_id, app.app_id().as_str());
     task
 }
@@ -54,33 +53,34 @@ async fn contract(store: Rc<OrmStore>) {
     let first = service.fixture_app(first);
     let second = service.fixture_app(second);
     let worker = WorkerIdentity::new("scoped-task-worker".into()).unwrap();
-    let task_a = start(&deployments, &service, &first, &worker, &objects).await;
-    let task_b = start(&deployments, &service, &second, &worker, &objects).await;
+    let task_a = start(&deployments, &service, &first, &worker).await;
+    let task_b = start(&deployments, &service, &second, &worker).await;
     let tasks = first.tasks(worker.clone(), objects.clone());
 
-    tasks.heartbeat(&task_a.id, &task_a.token).await.unwrap();
-    second
-        .tasks(worker.clone(), objects.clone())
-        .heartbeat(&task_b.id, &task_b.token)
+    // Each handle reaches its own app's task, so the refusals below are about
+    // scope rather than about a task nothing could have reached.
+    TaskPayloads::executable(&tasks, &task_a.id, &task_a.token)
         .await
         .unwrap();
-    assert!(matches!(
-        tasks.heartbeat(&task_b.id, &task_b.token).await,
-        Err(WorkflowServiceError::NotFound(_))
-    ));
+    TaskPayloads::executable(
+        &second.tasks(worker.clone(), objects.clone()),
+        &task_b.id,
+        &task_b.token,
+    )
+    .await
+    .unwrap();
     assert!(matches!(
         TaskPayloads::executable(&tasks, &task_b.id, &task_b.token).await,
         Err(WorkflowServiceError::NotFound(_))
     ));
-    assert!(matches!(
-        tasks.release(&task_b.id, &task_b.token).await,
-        Err(WorkflowServiceError::NotFound(_))
-    ));
-    second
-        .tasks(worker.clone(), objects.clone())
-        .heartbeat(&task_b.id, &task_b.token)
-        .await
-        .unwrap();
+    // And the refusal did not disturb the handle that owns it.
+    TaskPayloads::executable(
+        &second.tasks(worker.clone(), objects.clone()),
+        &task_b.id,
+        &task_b.token,
+    )
+    .await
+    .unwrap();
 
     // Replacing this app's host binding must not refresh retained task handles.
     let replacement = service.policies().bind(first.app_id().clone()).unwrap();
@@ -91,14 +91,12 @@ async fn contract(store: Rc<OrmStore>) {
         .unwrap();
     let fresh = service.bind_app(&replacement).unwrap().tasks(worker, objects.clone());
     assert!(matches!(
-        tasks.heartbeat(&task_a.id, &task_a.token).await,
-        Err(WorkflowServiceError::Unavailable(_))
-    ));
-    assert!(matches!(
         TaskPayloads::executable(&tasks, &task_a.id, &task_a.token).await,
         Err(WorkflowServiceError::Unavailable(_))
     ));
-    fresh.heartbeat(&task_a.id, &task_a.token).await.unwrap();
+    TaskPayloads::executable(&fresh, &task_a.id, &task_a.token)
+        .await
+        .unwrap();
 }
 
 #[compio::test]
