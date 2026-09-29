@@ -97,6 +97,7 @@ impl JobLease for Lease {
 struct Metadata {
     settlements: RefCell<BTreeMap<i64, Settlement>>,
     requests: RefCell<Vec<Settlement>>,
+    releases: Cell<usize>,
     lose_ack: Cell<bool>,
     /// Every acknowledgement is lost, not just the first, so a retry loop has
     /// nothing that will ever let it finish.
@@ -117,6 +118,7 @@ impl JobTransport for Metadata {
         lease: &Self::Lease,
         task: &zeroship_workflow::service::delivery::DeliveredTask,
     ) -> Result<(), WorkflowServiceError> {
+        self.releases.set(self.releases.get() + 1);
         journal.release_job(task, lease).await
     }
     async fn receipt(
@@ -237,10 +239,19 @@ enum Mode {
     AfterCreatorRenewal,
     HardTimeout,
     RevokedFrontier,
+    /// One compensable step, then a failure: the run owes a rollback.
+    CompensableFailure,
+    /// The compensating effect reaches the outside world, and the thread is held
+    /// past the execution budget before the resolved outcome is returned.
+    Compensate,
 }
 
 #[derive(Default)]
 struct Probe {
+    /// How long `Mode::Compensate` holds the thread, as synchronous app code
+    /// does, after the compensating effect has already landed.
+    overrun: Cell<Duration>,
+    compensations: Cell<usize>,
     starts: Cell<usize>,
     cancels: Cell<usize>,
     stops: Cell<usize>,
@@ -306,6 +317,21 @@ impl TaskExecution for Execution {
                 ));
             }
             Mode::Pending => std::future::pending().await,
+            Mode::CompensableFailure => {
+                return WorkflowExecution::from_runtime_value(json!({"outcomes":[
+                    {"kind":"StepCompleted","ordinal":0,"name":"reserve",
+                     "compensable":true,"output":0},
+                    {"kind":"RunFailed",
+                     "error":{"type":"Error","message":"intentional failure"}}
+                ]}));
+            }
+            Mode::Compensate => {
+                self.probe.compensations.set(self.probe.compensations.get() + 1);
+                std::thread::sleep(self.probe.overrun.get());
+                return WorkflowExecution::from_runtime_value(json!({"outcomes":[
+                    {"kind":"CompensationCompleted","ordinal":0,"name":"reserve"}
+                ]}));
+            }
             Mode::RevokedFrontier => {
                 self.probe
                     .revoke
@@ -821,6 +847,97 @@ async fn replay_contract(fixture: Fixture) {
     assert_eq!(
         fixture.app.job_receipt(&fixture.job).await.unwrap(),
         Some(*creator)
+    );
+}
+
+/// An applied compensation survives local expiry and is published once.
+///
+/// The compensating effect has already reached the outside world by the time the
+/// budget ends, so withdrawing the right to publish it would strand the effect:
+/// the journal would owe a rollback that had in fact run. The claim is therefore
+/// never handed back for reclaim, and the journal accounts for exactly the one
+/// compensation that ran.
+#[compio::test]
+async fn a_compensation_resolved_after_expiry_publishes_once_and_keeps_its_claim() {
+    let fixture = Fixture::new(AppPolicy {
+        lease_ms: 5_000,
+        ..AppPolicy::default()
+    })
+    .await;
+    // The forward attempt: one compensable step, then a failure.
+    fixture.probe.mode.set(Mode::CompensableFailure);
+    let mut forward = fixture.slot(Duration::from_secs(5));
+    assert!(matches!(
+        Box::pin(forward.run(
+            &fixture.app,
+            fixture.app.binding(),
+            claimed(&fixture.app, fixture.lease.clone()).await.unwrap(),
+        ))
+        .await
+        .unwrap(),
+        DeliveryOutcome::Settled { .. }
+    ));
+    let JobOperation::Advance { run_id, .. } = fixture.job.operation.clone() else {
+        panic!("the started run advances")
+    };
+    assert_eq!(
+        fixture.app.status(run_id.as_str()).await.unwrap().state,
+        RunState::Compensating,
+        "a compensable step and a failure leave a rollback owed"
+    );
+    // The rollback arrives as the next advance of the same run, claimed the way
+    // the manager delivers it.
+    let owed = fixture.app.pending_jobs(None, 8).await.unwrap();
+    let rollback_job = owed
+        .into_iter()
+        .max_by_key(|job| match &job.operation {
+            JobOperation::Advance { revision, .. } => revision.get(),
+            _ => 0,
+        })
+        .expect("the owed rollback is pending");
+    assert_ne!(
+        rollback_job.id, fixture.job.id,
+        "the rollback is later work than the attempt that owed it"
+    );
+    let mut rollback = fixture.lease.clone();
+    rollback.delivery.job = rollback_job;
+    // A distinct delivery of distinct work, so its settlement is its own.
+    rollback.delivery.attempt = Revision::try_from(2).unwrap();
+    fixture.probe.mode.set(Mode::Compensate);
+    fixture.probe.overrun.set(Duration::from_millis(900));
+    let bound = Duration::from_millis(500);
+    let mut slot = fixture.slot(bound);
+    let started = Instant::now();
+    Box::pin(slot.run(
+        &fixture.app,
+        fixture.app.binding(),
+        claimed(&fixture.app, rollback).await.unwrap(),
+    ))
+    .await
+    .unwrap();
+    // Without this the case would pass over an attempt that never reached
+    // expiry, and "survives expiry" would be asserting nothing.
+    assert!(
+        started.elapsed() > bound,
+        "the attempt did not outlive its execution bound, so the publish never \
+         had to survive an expired budget"
+    );
+    assert_eq!(
+        fixture.probe.compensations.get(),
+        1,
+        "the compensating effect ran more than once"
+    );
+    assert_eq!(
+        fixture.metadata.releases.get(),
+        0,
+        "a published compensation was handed back for reclaim"
+    );
+    let settled = fixture.app.status(run_id.as_str()).await.unwrap();
+    assert_eq!(settled.state, RunState::Failed);
+    assert_eq!(
+        settled.error.unwrap()["compensation"],
+        json!({"total":1, "completed":1, "failed":0, "outcome":"completed"}),
+        "the journal accounts for exactly the one compensation that ran"
     );
 }
 
