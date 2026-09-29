@@ -97,6 +97,9 @@ struct Metadata {
     settlements: RefCell<BTreeMap<i64, Settlement>>,
     requests: RefCell<Vec<Settlement>>,
     lose_ack: Cell<bool>,
+    /// Every acknowledgement is lost, not just the first, so a retry loop has
+    /// nothing that will ever let it finish.
+    lose_every_ack: Cell<bool>,
     reject_renewal: Cell<bool>,
     stall_renewal: Cell<bool>,
     substitute_renewal: Cell<bool>,
@@ -193,7 +196,7 @@ impl JobTransport for Metadata {
             previous, settlement,
             "a retry changed immutable settlement metadata"
         );
-        if self.lose_ack.replace(false) {
+        if self.lose_every_ack.get() || self.lose_ack.replace(false) {
             return Err(WorkflowServiceError::Timeout);
         }
         Ok(SettlementReceipt {
@@ -974,6 +977,45 @@ async fn a_renewal_that_never_answers_ends_the_attempt_on_the_operation_bound() 
     assert!(
         fixture.metadata.requests.borrow().is_empty(),
         "an attempt ended by a stalled renewal reported a settlement"
+    );
+}
+
+/// Completion retries stay bounded while renewal keeps succeeding.
+///
+/// A settlement the manager never acknowledges is retried, and renewal is the
+/// thing that would otherwise keep the attempt alive to retry in: a host whose
+/// renewals all succeed has no expiring authority to stop it. So the phase is
+/// what has to, and this is the case that says so - the retries end, the claim
+/// is not settled, and the attempt reports the failure rather than looping.
+#[compio::test]
+async fn completion_retries_end_with_the_phase_while_renewal_keeps_succeeding() {
+    let fixture = Fixture::new(AppPolicy::default()).await;
+    fixture.probe.mode.set(Mode::Complete);
+    fixture.metadata.lose_every_ack.set(true);
+    let execution = Duration::from_secs(2);
+    let mut slot = fixture.slot_bounding_operations(execution, Duration::from_millis(100));
+    let started = Instant::now();
+    Box::pin(slot.run(
+        &fixture.app,
+        fixture.app.binding(),
+        claimed(&fixture.app, fixture.lease.clone()).await.unwrap(),
+    ))
+    .await
+    .unwrap_err();
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < execution * 3,
+        "the retry loop outlived the phase that had to end it: {elapsed:?}"
+    );
+    assert!(
+        fixture.metadata.requests.borrow().len() > 1,
+        "an acknowledgement lost every time was never retried"
+    );
+    let settlements = fixture.metadata.settlements.borrow();
+    assert_eq!(
+        settlements.len(),
+        1,
+        "a retry addressed an attempt other than the one it was settling"
     );
 }
 
