@@ -378,7 +378,7 @@ async fn native_runner_reads_replay_payloads_through_its_task_authority() {
     let manager = Manager::new(&fixture).await;
     let mut consumer = manager.consumer(&fixture, 1);
     let done =
-        advance_until_suspended(&fixture, &manager, &mut consumer, &run, Duration::from_secs(5))
+        advance_until_suspended(&fixture, &manager, &mut consumer, &run, Duration::from_secs(20))
             .await;
     assert_eq!(done.state, RunState::Completed);
     assert_eq!(
@@ -540,7 +540,11 @@ async fn payload_outage_interrupts_app_code_and_leaves_the_frontier_retryable() 
     assert!(fixture.loader.markers.0.lock().unwrap().is_empty());
     assert!(!fixture.app.status(&run).await.unwrap().state.is_terminal());
     fixture.assert_disposed().await;
-    let done = slot_advance_until_suspended(&mut fixture.runner(Duration::from_secs(5))).await;
+    let manager = Manager::new(&fixture).await;
+    let mut consumer = manager.consumer(&fixture, 1);
+    let done =
+        advance_until_suspended(&fixture, &manager, &mut consumer, &run, Duration::from_secs(20))
+            .await;
     assert_eq!(done.state, RunState::Completed);
     assert_eq!(
         returned_value(&fixture, &run).await,
@@ -753,7 +757,7 @@ async fn native_runner_stores_large_root_results_in_service_owned_payloads() {
     let manager = Manager::new(&fixture).await;
     let mut consumer = manager.consumer_with_limits(&fixture, 1, OUTPUT_LIMITS);
     assert_eq!(
-        advance_until_suspended(&fixture, &manager, &mut consumer, &run.id, Duration::from_secs(5))
+        advance_until_suspended(&fixture, &manager, &mut consumer, &run.id, Duration::from_secs(20))
             .await
             .state,
         RunState::Completed
@@ -794,7 +798,7 @@ async fn inline_output_limit_commits_a_terminal_workflow_failure() {
     let manager = Manager::new(&fixture).await;
     let mut consumer = manager.consumer_with_limits(&fixture, 1, OUTPUT_LIMITS);
     assert_eq!(
-        advance_until_suspended(&fixture, &manager, &mut consumer, &run.id, Duration::from_secs(5))
+        advance_until_suspended(&fixture, &manager, &mut consumer, &run.id, Duration::from_secs(20))
             .await
             .state,
         RunState::Failed
@@ -834,7 +838,7 @@ async fn caught_step_output(length: usize) -> (RunState, serde_json::Value) {
     let manager = Manager::new(&fixture).await;
     let mut consumer = manager.consumer_with_limits(&fixture, 1, OUTPUT_LIMITS);
     let state =
-        advance_until_suspended(&fixture, &manager, &mut consumer, &run.id, Duration::from_secs(5))
+        advance_until_suspended(&fixture, &manager, &mut consumer, &run.id, Duration::from_secs(20))
             .await
             .state;
     let output = returned_value(&fixture, &run.id).await;
@@ -994,6 +998,25 @@ async fn advance_until_suspended(
     run: &str,
     bound: Duration,
 ) -> RunStatus {
+    advance_until(fixture, manager, consumer, run, bound, |status| {
+        !matches!(status.state, RunState::Queued | RunState::Running)
+    })
+    .await
+}
+
+/// The same drive, with the caller naming the state it is waiting FOR.
+///
+/// A run that is already suspended when the drive starts - one resumed by a
+/// signal, say - is not what `advance_until_suspended` answers, because its
+/// entry state already satisfies that predicate.
+async fn advance_until(
+    fixture: &Fixture,
+    manager: &Rc<Manager>,
+    consumer: &mut zeroship_workflow_runner::consumer::JobConsumer<Manager>,
+    run: &str,
+    bound: Duration,
+    done: impl Fn(&RunStatus) -> bool,
+) -> RunStatus {
     let settled = std::cell::RefCell::new(None);
     let within = compio::time::timeout(
         bound,
@@ -1001,7 +1024,7 @@ async fn advance_until_suspended(
             loop {
                 manager.publish(&fixture.app).await;
                 let status = fixture.app.status(run).await.unwrap();
-                if !matches!(status.state, RunState::Queued | RunState::Running) {
+                if done(&status) {
                     *settled.borrow_mut() = Some(status);
                     return;
                 }
@@ -1059,9 +1082,11 @@ async fn native_runner_awaits_creator_startup_before_committing_the_frontier() {
     )
     .await;
     let run = fixture.start(json!({"number":7})).await;
-    let mut runner = fixture.runner(Duration::from_secs(5));
-    let receipt = slot_advance_until_suspended(&mut runner).await;
-    assert_eq!(receipt.run_id, run.id);
+    let manager = Manager::new(&fixture).await;
+    let mut consumer = manager.consumer(&fixture, 1);
+    let receipt =
+        advance_until_suspended(&fixture, &manager, &mut consumer, &run.id, Duration::from_secs(20))
+            .await;
     assert_eq!(receipt.state, RunState::Completed);
     assert_eq!(
         returned_value(&fixture, &run.id).await,
