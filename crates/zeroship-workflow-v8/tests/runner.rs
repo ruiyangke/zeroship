@@ -708,14 +708,11 @@ async fn upload_outage_is_bounded_after_disposing_the_app() {
         .start(&RequestId::mint(), "Example", StartOptions::default())
         .await
         .unwrap();
-    let tasks = Rc::new(
-        fixture
-            .service
-            .tasks(
-                WorkerIdentity::new("upload-worker".into()).unwrap(),
-                fixture.objects.clone(),
-            ),
-    );
+    let manager = Manager::new(&fixture).await;
+    let tasks = Rc::new(fixture.app.tasks(
+        WorkerIdentity::new(manager.worker.as_str().to_owned()).unwrap(),
+        fixture.objects.clone(),
+    ));
     let upload = Rc::new(UploadProbe {
         tasks: tasks.as_ref().clone(),
         loader: fixture.loader.clone(),
@@ -726,11 +723,10 @@ async fn upload_outage_is_bounded_after_disposing_the_app() {
     let executor = Rc::new(
         V8TaskExecutor::new(fixture.loader.clone(), upload.clone(), OUTPUT_LIMITS).unwrap(),
     );
-    let mut runner = RunnerSlot::new(tasks, executor, Duration::from_millis(500)).unwrap();
-    assert!(matches!(
-        runner.run_once().await,
-        Err(WorkflowServiceError::Timeout)
-    ));
+    let mut consumer = manager.consumer_with_executor(&fixture, 1, executor);
+    // The outage leaves the frontier retryable, so there is no settled state to
+    // wait for; the window is what bounds the case.
+    drive_for(&fixture, &manager, &mut consumer, Duration::from_secs(3)).await;
     assert!(!fixture
         .app
         .status(&run.id)
@@ -1042,6 +1038,30 @@ async fn advance_until(
     settled
         .into_inner()
         .expect("a settled run has a status")
+}
+
+/// Drive delivery for a fixed window, for the cases whose run never settles.
+///
+/// A payload outage leaves the frontier retryable on purpose, so there is no
+/// state to wait for: what the case asserts is what the host did while it could
+/// not finish - the callback it ran once, the uploads it retried, and the isolate
+/// it disposed.
+async fn drive_for(
+    fixture: &Fixture,
+    manager: &Rc<Manager>,
+    consumer: &mut zeroship_workflow_runner::consumer::JobConsumer<Manager>,
+    window: Duration,
+) {
+    let _ = compio::time::timeout(
+        window,
+        consumer.run_until(async {
+            loop {
+                manager.publish(&fixture.app).await;
+                compio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }),
+    )
+    .await;
 }
 
 #[compio::test]
