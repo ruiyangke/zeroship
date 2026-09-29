@@ -641,14 +641,14 @@ async fn output_upload_retry_preserves_the_callback_and_stops_background_app_wor
         .start(&RequestId::mint(), "Example", StartOptions::default())
         .await
         .unwrap();
-    let tasks = Rc::new(
-        fixture
-            .service
-            .tasks(
-                WorkerIdentity::new("upload-worker".into()).unwrap(),
-                fixture.objects.clone(),
-            ),
-    );
+    let manager = Manager::new(&fixture).await;
+    // The payload seam must answer for the worker that holds the claim, which on
+    // this path is the one the manager placed rather than a name of the test's
+    // own choosing.
+    let tasks = Rc::new(fixture.app.tasks(
+        WorkerIdentity::new(manager.worker.as_str().to_owned()).unwrap(),
+        fixture.objects.clone(),
+    ));
     let upload = Rc::new(UploadProbe {
         tasks: tasks.as_ref().clone(),
         loader: fixture.loader.clone(),
@@ -659,8 +659,10 @@ async fn output_upload_retry_preserves_the_callback_and_stops_background_app_wor
     let executor = Rc::new(
         V8TaskExecutor::new(fixture.loader.clone(), upload.clone(), OUTPUT_LIMITS).unwrap(),
     );
-    let mut runner = RunnerSlot::new(tasks, executor, Duration::from_secs(5)).unwrap();
-    let done = slot_advance_until_suspended(&mut runner).await;
+    let mut consumer = manager.consumer_with_executor(&fixture, 1, executor);
+    let done =
+        advance_until_suspended(&fixture, &manager, &mut consumer, &run.id, Duration::from_secs(20))
+            .await;
     assert_eq!(done.state, RunState::Completed);
     assert_eq!(returned_value(&fixture, &run.id).await, json!(64));
     assert_eq!(*fixture.loader.markers.0.lock().unwrap(), ["callback"]);
