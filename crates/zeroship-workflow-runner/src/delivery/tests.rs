@@ -1164,6 +1164,14 @@ async fn stalled_native_stop_exhausts_renewal_budget_without_reusing_slot() {
         assert_eq!(fixture.probe.starts.get(), 1);
         assert_eq!(fixture.probe.stops.get(), 0);
         assert!(fixture.metadata.requests.borrow().is_empty());
+        // The claim is still held while shutdown is blocked. Paired with the
+        // release asserted below, this is what orders the two: a release that
+        // ran before the executor stopped would show up here.
+        assert_eq!(
+            fixture.task_state().await,
+            "leased",
+            "the creator claim was given back before the executor stopped"
+        );
         release_stop.send(()).unwrap();
         let error = run.await.unwrap_err();
         match mode {
@@ -1175,6 +1183,19 @@ async fn stalled_native_stop_exhausts_renewal_budget_without_reusing_slot() {
             _ => unreachable!(),
         }
         assert_eq!(fixture.probe.stops.get(), 1);
+        // The claim is NOT given back here, and that is the contract rather
+        // than an omission: the error arm does attempt a release, bounded by the
+        // same operation timeout this case exhausted, and that helper swallows a
+        // failed attempt. So an attempt whose shutdown outlived its bound leaves
+        // the claim to expire, which is what lets the manager redeliver it. The
+        // drain path is where a release is joined -
+        // `cancellation_retains_slot_until_stop_joins_before_release` holds that.
+        assert_eq!(
+            fixture.task_state().await,
+            "leased",
+            "a claim left to expire was instead given back inside a bound the \
+             attempt had already exhausted"
+        );
         assert!(slot.active.is_none());
         assert!(fixture
             .app
