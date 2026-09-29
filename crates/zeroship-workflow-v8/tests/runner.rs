@@ -1722,9 +1722,12 @@ const HANGING_STEP: &str = r"
 async fn a_step_timeout_under_the_execution_bound_commits_a_step_failure() {
     let fixture = Fixture::new(HANGING_STEP).await;
     let run = fixture.start(json!({"timeout":"50ms"})).await;
-    let mut runner = fixture.runner(Duration::from_secs(10));
+    let manager = Manager::new(&fixture).await;
+    let mut consumer = manager.consumer(&fixture, 1);
     assert_eq!(
-        slot_advance_until_suspended(&mut runner).await.state,
+        advance_until_suspended(&fixture, &manager, &mut consumer, &run.id, Duration::from_secs(20))
+            .await
+            .state,
         RunState::Failed
     );
     let error = fixture.app.status(&run.id).await.unwrap().error.unwrap();
