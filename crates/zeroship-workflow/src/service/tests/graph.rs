@@ -1,8 +1,8 @@
-use super::*;
+use super::{job_door, *};
 use crate::{
     engine::StepCheckpoint,
     operations::{RestartOptions, RunState},
-    service::{app, frontier, journal, models, types::storage_id, WorkerIdentity},
+    service::{app, frontier, journal, models, types::storage_id},
 };
 use zeroship_data_orm::{
     budgets::MAX_INSERT_MANY_BATCH,
@@ -401,7 +401,7 @@ async fn depth_of(service: &WorkflowService, app_id: &AppId, run: &str) -> i64 {
 async fn depth_contract(store: Rc<OrmStore>) {
     let (service, app_id, _, _deployments) = registered_service(store).await;
     let scope = service.fixture_app(app_id.clone());
-    let worker = WorkerIdentity::new("child-depth".into()).unwrap();
+    let worker = job_door::Worker::new(&app_id).await;
     service
         .policies
         .fixture_install(
@@ -422,10 +422,10 @@ async fn depth_contract(store: Rc<OrmStore>) {
         .start(&RequestId::mint(), "Example", StartOptions::default())
         .await
         .unwrap();
-    let task = service.poll(&worker).await.unwrap().unwrap();
-    assert_eq!(task.invocation.run_id, root.id);
-    service
-        .complete(&worker, &task.id, &task.token, child_call())
+    let claimed = worker.claim(&scope).await;
+    assert_eq!(claimed.assignment().invocation.run_id, root.id);
+    claimed
+        .finish(&scope, child_call())
         .await
         .expect("a parent under the ceiling starts its child");
     let child = child_run(&service, &app_id, &root.id)
@@ -438,14 +438,12 @@ async fn depth_contract(store: Rc<OrmStore>) {
     );
 
     // The same call from that child, which is at the ceiling.
-    let task = service.poll(&worker).await.unwrap().unwrap();
+    let claimed = worker.claim(&scope).await;
     assert_eq!(
-        task.invocation.run_id, child,
+        claimed.assignment().invocation.run_id, child,
         "the root parks on its join, leaving only the child runnable"
     );
-    let refused = service
-        .complete(&worker, &task.id, &task.token, child_call())
-        .await;
+    let refused = claimed.finish(&scope, child_call()).await;
     assert!(
         matches!(&refused, Err(WorkflowServiceError::ResourceExhausted(message))
             if message == "workflow child depth limit reached"),

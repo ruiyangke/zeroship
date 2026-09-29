@@ -101,6 +101,7 @@ mod graph;
 mod hold_release;
 mod ingress_models;
 mod journal_models;
+mod job_door;
 mod management;
 #[path = "../../../../tests/fixtures/workflow_manager_queue.rs"]
 pub(super) mod manager_queue;
