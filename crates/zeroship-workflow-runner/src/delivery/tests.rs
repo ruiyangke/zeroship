@@ -7,7 +7,7 @@ mod fanout;
 mod management;
 mod propagation;
 use zeroship_workflow::{
-    operations::{RunState, StartOptions},
+    operations::{RunOperation, RunState, StartOptions},
     service::{
         collection::CollectionOptions,
         maintenance::{MaintenanceOptions, MaintenanceOutcome},
@@ -848,6 +848,43 @@ async fn an_attempt_resolved_before_its_renewal_delay_reports_no_renewal() {
         DeliveryOutcome::Settled { .. }
     ));
     assert_eq!(fixture.metadata.renewals.get(), 0);
+}
+
+/// A control intent on a renewal interrupts the attempt, and settles nothing.
+///
+/// The manager's delivery ceiling and the creator's lease each end an attempt by
+/// expiring. This is the third way and the only one an operator drives: the
+/// renewal carries the run's effective control intent, so a run paused while a
+/// host is executing it comes back as `Interrupted` with its claim released
+/// rather than as a settlement.
+///
+/// The pause is recorded through the ordinary lifecycle call, so
+/// `effective_control` is what reports it. A test that fabricated a renewal
+/// carrying the intent would assert its own construction instead.
+#[compio::test]
+async fn a_control_intent_on_a_renewal_interrupts_without_settling() {
+    let fixture = Fixture::new(AppPolicy::default()).await;
+    fixture.probe.mode.set(Mode::Pending);
+    let JobOperation::Advance { run_id, .. } = fixture.job.operation.clone() else {
+        panic!("the started run's first job advances it");
+    };
+    let claim = claimed(&fixture.app, fixture.lease.clone()).await.unwrap();
+    fixture
+        .app
+        .transition(&RequestId::mint(), run_id.as_str(), RunOperation::Pause)
+        .await
+        .unwrap();
+    let mut slot = fixture.slot(MANAGER_LEASE / 32);
+    assert!(matches!(
+        Box::pin(slot.run(&fixture.app, fixture.app.binding(), claim))
+            .await
+            .unwrap(),
+        DeliveryOutcome::Interrupted(ControlIntent::Pause)
+    ));
+    assert!(
+        fixture.metadata.requests.borrow().is_empty(),
+        "an interrupted attempt reported a settlement to the manager"
+    );
 }
 
 /// Captured host authority can end an attempt before either the manager lease
