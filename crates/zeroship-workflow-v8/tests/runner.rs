@@ -452,18 +452,40 @@ async fn native_runner_hydrates_continuation_input_before_entering_v8() {
 
 #[compio::test]
 async fn oversized_input_never_initializes_the_creator_module() {
+    assert!(!payload_bounded_initialization(1).await);
+}
+
+#[compio::test]
+async fn an_input_inside_the_payload_budget_initializes_the_creator_module() {
+    // The control for the case above: the same staged input and the same drive,
+    // differing only in whether it clears the budget. Without it, an empty
+    // `probes` would prove the budget refused the input OR that nothing was
+    // ever delivered to refuse.
+    assert!(payload_bounded_initialization(1024 * 1024).await);
+}
+
+/// Drive a staged continuation input through delivery under `max_payload_bytes`
+/// and answer whether the host built a creator isolate for it.
+///
+/// The creator module throws on evaluation, so a constructed isolate is proof
+/// the input cleared the budget and nothing beyond that.
+async fn payload_bounded_initialization(max_payload_bytes: usize) -> bool {
     let fixture =
         Fixture::new("throw new Error('must not evaluate'); export class Example {}").await;
     prepare_payload(&fixture, true).await;
-    let result = fixture
-        .runner_with_payload_limit(Duration::from_secs(5), 1)
-        .run_once()
-        .await;
-    assert!(
-        matches!(result, Err(WorkflowServiceError::PayloadTooLarge)),
-        "{result:?}"
+    let manager = Manager::new(&fixture).await;
+    let mut consumer = manager.consumer_with_limits(
+        &fixture,
+        1,
+        TaskPayloadLimits {
+            max_inline_bytes: max_payload_bytes,
+            max_payload_bytes,
+            ..TaskPayloadLimits::default()
+        },
     );
-    assert!(fixture.loader.probes.borrow().is_empty());
+    drive_for(&fixture, &manager, &mut consumer, DRIVE_WINDOW).await;
+    let built = !fixture.loader.probes.borrow().is_empty();
+    built
 }
 
 struct UnavailablePayloads(Rc<WorkerTasks>);
