@@ -1223,15 +1223,19 @@ async fn replay_loads_retained_dependencies_after_redeploy_and_host_restart() {
         .unwrap();
     let manager = Manager::new(&fixture).await;
     let mut consumer = manager.consumer(&fixture, 1);
-    let receipt = advance_until_suspended(
+    // The signal above already moved this run out of `Running`, so the state to
+    // wait for has to be named: `advance_until_suspended` is satisfied by the
+    // run's ENTRY state and answers `Waiting` before delivery resumes it.
+    let status = advance_until(
         &fixture,
         &manager,
         &mut consumer,
         &old_run,
         Duration::from_secs(5),
+        |status| status.state == RunState::Completed,
     )
     .await;
-    assert_eq!(receipt.state, RunState::Completed);
+    assert_eq!(status.state, RunState::Completed);
     assert_eq!(
         returned_value(&fixture, &old_run).await,
         json!({"before":"original","after":"original"})
