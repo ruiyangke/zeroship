@@ -13,15 +13,15 @@ use zeroship_runtime::{runtime::InnerProbe, EnvSnapshot, ModuleEntry, Runtime};
 use zeroship_workflow::{
     operations::{RunOperation, RunState, RunStatus, SignalOptions, StartOptions},
     service::{
-        AppPolicy, AppWorkflows, CompletionReceipt, DeployRegistration, HostPolicies, PayloadSlot,
+        AppPolicy, AppWorkflows, DeployRegistration, HostPolicies, PayloadSlot,
         PolicySnapshot, RequestId, TaskAssignment, TaskToken, WorkerIdentity,
         WorkflowService,
     },
     WorkflowServiceError,
 };
 use zeroship_workflow_runner::{
-    ObjectStepOutputs, PayloadObjects, PayloadRead, RunPayloads, RunnerOutcome, RunnerSlot,
-    TaskPayloadLimits, TaskPayloads, WorkerBinding, WorkerPayloads, WorkerTasks,
+    ObjectStepOutputs, PayloadObjects, PayloadRead, RunPayloads, TaskPayloadLimits,
+    TaskPayloads, WorkerBinding, WorkerPayloads, WorkerTasks,
 };
 use zeroship_workflow_v8::{
     LoadedWorkflow, V8TaskExecutor, WorkflowBinding, WorkflowRuntimeLoader,
@@ -218,38 +218,6 @@ impl Fixture {
                 markers: Markers::default(),
             }),
         }
-    }
-    fn runner(&self, timeout: Duration) -> RunnerSlot {
-        self.runner_with_payload_limit(timeout, 1024 * 1024)
-    }
-    fn runner_with_payload_limit(&self, timeout: Duration, max_payload_bytes: usize) -> RunnerSlot {
-        self.runner_with_output_limits(
-            timeout,
-            TaskPayloadLimits {
-                max_inline_bytes: max_payload_bytes,
-                max_payload_bytes,
-                ..TaskPayloadLimits::default()
-            },
-        )
-    }
-    fn runner_with_output_limits(
-        &self,
-        timeout: Duration,
-        limits: TaskPayloadLimits,
-    ) -> RunnerSlot {
-        let tasks = Rc::new(
-            self.service
-                .tasks(
-                    WorkerIdentity::new("local-v8-worker".into()).unwrap(),
-                    self.objects.clone(),
-                ),
-        );
-        RunnerSlot::new(
-            tasks.clone(),
-            Rc::new(V8TaskExecutor::new(self.loader.clone(), tasks, limits).unwrap()),
-            timeout,
-        )
-        .unwrap()
     }
     /// Start a run from `input`, staging the value first as the creator seam
     /// does: a generation row keeps no inline slot for a run.s input.
@@ -1003,29 +971,16 @@ async fn confirmed_lease_bounds_synchronous_execution_before_its_timeout() {
     .await;
 }
 
-async fn slot_advance_until_suspended(runner: &mut RunnerSlot) -> CompletionReceipt {
-    for _ in 0..16 {
-        let RunnerOutcome::Completed(receipt) = runner.run_once().await.unwrap() else {
-            panic!("an accepted workflow must have a runnable frontier");
-        };
-        if !matches!(receipt.state, RunState::Queued | RunState::Running) {
-            return receipt;
-        }
-    }
-    panic!("workflow did not reach a wait or terminal state");
-}
-
 /// Drive the app's frontier the way the worker does, and answer with what the
 /// journal says.
 ///
 /// The manager publishes the jobs the journal has pending, the consumer claims
 /// and executes them, and the run's own status is the assertion's subject. This
-/// is the path `zeroship-worker` takes.
+/// is the path `zeroship-worker` takes, so it carries the delivery grant, the
+/// fencing and the lease renewal a real job is executed under.
 ///
-/// It replaces a `RunnerSlot` loop. The slot POLLED the journal for work, and
-/// nothing in production does that, so a test driven through it proved the
-/// executor behaves under a dispatch path the worker had already abandoned -
-/// notably without the delivery fencing and lease renewal this path carries.
+/// A drive that instead polled the journal itself would assert the executor's
+/// behaviour under a dispatch nothing performs.
 async fn advance_until_suspended(
     fixture: &Fixture,
     manager: &Rc<Manager>,
@@ -1236,6 +1191,12 @@ async fn replay_loads_retained_dependencies_after_redeploy_and_host_restart() {
         descriptor: None,
     }
     };
+    // One manager for the whole case, across the host restart. Its worker
+    // registration and app assignment live in the platform store, which the
+    // rebuilt service reopens, so registering again would place a second worker
+    // against an app already assigned to the first.
+    let manager = Manager::new(&fixture).await;
+    let mut consumer = manager.consumer(&fixture, 1);
     let mut old_run = None;
     for (version, hash, wait) in [("original", 'b', true), ("replacement", 'c', false)] {
         let declaration = fixture
@@ -1258,13 +1219,19 @@ async fn replay_loads_retained_dependencies_after_redeploy_and_host_restart() {
             .await
             .unwrap();
         let run = fixture.start(json!({"wait":wait})).await;
-        let receipt = slot_advance_until_suspended(&mut fixture.runner(Duration::from_secs(5))).await;
-        assert_eq!(receipt.run_id, run.id);
+        let status = advance_until_suspended(
+            &fixture,
+            &manager,
+            &mut consumer,
+            &run.id,
+            Duration::from_secs(20),
+        )
+        .await;
         if wait {
-            assert_eq!(receipt.state, RunState::Waiting);
+            assert_eq!(status.state, RunState::Waiting);
             old_run = Some(run.id);
         } else {
-            assert_eq!(receipt.state, RunState::Completed);
+            assert_eq!(status.state, RunState::Completed);
             assert_eq!(
                 returned_value(&fixture, &run.id).await,
                 json!({"before":version,"after":version})
@@ -1313,17 +1280,19 @@ async fn replay_loads_retained_dependencies_after_redeploy_and_host_restart() {
         )
         .await
         .unwrap();
-    let manager = Manager::new(&fixture).await;
-    let mut consumer = manager.consumer(&fixture, 1);
+    // A fresh consumer on the SAME manager: the one above holds the loader the
+    // restart replaced, and loading the retained dependency is the subject.
+    //
     // The signal above already moved this run out of `Running`, so the state to
     // wait for has to be named: `advance_until_suspended` is satisfied by the
     // run's ENTRY state and answers `Waiting` before delivery resumes it.
+    let mut consumer = manager.consumer(&fixture, 1);
     let status = advance_until(
         &fixture,
         &manager,
         &mut consumer,
         &old_run,
-        Duration::from_secs(5),
+        Duration::from_secs(20),
         |status| status.state == RunState::Completed,
     )
     .await;

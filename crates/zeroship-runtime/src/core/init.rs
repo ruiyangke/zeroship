@@ -42,6 +42,31 @@ pub fn v8_platform_flavor() -> u8 {
     V8_FLAVOR.load(std::sync::atomic::Ordering::SeqCst)
 }
 
+/// The `--stack-size` this build asks V8 for, as a flag fragment to append.
+///
+/// V8 sizes the JS stack from its own default and NOT from the thread's
+/// reservation, and that one budget covers both the Rust chain already on the
+/// stack when V8 is entered and the creator's own compile and run. A build with
+/// `debug_assertions` does not inline its async state machines, so the same
+/// delivered-job chain stands an order of magnitude deeper and leaves a creator
+/// module graph too little of the default to compile in - V8 then raises
+/// `RangeError: Maximum call stack size exceeded` while the isolate is still
+/// starting up, before any creator frame runs. Naming a larger budget there
+/// restores the headroom the shipped chain already has.
+///
+/// Shipped builds keep V8's default deliberately. Their chain sits far enough
+/// inside it, and the default is what keeps the budget under the real stack of
+/// every thread that enters V8: `host.rs` is the only thread builder in the tree
+/// that reserves one, so a budget above a hosting thread's actual stack would
+/// trade a catchable `RangeError` for an overrun that takes the process down.
+fn js_stack_flag() -> &'static str {
+    if cfg!(debug_assertions) {
+        " --stack-size=4000"
+    } else {
+        ""
+    }
+}
+
 /// Shared one-time V8 setup. `single_threaded` selects the platform flavor.
 fn init_v8_platform(single_threaded: bool) {
     V8_INIT.call_once(|| {
@@ -61,23 +86,27 @@ fn init_v8_platform(single_threaded: bool) {
         // error. Icu error." otherwise.
         v8::icu::set_common_data_77(deno_core_icudata::ICU_DATA).expect("failed to load ICU data");
 
+        // `--expose-gc` makes `request_garbage_collection_for_testing`
+        // available so memory-pressure tests can force a GC pass
+        // mid-run instead of waiting for isolate teardown. The flag
+        // only enables a test entry point — it doesn't affect
+        // production behavior.
+        //
+        // `--single_threaded` keeps V8's GC/compiler work on the calling thread;
+        // the single-threaded platform spawns NO worker-thread pool. Both inits
+        // set `--expose-gc`, so memory-pressure handling is identical either way.
+        let mut flags = String::from("--expose-gc");
         if single_threaded {
-            // `--single_threaded` keeps V8's GC/compiler work on the calling thread;
-            // the single-threaded platform spawns NO worker-thread pool. `--expose-gc`
-            // mirrors the multi-threaded init so memory-pressure handling is identical.
-            v8::V8::set_flags_from_string("--single_threaded --expose-gc");
-            let platform = v8::new_single_threaded_default_platform(false).make_shared();
-            v8::V8::initialize_platform(platform);
-        } else {
-            // `--expose-gc` makes `request_garbage_collection_for_testing`
-            // available so memory-pressure tests can force a GC pass
-            // mid-run instead of waiting for isolate teardown. The flag
-            // only enables a test entry point — it doesn't affect
-            // production behavior.
-            v8::V8::set_flags_from_string("--expose-gc");
-            let platform = v8::new_default_platform(0, false).make_shared();
-            v8::V8::initialize_platform(platform);
+            flags.push_str(" --single_threaded");
         }
+        flags.push_str(js_stack_flag());
+        v8::V8::set_flags_from_string(&flags);
+        let platform = if single_threaded {
+            v8::new_single_threaded_default_platform(false).make_shared()
+        } else {
+            v8::new_default_platform(0, false).make_shared()
+        };
+        v8::V8::initialize_platform(platform);
         v8::V8::initialize();
     });
 }
