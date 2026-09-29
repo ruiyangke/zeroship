@@ -98,6 +98,7 @@ struct Metadata {
     requests: RefCell<Vec<Settlement>>,
     lose_ack: Cell<bool>,
     reject_renewal: Cell<bool>,
+    stall_renewal: Cell<bool>,
     substitute_renewal: Cell<bool>,
     renewals: Cell<usize>,
     renewal_deadline: Cell<Option<Instant>>,
@@ -155,6 +156,9 @@ impl JobTransport for Metadata {
         task: &DeliveredTask,
     ) -> Result<Renewed<Lease>, WorkflowServiceError> {
         self.renewals.set(self.renewals.get() + 1);
+        if self.stall_renewal.get() {
+            std::future::pending::<()>().await;
+        }
         if self
             .renewal_deadline
             .get()
@@ -495,6 +499,15 @@ impl Fixture {
     }
 
     fn slot(&self, execution_timeout: Duration) -> DeliverySlot<Metadata> {
+        self.slot_bounding_operations(execution_timeout, Duration::from_secs(5))
+    }
+    /// The same slot with the per-operation bound named, for the cases that
+    /// assert what ends an attempt when a manager exchange never answers.
+    fn slot_bounding_operations(
+        &self,
+        execution_timeout: Duration,
+        operation_timeout: Duration,
+    ) -> DeliverySlot<Metadata> {
         DeliverySlot::new(
             self.metadata.clone(),
             Rc::new(Executor {
@@ -503,7 +516,7 @@ impl Fixture {
             }),
             DeliveryOptions {
                 execution_timeout,
-                operation_timeout: Duration::from_secs(5),
+                operation_timeout,
                 retry_delay: Duration::from_millis(5),
             },
         )
@@ -922,6 +935,46 @@ async fn authority_ending_before_the_lease_still_renews_inside_the_attempt() {
         "an attempt that outlived its renewal delay reported nothing to the manager"
     );
     assert!(fixture.metadata.requests.borrow().is_empty());
+}
+
+/// A manager exchange that never answers ends the attempt on the operation
+/// bound, not on the execution bound.
+///
+/// The renewal is the only exchange an executing attempt makes, and a manager
+/// that accepts the connection and then says nothing would otherwise hold the
+/// slot for the whole execution bound while reporting nothing. Two bounds could
+/// end this attempt and the assertion below is what says which one did: the
+/// execution bound is an order of magnitude larger, so an attempt that ran to it
+/// would fail here rather than pass slowly.
+#[compio::test]
+async fn a_renewal_that_never_answers_ends_the_attempt_on_the_operation_bound() {
+    let fixture = Fixture::new(AppPolicy::default()).await;
+    fixture.probe.mode.set(Mode::Pending);
+    fixture.metadata.stall_renewal.set(true);
+    let execution = Duration::from_secs(6);
+    let mut slot = fixture.slot_bounding_operations(execution, Duration::from_millis(200));
+    let started = Instant::now();
+    Box::pin(slot.run(
+        &fixture.app,
+        fixture.app.binding(),
+        claimed(&fixture.app, fixture.lease.clone()).await.unwrap(),
+    ))
+    .await
+    .unwrap_err();
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < execution / 2,
+        "the attempt ran to its execution bound instead of the stalled exchange: {elapsed:?}"
+    );
+    assert_eq!(
+        fixture.metadata.renewals.get(),
+        1,
+        "the stalled exchange is the one renewal this attempt attempted"
+    );
+    assert!(
+        fixture.metadata.requests.borrow().is_empty(),
+        "an attempt ended by a stalled renewal reported a settlement"
+    );
 }
 
 /// The control for the renewal above, differing only in whether the attempt
