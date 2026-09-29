@@ -1326,10 +1326,6 @@ impl Manager {
         slots: usize,
         limits: TaskPayloadLimits,
     ) -> zeroship_workflow_runner::consumer::JobConsumer<Self> {
-        use zeroship_workflow_runner::{
-            consumer::{ConsumerOptions, ConsumerScope, JobConsumer},
-            delivery::DeliveryOptions,
-        };
         let tasks = Rc::new(
             fixture
                 .app
@@ -1341,6 +1337,20 @@ impl Manager {
         let executor = Rc::new(
             V8TaskExecutor::new(fixture.loader.clone(), tasks, limits).unwrap(),
         );
+        self.consumer_with_executor(fixture, slots, executor)
+    }
+    /// The same consumer over an executor the caller built, for the cases that
+    /// wrap the payload seam in a probe.
+    fn consumer_with_executor(
+        self: &Rc<Self>,
+        fixture: &Fixture,
+        slots: usize,
+        executor: Rc<V8TaskExecutor>,
+    ) -> zeroship_workflow_runner::consumer::JobConsumer<Self> {
+        use zeroship_workflow_runner::{
+            consumer::{ConsumerOptions, ConsumerScope, JobConsumer},
+            delivery::DeliveryOptions,
+        };
         let consumer = JobConsumer::new(
             self.clone(),
             self.worker.clone(),
