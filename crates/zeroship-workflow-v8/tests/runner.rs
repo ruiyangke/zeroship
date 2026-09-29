@@ -11,7 +11,7 @@ use zeroship_core::{app_id::AppId, typed_id};
 use zeroship_runtime::plugin::{NativePlugin, NativeRegistrar};
 use zeroship_runtime::{runtime::InnerProbe, EnvSnapshot, ModuleEntry, Runtime};
 use zeroship_workflow::{
-    operations::{RunOperation, RunState, SignalOptions, StartOptions},
+    operations::{RunOperation, RunState, RunStatus, SignalOptions, StartOptions},
     service::{
         AppPolicy, AppWorkflows, CompletionReceipt, DeployRegistration, HostPolicies, PayloadSlot,
         PolicySnapshot, RequestId, TaskAssignment, TaskToken, WorkerIdentity,
@@ -375,8 +375,8 @@ async fn native_runner_reads_replay_payloads_through_its_task_authority() {
     )
     .await;
     let run = prepare_payload(&fixture, false).await;
-    let done = advance_until_suspended(&mut fixture.runner(Duration::from_secs(5))).await;
-    assert_eq!(done.run_id, run);
+    let manager = Manager::new(&fixture).await;
+    let done = advance_until_suspended(&fixture, &manager, &run, Duration::from_secs(5)).await;
     assert_eq!(done.state, RunState::Completed);
     assert_eq!(
         returned_value(&fixture, &run).await,
@@ -389,11 +389,21 @@ async fn native_runner_reads_replay_payloads_through_its_task_authority() {
 async fn native_runner_hydrates_continuation_input_before_entering_v8() {
     let fixture =
         Fixture::new("export class Example { run(trigger) { return trigger.input; } }").await;
-    prepare_payload(&fixture, true).await;
-    let done = advance_until_suspended(&mut fixture.runner(Duration::from_secs(5))).await;
+    let run = prepare_payload(&fixture, true).await;
+    let manager = Manager::new(&fixture).await;
+    // The staged input belongs to a continuation, so the work the manager
+    // delivers is the SUCCESSOR run. Naming it is what the slot loop left
+    // implicit: it polled for any runnable task and returned whichever receipt
+    // came last, so the state it asserted was the successor's by accident.
+    let first = advance_until_suspended(&fixture, &manager, &run, Duration::from_secs(5)).await;
+    assert_eq!(first.state, RunState::ContinuedAsNew);
+    let next = first
+        .continued_as_new_run_id
+        .expect("a continued close names the run it handed its work to");
+    let done = advance_until_suspended(&fixture, &manager, &next, Duration::from_secs(5)).await;
     assert_eq!(done.state, RunState::Completed);
     assert_eq!(
-        returned_value(&fixture, &done.run_id).await,
+        returned_value(&fixture, &next).await,
         json!({"secret":"retained"})
     );
     fixture.assert_disposed().await;
@@ -493,7 +503,7 @@ async fn payload_outage_interrupts_app_code_and_leaves_the_frontier_retryable() 
     assert!(fixture.loader.markers.0.lock().unwrap().is_empty());
     assert!(!fixture.app.status(&run).await.unwrap().state.is_terminal());
     fixture.assert_disposed().await;
-    let done = advance_until_suspended(&mut fixture.runner(Duration::from_secs(5))).await;
+    let done = slot_advance_until_suspended(&mut fixture.runner(Duration::from_secs(5))).await;
     assert_eq!(done.state, RunState::Completed);
     assert_eq!(
         returned_value(&fixture, &run).await,
@@ -609,7 +619,7 @@ async fn output_upload_retry_preserves_the_callback_and_stops_background_app_wor
         V8TaskExecutor::new(fixture.loader.clone(), upload.clone(), OUTPUT_LIMITS).unwrap(),
     );
     let mut runner = RunnerSlot::new(tasks, executor, Duration::from_secs(5)).unwrap();
-    let done = advance_until_suspended(&mut runner).await;
+    let done = slot_advance_until_suspended(&mut runner).await;
     assert_eq!(done.state, RunState::Completed);
     assert_eq!(returned_value(&fixture, &run.id).await, json!(64));
     assert_eq!(*fixture.loader.markers.0.lock().unwrap(), ["callback"]);
@@ -705,7 +715,7 @@ async fn native_runner_stores_large_root_results_in_service_owned_payloads() {
         .unwrap();
     let mut runner = fixture.runner_with_output_limits(Duration::from_secs(5), OUTPUT_LIMITS);
     assert_eq!(
-        advance_until_suspended(&mut runner).await.state,
+        slot_advance_until_suspended(&mut runner).await.state,
         RunState::Completed
     );
     let bytes = fixture
@@ -743,7 +753,7 @@ async fn inline_output_limit_commits_a_terminal_workflow_failure() {
         .unwrap();
     let mut runner = fixture.runner_with_output_limits(Duration::from_secs(5), OUTPUT_LIMITS);
     assert_eq!(
-        advance_until_suspended(&mut runner).await.state,
+        slot_advance_until_suspended(&mut runner).await.state,
         RunState::Failed
     );
     let error = fixture.app.status(&run.id).await.unwrap().error.unwrap();
@@ -779,7 +789,7 @@ async fn caught_step_output(length: usize) -> (RunState, serde_json::Value) {
         .await
         .unwrap();
     let mut runner = fixture.runner_with_output_limits(Duration::from_secs(5), OUTPUT_LIMITS);
-    let state = advance_until_suspended(&mut runner).await.state;
+    let state = slot_advance_until_suspended(&mut runner).await.state;
     let output = returned_value(&fixture, &run.id).await;
     fixture.assert_disposed().await;
     (state, output)
@@ -907,7 +917,7 @@ async fn confirmed_lease_bounds_synchronous_execution_before_its_timeout() {
     .await;
 }
 
-async fn advance_until_suspended(runner: &mut RunnerSlot) -> CompletionReceipt {
+async fn slot_advance_until_suspended(runner: &mut RunnerSlot) -> CompletionReceipt {
     for _ in 0..16 {
         let RunnerOutcome::Completed(receipt) = runner.run_once().await.unwrap() else {
             panic!("an accepted workflow must have a runnable frontier");
@@ -919,18 +929,74 @@ async fn advance_until_suspended(runner: &mut RunnerSlot) -> CompletionReceipt {
     panic!("workflow did not reach a wait or terminal state");
 }
 
+/// Drive the app's frontier the way the worker does, and answer with what the
+/// journal says.
+///
+/// The manager publishes the jobs the journal has pending, the consumer claims
+/// and executes them, and the run's own status is the assertion's subject. This
+/// is the path `zeroship-worker` takes.
+///
+/// It replaces a `RunnerSlot` loop. The slot POLLED the journal for work, and
+/// nothing in production does that, so a test driven through it proved the
+/// executor behaves under a dispatch path the worker had already abandoned -
+/// notably without the delivery fencing and lease renewal this path carries.
+async fn advance_until_suspended(
+    fixture: &Fixture,
+    manager: &Rc<Manager>,
+    run: &str,
+    bound: Duration,
+) -> RunStatus {
+    advance_under_limits(fixture, manager, run, bound, TaskPayloadLimits::default()).await
+}
+
+/// The same drive under explicit payload bounds.
+async fn advance_under_limits(
+    fixture: &Fixture,
+    manager: &Rc<Manager>,
+    run: &str,
+    bound: Duration,
+    limits: TaskPayloadLimits,
+) -> RunStatus {
+    let settled = std::cell::RefCell::new(None);
+    let mut consumer = manager.consumer_with_limits(fixture, 1, limits);
+    let within = compio::time::timeout(
+        bound,
+        consumer.run_until(async {
+            loop {
+                manager.publish(&fixture.app).await;
+                let status = fixture.app.status(run).await.unwrap();
+                if !matches!(status.state, RunState::Queued | RunState::Running) {
+                    *settled.borrow_mut() = Some(status);
+                    return;
+                }
+                compio::time::sleep(Duration::from_millis(2)).await;
+            }
+        }),
+    )
+    .await;
+    assert!(
+        within.is_ok(),
+        "the run stayed runnable for {bound:?}; delivery never settled it"
+    );
+    settled
+        .into_inner()
+        .expect("a settled run has a status")
+}
+
 #[compio::test]
 async fn control_bounded_loop_completes_when_the_deadline_allows_it() {
     // The control of the deadline cases above: the same loop, bounded well
     // inside the deadline, must run to completion and mark `escaped`.
     let source = format!("{BURN}\nexport class Example {{ run() {{ return burn(50); }} }}");
     let fixture = Fixture::with_limits(&source, None, AppPolicy::default()).await;
-    fixture
+    let run = fixture
         .app
         .start(&RequestId::mint(), "Example", StartOptions::default())
         .await
         .unwrap();
-    let done = advance_until_suspended(&mut fixture.runner(Duration::from_secs(30))).await;
+    let manager = Manager::new(&fixture).await;
+    let done =
+        advance_until_suspended(&fixture, &manager, &run.id, Duration::from_secs(30)).await;
     assert_eq!(done.state, RunState::Completed);
     assert_eq!(
         *fixture.loader.markers.0.lock().unwrap(),
@@ -956,7 +1022,7 @@ async fn native_runner_awaits_creator_startup_before_committing_the_frontier() {
     .await;
     let run = fixture.start(json!({"number":7})).await;
     let mut runner = fixture.runner(Duration::from_secs(5));
-    let receipt = advance_until_suspended(&mut runner).await;
+    let receipt = slot_advance_until_suspended(&mut runner).await;
     assert_eq!(receipt.run_id, run.id);
     assert_eq!(receipt.state, RunState::Completed);
     assert_eq!(
@@ -1017,7 +1083,7 @@ async fn replay_loads_retained_dependencies_after_redeploy_and_host_restart() {
             .await
             .unwrap();
         let run = fixture.start(json!({"wait":wait})).await;
-        let receipt = advance_until_suspended(&mut fixture.runner(Duration::from_secs(5))).await;
+        let receipt = slot_advance_until_suspended(&mut fixture.runner(Duration::from_secs(5))).await;
         assert_eq!(receipt.run_id, run.id);
         if wait {
             assert_eq!(receipt.state, RunState::Waiting);
@@ -1072,8 +1138,9 @@ async fn replay_loads_retained_dependencies_after_redeploy_and_host_restart() {
         )
         .await
         .unwrap();
-    let receipt = advance_until_suspended(&mut fixture.runner(Duration::from_secs(5))).await;
-    assert_eq!(receipt.run_id, old_run);
+    let manager = Manager::new(&fixture).await;
+    let receipt =
+        advance_until_suspended(&fixture, &manager, &old_run, Duration::from_secs(5)).await;
     assert_eq!(receipt.state, RunState::Completed);
     assert_eq!(
         returned_value(&fixture, &old_run).await,
@@ -1179,6 +1246,16 @@ impl Manager {
         fixture: &Fixture,
         slots: usize,
     ) -> zeroship_workflow_runner::consumer::JobConsumer<Self> {
+        self.consumer_with_limits(fixture, slots, TaskPayloadLimits::default())
+    }
+    /// The same consumer under explicit payload bounds, for the cases that
+    /// assert what an oversized input or output does.
+    fn consumer_with_limits(
+        self: &Rc<Self>,
+        fixture: &Fixture,
+        slots: usize,
+        limits: TaskPayloadLimits,
+    ) -> zeroship_workflow_runner::consumer::JobConsumer<Self> {
         use zeroship_workflow_runner::{
             consumer::{ConsumerOptions, ConsumerScope, JobConsumer},
             delivery::DeliveryOptions,
@@ -1192,8 +1269,7 @@ impl Manager {
                 ),
         );
         let executor = Rc::new(
-            V8TaskExecutor::new(fixture.loader.clone(), tasks, TaskPayloadLimits::default())
-                .unwrap(),
+            V8TaskExecutor::new(fixture.loader.clone(), tasks, limits).unwrap(),
         );
         let consumer = JobConsumer::new(
             self.clone(),
@@ -1492,7 +1568,7 @@ async fn native_runner_reloads_v8_to_resume_a_durable_signal_wait() {
         .await
         .unwrap();
     let mut runner = fixture.runner(Duration::from_secs(5));
-    let waiting = advance_until_suspended(&mut runner).await;
+    let waiting = slot_advance_until_suspended(&mut runner).await;
     assert_eq!(waiting.state, RunState::Waiting);
     fixture.assert_disposed().await;
     let before_signal = fixture.loader.probes.borrow().len();
@@ -1508,7 +1584,7 @@ async fn native_runner_reloads_v8_to_resume_a_durable_signal_wait() {
         )
         .await
         .unwrap();
-    let done = advance_until_suspended(&mut runner).await;
+    let done = slot_advance_until_suspended(&mut runner).await;
     assert_eq!(done.state, RunState::Completed);
     assert_eq!(
         returned_value(&fixture, &run.id).await,
@@ -1552,7 +1628,7 @@ async fn native_runner_timeout_disposes_v8_before_reusing_its_slot() {
     let next = fixture
         .start(json!({"hang":false}))
         .await;
-    let done = advance_until_suspended(&mut runner).await;
+    let done = slot_advance_until_suspended(&mut runner).await;
     assert_eq!(done.run_id, next.id);
     assert_eq!(returned_value(&fixture, &next.id).await, json!("finished"));
     fixture.assert_disposed().await;
@@ -1578,7 +1654,7 @@ async fn a_step_timeout_under_the_execution_bound_commits_a_step_failure() {
     let run = fixture.start(json!({"timeout":"50ms"})).await;
     let mut runner = fixture.runner(Duration::from_secs(10));
     assert_eq!(
-        advance_until_suspended(&mut runner).await.state,
+        slot_advance_until_suspended(&mut runner).await.state,
         RunState::Failed
     );
     let error = fixture.app.status(&run.id).await.unwrap().error.unwrap();
