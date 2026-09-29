@@ -1,12 +1,12 @@
 //! Own the migrated Testcontainers servers until the test process closes stdin.
 //!
 //! TWO servers, because the fleet runs two PRIVATE ZONES. The platform server
-//! carries the `zeroship` schema and every platform table; the creator server
-//! carries app schemas and their workflow journals and has no platform schema
+//! carries the `zeroship` schema, every platform table and the workflow
+//! journal; the creator server carries app schemas and has no platform schema
 //! at all. A fleet hands Control, the manager and the gateway the first and the
-//! worker the second, so "Control cannot reach a creator journal" and "a worker
-//! cannot reach a platform table" are properties of the connection rather than
-//! of a grant somebody could widen.
+//! worker the second, so "a worker cannot reach a platform table" and "a worker
+//! cannot reach the journal" are properties of the connection rather than of a
+//! grant somebody could widen.
 //!
 //! The creator server is seeded from the platform server's ROLE GLOBALS, not
 //! from its database: roles are cluster-wide, so a creator cluster needs the

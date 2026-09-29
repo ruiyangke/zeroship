@@ -1,34 +1,29 @@
 # zeroship-workflow
 
-The Rust customer workflow engine. This crate owns the journal protocol,
-claim and apply logic, PostgreSQL journal storage, app-scoped HTTP backend,
-and customer-bound PostgreSQL and SQLite execution. It does not depend on V8.
+The Rust workflow engine. It owns the journal protocol, replay and folding,
+the app-scoped backends a host composes, and the workflow service that holds
+the journal. It does not depend on V8.
 
 - `engine.rs`: dispatch envelopes, outcomes, and journal folding.
 - `execution.rs`: typed replay inputs, executor outcomes and runtime decoding.
-- `zeroship-workflow-calendar`: shared parsing and timing semantics used by the
-  manager; creator acceptance does not evaluate calendars.
-- `claim.rs`, `apply.rs`, `advance.rs`: claims, fencing, and durable advancement.
-- `store/`: existing Control journal implementation, awaiting production cutover.
-- `backend.rs`, `client.rs`: app-scoped control-plane operations for Rust hosts.
-- `service/`: replacement shared service, app handles, transactional lifecycle and
-  worker task protocol through the shared Rust ORM.
-- `schema/`: customer journal recorded through the canonical migration DSL
-  and generated through its PostgreSQL and SQLite compilers.
-- `deployment_holds/`: scoped customer clients for deployment retention.
+- `backend.rs`: the `WorkflowBackend`, `StepOutputReader` and `InputStager`
+  traits a host implements, and the app-scoped handles built on them.
+- `service/`: the workflow service - app handles, transactional lifecycle,
+  journal storage and the worker task protocol, through the shared Rust ORM.
+- `lifecycle.rs`, `operations.rs`, `validation.rs`: run lifecycle states, the
+  operations a caller may request, and the checks applied to them.
+- `deploy_registrations.rs`: the schedule registrations a deployment declares.
+- `deployment_holds/`: scoped clients for deployment retention.
   `zeroship-workflow-manager::deployments` owns the platform ORM ledger and its
   canonical schema; `zeroship-workflow-client` owns authenticated transport.
+- `zeroship-workflow-calendar`: shared parsing and timing semantics used by the
+  manager; creator acceptance does not evaluate calendars.
 
-Rust hosts can construct `HttpWorkflowBackend` with `WorkflowClientConfig` and
-call `WorkflowBackend::{start,status,signal,transition,restart,read_step_output}`. The host binds
-the app identity and its scoped token when constructing the backend; individual
-operations cannot supply another app identity. `app_scoped_token` derives the
-credential for a trusted host that already holds the control key.
-
-The control plane authorizes these requests and owns run management. Journal
-access remains subject to the database roles provisioned by the migration
-service. The separate `zeroship-workflow-v8` crate installs `env.workflows`
-and supplies a V8 executor for local development.
+The journal lives in the platform database, in the workflow service's own
+schema, and `zeroship-workflow-schema` carries its generated artifacts. A
+worker runs creator code and reaches the service for every journal fact. The
+separate `zeroship-workflow-v8` crate installs `env.workflows` and supplies a
+V8 executor.
 
 The shared runner supplies `WorkflowInvocation` and receives `WorkflowExecution`.
 Local and deployed hosts share journal types and outcome decoding. The host
@@ -41,15 +36,12 @@ native hosts prepare creator resources under the same registry and original
 policy deadline, with cancellation on revocation and no authority replacement
 through a later refresh.
 
-The shared engine is composed into the CLI; production worker and Control
-integration remain unfinished. The [revised design](../../docs/proposals/2026-09-11-workflow-worker.md)
-assigns scheduling and queue delivery to the manager, with workers consuming
-bounded jobs against creator storage. The [planned crate layout](../../docs/proposals/2026-09-11-workflow-worker.md#crate-layout)
-keeps the manager and service client separate from customer execution here.
-Their native crates exist; production scheduling and delivery still await
-cutover. Workers may access only creator databases; Control and other
-platform services may access only the Control database. Authenticated service
-contracts carry cross-boundary requests without sharing database credentials.
+The shared engine is composed into the CLI and into the worker, which binds it
+through `WorkflowBinding::remote`. Scheduling and queue delivery belong to the
+manager, and a worker executes only the bounded jobs the manager delivers. A
+worker opens its creator database for `env.db`; Control and the other platform
+services open the platform database. Authenticated service contracts carry
+cross-boundary requests without sharing database credentials.
 `AppWorkflows::management_job` accepts manager-delivered lifecycle commands
 with explicit per-run revisions and durable customer-journal receipts. Lifecycle
 state, publication intents, command history, the applied revision and the job

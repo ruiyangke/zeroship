@@ -30,10 +30,9 @@ use crate::WorkflowServiceError;
 use std::future::Future;
 use zeroship_core::{
     app_id::AppId,
-    workflow_coordination::{AssignedScope, FailureCode, Revision, RunId, UnixMillis},
+    workflow_coordination::{Revision, RunId, UnixMillis},
     workflow_jobs::{
         publication_id, BroadcastId, DeploymentId, JobId, JobOperation, JobSpec, PropagationId,
-        SubmitJob,
     },
 };
 use zeroship_data_orm::{
@@ -44,55 +43,12 @@ use zeroship_data_orm::{
     sql::MAX_ROW_LIMIT,
     value,
 };
-use zeroship_workflow_client::WorkerCoordinator;
 
 /// Host-bound metadata publisher, shared by remote and local compositions.
 /// Implementations must durably submit the immutable job before acknowledging it.
 pub trait JobPublisher {
     fn app_id(&self) -> &AppId;
     fn submit(&self, job: &JobSpec) -> impl Future<Output = Result<JobSpec, WorkflowServiceError>>;
-}
-
-/// Authenticated publication under the worker's current app placement.
-#[derive(Debug)]
-pub struct AssignedPublisher<'a> {
-    client: &'a WorkerCoordinator,
-    scope: AssignedScope,
-}
-
-impl<'a> AssignedPublisher<'a> {
-    #[must_use]
-    pub const fn new(client: &'a WorkerCoordinator, scope: AssignedScope) -> Self {
-        Self { client, scope }
-    }
-}
-
-impl JobPublisher for AssignedPublisher<'_> {
-    fn app_id(&self) -> &AppId {
-        &self.scope.app_id
-    }
-
-    async fn submit(&self, job: &JobSpec) -> Result<JobSpec, WorkflowServiceError> {
-        self.client
-            .submit_job(&SubmitJob {
-                scope: self.scope.clone(),
-                job: job.clone(),
-            })
-            .await
-            .map_err(|error| match error {
-                zeroship_workflow_client::Error::Refused(FailureCode::Denied) => {
-                    WorkflowServiceError::PermissionDenied
-                }
-                zeroship_workflow_client::Error::Refused(FailureCode::Conflict) => {
-                    WorkflowServiceError::Conflict("workflow job publication conflicts".into())
-                }
-                zeroship_workflow_client::Error::Refused(FailureCode::Capacity) => {
-                    WorkflowServiceError::ResourceExhausted("workflow queue is full".into())
-                }
-                zeroship_workflow_client::Error::Timeout => WorkflowServiceError::Timeout,
-                _ => WorkflowServiceError::Unavailable("workflow job publication failed".into()),
-            })
-    }
 }
 
 /// One intent row: its identity, the specification that identity is derived

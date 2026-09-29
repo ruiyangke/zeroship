@@ -1,30 +1,29 @@
 //! The workflow journal's generated schema artifacts, and nothing else.
 //!
-//! The journal is a PLATFORM-owned schema that lives inside a creator database.
-//! Two parties need to read its artifacts and they must not reach each other to
-//! do it: the workflow engine (which runs inside a worker) and whichever service
-//! installs the schema. This crate is the shared leaf they both depend on. It
-//! depends on nothing else in the workspace, so depending on it cannot drag the
-//! engine into a platform service.
+//! The journal is a platform-owned schema in the platform database. Two parties
+//! need to read its artifacts and they must not reach each other to do it: the
+//! workflow engine and whichever service installs the schema. This crate is the
+//! shared leaf they both depend on. It depends on nothing else in the tree, so
+//! depending on it cannot drag the engine into a platform service.
 //!
 //! `schema/schema.ts` remains the one authored source; `schema/generate.mjs`
 //! compiles it through the migration compiler into the artifacts embedded here.
 //!
-//! # The schema-name substitution lives here, once
+//! # The placeholder lives here, once
 //!
 //! The generated `PostgreSQL` DDL names its schema with the placeholder
-//! [`SCHEMA_PLACEHOLDER`], which the installer replaces with the schema the
-//! journal is installed into. That replacement used to be written twice - once
-//! in the migration service and once in the engine - two copies that had to
-//! agree exactly with nothing holding them together. [`postgres_sql`] is now the
-//! only one.
+//! [`SCHEMA_PLACEHOLDER`], and two installers bind it: [`postgres_sql`] here,
+//! and `db/migrations-ts/20260919000000_workflow_journal.ts`, which reads
+//! `schema/postgres.sql` off disk and substitutes in TypeScript. They agree
+//! because the placeholder is declared once, here, and the TypeScript side
+//! refuses an artifact that does not carry it or still carries it unbound.
 //!
 //! # The schema is not an app
 //!
-//! Nothing here takes an app id, and no name here should suggest one. A journal
-//! belongs to a creator database, and one schema holds the journals of every app
-//! in it - the `app_id` COLUMNS inside the journal are the tenant discriminator,
-//! and [`STAMP_ROW_ID`] is one row per journal, not one per app.
+//! Nothing here takes an app id, and no name should suggest one. One schema
+//! holds every app's journal - the `app_id` COLUMNS inside the journal are the
+//! tenant discriminator, and [`STAMP_ROW_ID`] is one row per journal, not one
+//! per app.
 
 /// The generated `PostgreSQL` DDL, still carrying [`SCHEMA_PLACEHOLDER`].
 ///

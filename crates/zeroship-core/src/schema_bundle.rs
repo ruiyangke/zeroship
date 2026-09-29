@@ -11,10 +11,10 @@
 //!
 //! # It is addressed by SCHEMA, not by app
 //!
-//! A creator database holds one journal for every app inside it, so the schema
-//! is not derivable from an app id and the bundle never carries one. The stamp
-//! is likewise ONE row per schema: installing or upgrading moves every app in
-//! that database at once.
+//! One schema holds the journal of every app it serves, so the schema is not
+//! derivable from an app id and the bundle never carries one. The stamp is
+//! likewise ONE row per schema: installing or upgrading moves every app in that
+//! schema at once.
 
 use serde::{Deserialize, Serialize};
 

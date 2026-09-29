@@ -146,7 +146,6 @@ mimalloc = { workspace = true }
 itoa = { workspace = true }
 socket2 = { workspace = true }
 
-sha2 = { workspace = true }
 
 # WebSocket handshake (SHA-1 for Sec-WebSocket-Accept per RFC 6455)
 sha1 = { workspace = true }

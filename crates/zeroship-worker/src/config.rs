@@ -184,7 +184,7 @@ pub struct WorkerSettings {
     /// Empty (the default) runs no workflow host: every app's `env.workflows`
     /// call is refused as retryable, and nothing falls back to Control. When
     /// set, the worker also requires `worker.database_url` for creator
-    /// journals and `worker.storage_url` for workflow payloads, and refuses
+    /// code and `worker.storage_url` for workflow payloads, and refuses
     /// to start without them. Remote managers must use HTTPS; plain HTTP is
     /// accepted for a literal loopback address, or for an origin named in
     /// `plaintext_peers`.

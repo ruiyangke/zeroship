@@ -63,7 +63,7 @@ impl Default for Options {
 ///
 /// Hosts authenticate workers and obtain their current coordinator assignment
 /// before calling delivery operations. The authorized variants recheck placement
-/// after locks and before commit. Journal authority remains in the creator zone.
+/// after locks and before commit. Journal authority belongs to the service.
 /// A timeout does not retract a dispatched commit; retry the same settlement to
 /// recover its durable receipt.
 #[derive(Clone, Debug)]

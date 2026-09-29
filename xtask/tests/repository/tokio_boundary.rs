@@ -6,20 +6,65 @@ use std::process::Command;
 
 // Update these sets and the zero-tokio invariant together when the accepted
 // transitive dependency changes. They describe linked dependencies, not which
-// runtime drives the application's I/O.
+// runtime drives the application's I/O - SHIPPED_TOKIO_FEATURES below is what
+// settles that.
 const CARRIERS: &[&str] = &["cyper", "cyper-core", "hyper", "hyper-util"];
-const ENTRYPOINTS: &[&str] = &[
+
+// Workspace members that REACH tokio in the resolved graph.
+//
+// Reachability, not declaration. A member that declares a carrier it never
+// names links exactly what a member that declares nothing links, so pinning
+// declarations made this gate fire on edits that changed no dependency at all.
+// It also missed the case that matters more: a member can start reaching tokio
+// through a NEW intermediate without declaring a carrier itself.
+//
+// The members absent here are the ones this pin protects - the leaves that must
+// stay clean, `zeroship-workflow-schema` and `zeroship-id` among them.
+const REACHERS: &[&str] = &[
     "compio-s3",
     "zeroship-auth",
+    "zeroship-authn",
+    "zeroship-bundle",
+    "zeroship-cli",
+    "zeroship-config-contract",
     "zeroship-control",
     "zeroship-core",
+    "zeroship-data-cdc-server",
+    "zeroship-data-orm",
+    "zeroship-data-v8",
     "zeroship-gateway",
+    "zeroship-kv-v8",
     "zeroship-mailer",
+    "zeroship-metering",
+    "zeroship-migrate-server",
     "zeroship-runtime",
+    "zeroship-storage",
+    "zeroship-storage-v8",
     "zeroship-worker",
     "zeroship-workflow",
     "zeroship-workflow-client",
+    "zeroship-workflow-manager",
+    "zeroship-workflow-runner",
+    "zeroship-workflow-server",
+    "zeroship-workflow-v8",
 ];
+
+// The tokio features a SHIPPED build may enable.
+//
+// This is the invariant, and it is structural rather than a convention. Tokio's
+// `default` is empty and its whole `runtime` module sits inside `cfg_rt!`, so
+// without `rt` there is no `tokio::runtime`, no `Runtime::new` and no
+// `tokio::spawn` anywhere in a shipped binary. hyper's tokio `net`/`sync` TYPES
+// compile; nothing can drive them. `cyper-core` depends on `compio`, which is
+// the adapter that drives hyper's protocol state machine on compio I/O.
+//
+// So a carrier cannot introduce a tokio runtime without adding a feature here,
+// which is the failure this pin reports by name.
+const SHIPPED_TOKIO_FEATURES: &[&str] =
+    &["default", "libc", "mio", "net", "socket2", "sync"];
+
+// Features whose presence means a tokio runtime EXISTS and can be started.
+const RUNTIME_FEATURES: &[&str] = &["rt", "rt-multi-thread"];
 
 fn is_tokio(name: &str) -> bool {
     name == "tokio" || name.starts_with("tokio-")
@@ -121,20 +166,43 @@ fn tree_packages(output: &str) -> Result<BTreeSet<String>, String> {
     Ok(packages)
 }
 
-fn entrypoints(packages: &[&Value], carriers: &BTreeSet<String>) -> BTreeSet<String> {
-    packages
-        .iter()
-        .filter(|package| {
-            package["dependencies"]
-                .as_array()
-                .expect("dependencies")
-                .iter()
-                .any(|dependency| {
-                    carriers.contains(dependency["name"].as_str().expect("dependency name"))
-                })
-        })
-        .map(|package| package["name"].as_str().expect("package name").to_owned())
-        .collect()
+// `-e features,normal` restricts to normal edges, so the answer describes what a
+// DEPLOYED binary links. Dropping `normal` admits dev edges, which is how the
+// control below proves this reader can see a runtime feature when one is there.
+fn tokio_feature_tree(root: &Path, include_dev: bool) -> Result<String, String> {
+    let edges = if include_dev { "features" } else { "features,normal" };
+    let output = Command::new(env!("CARGO"))
+        .current_dir(root)
+        .args([
+            "tree",
+            "--workspace",
+            "--locked",
+            "-e",
+            edges,
+            "--color",
+            "never",
+        ])
+        .output()
+        .map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        return Err(format!(
+            "cargo tree (features, include_dev={include_dev}) failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    String::from_utf8(output.stdout).map_err(|error| error.to_string())
+}
+
+fn tokio_features(output: &str) -> Result<BTreeSet<String>, String> {
+    let row = regex::Regex::new(r#"\btokio feature "([a-z0-9_-]+)""#).unwrap();
+    let features: BTreeSet<String> = row
+        .captures_iter(output)
+        .map(|capture| capture[1].to_owned())
+        .collect();
+    if features.is_empty() {
+        return Err("no tokio feature rows in cargo tree output".into());
+    }
+    Ok(features)
 }
 
 #[test]
@@ -180,17 +248,63 @@ fn accepted_transitive_tokio_boundary_is_unchanged() {
         reachers.len() >= 8,
         "tokio reachability scan lost its packages"
     );
-    let carriers = reachers.difference(&workspace_names).cloned().collect();
+    let carriers: BTreeSet<_> = reachers.difference(&workspace_names).cloned().collect();
     assert_eq!(
         carriers,
         CARRIERS.iter().map(|name| (*name).to_owned()).collect(),
         "transitive tokio carriers changed; review this boundary and AGENTS.md together"
     );
+    // The workspace half, by reachability. A member entering this set links a
+    // tokio-carrying package for the first time, however indirectly.
     assert_eq!(
-        entrypoints(&packages, &carriers),
-        ENTRYPOINTS.iter().map(|name| (*name).to_owned()).collect(),
-        "workspace tokio entrypoints changed; review this boundary and AGENTS.md together"
+        reachers
+            .intersection(&workspace_names)
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+        REACHERS.iter().map(|name| (*name).to_owned()).collect(),
+        "workspace members reaching tokio changed; review this boundary and AGENTS.md together"
     );
+}
+
+/// A shipped build compiles no tokio runtime, so nothing can start one.
+///
+/// This is the assertion the package sets above cannot make. They describe what
+/// is LINKED; `cfg_rt!` is what decides whether `tokio::runtime` exists at all.
+///
+/// The control is the second half, and without it the first half is vacuous: a
+/// reader that silently matched nothing would report "no runtime features" over
+/// an empty string. Admitting dev edges MUST surface `rt`, because
+/// `testcontainers` -> `bollard` -> `hyper-util` needs a real tokio runtime to
+/// reach the Docker daemon. Same reader, same regex, one flag apart.
+#[test]
+fn shipped_builds_compile_no_tokio_runtime() {
+    let shipped = tokio_features(&tokio_feature_tree(&repo::root(), false).unwrap()).unwrap();
+    let runtime: Vec<_> = RUNTIME_FEATURES
+        .iter()
+        .filter(|feature| shipped.contains(**feature))
+        .collect();
+    assert!(
+        runtime.is_empty(),
+        "a shipped build enables tokio {runtime:?}, so a tokio runtime exists; \
+         review the zero-tokio invariant in AGENTS.md"
+    );
+    assert_eq!(
+        shipped,
+        SHIPPED_TOKIO_FEATURES
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect(),
+        "shipped tokio features changed; review this boundary and AGENTS.md together"
+    );
+
+    let with_dev = tokio_features(&tokio_feature_tree(&repo::root(), true).unwrap()).unwrap();
+    for feature in RUNTIME_FEATURES {
+        assert!(
+            with_dev.contains(*feature),
+            "dev edges do not enable tokio {feature:?}, so the shipped assertion \
+             above is reading a feature set this reader cannot see"
+        );
+    }
 }
 
 #[test]
@@ -259,20 +373,26 @@ fn tree_reader_rejects_empty_missing_root_and_unrecognized_output() {
     }
 }
 
+/// The feature reader must find features nested anywhere in the tree, and must
+/// REFUSE rather than return an empty set when there is nothing to read - an
+/// empty set would read as "no runtime features" and pass the assertion above.
 #[test]
-fn carrier_entrypoints_include_dev_build_target_and_renamed_dependencies() {
-    let carriers = BTreeSet::from(["cyper".into()]);
-    for kind in [Value::Null, Value::from("build"), Value::from("dev")] {
-        let package = serde_json::json!({
-            "name": "consumer",
-            "dependencies": [{ "name": "cyper", "rename": "http", "kind": kind, "target": "cfg(windows)" }]
-        });
-        assert_eq!(
-            entrypoints(&[&package], &carriers),
-            BTreeSet::from(["consumer".into()])
-        );
-        assert!(entrypoints(&[&package], &BTreeSet::from(["unrelated".into()])).is_empty());
+fn feature_reader_finds_nested_rows_and_refuses_empty_output() {
+    let output = "\
+tokio v1.51.1\n\
+├── hyper-util v0.1.20\n\
+│   ├── tokio feature \"net\"\n\
+│   │   └── tokio feature \"rt-multi-thread\"\n\
+└── tokio feature \"sync\"\n";
+    assert_eq!(
+        tokio_features(output).unwrap(),
+        BTreeSet::from(["net".into(), "rt-multi-thread".into(), "sync".into()])
+    );
+    for empty in ["", "tokio v1.51.1\nhyper v1.9.0\n", "no features here"] {
+        assert!(tokio_features(empty).is_err(), "accepted {empty:?}");
     }
+    // A near miss must not be read as a feature: the crate name is part of the row.
+    assert!(tokio_features("├── hyper feature \"client\"\n").is_err());
 }
 
 #[test]
@@ -326,5 +446,9 @@ fn cargo_selects_activated_normal_edges_without_dev_or_build_edges() {
     assert!(
         tokio_tree(root, false).is_err(),
         "Cargo failure was accepted"
+    );
+    assert!(
+        tokio_feature_tree(root, false).is_err(),
+        "Cargo failure was accepted by the feature reader"
     );
 }

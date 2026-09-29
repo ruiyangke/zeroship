@@ -92,9 +92,9 @@ async fn journal_tables_in(
 /// grantee from the catalog; an oracle that repeated that derivation would
 /// agree with the migration by construction and assert nothing.
 ///
-/// The stamp is compared against the same constants the creator bundle declares
-/// (`journal_bundle` in `crates/zeroship-workflow-server/src/journal.rs`), so
-/// the two installation sites cannot describe different journals.
+/// The stamp is compared against the constants `zeroship-workflow-schema`
+/// generates beside the artifact, so the DDL that was installed and the
+/// version recorded for it cannot describe different journals.
 async fn journal_is_installed_and_served_by_one_role(fixture: &platform::Platform) {
     let stamp = fixture
         .admin
@@ -188,10 +188,10 @@ async fn journal_is_installed_and_served_by_one_role(fixture: &platform::Platfor
         }
     }
 
-    // The journal the worker reads today lives in a CREATOR schema, installed
-    // by the migration service's bundle path. This installation adds a second
-    // site; it must not have moved the first, and it must not have scattered
-    // journal tables through the platform's other schemas.
+    // The journal is installed in the workflow service's own schema. This
+    // check states that the install stayed there: it must not have reached into
+    // a creator schema, and it must not have scattered journal tables through
+    // the platform's other schemas.
     //
     // The scatter check reads a NEGATIVE, so it is only worth the ink if the
     // predicate producing it can produce a positive. The control runs first,

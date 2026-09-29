@@ -132,9 +132,10 @@ impl Database {
         self.url.clone()
     }
 
-    /// The CREATOR database: the worker, its app schemas and their journals.
-    /// It has no `zeroship` schema, which is what the worker's boot posture
-    /// gate refuses to start without.
+    /// The CREATOR database: the worker and the app schemas it runs creator
+    /// code against. It holds no workflow journal, and no `zeroship` schema -
+    /// that absence is what the worker's boot posture gate refuses to start
+    /// without.
     pub fn creator_url(&self) -> String {
         self.creator_url.clone()
     }

@@ -18,7 +18,6 @@ zeroship-kv = { workspace = true, features = ["redis", "redb"] }
 zeroship-core = { workspace = true }
 compio = { workspace = true }
 tempfile = { workspace = true }
-uuid = { workspace = true }
 testcontainers = { version = "0.28", default-features = false, features = ["blocking"] }
 
 [lints]
