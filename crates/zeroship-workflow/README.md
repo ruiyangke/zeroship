@@ -368,8 +368,8 @@ customer data.
 Task hosts instead use `runner::TaskPayloadReader`: it captures the assignment's
 journal, resolves named occurrences in that snapshot and reads referenced
 objects through the live task lease. `WorkerTasks` implements the
-payload read/write contract alongside the task protocol that `RunnerSlot` and
-executor tests exercise. Hosts run workflow work only through delivered jobs:
+payload read/write contract that the executor and its tests exercise. Hosts run
+workflow work only through delivered jobs:
 `zeroship serve` feeds `runner::consumer::JobConsumer` from the native manager
 and has no journal polling or maintenance loop. Production worker composition
 remains unfinished.
