@@ -3,7 +3,7 @@
 //! The fence is `Transport::configuration`. Every check here drives it through
 //! `Transport::validate_config`, which is the same predicate the clients use -
 //! `WorkerCoordinator::new`, `ControlCoordinator::new`, `QueueDeploymentHolds`
-//! and `SchemaBundles` all reach it - without keys or sockets.
+//! and `ControlAppFacts` all reach it - without keys or sockets.
 
 use std::str::FromStr;
 use zeroship_core::config::{PlaintextPeer, PlaintextPeers};

@@ -6,6 +6,9 @@
 //! while `/healthz` still answers 200. Those two together are what separate a
 //! readiness endpoint from a second liveness endpoint - a `/readyz` hardcoded
 //! to 200 passes every up-case test ever written.
+//!
+//! The same route table decides which mutating routes this service serves at
+//! all, so the case that pins that shape lives here too.
 
 mod fixture;
 
@@ -137,6 +140,91 @@ async fn retired_health_alias_is_not_registered() {
     let unknown = status_of(state, "/route-that-does-not-exist").await.0;
     assert_ne!(retired, StatusCode::OK);
     assert_eq!(retired, unknown, "the retired alias must not be a route");
+}
+
+async fn post_status(
+    state: Arc<MigrationServiceState>,
+    path: &str,
+    body: &serde_json::Value,
+) -> (StatusCode, String) {
+    let app = test::init_service(
+        web::App::new()
+            .state(state)
+            .configure(zeroship_migrate_server::api::configure),
+    )
+    .await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(path)
+            .set_json(body)
+            .to_request(),
+    )
+    .await;
+    let status = resp.status();
+    let body = test::read_body(resp).await;
+    (status, String::from_utf8_lossy(&body).to_string())
+}
+
+/// The only schema this service writes is a creator database's, through the
+/// apply route addressed by that database. A platform-owned schema arrives
+/// through the platform migrations, so no route here installs one.
+///
+/// The request is well formed for the install route this service does not
+/// carry, so a table that still served it would answer from its handler rather
+/// than from a body extractor. The apply route is the positive control: the
+/// same table, the same method and no credential reach its handler and are
+/// refused as unauthenticated, so a table that routed nothing could not pass.
+#[ntex::test]
+async fn no_platform_schema_install_route_is_served_beside_the_creator_apply() {
+    let state = state_on(DEAD_DSN);
+    let install = serde_json::json!({
+        "bundle": "probe",
+        "schema": "customer",
+        "dialect": "postgres",
+        "version": 1,
+        "fingerprint": "a".repeat(64),
+        "stamp": {"table": "__zeroship_probe_version", "row_id": "probe"},
+        "policy": "policy_version = 1\n",
+        "versions": [
+            {"version": 1, "sql": "CREATE TABLE \"customer\".\"t\" (id text PRIMARY KEY)"}
+        ],
+    });
+
+    let (install_status, install_body) =
+        post_status(state.clone(), "/v1/schema-bundles/apply", &install).await;
+    let (unknown_status, _) =
+        post_status(state.clone(), "/v1/route-that-does-not-exist", &install).await;
+    assert_eq!(
+        install_status,
+        StatusCode::NOT_FOUND,
+        "a platform schema install must not be a route: {install_body}"
+    );
+    assert_eq!(install_status, unknown_status);
+
+    let apply = serde_json::json!({
+        "kind": "ir",
+        "descriptor_sha256": "1".repeat(64),
+        "documents": [{"filename": "0001_notes.ir.json", "body": {}}],
+    });
+    let (apply_status, apply_body) = post_status(
+        state,
+        &format!(
+            "/v1/databases/{}/migrations/apply",
+            DatabaseId::mint().as_str()
+        ),
+        &apply,
+    )
+    .await;
+    assert_eq!(
+        apply_status,
+        StatusCode::UNAUTHORIZED,
+        "the creator apply must reach its handler: {apply_body}"
+    );
+    assert!(
+        apply_body.contains("unauthenticated"),
+        "the refusal must be the apply handler's own: {apply_body}"
+    );
 }
 
 // What these do NOT catch:

@@ -279,9 +279,6 @@ export class Platform {
     ], {
       ZEROSHIP_MIGRATE_SERVER_DATABASE_URL: dsn, ZEROSHIP_MIGRATE_SERVER_PROVISION_DATABASE_URL: dsn,
       ZEROSHIP_MIGRATE_SERVER_POLICY_SEAL_KEY: randomBytes(32).toString("hex"),
-      // Without a peer bundle the schema-bundle endpoint verifies nobody and
-      // refuses every caller, so no journal would ever be installed.
-      ZEROSHIP_MIGRATE_SERVER_SERVICE_PEERS_FILE: peers,
     });
     await this.waitFor("migrate-server", () => this.httpReady(migrationServer.url + "/readyz"));
 

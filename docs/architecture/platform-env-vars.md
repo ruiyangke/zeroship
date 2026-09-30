@@ -286,7 +286,6 @@ Every environment name below is `ZEROSHIP_<CANONICAL>` and every overlay path is
 | `migrate_server.port` | operational | `ZEROSHIP_MIGRATE_SERVER_PORT` | `migrate_server.port` | zeroship-migrate-server `--port` | `9091` |
 | `migrate_server.provision_database_url` | secret | `ZEROSHIP_MIGRATE_SERVER_PROVISION_DATABASE_URL` | `migrate_server.provision_database_url` | zeroship-migrate-server `--provision-database-url-file` | - |
 | `migrate_server.reconcile_interval_seconds` | operational | `ZEROSHIP_MIGRATE_SERVER_RECONCILE_INTERVAL_SECONDS` | `migrate_server.reconcile_interval_seconds` | zeroship-migrate-server `--reconcile-interval-seconds` | `30` |
-| `migrate_server.service_peers_file` | operational | `ZEROSHIP_MIGRATE_SERVER_SERVICE_PEERS_FILE` | `migrate_server.service_peers_file` | zeroship-migrate-server `--service-peers-file` | empty |
 | `migrate_server.threads` | operational | `ZEROSHIP_MIGRATE_SERVER_THREADS` | `migrate_server.threads` | zeroship-migrate-server `--threads` | `default_http_threads()` |
 | `migrate_server.tmp_dir` | operational | `ZEROSHIP_MIGRATE_SERVER_TMP_DIR` | `migrate_server.tmp_dir` | zeroship-migrate-server `--tmp-dir` | `std::env::temp_dir().join("zeroship-migrate-server")` |
 

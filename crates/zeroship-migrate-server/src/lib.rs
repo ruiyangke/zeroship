@@ -17,7 +17,6 @@
 pub mod api;
 pub mod apply;
 pub mod auth;
-pub mod bundle;
 pub mod capability_grants;
 pub mod config;
 pub mod control_plane;
@@ -45,14 +44,6 @@ pub struct MigrationServiceState {
     pub provision_dsn: String,
     pub tmp_dir: PathBuf,
     pub authenticator: Arc<dyn Authenticator>,
-    /// Verifies inbound PLATFORM-service assertions.
-    ///
-    /// A separate identity from [`MigrationServiceState::authenticator`], which
-    /// resolves a creator PRINCIPAL through an OAuth bearer. A platform caller
-    /// has no creator principal and no app to be authorized against: it presents
-    /// a service assertion, and the endpoint allowlist decides what that identity
-    /// may reach. `None` when no peer bundle is configured.
-    pub peers: Option<Arc<dyn zeroship_core::service_identity::IdentityVerifier + Send + Sync>>,
     pub mutation_rate_limiter: Arc<dyn MutationRateLimiter>,
     pub trust_proxy: bool,
     pub policy_config: ManagedPolicyConfig,
@@ -80,23 +71,12 @@ impl MigrationServiceState {
             provision_dsn,
             tmp_dir,
             authenticator,
-            peers: None,
             mutation_rate_limiter,
             trust_proxy,
             policy_config,
             control_plane: ControlPlaneStore::new(control_dsn),
             readiness: ReadinessGate::with_defaults(),
         }
-    }
-
-    /// Accept platform-service assertions verified against `peers`.
-    #[must_use]
-    pub fn verifying_peers(
-        mut self,
-        peers: Arc<dyn zeroship_core::service_identity::IdentityVerifier + Send + Sync>,
-    ) -> Self {
-        self.peers = Some(peers);
-        self
     }
 }
 
