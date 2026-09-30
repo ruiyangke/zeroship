@@ -89,8 +89,8 @@ yet, or rebuild something that does.
 
 ```
 PostgreSQL server
-  |- Datastore    ds_...     one physical database on it      operator-owned   (designed)
-     |- Database  dbs_...    one schema inside it             creator-owned    (designed)
+  |- Datastore    ds_...     one physical database on it      operator-owned
+     |- Database  dbs_...    one schema inside it             creator-owned
         |- tables, and the app's data
 
 app  --grant--  database        one app sees exactly ONE database
@@ -109,15 +109,18 @@ Three ideas, and the whole design is the consequence of separating them:
 ### Current identity boundary
 
 Runtime bindings carry app identity separately from the physical schema. App identity
-keys transaction lanes and metering; the schema selects SQL qualification and PostgreSQL
-roles. The host supplies project ROOT keys and authorized app bindings through
-`crates/zeroship-data-orm/src/encryption/keys.rs`; the key a column is encrypted under is
-`derive_key` of that root and the DATABASE the row lives in, and
+keys transaction lanes and metering; the database a binding names selects SQL qualification,
+and the binding itself selects the PostgreSQL role (`DbBinding::to_database` in
+`crates/zeroship-data-orm/src/binding.rs`). The host supplies project ROOT keys and authorized
+app bindings through `crates/zeroship-data-orm/src/encryption/keys.rs`; the key a column is
+encrypted under is `derive_key` of that root and the DATABASE the row lives in, and
 `crates/zeroship-data-orm/src/encryption/aad.rs` binds the same database into every tag. At-rest
 encryption is therefore not what separates two apps bound to one database - a column-level GRANT
 is.
 
-The independently managed Database and Grant records described below remain planned.
+Control declares the Database and Grant records (`zeroship.databases` and
+`zeroship.database_bindings`, `db/migrations-ts/20260919000200_database_entities.ts`) and a
+per-cluster reconciler converges them; see Provisioning below.
 
 ---
 
@@ -228,39 +231,35 @@ preserve that property.)*
 
 ## Provisioning: databases are created, never conjured
 
-**A dedicated service owns database lifecycle**, on the D1-to-Workers model: create a database,
-then bind an app to it. `zeroship deploy` does **not** bring a schema into existence.
+**A database is created, then an app is bound to it**, on the D1-to-Workers model.
+`zeroship deploy` does **not** bring a schema into existence.
 
 This belongs to the decoupling rather than sitting beside it. As long as a deploy can create a
 database, app identity and database identity are still welded together at the moment that matters
 most - the moment of creation.
 
-**The service already exists; it runs at the wrong time.** The migration service already issues
-every statement provisioning needs, from a process that already does not execute creator code -
-which is the boundary that matters, and the reason provisioning can never live in the worker:
-`CREATE ROLE` in `crates/zeroship-migrate-server/src/provisioning.rs` (`provision_migrator`, the
-dynamic `CREATE ROLE` at `:176`) and `ALTER SCHEMA ... OWNER` at `:198`.
+**Control declares; a per-cluster reconciler converges.** `create_database` in
+`crates/zeroship-control/src/databases.rs` places a new database on an active datastore in its
+project's zone (`place`) and writes it `provisioning`; `bind_database` writes a binding `pending`.
+Nothing in Control reaches `active`. The reconciler (`zeroship_migrate_server::datastore::Reconciler`)
+runs in the migration service, which holds the cluster's privileged credential and does not execute
+creator code - the boundary that matters, and the reason provisioning can never live in the worker.
+`converge_database` (`crates/zeroship-migrate-server/src/datastore/cluster.rs`) creates the
+`db_<dbsid>` schema together with its migrator, read-write, read-only and unmask roles in one
+transaction, and `grant_binding` grants a binding's edges.
 
-What is wrong is the trigger. Provisioning is a **side effect of applying a migration**. The apply
-path takes `let schema_text = app_derivation::schema_name(app_id)`
-(`crates/zeroship-migrate-server/src/apply.rs:294`) and issues `CREATE SCHEMA IF NOT EXISTS` over that
-schema before any migration runs; the engine journal lives in the same data schema under the
-`__zeroship_` prefix (`crates/zeroship-migrate-server/src/provisioning.rs:21-22`, with `meta_schema` reset
-to the data schema at `:94`), not in a separate `app_{schema}` schema. That is the conflation this
-design removes, in executable form - **a database exists because an app deployed.**
-
-So the work is inversion, not construction:
+**An apply refuses a database that does not exist.** `apply_ir_documents`
+(`crates/zeroship-migrate-server/src/apply.rs`) derives the schema with
+`database_derivation::schema_name` and reads the catalog for it; when it is absent the apply returns
+`ApplyRequestError::DatabaseNotCreated` before any role, audit, lock or ledger side effect. It then
+runs as the migrator the reconciler minted, and the engine journal lives in that same schema under
+the `__zeroship_` prefix rather than in a separate schema.
 
 ```
-  TODAY     deploy -> apply migration -> (side effect) CREATE SCHEMA app_<app_id>
-  DESIGNED  create database -> CREATE SCHEMA db_<dbsid>      explicit, first-class
-            bind app -> grant
-            deploy -> apply migration -> FAILS if the database does not exist
+  create database -> declared provisioning; the reconciler creates db_<dbsid> and its roles
+  bind app        -> declared pending;      the reconciler grants the binding's edges
+  apply migration -> FAILS if the database does not exist
 ```
-
-Genuinely new, as opposed to re-keyed: **placement**. Choosing which Datastore does not exist at
-all - the service holds one DSN, not a set - and neither does the grant table. That is where the
-new surface is.
 
 A fourth privileged service would be the wrong answer: it would hold datastore credentials and do
 DDL, which is what this one already does, with the policy machinery, apply lock and journal already
@@ -319,16 +318,20 @@ worker executes creator code, so any capability the worker holds is reachable by
 the worker. A privileged call the worker can make is not a boundary. What the worker may do must be
 what the tenant may do.
 
-The worker's database posture permits one ambient workflow-owner membership and rejects other
-inherited data roles. CDC runs in a separate relay process: the worker login must not have
-`REPLICATION` or `BYPASSRLS`, and workers receive value-free invalidations from the relay.
+The worker's database posture refuses any inherited role membership (`validate` in
+`crates/zeroship-worker/src/db_posture.rs`). CDC runs in a separate relay process: the worker
+login must not have `REPLICATION` or `BYPASSRLS`, and workers receive value-free invalidations
+from the relay.
 
-### Runtime role and descriptor authority
+### Binding roles and descriptor authority
 
-The runtime role receives ordinary data privileges on every table and sequence in its bound
-creator schema. Prefixes such as `__zeroship_` do not change ORM visibility, privileges or CDC
-publication. The role receives schema `USAGE` without `CREATE`, and it receives no authority on
-another creator schema.
+A session narrows to its binding role, which inherits exactly one of the database's two capability
+roles. The reconciler gives the capability roles schema `USAGE` without `CREATE` and nothing else;
+every apply regenerates their column-scoped DML on the creator tables from the live catalog
+(`crates/zeroship-migrate-server/src/capability_grants.rs`), withholding the `__zs_raw__` sibling
+of each masked field from both. Tables under the `__zeroship_` platform prefix - the engine journal
+and the unmask audit table - are outside that grant; the audit table carries its own `INSERT`
+grant and no `SELECT`. No capability role holds authority on another database's schema.
 
 The runtime descriptor remains the ORM's logical schema authority. It defines the collections,
 fields and physical storage mappings that creator code can express through the compiled query
@@ -432,15 +435,19 @@ things in. Anything added here has to pass the invariant's shape test first.
 
 ## Change streams
 
-The deployed runtime still uses app schemas in a shared PostgreSQL database.
-Each app publication includes every top-level table in the bound app schema;
-table names do not alter CDC visibility. The CDC protocol uses the actual app
-schema rather than inventing grants.
+A datastore carries one relay-owned publication
+(`zeroship_core::replication_names::DATASTORE_PUBLICATION`), and each apply
+reconciles only its own database's entries in it: every top-level table in that
+database's schema (`crates/zeroship-migrate-server/src/publication.rs`).
+Membership is not the tenant filter. The relay compares each decoded relation's
+namespace against the schema of the one database a subscriber is bound to
+(`crates/zeroship-data-cdc-server/src/source.rs`).
 
 `zeroship-data-cdc-server` owns logical decoding in a separate process. Workers
 connect through the authenticated TLS client in `zeroship-data-orm::cdc::relay`.
-The relay shares an app capture across worker connections, buffers changes until
-commit, and sends collection invalidations without row values. Workers re-read
+The relay runs one capture per subscribed (app, database) pair, shares it across
+worker connections, buffers changes until commit, and sends collection
+invalidations without row values. Workers re-read
 through the ORM's ordinary access controls. The worker login has neither
 `REPLICATION` nor `BYPASSRLS`; the relay uses its own constrained login.
 
@@ -457,14 +464,14 @@ SQLite commit capture -----------> ORM broker
 
 Relay admission and delivery queues are bounded. Overflow, truncate and
 reconnection request a fresh snapshot rather than pretending to replay a durable
-event log. The final connected subscriber stops capture and releases the app's
+event log. The final connected subscriber stops a capture and releases its
 slot. A database advisory lock fences the relay singleton, while PostgreSQL's
 finite `max_slot_wal_keep_size` bounds retention after a process crash.
 
 Slots consume cluster resources even though each logical slot decodes only its
 own database. Size slot, WAL-sender and connection budgets across relay captures
 and other replication users. Worker scaling adds transport connections instead
-of duplicate slots for the same app. See `docs/runbooks/cdc-relay.md` for
+of duplicate slots for the same capture. See `docs/runbooks/cdc-relay.md` for
 configuration and the coordinated role cutover.
 
 ## The reserved-column collision the database will not refuse

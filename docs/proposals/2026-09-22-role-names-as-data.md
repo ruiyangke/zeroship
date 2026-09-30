@@ -157,9 +157,9 @@ channel the binding id arrives on now, and PostgreSQL still decides what it open
    a creator who cannot yet evaluate it. A creator who starts on BYOD and wants managed, or the
    reverse, is stuck. Relocation looks like the prerequisite rather than a follow-up.
 
-3. **Does the per-app role (`per_app_role_name`) move too?** It is derived from a physical schema
-   name rather than an entity id, so it has no obvious row to sit on. Left out of this proposal
-   deliberately; it should be named rather than assumed to follow.
+3. **Does every role name have a row to sit on?** Yes. Every composer in
+   `crates/zeroship-core/src/database_role.rs` takes a database id or a binding id, so each role
+   it names belongs to a `zeroship.databases` or `zeroship.database_bindings` row.
 
 4. **Is `mig` the right suffix, and does it survive at all?** The role's authority is OWNERSHIP of
    the schema - `apply.rs` calls it "THE OWNER IS THE RECONCILER'S ROLE" and

@@ -1731,7 +1731,7 @@ the policy lists `auto` with a narrower set.
 |------------------------------------|-------------------------------------|
 | `__zeroship_audit_unmask`          | Every `.unmask()` call (granted or denied). |
 
-This table lives in the per-app schema; standard isolation rules apply.
+This table lives in the database's own schema; standard isolation rules apply.
 
 **The unmask audit row is written OUTSIDE your transaction, on purpose.**
 An `unmask()` or `find({ unmask })` issued inside `db.transaction(fn)`

@@ -5,8 +5,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 use zeroship_core::database_derivation;
-#[cfg(test)]
-use zeroship_core::database_role::per_app_role_name;
 use zeroship_core::database_role::DatabaseCapability;
 use zeroship_core::schema_name::SchemaName;
 use zeroship_core::DatabaseId;
@@ -254,7 +252,7 @@ pub enum ApplyRequestError {
     Apply(#[from] SealedApplyError),
 }
 
-/// Apply a frozen `.ir.json` bundle into the app's own schema.
+/// Apply a frozen `.ir.json` bundle into the schema of the database it names.
 ///
 /// THERE IS ONE PATH. The ceiling the creator runs under is what bounds them, and
 /// the engine still refuses a destructive step it was not handed an [`Approval`] for.
@@ -339,10 +337,10 @@ pub async fn apply_ir_documents(
         ApplyRequestError::ProvisionRole(ProvisionRoleError::BadRoleName(reason.to_string()))
     })?;
     let exec_cfg = migrator_executor_config_for_role(schema.as_str(), &migrator);
-    // THE MIGRATION JOURNAL LIVES IN THE APP'S OWN SCHEMA. `ExecutorConfig::new`
+    // THE MIGRATION JOURNAL LIVES IN THE DATABASE'S OWN SCHEMA. `ExecutorConfig::new`
     // derives `meta_schema` as `<project_schema>_migrations`; this host points it at
     // the project schema itself, so the engine writes
-    // `"<app_uuid>".__zeroship_schema_migrations` and its five siblings. The record
+    // `"db_<dbs>".__zeroship_schema_migrations` and its five siblings. The record
     // of what ran belongs to the tenant whose schema it describes.
     //
     // THE `__zeroship_` PREFIX IS WHAT MAKES THIS SAFE, and it is not decoration.
@@ -887,7 +885,7 @@ async fn attest_complete_history(
 }
 
 /// Build the rendered-DDL guard from the authored no-inject confined charter, bound
-/// to the same exact app schema as the inject-bearing policy used during lower.
+/// to the same exact database schema as the inject-bearing policy used during lower.
 fn guard_config_for_managed(schema: &str) -> GuardConfig {
     GuardConfig::from_policy(guard_policy_for_managed(schema), POSTGRES, schema)
 }
@@ -1288,19 +1286,10 @@ mod tests {
 #[cfg(test)]
 mod live_audit_unmask_provisioning {
     use super::*;
-    use zeroship_migrate_postgres::role::migrator_role_name;
+    use crate::datastore::cluster::{converge_database, drop_database};
 
     async fn admin_client() -> compio_postgres::Client {
         crate::test_database::connect().await
-    }
-
-    /// A scratch PLATFORM schema, unique per case.
-    ///
-    /// Unique because `pg_authid` is cluster-shared: `provision_migrator`
-    /// derives the migrator role from the schema, so two cases on one name
-    /// would create and drop each other.s role.
-    fn scratch_schema() -> String {
-        format!("zs_scratch_{}", uuid::Uuid::new_v4().simple())
     }
 
     fn audit_table_ref(schema: &str) -> String {
@@ -1308,36 +1297,31 @@ mod live_audit_unmask_provisioning {
     }
 
     /// Drop everything a case created, by name. Never a blanket sweep: this
-    /// server is shared with other work.
-    async fn teardown(admin: &compio_postgres::Client, schema: &str) {
-        let _ = admin
-            .batch_execute(&format!(
-                "DROP SCHEMA IF EXISTS {} CASCADE;",
-                quote_ident(schema),
-            ))
-            .await;
-        for role in [
-            per_app_role_name(schema).expect("scratch runtime role name"),
-            migrator_role_name(schema).unwrap_or_default(),
-        ] {
-            if role.is_empty() {
-                continue;
-            }
-            let q = quote_ident(&role);
-            let _ = admin
-                .batch_execute(&format!("DROP OWNED BY {q} CASCADE"))
-                .await;
-            let _ = admin
-                .batch_execute(&format!("DROP ROLE IF EXISTS {q}"))
-                .await;
-        }
+    /// server is shared with other work. `drop_database` is the reconciler's
+    /// own teardown, and it removes exactly the schema and the roles
+    /// `converge_database` derived from this one database id.
+    async fn teardown(admin: &mut compio_postgres::Client, database: &DatabaseId) {
+        drop_database(admin, database)
+            .await
+            .expect("drop the scratch database");
     }
 
-    /// The explicit database-create operation: data schema, then migrator role.
-    async fn provision_schema_and_migrator(admin: &compio_postgres::Client, schema: &str) {
-        crate::provisioning::provision_database(admin, schema)
+    /// A scratch creator database, converged the way the cluster reconciler
+    /// converges one: its schema, the migrator that owns it, and its
+    /// capability and unmask roles.
+    ///
+    /// Minted per case because `pg_authid` is cluster-shared: every one of
+    /// those roles is derived from the database id, so two cases on one id
+    /// would create and drop each other's roles.
+    async fn converge_scratch_database(
+        admin: &mut compio_postgres::Client,
+    ) -> (DatabaseId, String) {
+        let database = DatabaseId::mint();
+        converge_database(admin, &database)
             .await
-            .expect("create scratch app database");
+            .expect("converge the scratch database");
+        let schema = database_derivation::schema_name(&database);
+        (database, schema)
     }
 
     async fn probe(admin: &compio_postgres::Client, sql: &str) -> bool {
@@ -1357,10 +1341,8 @@ mod live_audit_unmask_provisioning {
     /// makes it safe on every apply.
     #[compio::test]
     async fn provisioning_creates_the_audit_table_with_its_columns_and_indexes() {
-        let admin = admin_client().await;
-        let schema = scratch_schema();
-        teardown(&admin, &schema).await;
-        provision_schema_and_migrator(&admin, &schema).await;
+        let mut admin = admin_client().await;
+        let (database, schema) = converge_scratch_database(&mut admin).await;
 
         provision_audit_unmask_table(&admin, &schema)
             .await
@@ -1441,8 +1423,9 @@ mod live_audit_unmask_provisioning {
         );
 
         // OWNERSHIP: the table is created by the migration service's admin
-        // principal, so the worker's runtime role is an ordinary grantee rather
-        // than the owner.
+        // principal, so no role a bound session reaches owns it. A binding
+        // inherits one of the database's two capability roles and may assume
+        // its unmask role; each of them is an ordinary grantee of this table.
         let owner: String = admin
             .query_one_scalar(
                 "SELECT tableowner FROM pg_tables \
@@ -1451,11 +1434,27 @@ mod live_audit_unmask_provisioning {
             )
             .await
             .expect("read table owner");
-        assert_ne!(
-            owner,
-            per_app_role_name(&schema).expect("scratch runtime role name"),
-            "the runtime role must NOT own its own audit log"
-        );
+        for runtime in [
+            database_derivation::capability_role_name(&database, DatabaseCapability::ReadWrite),
+            database_derivation::capability_role_name(&database, DatabaseCapability::ReadOnly),
+            database_derivation::unmask_role_name(&database),
+        ] {
+            let runtime = runtime.expect("scratch database role name");
+            // The control: the name compared against is a role the converge
+            // minted, so the inequality below cannot pass over a misspelling.
+            assert!(
+                probe(
+                    &admin,
+                    &format!("SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{runtime}')"),
+                )
+                .await,
+                "{runtime} must be a role the converged database carries"
+            );
+            assert_ne!(
+                owner, runtime,
+                "a role a bound session reaches must NOT own its own audit log"
+            );
+        }
 
         let indexes: Vec<String> = admin
             .query(
@@ -1504,6 +1503,6 @@ mod live_audit_unmask_provisioning {
             .await
             .expect("re-running the provisioning must be a no-op");
 
-        teardown(&admin, &schema).await;
+        teardown(&mut admin, &database).await;
     }
 }

@@ -2,16 +2,16 @@
 //!
 //! TWO servers, because the fleet runs two PRIVATE ZONES. The platform server
 //! carries the `zeroship` schema, every platform table and the workflow
-//! journal; the creator server carries app schemas and has no platform schema
-//! at all. A fleet hands Control, the manager and the gateway the first and the
-//! worker the second, so "a worker cannot reach a platform table" and "a worker
-//! cannot reach the journal" are properties of the connection rather than of a
-//! grant somebody could widen.
+//! journal; the creator server carries creator database schemas and has no
+//! platform schema at all. A fleet hands Control, the manager and the gateway
+//! the first and the worker the second, so "a worker cannot reach a platform
+//! table" and "a worker cannot reach the journal" are properties of the
+//! connection rather than of a grant somebody could widen.
 //!
 //! The creator server is seeded from the platform server's ROLE GLOBALS, not
 //! from its database: roles are cluster-wide, so a creator cluster needs the
-//! same `zeroship_worker` login and the same per-app role machinery, and
-//! nothing else.
+//! same `zeroship_worker` login, and nothing else. Each database's and each
+//! binding's roles are minted on it the way the cluster reconciler mints them.
 use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -134,7 +134,7 @@ fn main() {
 
     // The creator cluster: the same roles, and no platform schema. Seeded AFTER
     // the migrations so it carries the roles those migrations create, including
-    // the per-app role template every apply grants from.
+    // the `zeroship_worker` login every binding role is granted to.
     let creator = image(&owner, "creator_template")
         .with_copy_to(
             "/docker-entrypoint-initdb.d/roles.sql",

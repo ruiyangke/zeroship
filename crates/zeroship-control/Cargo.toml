@@ -142,11 +142,11 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 zeroship-runtime = { workspace = true }
 # The workflow test fixtures seed an app by INSERTing into `zeroship.apps`,
-# which skips the deploy-time migration apply. They provision the creator
-# database through the migration service's own
-# `provisioning::provision_database` rather than a CREATE SCHEMA of their own,
-# so the seeded app carries production's privilege shape instead of a
-# test-only one.
+# which skips the deploy-time migration apply. They converge the creator
+# database and grant its binding through the cluster reconciler's own
+# `datastore::cluster` statements, and migrate it through `apply`, rather than
+# a CREATE SCHEMA of their own, so the seeded app carries production's
+# privilege shape instead of a test-only one.
 zeroship-migrate-server = { workspace = true }
 tempfile = { workspace = true }
 tracing-subscriber = { workspace = true }

@@ -7,23 +7,23 @@ removed.
 
 ## Placement
 
-**Creator migrations belong to the creator.** Their journal lives in their own
-schema, under the platform prefix:
+**Creator migrations belong to the creator.** Their journal lives in the schema
+of the database they migrate, under the platform prefix:
 
 ```
-<app_id>.__zeroship_schema_migrations
-<app_id>.__zeroship_schema_migrations_supersedes
-<app_id>.__zeroship_schema_migrations_inflight
-<app_id>.__zeroship_schema_pending_contracts
-<app_id>.__zeroship_schema_deploy_recovery
-<app_id>.__zeroship_schema_backfills
+db_<database_id>.__zeroship_schema_migrations
+db_<database_id>.__zeroship_schema_migrations_supersedes
+db_<database_id>.__zeroship_schema_migrations_inflight
+db_<database_id>.__zeroship_schema_pending_contracts
+db_<database_id>.__zeroship_schema_deploy_recovery
+db_<database_id>.__zeroship_schema_backfills
 ```
 
 **Platform migrations keep `zeroship_migrations.<table>`.**
 
 The asymmetry is deliberate. The platform keeps a separate meta schema because
-it has no tenant: nothing owns `zeroship` the way a migrator role owns an app
-schema, so the engine's default derivation (`<project_schema>` + `_migrations`)
+it has no tenant: nothing owns `zeroship` the way a migrator role owns a
+database schema, so the engine's default derivation (`<project_schema>` + `_migrations`)
 stays correct. The creator case moves in-schema precisely because a tenant DOES
 own theirs.
 
@@ -105,13 +105,14 @@ test compares all three copies. Its additional backend and runtime-plan
 reservations remain separate.
 
 The prefix is still worth having: it means one thing everywhere, and the pattern
-is already in use - `__zeroship_workflow_{runs,steps,signals,blobs,subscriptions}`
-live in the `app_<uuid>` workflow schema, which is a different service's journal
-and is not folded in here.
+is already in use - `__zeroship_workflow_{runs,steps,signals,payloads,subscriptions}`
+live in `workflow_manager`, the workflow service's own schema on the platform
+database, which is a different service's journal and is not folded in here.
 
 ## What this costs, accepted deliberately
 
-The migrator role **owns** the app's schema (`provisioning.rs:140-160`:
+The migrator role **owns** the database's schema (`provision_migrator` in
+`crates/zeroship-migrate-server/src/provisioning.rs`:
 `ALTER SCHEMA {proj} OWNER TO {role}`, `GRANT CREATE, USAGE`, default privileges
 granting ALL on tables). A schema owner can `DROP` and `TRUNCATE` anything in
 it, and owner privileges are **implicit - they cannot be REVOKE'd away.**
@@ -147,7 +148,7 @@ Two consequences follow and must not be "fixed" later:
    `:224`, `:327`, `:342`) and `schema_backfills` in
    `migrate-postgres/src/backend/backfill_sql.rs:1527`. Grep `{meta}\.` across
    the crate rather than trusting that list.
-4. **Point `meta_schema` at the app's own schema.** `conn.rs` exposes
+4. **Point `meta_schema` at the database's own schema.** `conn.rs` exposes
    `meta_schema` and no table-name knob, so step 3 is what makes step 4 safe.
 5. **Delete `provisioning.rs` step 5's `REVOKE ALL ON ... SCHEMA {meta}`.** With
    no separate meta schema it names nothing, and a revoke that names nothing
@@ -181,6 +182,6 @@ party gaining write access to someone else's is not.
 
 The engine's journal has **no tenant column** - `event_seq`, `event_kind`,
 `version`, `name`, `checksum`, `at`, `by`, `exec_ms`, `down`, `phase`,
-`outcome`, `kind`. Its per-app isolation is carried entirely by the schema name.
-Any move to a single shared journal table must first add an owner column
+`outcome`, `kind`. Its per-database isolation is carried entirely by the schema
+name. Any move to a single shared journal table must first add an owner column
 upstream in the standalone engine, which changes a published contract.

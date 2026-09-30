@@ -6,6 +6,7 @@ use zeroship_control::{
     cron::deploy_retention::{Collector, DeployRetentionConfig},
     publication::{Acceptance, CatalogError, VerifiedDeployment},
 };
+use zeroship_workflow::service::store::JOURNAL_SCHEMA;
 use zeroship_workflow_manager::deployments::{self, DeploymentHolds};
 
 struct Versions {
@@ -124,6 +125,20 @@ async fn assert_current(fixture: &Fixture, app: &AppId, hash: &str) {
     assert_eq!(value, hash);
 }
 
+/// Whether `role` may enter the schema the workflow journal lives in.
+async fn journal_usage(fixture: &Fixture, role: &str) -> bool {
+    fixture
+        .platform
+        .admin
+        .query_one(
+            "SELECT has_schema_privilege($1, $2, 'USAGE')",
+            &[&role, &JOURNAL_SCHEMA],
+        )
+        .await
+        .unwrap()
+        .get(0)
+}
+
 async fn collector(fixture: &Fixture, blobs: Arc<dyn BlobStore>, batch: i64) -> Collector {
     Collector::connect(
         &fixture.control_url,
@@ -138,38 +153,33 @@ async fn collector(fixture: &Fixture, blobs: Arc<dyn BlobStore>, batch: i64) -> 
 }
 
 #[ntex::test]
-async fn collection_obeys_independent_holds_without_creator_schema_access() {
+async fn collection_obeys_independent_holds_without_journal_access() {
     let fixture = Fixture::new().await;
     let versions = seed_versions(&fixture, "collector-private").await;
     let foreign = seed_versions(&fixture, "collector-foreign").await;
-    let journal_schema = zeroship_core::app_derivation::schema_name(&versions.app);
-    fixture
+    // THE JOURNAL IS THE WORKFLOW SERVICE'S, and Control cannot enter the
+    // schema it lives in, so collection has to decide on the holds ledger
+    // alone: a collector that consulted the journal would fail here rather than
+    // collect. The platform migrations installed the journal, so the probe
+    // below reads a schema that exists, and the service login entering it is
+    // the control that the privilege probe can answer true.
+    let journal_runs = format!("{JOURNAL_SCHEMA}.__zeroship_workflow_runs");
+    let installed: bool = fixture
         .platform
         .admin
-        .batch_execute(&format!(
-            // The fourth statement used to revoke Control's access to
-            // `zeroship.workflow_runs`, the platform-side journal table. That
-            // table was deleted with the legacy path, so the statement failed
-            // with `undefined_table` and took the test with it. Nothing is lost
-            // by dropping it: Control cannot read a table that no longer
-            // exists, which is a stronger guarantee than a revoked grant.
-            "CREATE SCHEMA \"{journal_schema}\"; \
-         CREATE TABLE \"{journal_schema}\".__zeroship_workflow_runs(id text PRIMARY KEY); \
-         REVOKE ALL ON SCHEMA \"{journal_schema}\" FROM PUBLIC, zeroship_control;"
-        ))
-        .await
-        .unwrap();
-    let readable: bool = fixture
-        .platform
-        .admin
-        .query_one(
-            "SELECT has_schema_privilege('zeroship_control',$1,'USAGE')",
-            &[&journal_schema],
-        )
+        .query_one("SELECT to_regclass($1) IS NOT NULL", &[&journal_runs])
         .await
         .unwrap()
         .get(0);
-    assert!(!readable);
+    assert!(installed, "the platform migrations must install {journal_runs}");
+    assert!(
+        journal_usage(&fixture, "zeroship_workflow").await,
+        "the service login enters {JOURNAL_SCHEMA}, or the refusal below reads nothing"
+    );
+    assert!(
+        !journal_usage(&fixture, "zeroship_control").await,
+        "Control can enter {JOURNAL_SCHEMA}"
+    );
     assert_eq!(
         fixture
             .platform

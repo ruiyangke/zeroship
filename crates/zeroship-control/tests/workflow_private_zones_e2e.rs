@@ -9,14 +9,20 @@
 //!
 //! What each arm would catch:
 //!
-//! - If Control could still reach a creator journal, its connection would
-//!   resolve the app's journal relation. It cannot, because that relation is
-//!   in another server.
-//! - If the worker could still read Control's catalog, its login would resolve
-//!   `zeroship.apps`. It cannot, for the same reason.
-//! - Each of those is paired with its own control, one variable apart: Control
-//!   DOES resolve `zeroship.apps` and the worker DOES resolve its own app
-//!   schema, so neither refusal can be a dead connection reading as a fence.
+//! - The workflow journal is the workflow service's, in the platform zone
+//!   (`zeroship_workflow::service::store::JOURNAL_SCHEMA`). If the worker could
+//!   still reach it, its login would resolve the journal relation; if it could
+//!   read Control's catalog, its login would resolve `zeroship.apps`. It
+//!   resolves neither, because both are in another server.
+//! - If the platform connection could reach creator data, it would resolve a
+//!   table of the database the app is bound to. It cannot, for the same reason.
+//! - Each refusal is paired with a control one variable apart: the platform
+//!   connection DOES resolve `zeroship.apps` and the journal, and the worker,
+//!   narrowed to its binding role, DOES resolve its database's table, so no
+//!   refusal can be a dead connection or a misspelled relation reading as a
+//!   fence.
+//! - The completed run is in the platform journal, and no creator schema holds
+//!   a journal table at all.
 //! - A handle the app cloned out of `env.workflows` and kept is revoked with
 //!   the app rather than outliving its retired generation.
 //! - The worker is stopped the way an orchestrator stops it, and the joined
@@ -31,6 +37,8 @@ use std::time::{Duration, Instant};
 
 use compio_postgres::NoTls;
 use serde_json::Value;
+use zeroship_core::database_derivation;
+use zeroship_workflow::service::store::JOURNAL_SCHEMA;
 
 const DEADLINE: Duration = Duration::from_secs(180);
 const POLL: Duration = Duration::from_millis(250);
@@ -138,8 +146,8 @@ async fn until<T>(
 /// so a connection that resolves nothing cannot pass as a fence.
 ///
 /// `role` exists because `zeroship_worker` holds nothing ambiently: it reaches
-/// an app's objects only under `SET ROLE <app role>`, which is the fence the
-/// boot posture gate keeps non-inheriting.
+/// a database's objects only under `SET ROLE <binding role>`, which is the
+/// fence the boot posture gate keeps non-inheriting.
 async fn resolves(url: &str, role: Option<&str>, relation: &str) -> bool {
     let (client, connection) = compio_postgres::connect(url, NoTls)
         .await
@@ -167,35 +175,50 @@ async fn resolves(url: &str, role: Option<&str>, relation: &str) -> bool {
 #[compio::test]
 async fn the_two_zones_run_a_workflow_without_reaching_each_other() {
     let mut fleet = Fleet::with_workflow_manager();
-    let journal = format!("{}.__zeroship_workflow_runs", fleet.app_id.as_str());
+    // The two relations the zone arms probe: the journal the workflow service
+    // serves, and a table the fleet's apply created in the app's database.
+    let journal = format!("{JOURNAL_SCHEMA}.__zeroship_workflow_runs");
+    let creator_table = format!(
+        "{}.workflow_e2e_side_effects",
+        database_derivation::schema_name(&fleet.creator_database)
+    );
 
-    // ZONE ARM 1, with its control. Control's login resolves the platform
-    // catalog and does not resolve the app's journal.
-    let control_url = fleet.database.url();
+    // ZONE ARM 1, with its control. The platform connection Control runs under
+    // resolves the catalog and the journal, which both live in its zone, and
+    // does not resolve the creator database's table.
+    let platform_url = fleet.database.url();
     assert!(
-        resolves(&control_url, None, "zeroship.apps").await,
+        resolves(&platform_url, None, "zeroship.apps").await,
         "the control-plane connection must resolve its own catalog, or the \
          refusal below is a dead connection rather than a boundary",
     );
     assert!(
-        !resolves(&control_url, None, &journal).await,
-        "Control reached a creator journal: {journal}",
+        resolves(&platform_url, None, &journal).await,
+        "the workflow journal must live in the platform zone: {journal}",
+    );
+    assert!(
+        !resolves(&platform_url, None, &creator_table).await,
+        "the platform connection reached creator data: {creator_table}",
     );
 
-    // ZONE ARM 2, with its control. Under its app role the worker's login
-    // resolves that app's journal; on the same connection it does not resolve
-    // the platform catalog.
+    // ZONE ARM 2, with its control. Narrowed to its binding role, the worker's
+    // login resolves its database's table; on the same connection and role it
+    // resolves neither the platform catalog nor the journal.
     let worker_url = fleet.creator_role_url("zeroship_worker");
-    let app_role = zeroship_core::app_derivation::role_name(&fleet.app_id)
-        .expect("the app's runtime role name");
+    let binding_role = database_derivation::binding_role_name(&fleet.binding)
+        .expect("the app's binding role name");
     assert!(
-        resolves(&worker_url, Some(&app_role), &journal).await,
-        "the worker's login must resolve the journal it owns under {app_role}, \
-         or the refusal below is a broken login rather than a boundary",
+        resolves(&worker_url, Some(&binding_role), &creator_table).await,
+        "the worker's login must resolve its database's table under {binding_role}, \
+         or the refusals below are a broken login rather than a boundary",
     );
     assert!(
-        !resolves(&worker_url, Some(&app_role), "zeroship.apps").await,
+        !resolves(&worker_url, Some(&binding_role), "zeroship.apps").await,
         "the worker reached a platform table",
+    );
+    assert!(
+        !resolves(&worker_url, Some(&binding_role), &journal).await,
+        "the worker reached the workflow journal: {journal}",
     );
 
     // The host registers under the identity it enrolled with at boot; nothing
@@ -233,21 +256,44 @@ async fn the_two_zones_run_a_workflow_without_reaching_each_other() {
         "the delivered execution must carry the ingress input: {output}"
     );
 
-    // The journal is in the CREATOR server, which is where the completed run
-    // has to be for the two arms above to be about the same run.
+    // The completed run is in the workflow service's journal, in the PLATFORM
+    // server, which is where it has to be for the arms above to be about the
+    // same run.
+    let (platform, connection) = compio_postgres::connect(&fleet.database.url(), NoTls)
+        .await
+        .expect("open the platform database");
+    let platform_driver = compio::runtime::spawn(connection.run());
+    let runs: i64 = platform
+        .query_one(
+            &format!("SELECT count(*) FROM {journal} WHERE id = $1 AND app_id = $2"),
+            &[&run.as_str(), &fleet.app_id.as_str()],
+        )
+        .await
+        .expect("read the platform journal")
+        .get(0);
+    assert_eq!(runs, 1, "the completed run must live in the platform journal");
+
+    // No schema on the creator server holds a journal table at all. The same
+    // predicate finds the platform's, so the empty answer is about the creator
+    // server rather than a predicate that matches nothing.
     let (creator, connection) = compio_postgres::connect(&fleet.database.creator_url(), NoTls)
         .await
         .expect("open the creator database");
     let creator_driver = compio::runtime::spawn(connection.run());
-    let runs: i64 = creator
-        .query_one(
-            &format!("SELECT count(*) FROM {journal} WHERE id = $1"),
-            &[&run.as_str()],
-        )
+    let journal_tables =
+        "SELECT count(*) FROM pg_catalog.pg_class WHERE relname = '__zeroship_workflow_runs'";
+    let on_platform: i64 = platform
+        .query_one(journal_tables, &[])
         .await
-        .expect("read the creator journal")
+        .expect("count the platform's journal tables")
         .get(0);
-    assert_eq!(runs, 1, "the completed run must live in the creator server");
+    assert_eq!(on_platform, 1, "the platform server carries one journal");
+    let on_creator: i64 = creator
+        .query_one(journal_tables, &[])
+        .await
+        .expect("count the creator server's journal tables")
+        .get(0);
+    assert_eq!(on_creator, 0, "a creator schema holds a workflow journal table");
 
     // THE RETAINED HANDLE. The app clones a handle out of `env.workflows` in
     // one request and keeps it; it answers while the app is published.
@@ -279,10 +325,6 @@ async fn the_two_zones_run_a_workflow_without_reaching_each_other() {
     // refuses a deleted app that is not archived - so writing both is writing
     // the state Control produces. What this does NOT cover: whether Control's
     // own delete endpoint writes them, or what else it does around them.
-    let (platform, connection) = compio_postgres::connect(&fleet.database.url(), NoTls)
-        .await
-        .expect("open the platform database");
-    let platform_driver = compio::runtime::spawn(connection.run());
     let plan: String = platform
         .query_one(
             "SELECT plan_id FROM zeroship.apps WHERE id = $1",
