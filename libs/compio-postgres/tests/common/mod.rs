@@ -120,13 +120,111 @@ pub fn error_chain(error: &(dyn std::error::Error + 'static)) -> String {
     rendered
 }
 
-/// Whether the server answered. A `DbError` anywhere in the chain is a message
-/// PostgreSQL composed and sent, so something was listening, authenticated the
-/// startup packet far enough to reply, and refused on purpose.
+/// Whether the server answered. A `DbError` anywhere in the chain - this
+/// driver's, or the `tokio-postgres` oracle's, whose connect failures the
+/// differential suites also route through [`postgres_unreachable`] - is a
+/// message `PostgreSQL` composed and sent, so something was listening, read
+/// the startup packet far enough to reply, and refused on purpose.
 pub fn server_answered(error: &(dyn std::error::Error + 'static)) -> bool {
+    chain_contains(error, |link| {
+        link.is::<compio_postgres::error::DbError>() || link.is::<tokio_postgres::error::DbError>()
+    })
+}
+
+/// The kinds of every `io::Error` in the chain.
+///
+/// The classification below is taken on these rather than on either driver's
+/// own error kind, because the driver kinds do not separate the cases. This
+/// driver files a frame too large to be `PostgreSQL`'s under its
+/// communication kind (`buf_stream::validate_length_against` builds it with
+/// `Error::io`) and a startup-protocol violation under its connect kind
+/// (`connect_raw::protocol_error` builds it with `Error::connect`), so a peer
+/// that answered with the wrong protocol shares a kind with a refused dial.
+/// The `io::ErrorKind` under it does not: both drivers mark bytes they cannot
+/// accept `InvalidData`, and a socket that never produced a reply with the
+/// socket-level kinds. `InvalidInput` is the one ambiguous kind; see
+/// [`refused_as_invalid`].
+fn io_kinds(error: &(dyn std::error::Error + 'static)) -> Vec<std::io::ErrorKind> {
+    let mut kinds = Vec::new();
     let mut link = Some(error);
     while let Some(current) = link {
-        if current.is::<compio_postgres::error::DbError>() {
+        if let Some(io) = current.downcast_ref::<std::io::Error>() {
+            kinds.push(io.kind());
+        }
+        link = current.source();
+    }
+    kinds
+}
+
+/// Whether the attempt ran out of time: an `io::Error` of kind `TimedOut`
+/// anywhere in the chain. The driver reports an expired connect or pool bound
+/// that way, and it says nothing about whether anything answered - a server
+/// that drops packets and a server too slow to finish the handshake inside the
+/// bound both end here.
+fn timed_out(error: &(dyn std::error::Error + 'static)) -> bool {
+    io_kinds(error).contains(&std::io::ErrorKind::TimedOut)
+}
+
+/// Whether something at the address answered with bytes the driver refused:
+/// a frame too large or malformed to be `PostgreSQL`'s, or a TLS handshake
+/// that failed on what the peer sent. Both drivers mark bytes they cannot
+/// accept `InvalidData`, so a reply arrived and the address is served.
+fn peer_answered_unintelligibly(error: &(dyn std::error::Error + 'static)) -> bool {
+    io_kinds(error).contains(&std::io::ErrorKind::InvalidData)
+}
+
+/// Whether the attempt was refused as invalid, without saying by whom.
+///
+/// `InvalidInput` names both sides. `postgres-protocol` reports a message tag
+/// the protocol does not define with it, which means a peer answered; std
+/// reports `EINVAL` and a refused argument with it - an over-long Unix socket
+/// path, a name that resolved to no address, a link-local address without a
+/// zone - which means the client side refused before anything answered.
+/// Neither is a missing server, and the report does not claim either.
+fn refused_as_invalid(error: &(dyn std::error::Error + 'static)) -> bool {
+    io_kinds(error).contains(&std::io::ErrorKind::InvalidInput)
+}
+
+/// Whether the address never produced a reply: nothing accepted the
+/// connection, there was no route or no Unix socket at that path, or the peer
+/// reset or closed the connection before answering.
+///
+/// A reset or an end of stream records no stage. A peer that accepted TLS -
+/// answered `S` - and then closed mid-handshake lands here too. The only thing
+/// in the chain that marks the handshake stage is this driver's own error
+/// kind, which reaches it only as display text ("error performing TLS
+/// handshake"), so that case is reported as a missing server although
+/// something answered.
+fn nothing_answered(error: &(dyn std::error::Error + 'static)) -> bool {
+    use std::io::ErrorKind::{
+        AddrNotAvailable, BrokenPipe, ConnectionAborted, ConnectionRefused, ConnectionReset,
+        HostUnreachable, NetworkDown, NetworkUnreachable, NotConnected, NotFound, UnexpectedEof,
+    };
+    io_kinds(error).iter().any(|kind| {
+        matches!(
+            kind,
+            ConnectionRefused
+                | ConnectionReset
+                | ConnectionAborted
+                | NotConnected
+                | BrokenPipe
+                | UnexpectedEof
+                | NotFound
+                | AddrNotAvailable
+                | HostUnreachable
+                | NetworkUnreachable
+                | NetworkDown
+        )
+    })
+}
+
+fn chain_contains(
+    error: &(dyn std::error::Error + 'static),
+    matches: impl Fn(&(dyn std::error::Error + 'static)) -> bool,
+) -> bool {
+    let mut link = Some(error);
+    while let Some(current) = link {
+        if matches(current) {
             return true;
         }
         link = current.source();
@@ -213,35 +311,56 @@ impl TestTransport {
 
 /// Fail the calling test because the connection this test needs was not made.
 ///
-/// This is what a missing database does now. It used to announce a skip, which
-/// cargo counts as a pass, and the only way to make it fatal was to remember to
-/// export `ZEROSHIP_REQUIRE_LIVE_BACKENDS=1` - a flag whose whole design was
-/// that the person who most needed it was the one who did not know it existed.
+/// A missing database is a failed run, never a skip: cargo counts a skip as a
+/// pass, so there is no environment variable that turns this into one.
 ///
-/// The message has to answer three questions or it is no better than the
-/// `connection refused` it replaces: WHICH backend, WHERE it was dialled (with
-/// the password removed - see [`redact_dsn`]), and WHAT COMMAND provisions one.
-///
-/// The third answer is only correct when nothing answered, and this printed it
-/// unconditionally. Measured 2026-08-20: with `crate::release` disabled, nine
-/// tests in `integration.rs` failed against a running, healthy server that had
-/// hit its `max_connections` ceiling, and every one of them reported
-///
-/// ```text
-///   error:   db error
-/// Provision it, then re-run: ...
-/// ```
-///
-/// That is the wrong cause, and a remedy for a server that was already up. So
-/// the branch below asks whether PostgreSQL replied before it prescribes
-/// anything, and [`error_chain`] prints what it said.
+/// The message answers WHICH backend, WHERE it was dialled (with the password
+/// removed - see [`redact_dsn`]), WHAT the failure was ([`error_chain`]) and
+/// WHAT TO DO, and the last answer depends on who stopped the attempt. See
+/// [`connection_failure_report`].
 #[track_caller]
 pub fn postgres_unreachable(dsn: &str, error: &(dyn std::error::Error + 'static)) -> ! {
+    panic!("{}", connection_failure_report(dsn, error))
+}
+
+/// Why a connection attempt failed, and the remedy for THAT failure.
+///
+/// The causes are told apart by what the error chain carries, because each has
+/// a different remedy and prescribing the wrong one sends a developer to fix a
+/// server that is fine:
+///
+/// * `PostgreSQL` replied ([`server_answered`]): the server is up and objected,
+///   and its SQLSTATE says to what. Provisioning cannot help.
+/// * A bound expired ([`timed_out`]): nothing says whether a server answered,
+///   so the report asks for the check that tells a missing server from a
+///   loaded machine instead of prescribing either remedy.
+/// * Something answered, unintelligibly ([`peer_answered_unintelligibly`]):
+///   the address is served, by something the driver cannot talk to or behind
+///   TLS material it does not trust. Provisioning cannot help.
+/// * Refused as invalid ([`refused_as_invalid`]): a peer sent a message the
+///   protocol does not define, or the client side refused an argument; the
+///   kind cannot say which, and the report does not guess. Neither is a
+///   missing server.
+/// * Nothing answered ([`nothing_answered`]): no reply came from the address
+///   dialled, so provisioning is the remedy.
+/// * None of those: the attempt stopped on the client side - a configuration
+///   the driver will not use, a TLS setting its connector cannot honour, an
+///   authentication requirement, or a name that does not resolve. The DSN or
+///   the code that built the `Config` is what needs fixing.
+///
+/// The remedies name where the DSN came from and what stands its server up,
+/// which differ under `suite-over-tls`: that mode reads the TLS fixture's
+/// descriptor instead of `PG_TEST_URL`.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one message per cause, kept side by side so their remedies can be compared"
+)]
+pub fn connection_failure_report(dsn: &str, error: &(dyn std::error::Error + 'static)) -> String {
     let dialled = redact_dsn(dsn);
     let cause = error_chain(error);
 
     if server_answered(error) {
-        panic!(
+        return format!(
             "PostgreSQL refused the connection this test requires.\n\
              \n\
              \x20 backend: PostgreSQL\n\
@@ -257,27 +376,140 @@ pub fn postgres_unreachable(dsn: &str, error: &(dyn std::error::Error + 'static)
              \n\
              There is no environment variable that makes this a skip. A\n\
              database this suite cannot use is a failed run, not a green one."
-        )
+        );
     }
 
-    panic!(
-        "PostgreSQL is unreachable, and this test requires it.\n\
+    if timed_out(error) {
+        return format!(
+            "The connection this test requires ran out of time.\n\
+             \n\
+             \x20 backend: PostgreSQL\n\
+             \x20 dialled: {dialled}\n\
+             \x20 error:   {cause}\n\
+             \n\
+             A timeout does not say whether anything answered: a server that\n\
+             is down behind a port that drops packets, and a server that is up\n\
+             but did not finish the handshake inside the bound named above,\n\
+             both end here. If {HEALTH_CHECK} shows the server\n\
+             up, the server is fine and the bound expired on a machine too\n\
+             loaded to meet it.\n\
+             \n\
+             There is no environment variable that makes this a skip. A database\n\
+             this suite cannot reach in time is a failed run, not a green one."
+        );
+    }
+
+    if peer_answered_unintelligibly(error) {
+        return format!(
+            "Something answered at the address this test dialled, but not in a\n\
+             way the driver accepts.\n\
+             \n\
+             \x20 backend: PostgreSQL\n\
+             \x20 dialled: {dialled}\n\
+             \x20 error:   {cause}\n\
+             \n\
+             A reply arrived, so the address is served and provisioning will not\n\
+             help. The driver refused what the reply carried: a frame too large\n\
+             or malformed to be PostgreSQL's, an unknown message tag, or a TLS\n\
+             handshake that failed on the peer's bytes. Check what listens there\n\
+             - another service on this port speaks another protocol - and, for a\n\
+             TLS failure, whether the server's certificate is one this checkout\n\
+             trusts: libs/compio-postgres/tests/tls_live_setup.sh run from\n\
+             another checkout regenerates the CA its servers share.\n\
+             \n\
+             There is no environment variable that makes this a skip. A database\n\
+             this suite cannot use is a failed run, not a green one."
+        );
+    }
+
+    if refused_as_invalid(error) {
+        return format!(
+            "The connection this test requires was refused as invalid.\n\
+             \n\
+             \x20 backend: PostgreSQL\n\
+             \x20 dialled: {dialled}\n\
+             \x20 error:   {cause}\n\
+             \n\
+             The error's kind does not say which side was invalid: something at\n\
+             the address may have answered with a message the protocol does not\n\
+             define, or the client side may have refused an argument of this\n\
+             attempt - an over-long Unix socket path, a name that resolved to no\n\
+             address, a link-local address without a zone. The error names\n\
+             which. Neither is a missing server, so provisioning will not help:\n\
+             check what listens at the address, or fix the DSN ({DSN_SOURCE}).\n\
+             \n\
+             There is no environment variable that makes this a skip. A database\n\
+             this suite cannot use is a failed run, not a green one."
+        );
+    }
+
+    if nothing_answered(error) {
+        return format!(
+            "PostgreSQL is unreachable, and this test requires it.\n\
+             \n\
+             \x20 backend: PostgreSQL\n\
+             \x20 dialled: {dialled}\n\
+             \x20 error:   {cause}\n\
+             \n\
+             Nothing replied at that address, so provision it and re-run:\n\
+             \x20 {PROVISION_COMMAND}\n\
+             \n\
+             {PROVISION_NOTE}\n\
+             \n\
+             There is no environment variable that makes this a skip. A database\n\
+             this suite cannot reach is a failed run, not a green one."
+        );
+    }
+
+    format!(
+        "The connection this test requires was stopped on the client side.\n\
          \n\
          \x20 backend: PostgreSQL\n\
          \x20 dialled: {dialled}\n\
          \x20 error:   {cause}\n\
          \n\
-         Nothing answered, so provision it and re-run:\n\
-         \x20 tests/provision_test_backends.sh\n\
-         \n\
-         That brings up the `postgres` and `redis` services from\n\
-         deploy/compose/docker-compose.yml and waits for both to be healthy.\n\
-         Point the tests somewhere else with PG_TEST_URL.\n\
+         Nothing in the error says a server is missing, so provisioning one\n\
+         will not help. The error names what stopped the attempt: a\n\
+         configuration the driver will not use, a TLS setting its connector\n\
+         cannot honour, an authentication requirement the server did not meet,\n\
+         or a host name that does not resolve. Fix the DSN ({DSN_SOURCE})\n\
+         or the code that built the configuration.\n\
          \n\
          There is no environment variable that makes this a skip. A database\n\
-         this suite cannot reach is a failed run, not a green one."
+         this suite cannot use is a failed run, not a green one."
     )
 }
+
+/// Where the DSN a failing test dialled came from.
+#[cfg(not(feature = "suite-over-tls"))]
+const DSN_SOURCE: &str =
+    "PG_TEST_URL, or `DEFAULT_TEST_URL` in libs/compio-postgres/tests/common/env.rs";
+#[cfg(feature = "suite-over-tls")]
+const DSN_SOURCE: &str = "libs/compio-postgres/tests/data/live/tls_live.conf, which \
+                          suite-over-tls reads in place of PG_TEST_URL";
+
+/// The command that stands the dialled server up.
+#[cfg(not(feature = "suite-over-tls"))]
+const PROVISION_COMMAND: &str = "tests/provision_test_backends.sh";
+#[cfg(feature = "suite-over-tls")]
+const PROVISION_COMMAND: &str = "libs/compio-postgres/tests/tls_live_setup.sh";
+
+/// What that command does, and what to know before running it.
+#[cfg(not(feature = "suite-over-tls"))]
+const PROVISION_NOTE: &str = "That brings up the `postgres` service from\n\
+                              deploy/compose/docker-compose.yml and waits for it to be healthy.\n\
+                              Point the tests somewhere else with PG_TEST_URL.";
+#[cfg(feature = "suite-over-tls")]
+const PROVISION_NOTE: &str = "That brings up the TLS servers and writes tls_live.conf, which\n\
+                              suite-over-tls reads in place of PG_TEST_URL. Read its header\n\
+                              first: it regenerates a CA that other checkouts' TLS fixtures\n\
+                              share, so running it from a second checkout breaks the first.";
+
+/// How to tell whether the dialled server is up.
+#[cfg(not(feature = "suite-over-tls"))]
+const HEALTH_CHECK: &str = "`tests/provision_test_backends.sh --check`";
+#[cfg(feature = "suite-over-tls")]
+const HEALTH_CHECK: &str = "`docker ps` (the servers tls_live_setup.sh starts)";
 
 /// `PG_TEST_URL`, or `env::DEFAULT_TEST_URL` when it is unset.
 ///
@@ -884,5 +1116,418 @@ mod tests {
             with_password("host=localhost port=5440 user=postgres", "wrong"),
             None
         );
+    }
+
+    /// The causes [`super::connection_failure_report`] tells apart, each
+    /// produced by a real driver call rather than by a hand-built error, so
+    /// the classification is measured on the chains the drivers return.
+    ///
+    /// Each case that must NOT prescribe provisioning sits beside one that
+    /// must, so a classifier that answers the same for everything fails here.
+    mod connection_failure_report {
+        use super::super::{
+            PROVISION_COMMAND, connection_failure_report, error_chain, server_answered,
+        };
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        use std::time::Duration;
+
+        /// Bounds every blocking call a scripted peer makes, so a client that
+        /// never arrives ends the peer instead of leaking its thread.
+        const PEER_WATCHDOG: Duration = Duration::from_secs(10);
+
+        const UNREACHABLE: &str = "PostgreSQL is unreachable";
+        const UNINTELLIGIBLE: &str = "Something answered at the address this test dialled";
+        const INVALID: &str = "The connection this test requires was refused as invalid";
+        const CLIENT_SIDE: &str =
+            "The connection this test requires was stopped on the client side";
+
+        /// A loopback port whose connections are refused, held for as long as
+        /// the returned socket lives.
+        ///
+        /// Bound but never listening: the port stays ours, so nothing can take
+        /// it between choosing it and dialling it, and a dial is answered with
+        /// a reset rather than accepted.
+        fn refusing_port() -> (socket2::Socket, u16) {
+            let socket = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None)
+                .expect("create the refusing socket");
+            socket
+                .bind(&std::net::SocketAddr::from(([127, 0, 0, 1], 0)).into())
+                .expect("bind the refusing socket");
+            let port = socket
+                .local_addr()
+                .expect("read the refusing socket's address")
+                .as_socket()
+                .expect("the refusing socket has an IP address")
+                .port();
+            (socket, port)
+        }
+
+        /// A peer that accepts ONE connection and runs `script` on it.
+        ///
+        /// Every blocking call, the accept included, is bounded by
+        /// [`PEER_WATCHDOG`]. The script owns the stream: dropping it hangs up,
+        /// and [`hold`] keeps it open until the client leaves.
+        fn scripted_peer(
+            script: impl FnOnce(TcpStream) -> std::io::Result<()> + Send + 'static,
+        ) -> (u16, std::thread::JoinHandle<std::io::Result<()>>) {
+            let listener = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None)
+                .expect("create the scripted peer");
+            listener
+                .bind(&std::net::SocketAddr::from(([127, 0, 0, 1], 0)).into())
+                .expect("bind the scripted peer");
+            listener.listen(1).expect("listen on the scripted peer");
+            // SO_RCVTIMEO bounds `accept` on Linux as well as `read`.
+            listener
+                .set_read_timeout(Some(PEER_WATCHDOG))
+                .expect("bound the scripted peer's accept");
+            let listener: std::net::TcpListener = listener.into();
+            let port = listener.local_addr().expect("scripted peer address").port();
+            let peer = std::thread::spawn(move || {
+                let (stream, _) = listener.accept()?;
+                stream.set_read_timeout(Some(PEER_WATCHDOG))?;
+                stream.set_write_timeout(Some(PEER_WATCHDOG))?;
+                script(stream)
+            });
+            (port, peer)
+        }
+
+        /// Read one length-prefixed startup-phase packet and return its body.
+        fn read_packet(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {
+            let mut length = [0u8; 4];
+            stream.read_exact(&mut length)?;
+            let length = u32::from_be_bytes(length) as usize;
+            if !(8..=10_000).contains(&length) {
+                return Err(std::io::Error::other(format!(
+                    "implausible startup length {length}"
+                )));
+            }
+            let mut body = vec![0u8; length - 4];
+            stream.read_exact(&mut body)?;
+            Ok(body)
+        }
+
+        /// Read the client's startup packet, declining `SSLRequest` and
+        /// `GSSENCRequest` on the way, as a plaintext `PostgreSQL` does.
+        fn read_startup(stream: &mut TcpStream) -> std::io::Result<()> {
+            loop {
+                let body = read_packet(stream)?;
+                let code = u32::from_be_bytes(body[..4].try_into().unwrap());
+                if code == 80_877_103 || code == 80_877_104 {
+                    stream.write_all(b"N")?;
+                    continue;
+                }
+                return Ok(());
+            }
+        }
+
+        /// Keep the connection open until the client leaves. A reset is the
+        /// client leaving with bytes it never read, not a peer failure.
+        fn hold(mut stream: TcpStream) -> std::io::Result<()> {
+            let mut scratch = [0u8; 256];
+            loop {
+                match stream.read(&mut scratch) {
+                    Ok(0) => return Ok(()),
+                    Ok(_) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {
+                        return Ok(());
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+
+        #[allow(clippy::future_not_send)]
+        async fn dial(dsn: &str) -> compio_postgres::Error {
+            match compio_postgres::connect(dsn, compio_postgres::NoTls).await {
+                Ok(_) => panic!("{dsn} completed a login this test scripted to fail"),
+                Err(error) => error,
+            }
+        }
+
+        /// The words that prescribe provisioning. The timeout report names the
+        /// provisioning script too, as the way to CHECK the server, so the
+        /// command alone does not say whether provisioning was prescribed.
+        const PRESCRIPTION: &str = "provision it and re-run";
+
+        fn assert_classified(report: &str, heading: &str, provisions: bool) {
+            assert!(
+                report.starts_with(heading),
+                "expected a report beginning {heading:?}, got:\n{report}"
+            );
+            assert_eq!(
+                report.contains(PRESCRIPTION),
+                provisions,
+                "provisioning was {} this report:\n{report}",
+                if provisions {
+                    "not prescribed by"
+                } else {
+                    "prescribed by"
+                }
+            );
+            if provisions {
+                assert!(
+                    report.contains(PROVISION_COMMAND),
+                    "the report prescribed provisioning without naming {PROVISION_COMMAND}:\n{report}"
+                );
+            }
+        }
+
+        /// A dial nothing accepts: provisioning is the remedy.
+        #[compio::test]
+        async fn a_dial_nothing_answers_prescribes_provisioning() {
+            let (_held, port) = refusing_port();
+            let dsn = format!("postgres://u:p@127.0.0.1:{port}/d?sslmode=disable");
+            let error = dial(&dsn).await;
+
+            let report = connection_failure_report(&dsn, &error);
+            assert_classified(&report, UNREACHABLE, true);
+            assert!(
+                !report.contains(":p@"),
+                "the report leaked the password:\n{report}"
+            );
+        }
+
+        /// A peer that hangs up before sending a byte produced no reply
+        /// either, so it is reported the same way as a refused dial.
+        #[compio::test]
+        async fn a_peer_that_hangs_up_before_replying_prescribes_provisioning() {
+            let (port, peer) = scripted_peer(|mut stream| read_startup(&mut stream));
+            let dsn = format!("postgres://u@127.0.0.1:{port}/d?sslmode=disable");
+            let error = dial(&dsn).await;
+            peer.join()
+                .expect("the scripted peer panicked")
+                .expect("the scripted peer failed");
+
+            assert_classified(&connection_failure_report(&dsn, &error), UNREACHABLE, true);
+        }
+
+        /// Another protocol on the port. An HTTP response's first five bytes
+        /// read as a `PostgreSQL` frame header too large for any message, and
+        /// the driver files that under its communication kind, beside a reset
+        /// socket - which is why the report cannot go by driver kind.
+        #[compio::test]
+        async fn a_peer_speaking_another_protocol_is_not_reported_missing() {
+            let (port, peer) = scripted_peer(|mut stream| {
+                read_startup(&mut stream)?;
+                stream.write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n")?;
+                hold(stream)
+            });
+            let dsn = format!("postgres://u@127.0.0.1:{port}/d?sslmode=disable");
+            let error = dial(&dsn).await;
+            peer.join()
+                .expect("the scripted peer panicked")
+                .expect("the scripted peer failed");
+
+            assert_classified(
+                &connection_failure_report(&dsn, &error),
+                UNINTELLIGIBLE,
+                false,
+            );
+        }
+
+        /// A well-framed message with a tag the protocol does not define. A
+        /// peer answered, but `postgres-protocol` reports the tag as
+        /// `InvalidInput`, the kind std also uses for a refused argument, so
+        /// the report may say neither "answered" nor "missing".
+        #[compio::test]
+        async fn an_unknown_message_tag_is_not_reported_missing() {
+            let (port, peer) = scripted_peer(|mut stream| {
+                read_startup(&mut stream)?;
+                stream.write_all(b"X\x00\x00\x00\x08abcd")?;
+                hold(stream)
+            });
+            let dsn = format!("postgres://u@127.0.0.1:{port}/d?sslmode=disable");
+            let error = dial(&dsn).await;
+            peer.join()
+                .expect("the scripted peer panicked")
+                .expect("the scripted peer failed");
+
+            assert_classified(&connection_failure_report(&dsn, &error), INVALID, false);
+        }
+
+        /// An argument the operating system refuses before anything is dialled:
+        /// a Unix socket path past `sun_path`. The same kind as the unknown tag
+        /// above, and this time nothing answered - so a report that claimed a
+        /// peer answered, or prescribed provisioning, would be wrong here.
+        #[cfg(unix)]
+        #[compio::test]
+        async fn an_argument_the_client_side_refuses_is_not_reported_as_an_answer() {
+            let dir = format!("/tmp/{}", "cpg_overlong_socket_dir_segment/".repeat(8));
+            let dsn = format!("host={dir} user=u dbname=d");
+            let error = dial(&dsn).await;
+
+            let report = connection_failure_report(&dsn, &error);
+            assert_classified(&report, INVALID, false);
+            assert!(
+                !report.contains("Something answered"),
+                "a refusal on the client side was reported as a peer's answer:\n{report}"
+            );
+        }
+
+        /// A peer that agrees to TLS and then does not speak it: the shape of
+        /// a TLS server whose certificate or protocol the client rejects.
+        #[cfg(feature = "tls")]
+        #[compio::test]
+        async fn a_peer_that_accepts_tls_then_sends_garbage_is_not_reported_missing() {
+            let (port, peer) = scripted_peer(|mut stream| {
+                let request = read_packet(&mut stream)?;
+                if request[..4] != 80_877_103u32.to_be_bytes() {
+                    return Err(std::io::Error::other("the client did not ask for TLS"));
+                }
+                stream.write_all(b"S")?;
+                stream.write_all(b"this is not a TLS record, it is plain text\r\n")?;
+                hold(stream)
+            });
+            let dsn = format!("postgres://u@127.0.0.1:{port}/d?sslmode=require");
+            let config: compio_postgres::Config = dsn.parse().expect("parse the TLS DSN");
+            let tls = compio_postgres::MakeRustlsConnect::from_config(&config)
+                .expect("build the TLS connector");
+            let Err(error) = config.connect(tls).await else {
+                panic!("a peer that sent plain text completed a TLS login");
+            };
+            peer.join()
+                .expect("the scripted peer panicked")
+                .expect("the scripted peer failed");
+
+            assert_classified(
+                &connection_failure_report(&dsn, &error),
+                UNINTELLIGIBLE,
+                false,
+            );
+        }
+
+        /// A real refusal by the driver after it reached a peer: the DSN
+        /// demands TLS and the connector cannot provide it.
+        #[compio::test]
+        async fn a_refusal_by_the_driver_itself_prescribes_no_provisioning() {
+            let (port, peer) = scripted_peer(hold);
+            let dsn = format!("postgres://u@127.0.0.1:{port}/d?sslmode=require");
+            let error = dial(&dsn).await;
+            peer.join()
+                .expect("the scripted peer panicked")
+                .expect("the scripted peer failed");
+
+            let report = connection_failure_report(&dsn, &error);
+            assert_classified(&report, CLIENT_SIDE, false);
+            assert!(
+                report.contains(&error_chain(&error)),
+                "the report dropped the error that names the refusal:\n{report}"
+            );
+        }
+
+        /// An expired bound is reported as a timeout, not as a missing server.
+        ///
+        /// The peer is a listener that never accepts: the kernel completes the
+        /// TCP handshake into its backlog and nothing ever replies, so the pool
+        /// warm-up bound expires every time. That is also the shape a loaded
+        /// machine produces against a healthy server - a pool bound expiring
+        /// mid-handshake - so "unreachable", with the provisioning remedy,
+        /// would be the wrong diagnosis for it.
+        #[compio::test]
+        async fn an_expired_bound_is_reported_as_a_timeout_not_a_missing_server() {
+            let silent = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a silent peer");
+            let dsn = format!(
+                "postgres://u:p@127.0.0.1:{}/d?sslmode=disable",
+                silent.local_addr().expect("silent peer address").port()
+            );
+            let config: compio_postgres::Config = dsn.parse().expect("parse the silent-peer DSN");
+            let mut pool_config = compio_postgres::PoolConfig::new();
+            pool_config
+                .max_size(1)
+                .min_idle(0)
+                .acquire_timeout(Duration::from_millis(100));
+            let Err(error) = compio_postgres::Pool::connect_with_config(config, pool_config).await
+            else {
+                panic!("a peer that never replies completed a pool warm-up");
+            };
+            assert!(error.is_pool_timeout(), "{}", error_chain(&error));
+
+            let report = connection_failure_report(&dsn, &error);
+            assert_classified(
+                &report,
+                "The connection this test requires ran out of time",
+                false,
+            );
+            assert!(
+                report.contains(&error_chain(&error)),
+                "the report dropped the bound that expired:\n{report}"
+            );
+            drop(silent);
+        }
+
+        /// A `PostgreSQL` refusal is a server answer from either driver. The
+        /// `tokio-postgres` oracle's connect failures reach the same report,
+        /// and its `DbError` is a different type from this driver's.
+        #[test]
+        fn a_server_refusal_is_recognised_from_either_driver() {
+            fn refusal(mut stream: TcpStream) -> std::io::Result<()> {
+                read_startup(&mut stream)?;
+                let mut fields = Vec::new();
+                for (tag, value) in [
+                    (b'S', "FATAL"),
+                    (b'V', "FATAL"),
+                    (b'C', "28P01"),
+                    (b'M', "password authentication failed for user \"u\""),
+                ] {
+                    fields.push(tag);
+                    fields.extend_from_slice(value.as_bytes());
+                    fields.push(0);
+                }
+                fields.push(0);
+                let mut frame = vec![b'E'];
+                frame.extend_from_slice(&u32::try_from(fields.len() + 4).unwrap().to_be_bytes());
+                frame.extend_from_slice(&fields);
+                stream.write_all(&frame)
+            }
+
+            let (port, peer) = scripted_peer(refusal);
+            let dsn = format!("postgres://u:p@127.0.0.1:{port}/d?sslmode=disable");
+            let ours = compio::runtime::Runtime::new()
+                .expect("build a compio runtime")
+                .block_on(compio_postgres::connect(&dsn, compio_postgres::NoTls))
+                .map(|_| ())
+                .expect_err("the refusing peer accepted this driver's login");
+            peer.join()
+                .expect("the refusing peer panicked")
+                .expect("the refusing peer failed");
+
+            let (port, peer) = scripted_peer(refusal);
+            let dsn = format!("postgres://u:p@127.0.0.1:{port}/d?sslmode=disable");
+            let theirs = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("build a tokio runtime")
+                .block_on(tokio_postgres::connect(&dsn, tokio_postgres::NoTls))
+                .map(|_| ())
+                .expect_err("the refusing peer accepted the oracle's login");
+            peer.join()
+                .expect("the refusing peer panicked")
+                .expect("the refusing peer failed");
+
+            for (driver, error) in [
+                (
+                    "compio-postgres",
+                    &ours as &(dyn std::error::Error + 'static),
+                ),
+                ("tokio-postgres", &theirs),
+            ] {
+                assert!(
+                    server_answered(error),
+                    "{driver}: a FATAL ErrorResponse was not recognised as a server answer: {}",
+                    error_chain(error)
+                );
+                assert_classified(
+                    &connection_failure_report(&dsn, error),
+                    "PostgreSQL refused",
+                    false,
+                );
+            }
+            assert!(
+                error_chain(&ours).contains("SQLSTATE 28P01"),
+                "the refusal's SQLSTATE was not rendered: {}",
+                error_chain(&ours)
+            );
+        }
     }
 }

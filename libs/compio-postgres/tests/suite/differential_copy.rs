@@ -412,7 +412,7 @@ where
         let result = runtime.block_on(async move {
             let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
                 .await
-                .expect("tokio-postgres connect");
+                .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
             let driver = tokio::spawn(async move {
                 let _ = connection.await;
             });

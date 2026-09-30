@@ -120,7 +120,7 @@ fn tokio_outcomes(url: String, statements: Vec<String>) -> Vec<Outcome> {
         let outcomes = runtime.block_on(async move {
             let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
                 .await
-                .expect("tokio-postgres connect");
+                .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
             let driver = tokio::spawn(async move {
                 let _ = connection.await;
             });
@@ -269,7 +269,7 @@ fn tokio_transaction_outcomes(url: String, sequences: Vec<Vec<&'static str>>) ->
         let outcomes = runtime.block_on(async move {
             let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
                 .await
-                .expect("tokio-postgres connect");
+                .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
             let driver = tokio::spawn(async move {
                 let _ = connection.await;
             });
@@ -568,7 +568,7 @@ fn tokio_fields(url: String, fixture: String, statements: Vec<String>) -> Vec<Op
                 runtime.block_on(async move {
                     let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
                         .await
-                        .expect("tokio-postgres connect");
+                        .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
                     let driver = tokio::spawn(async move {
                         let _ = connection.await;
                     });
@@ -742,7 +742,7 @@ fn tokio_notices(url: String) -> Vec<Notice> {
         let collected = runtime.block_on(async move {
             let (client, mut connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
                 .await
-                .expect("tokio-postgres connect");
+                .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
 
             // The connection must be POLLED for async messages to surface, so
             // it cannot simply be spawned and forgotten as elsewhere in this
@@ -950,7 +950,7 @@ fn tokio_notifications(
                     let (listener, mut listener_connection) =
                         tokio_postgres::connect(&url, tokio_postgres::NoTls)
                             .await
-                            .expect("tokio-postgres listener connect");
+                            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
                     let (message_sender, mut message_receiver) = futures_channel::mpsc::unbounded();
 
                     // `Connection` is not a Stream, but `poll_message` is its
@@ -981,7 +981,7 @@ fn tokio_notifications(
                     let (notifier, notifier_connection) =
                         tokio_postgres::connect(&url, tokio_postgres::NoTls)
                             .await
-                            .expect("tokio-postgres notifier connect");
+                            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
                     let notifier_driver = tokio::spawn(async move {
                         let _ = notifier_connection.await;
                     });
@@ -1252,7 +1252,7 @@ fn tokio_described(url: String, statements: Vec<String>) -> Vec<Described> {
         let collected = runtime.block_on(async move {
             let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
                 .await
-                .expect("tokio-postgres connect");
+                .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
             let driver = tokio::spawn(async move {
                 let _ = connection.await;
             });
@@ -1405,7 +1405,7 @@ fn tokio_copy_out(url: String, sql: String) -> Vec<u8> {
         let bytes = runtime.block_on(async move {
             let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
                 .await
-                .expect("tokio-postgres connect");
+                .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
             let driver = tokio::spawn(async move {
                 let _ = connection.await;
             });
@@ -1526,7 +1526,7 @@ fn tokio_copy_in(url: String, table: String, body: String) -> u64 {
         let written = runtime.block_on(async move {
             let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
                 .await
-                .expect("tokio-postgres connect");
+                .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
             let driver = tokio::spawn(async move {
                 let _ = connection.await;
             });
@@ -1687,7 +1687,7 @@ fn tokio_paging(url: String, page: i32) -> Paging {
         let paging = runtime.block_on(async move {
             let (mut client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
                 .await
-                .expect("tokio-postgres connect");
+                .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
             let driver = tokio::spawn(async move {
                 let _ = connection.await;
             });
@@ -1804,7 +1804,7 @@ fn tokio_binary_roundtrip(url: String, table: String) -> (u64, Vec<(i32, String,
 
             let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
                 .await
-                .expect("tokio-postgres connect");
+                .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
             let driver = tokio::spawn(async move {
                 let _ = connection.await;
             });
@@ -2068,7 +2068,7 @@ fn tokio_simple_queries(url: String, scripts: Vec<String>) -> Vec<Vec<Flattened>
         let collected = runtime.block_on(async move {
             let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
                 .await
-                .expect("tokio-postgres connect");
+                .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
             let driver = tokio::spawn(async move {
                 let _ = connection.await;
             });
@@ -2193,7 +2193,7 @@ fn tokio_explicit_prepare(url: String, table: String) -> Vec<Outcome> {
         let outcomes = runtime.block_on(async move {
             let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
                 .await
-                .expect("tokio-postgres connect");
+                .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
             let driver = tokio::spawn(async move {
                 let _ = connection.await;
             });
@@ -2423,7 +2423,7 @@ fn tokio_producerless_copy(url: String, table: String) -> CopyOutcome {
         let outcome = runtime.block_on(async move {
             let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
                 .await
-                .expect("tokio-postgres connect");
+                .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
             let driver = tokio::spawn(async move {
                 let _ = connection.await;
             });
