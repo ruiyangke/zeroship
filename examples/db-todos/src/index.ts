@@ -486,33 +486,22 @@ export const txDepth = mutation(
 // ---------------------------------------------------------------------------
 // CONCURRENT transactions -- the regime an isolation level exists for.
 //
-// Every probe above is a SINGLE uncontended transaction, so
-// none of them can see what happens when two transactions for the same app are
-// open at once. That is the whole point of `isolationLevel`.
-//
-// The mechanism under test (crates/zeroship-data-v8/src/context.rs:146 and
-// crates/zeroship-data-orm/src/transaction/mod.rs:227):
-//
-//   * the open tx connection lives in `tx_conns: HashMap<app_id, TxConnection>`
-//     -- ONE slot per app, per isolate.
-//   * `transaction_dispatch` decides BEGIN-vs-SAVEPOINT **synchronously**, from
-//     `has_tx_for(app_id)`, but the client is only installed LATER, inside the
-//     async begin op.
-//
-// So there are two distinct windows, and these probes separate them:
-//
-//   txParallel  both `transaction()` calls happen in the SAME JS turn, so both
-//               read `has_tx_for == false` and both take the top-level BEGIN
-//               path. The second `install_tx_client` then overwrites the
-//               first's slot.
-//   txOverlap   the second call happens AFTER the first's BEGIN landed, so it
-//               reads `has_tx_for == true` and nests as a SAVEPOINT on the
-//               first transaction's connection -- even though the two are
-//               logically unrelated units of work.
-//
-// Both are reachable from ONE request (`Promise.all`), so they do not depend on
-// how the worker schedules requests across isolates. `txRaceStep` is the
+// Every probe above is a SINGLE uncontended transaction, so none of them can
+// see what happens when two units of work for the same app are open at once.
+// These probes open both from ONE request (`Promise.all`), so they do not
+// depend on how the worker schedules requests. `txRaceStep` is the
 // cross-REQUEST version and does.
+//
+// Each asks whether a unit of work stays its own:
+//
+//   txParallel    two `db.transaction()` calls started in the same JS turn.
+//                 Both must commit, each as its own transaction, leaving two
+//                 rows.
+//   txOverlap     a second `db.transaction()` started while the first is open,
+//                 before the first aborts. The first's rollback must remove
+//                 only its own row; the second's committed row must survive.
+//   txPlainWrite  the same question for an ordinary write with no transaction
+//                 anywhere in its call chain.
 // ---------------------------------------------------------------------------
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(() => r(), ms));
@@ -520,17 +509,16 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(() => r(), ms)
 /** Two `db.transaction()` calls opened in the same JS turn.
  *
  *  Contract a creator would assume: two independent units of work, two rows,
- *  no errors. What is actually under test is whether the second BEGIN silently
- *  evicts the first from the per-app slot. */
+ *  no errors. */
 export const txParallel = mutation(
   async ({ userId, tag }: TxInput) => {
     const uid = userIdFromWire(userId);
     const title = `${tag}-par`;
     const leg = async (n: number) => {
       const r = await db.transaction(async (tx) => {
-        // `before` is read on whichever connection the slot holds at that
-        // moment. Two legs on two real transactions both see 0; two legs
-        // sharing one connection see 0 then 1.
+        // `before` is what this leg's transaction could see when it started,
+        // so the capture records whether the second leg ran after the first
+        // committed.
         const before = await tx.todos.count({ userId: uid, title });
         await tx.todos.insert({ userId: uid, title });
         const after = await tx.todos.count({ userId: uid, title });

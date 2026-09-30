@@ -53,8 +53,11 @@ test("the database contract holds through local and deployed app requests", asyn
   }
   expect(captures).toHaveLength(2);
   const divergences = Object.keys(captures[0]).filter((key) => !isDeepStrictEqual(captures[0][key], captures[1][key])).sort();
-  // SQLite's writer contention and supported isolation levels differ.
-  expect(divergences).toEqual(["cxPlain", "cxTotal", "txIsoRR", "txTotal"]);
+  // SQLite accepts only the default isolation level and SERIALIZABLE, so it
+  // refuses the REPEATABLE READ probe and that probe's row is missing from its
+  // transaction tally. Every other probe, the concurrent ones included, must
+  // agree across backends.
+  expect(divergences).toEqual(["txIsoRR", "txTotal"]);
 });
 
 test("invalid creator input fails without writing rows", async () => {
