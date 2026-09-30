@@ -649,12 +649,15 @@ fn queue_microtask_callback(
 /// Drain `process.nextTick` callbacks and V8's microtask queue until both are
 /// empty, bounded so a callback that re-queues itself cannot spin forever.
 ///
-/// This BRACKETS V8's checkpoint; it does not interleave with it. Ticks queued
-/// from inside a microtask therefore run after every promise job in that
-/// checkpoint, not before - a divergence from Node documented at the
-/// `process.nextTick` installation in `setup_globals`. Both drains are needed
-/// even so: the pre-drain catches ticks queued from synchronous code, and the
-/// post-drain catches the ones queued from microtasks.
+/// This BRACKETS V8's checkpoint; it does not interleave with it, and neither
+/// does Node. Node's `processTicksAndRejections` drains the whole tick queue,
+/// then runs every pending microtask, and repeats while ticks remain. So ticks
+/// queued by host-invoked code (a handler's synchronous prefix, a timer
+/// callback) run before the promise queue, and ticks queued from inside a
+/// microtask run after it. The pre-drain serves the first case and the
+/// post-drain the second. The one arrangement where the ordering differs from
+/// Node is ES module top level, described at the `process.nextTick`
+/// installation in `setup_globals`.
 pub(crate) fn perform_microtask_checkpoint(scope: &mut v8::PinScope) {
     for _ in 0..1024 {
         let had_next_ticks_before = drain_next_ticks(scope);
@@ -1507,33 +1510,25 @@ fn setup_globals_with_descriptor(
 
         // process.nextTick - Node-only. Restores the context captured per entry.
         //
-        // ORDERING DIVERGES FROM NODE: `perform_microtask_checkpoint`
-        // drains our queue BEFORE and AFTER V8's checkpoint - it brackets
-        // that checkpoint rather than interleaving with it. Node drains
-        // the nextTick queue ahead of the promise queue and again between
-        // microtasks.
-        //
-        // The difference is observable whenever the `nextTick` call itself
-        // happens inside a microtask, which is the common case: an async
-        // handler's synchronous prefix runs as a promise job, so at the
-        // pre-drain the queue is still empty, V8 then runs the whole
-        // promise queue (including any `.then` registered alongside), and
-        // only the post-drain sees the tick:
+        // Ordering against promise microtasks follows from where the call
+        // happens, because `perform_microtask_checkpoint` drains this queue
+        // before and after V8's checkpoint, as Node's tick processing does:
         //
         //     Promise.resolve().then(() => o.push("promise"));
         //     process.nextTick(() => o.push("tick"));
         //
         //     arrangement                        Node          this runtime
-        //     CommonJS, synchronous top level    tick,promise  (n/a, ESM only)
-        //     ESM, top level                     promise,tick  tick,promise
+        //     handler's synchronous prefix       tick,promise  tick,promise
         //     inside a microtask                 promise,tick  promise,tick
+        //     ESM, top level                     promise,tick  tick,promise
         //
-        // The in-microtask case does NOT diverge - Node defers the tick
-        // there too. The real divergence is ESM TOP LEVEL: this runtime
-        // drains the tick queue first there, like Node's CommonJS, while
-        // Node's ESM does not (module evaluation is itself driven from a
-        // job). Both arrangements are pinned in
-        // `tests/next_tick_ordering.rs`, one assertion each.
+        // The host calls `default.fetch` directly, as Node calls an `http`
+        // request listener, so a handler's synchronous prefix is not a
+        // promise job and the pre-drain sees the tick. ESM TOP LEVEL is the
+        // divergence: Node evaluates an ES module from inside a job, while
+        // this runtime evaluates it from the host and drains the tick queue
+        // first, as Node does only for CommonJS. Every row is checked
+        // against a real Node run in `tests/next_tick_ordering.rs`.
         {
             let key = v8::String::new(scope, "nextTick").unwrap();
             let next_tick = v8::Function::new(scope, process_next_tick_callback).unwrap();
