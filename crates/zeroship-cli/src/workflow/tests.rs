@@ -182,23 +182,47 @@ fn the_bundle_compiler_runs_an_installed_runner_inside_the_project() {
     assert_eq!(command.get_current_dir(), Some(root.path()));
 }
 
-fn test_storage(root: &Path, app: &AppId) -> HostStorage {
-    HostStorage {
-        connection: zeroship_data_orm::connection::ConnectionFactory::for_app_url(&format!(
-            "sqlite:{}",
-            root.join(".zeroship/dev.sqlite").display()
-        ))
-        .unwrap(),
-        keys: zeroship_data_orm::encryption::ProjectKeySource::unavailable(),
-        binding: zeroship_data_orm::binding::DbBinding::platform(
-            app.as_str(),
-            "test-deployment",
-            zeroship_core::schema_name::SchemaName::new(
-                &zeroship_core::app_derivation::schema_name(app),
-            )
-            .unwrap(),
-        ),
-    }
+/// The dev host's own `DATABASE_URL` shape: a session file, beside which every
+/// attached database is kept.
+fn dev_connection(root: &Path) -> zeroship_data_orm::connection::ConnectionFactory {
+    zeroship_data_orm::connection::ConnectionFactory::for_app_url(&format!(
+        "sqlite:{}",
+        root.join(".zeroship/dev.sqlite").display()
+    ))
+    .unwrap()
+}
+
+fn test_storage(root: &Path) -> HostStorage {
+    journal_storage(
+        dev_connection(root),
+        zeroship_data_orm::encryption::ProjectKeySource::unavailable(),
+    )
+}
+
+/// `zeroship serve` opens its journal where the production workflow service
+/// opens its own: in the journal's schema, under the service's tenant rather
+/// than an app's. On `SQLite` the schema names the attached file, so a binding
+/// that disagreed would keep the dev journal somewhere production never looks.
+#[test]
+fn the_local_host_opens_the_journal_where_production_does() {
+    let root = tempfile::tempdir().unwrap();
+    let local = journal_storage(
+        dev_connection(root.path()),
+        zeroship_data_orm::encryption::ProjectKeySource::unavailable(),
+    )
+    .binding;
+    let production = zeroship_workflow::service::store::journal_binding();
+    assert_eq!(
+        local.schema(),
+        production.schema(),
+        "the local journal must live in the production journal's schema"
+    );
+    assert_eq!(
+        local.app_id(),
+        production.app_id(),
+        "the local journal must be opened under the production journal's tenant"
+    );
+    assert_eq!(local, production);
 }
 
 fn test_objects(root: &Path) -> zeroship_storage::StorageStore {
@@ -236,7 +260,7 @@ fn start_with<C: Composition>(
         app.clone(),
         config,
         bundle,
-        test_storage(root, app),
+        test_storage(root),
         test_objects(root),
         [("APP_ID".into(), "untrusted-variable".into())].into(),
         peers,
@@ -283,8 +307,8 @@ fn metered_database(
     (vec![service.plugin()], meter)
 }
 
-/// A second creator handle on the app database, outside the host. It holds
-/// the manager's current ingress epoch, as another host would once it had
+/// A second creator handle on the journal, outside the host. It holds the
+/// manager's current ingress epoch, as another host would once it had
 /// established that epoch.
 async fn client(root: &Path, app: &AppId) -> AppWorkflows {
     let epoch = responsibility(root, app)
@@ -298,7 +322,7 @@ async fn client(root: &Path, app: &AppId) -> AppWorkflows {
                 .with_ingress_epoch(epoch),
         )?;
         let service =
-            WorkflowService::open(Rc::new(test_storage(root, app).open().await?), policies).await?;
+            WorkflowService::open(Rc::new(test_storage(root).open().await?), policies).await?;
         service.register_app(&binding).await
     })
     .await

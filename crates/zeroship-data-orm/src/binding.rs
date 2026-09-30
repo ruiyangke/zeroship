@@ -9,10 +9,14 @@
 //!
 //! # Two identities, carried separately
 //!
-//! `app_id` is the TENANT: the CDC event stamp, the SQLite `ATTACH` alias, the
-//! app the usage sink attributes to. [`DbBinding::database`] is the DATABASE:
-//! the physical schema tables are qualified with, the routing half that keeps
-//! one app's two databases apart, and what the binding role is granted on.
+//! `app_id` is the TENANT: the CDC event stamp and the app the usage sink
+//! attributes to. [`DbBinding::database`] is the DATABASE: the routing half
+//! that keeps one app's two databases apart, and what the binding role is
+//! granted on. [`DbBinding::schema`] is the physical schema tables are
+//! qualified with, derived from the database for a creator binding and named
+//! by the service for a platform one. On `SQLite` the schema is also the
+//! `ATTACH` alias, which names the attached file; a schema of `main` addresses
+//! the file the connection opened.
 //!
 //! # What the session-setup batch needs
 //!

@@ -19,6 +19,7 @@ use zeroship_data_orm::{
     orm::{Database, Output},
     value, ConnectOptions, Value as Record,
 };
+use zeroship_workflow::service::store::JOURNAL_SCHEMA;
 use zeroship_workflow_manager::deployments;
 
 struct Host {
@@ -364,11 +365,18 @@ fn resume_after_process_death(configured_app: Option<&AppId>, native_dev: bool) 
         json!({"version": if native_dev { "live-original" } else { "original:lazy" }})
     );
     assert!(!root.path().join("unused.sqlite").exists());
-    let database = root
-        .path()
-        .join(".zeroship")
-        .join(format!("zs-{}.sqlite", expected_app.as_str()));
+    // The journal is kept where the production service keeps it, in the file
+    // SQLite attaches for the journal's schema, and in no file of the app's.
+    let state = root.path().join(".zeroship");
+    let database = state.join(format!("zs-{JOURNAL_SCHEMA}.sqlite"));
     assert!(database.exists());
+    let app_file = state.join(format!("zs-{}.sqlite", expected_app.as_str()));
+    assert!(!app_file.exists());
+    // The host serves the app it was configured with: its deployment is
+    // activated under that id, and under no other.
+    let activated = |app: &AppId| Platform::open(root.path(), app).activated();
+    assert_eq!(activated(&expected_app).len(), 1);
+    assert!(activated(&AppId::mint()).is_empty());
     // Manager metadata shares the one local platform file with the deployment
     // catalog; there is no workflow-only database or object directory.
     assert!(root

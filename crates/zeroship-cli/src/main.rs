@@ -370,23 +370,15 @@ fn cmd_serve(args: &[String]) {
     });
     let workflow_host = workflow::LocalHost::start(
         &std::env::current_dir().expect("project directory"),
-        dev_app_id.clone(),
+        dev_app_id,
         workflow_config,
         is_archive.then_some(input_path.as_path()),
-        zeroship_workflow::service::store::HostStorage {
-            connection: database.connection().clone(),
-            keys: zeroship_data_orm::encryption::ProjectKeySource::supplied(
+        workflow::journal_storage(
+            database.connection().clone(),
+            zeroship_data_orm::encryption::ProjectKeySource::supplied(
                 database.project_keys().clone(),
             ),
-            binding: zeroship_data_orm::binding::DbBinding::platform(
-                dev_app_id.as_str(),
-                zeroship_data_orm::binding::COLD_START_DEPLOY_TOKEN,
-                zeroship_core::schema_name::SchemaName::new(
-                    &zeroship_core::app_derivation::schema_name(&dev_app_id),
-                )
-                .expect("local database binding"),
-            ),
-        },
+        ),
         storage,
         env_vars.clone(),
         plugins.clone(),

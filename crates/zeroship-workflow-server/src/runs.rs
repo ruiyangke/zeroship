@@ -12,14 +12,13 @@ use std::{
 };
 
 use futures::{future::LocalBoxFuture, lock::Mutex};
-use zeroship_core::{app_id::AppId, schema_name::SchemaName, workflow_coordination::Revision};
-use zeroship_data_orm::{
-    binding::DbBinding, connection::ConnectionFactory, encryption::ProjectKeySource,
-};
+use zeroship_core::{app_id::AppId, workflow_coordination::Revision};
+use zeroship_data_orm::{connection::ConnectionFactory, encryption::ProjectKeySource};
 use zeroship_workflow::{
     service::{
-        store::OrmStore, AppDeployments, AppWorkflows, HostPolicies, IngressEpochs, PolicyBinding,
-        PolicySnapshot, WorkflowService,
+        store::{journal_binding, OrmStore},
+        AppDeployments, AppWorkflows, HostPolicies, IngressEpochs, PolicyBinding, PolicySnapshot,
+        WorkflowService,
     },
     WorkflowServiceError,
 };
@@ -28,11 +27,6 @@ use zeroship_workflow_manager::{
     recovery::Recovery,
     Error as ManagerError,
 };
-
-/// The schema the journal is installed into, and the one this service holds DML
-/// on. `Coordinator::verify` separately refuses to start when the same login
-/// also holds CREATE here.
-const JOURNAL_SCHEMA: &str = "workflow_manager";
 
 /// The journal, the policy registry its bindings come from, and the recovery
 /// scope its ingress epochs are established against.
@@ -54,22 +48,21 @@ pub struct RunService {
 impl RunService {
     /// Open the journal over the service's own schema.
     ///
+    /// The login holds DML on that schema and no more: `Coordinator::verify`
+    /// separately refuses to start when the same login also holds CREATE there.
+    ///
     /// `recovery` owns the same app scopes this journal serves, so acceptance
     /// establishes its ingress epoch directly rather than through a manager
     /// client: here the manager and the journal are the same process.
     ///
     /// # Errors
-    /// Reports an unusable schema name, an unusable url, and journal storage
-    /// that refuses to verify.
+    /// Reports an unusable url and journal storage that refuses to verify.
     pub async fn connect(url: &str, recovery: Recovery) -> Result<Self, WorkflowServiceError> {
-        let schema = SchemaName::new(JOURNAL_SCHEMA).map_err(|_| {
-            WorkflowServiceError::Internal("workflow journal schema name is invalid".into())
-        })?;
         let factory = ConnectionFactory::for_platform_url(url).map_err(|_| {
             WorkflowServiceError::Unavailable("workflow journal url is unusable".into())
         })?;
         let store = OrmStore::connect(
-            DbBinding::platform(JOURNAL_SCHEMA, "workflow-journal", schema),
+            journal_binding(),
             &factory,
             // The journal declares no encrypted column, so there is no project
             // key to resolve and none to supply.

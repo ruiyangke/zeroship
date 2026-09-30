@@ -1,9 +1,9 @@
 //! The workflow host thread: the creator engine, the ordinary job consumer and
-//! this process's journal maintenance lane, all over the app's own database and
-//! storage. Manager metadata stays on the manager thread, reached through its
-//! client. Neither side opens the other's storage, and no loop here scans the
-//! creator journal for runnable work - the queue names every row either lane
-//! takes.
+//! this process's journal maintenance lane, all over the workflow journal and
+//! the app's storage. Manager metadata stays on the manager thread, reached
+//! through its client. Neither side opens the other's storage, and no loop here
+//! scans the creator journal for runnable work - the queue names every row
+//! either lane takes.
 
 #![expect(
     clippy::future_not_send,
