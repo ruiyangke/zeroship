@@ -30,7 +30,10 @@ function main(): void {
     // schema defaults" arm. That arm is the plugin's `zeroship()`-in-a-scratch-
     // directory case and is deliberately absent from the Rust side, so the
     // gate needs a way to observe it.
-    const { config } = readProjectConfig(resolve(rootFlag.slice("--root=".length)), { environment });
+    const { config } = readProjectConfig(resolve(rootFlag.slice("--root=".length)), {
+      environment,
+      processEnv: process.env,
+    });
     process.stdout.write(canonicalJson(config) + "\n");
     return;
   }

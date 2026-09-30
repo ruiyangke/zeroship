@@ -119,7 +119,11 @@ function bootDevServer(root: string) {
     serverFunctionMap: new Map(),
     discoveredProcedures: [],
   };
-  const plugins = devServerPlugin({}, state, createProjectConfigHolder({}));
+  const plugins = devServerPlugin(
+    { processEnv: {} },
+    state,
+    createProjectConfigHolder({ processEnv: {} }),
+  );
   const [envPlugin, devPlugin] = plugins as any[];
   hook(envPlugin, "configResolved")({ root, command: "serve" });
   hook(devPlugin, "configureServer")(makeServerStub(root));

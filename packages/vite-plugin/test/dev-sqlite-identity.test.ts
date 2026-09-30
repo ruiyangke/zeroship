@@ -14,7 +14,7 @@ import { readProjectConfig, selectDatabase } from "../src/project-config/index.j
 const DB_TODOS = fileURLToPath(new URL("../../../examples/db-todos", import.meta.url));
 
 test("the dev apply targets the file named by the DECLARED database id", () => {
-  const { config, path } = readProjectConfig(DB_TODOS);
+  const { config, path } = readProjectConfig(DB_TODOS, { processEnv: {} });
   assert.notEqual(path, null, `${DB_TODOS} must hold a zeroship.jsonc`);
   const database = selectDatabase(config);
   assert.notEqual(database, undefined, "db-todos must declare a primary database");

@@ -82,6 +82,15 @@ export interface DevServerOptions {
    * user; `false` disables. See `ZeroshipOptions.devAuth`.
    */
   devAuth?: DevAuthOption;
+  /**
+   * The process environment the dev server reads, and the environment the
+   * spawned runtime inherits. Required. The runtime command (`ZEROSHIP_BIN`),
+   * the runtime port (`ZEROSHIP_DEV_PORT`), the database URL (`DATABASE_URL`)
+   * and the runtime's own environment come from here and from nowhere else.
+   * `zeroship()` passes `process.env`; a test passes the environment it
+   * means, so nothing in its own shell reaches the dev server or its runtime.
+   */
+  processEnv: NodeJS.ProcessEnv;
 }
 
 /**
@@ -121,6 +130,10 @@ type FetchMethod = "fetchModule" | "getBuiltins";
  *               restart is pending. Requests are NOT proxied (see below).
  * - `fatal`   - `MAX_RAPID_RESTARTS` consecutive sub-healthy exits. No further
  *               restart is scheduled.
+ * - `unstartable` - the runtime command could not be executed at all (`spawn`
+ *               threw, or the child's `error` event arrived with no process).
+ *               No child exists, so nothing exits and nothing is retried on a
+ *               timer; an app change spawns afresh. Requests are NOT proxied.
  *
  * WHY `failing` STOPS PROXYING RATHER THAN LETTING THE PROXY FAIL NATURALLY.
  * The dev runtime listens on a port of its OWN (`devServerPort`), separate from
@@ -142,7 +155,7 @@ type FetchMethod = "fetchModule" | "getBuiltins";
  * resolves itself. Named here so the next reader does not mistake the guard for
  * total.
  */
-type RuntimeHealth = "ok" | "failing" | "fatal";
+type RuntimeHealth = "ok" | "failing" | "fatal" | "unstartable";
 
 interface RuntimeStatus {
   health: RuntimeHealth;
@@ -202,7 +215,11 @@ function runtimeDownEnvelope(status: RuntimeStatus): Record<string, unknown> {
   const causeLines = status.logTail.filter((l) => !l.startsWith("[zeroship]"));
   const cause = (causeLines.length > 0 ? causeLines : status.logTail).join(" ")
     || "no output captured";
-  const message = fatal
+  // No process ever ran, so there is no port, no attempt count and no runtime
+  // output to quote: the cause is the dev server's own account of the command.
+  const message = status.health === "unstartable"
+    ? `zeroship dev runtime could not be started: ${cause} Fix that, then restart \`pnpm dev\`.`
+    : fatal
     ? `zeroship dev runtime failed to start on port ${status.port} and was given up on `
       + `after ${MAX_RAPID_RESTARTS} attempts. The runtime said: ${cause} `
       + "Fix that, then restart `pnpm dev`. If the port is taken by another app, "
@@ -213,7 +230,7 @@ function runtimeDownEnvelope(status: RuntimeStatus): Record<string, unknown> {
   return {
     code: "UNAVAILABLE",
     message,
-    retryable: !fatal,
+    retryable: status.health === "failing",
     details: {
       state: status.health,
       devServerPort: status.port,
@@ -554,6 +571,28 @@ function parseFetchInvoke(body: string): FetchInvokePayload {
   };
 }
 
+/**
+ * The `zeroship` binary the dev server runs, and which lever chose it:
+ * `ZEROSHIP_BIN` in the given environment, then the project's own
+ * `node_modules/.bin/zeroship`, then `zeroship` on the PATH. `spawn` looks a
+ * bare command up on the PATH of the environment the child is given, which is
+ * the same environment. The lever rides along so a command that cannot be
+ * executed is reported with the setting that named it.
+ */
+function resolveRuntimeCommand(
+  root: string,
+  processEnv: NodeJS.ProcessEnv,
+): { command: string; source: string } {
+  if (processEnv.ZEROSHIP_BIN) {
+    return { command: processEnv.ZEROSHIP_BIN, source: "ZEROSHIP_BIN" };
+  }
+  const projectBin = resolve(root, "node_modules/.bin/zeroship");
+  if (existsSync(projectBin)) {
+    return { command: projectBin, source: "the project's node_modules/.bin" };
+  }
+  return { command: "zeroship", source: "PATH" };
+}
+
 // ── Plugin factory ─────────────────────────────────────────────────────────
 
 export function devServerPlugin(
@@ -561,9 +600,10 @@ export function devServerPlugin(
   state: TransformState,
   project: ProjectConfigHolder,
 ): Plugin[] {
+  const { processEnv } = options;
   const devPort =
     options.devServerPort ??
-    (Number(process.env[ENV_DEV_PORT]) || undefined) ??
+    (Number(processEnv[ENV_DEV_PORT]) || undefined) ??
     DEFAULT_DEV_PORT;
   let projectConfig: ResolvedProjectConfig = defaultProjectConfig();
 
@@ -724,7 +764,7 @@ export function devServerPlugin(
           // is what actually stops a runtime from being spawned against it.
           let databaseUrl: string;
           try {
-            ({ databaseUrl } = resolveDatabaseUrl(process.env, parseDotenvVars(root), devDb.databaseUrl));
+            ({ databaseUrl } = resolveDatabaseUrl(processEnv, parseDotenvVars(root), devDb.databaseUrl));
           } catch (e) {
             if (!(e instanceof DevDatabaseUrlSchemeError)) throw e;
             console.error(`[zeroship] ${(e as Error).message}`);
@@ -875,9 +915,7 @@ export function devServerPlugin(
       const __filename = fileURLToPath(import.meta.url);
       const __dirname = dirname(__filename);
       const bootstrapPath = resolve(__dirname, "dev-bootstrap.js");
-      const binPath = resolve(root, "node_modules/.bin/zeroship");
-      const cmd = process.env.ZEROSHIP_BIN
-        || (existsSync(binPath) ? binPath : "zeroship");
+      const runtimeCommand = resolveRuntimeCommand(root, processEnv);
 
       const serverEntry =
         projectConfig.build.serverEntry ?? findServerEntry(root) ?? undefined;
@@ -973,6 +1011,34 @@ export function devServerPlugin(
           }
           runtimeStatus.rapidFailures = 0;
           runtimeStatus.health = "ok";
+        };
+
+        /**
+         * The runtime command could not be executed, so no child exists.
+         *
+         * Node reports that by two roads: some failures throw from `spawn`
+         * itself (ENOTDIR, ENAMETOOLONG, ETXTBSY, an invalid argument), the
+         * rest arrive afterwards on the child's `error` event (ENOENT, EACCES)
+         * with no `exit`, so the restart handler never hears of them. Both
+         * land here. The proxy then answers for the runtime instead of
+         * forwarding to whatever holds the port, and the healthy timer is
+         * cancelled so it cannot promote a child that never existed. Nothing
+         * is retried on a timer; an app change spawns afresh.
+         */
+        const reportUnstartable = (reason: string) => {
+          if (healthyTimer) {
+            clearTimeout(healthyTimer);
+            healthyTimer = null;
+          }
+          const cause =
+            `the zeroship CLI at ${runtimeCommand.command} (from ${runtimeCommand.source}) `
+            + `could not be run: ${reason}.`;
+          runtimeStatus.health = "unstartable";
+          runtimeStatus.logTail = [cause];
+          console.error(
+            `[zeroship] Failed to start API server - ${cause} `
+              + "Set ZEROSHIP_BIN to a zeroship binary, or install the zeroship CLI.",
+          );
         };
 
         const attachRestartHandler = (child: ChildProcess, spawnedAt: number) => {
@@ -1106,7 +1172,7 @@ export function devServerPlugin(
             devDb = resolveDevDatabase(root);
           }
           const { databaseUrl, source } = resolveDatabaseUrl(
-            process.env,
+            processEnv,
             dotenvVars,
             devDb.databaseUrl,
           );
@@ -1114,12 +1180,12 @@ export function devServerPlugin(
 
           const childEnv: NodeJS.ProcessEnv = {
             ...dotenvVars,
-            ...process.env,
+            ...processEnv,
             // The runtime's identity, and the ONLY lever over it: `--app=`
             // below names a LABEL the child dereferences to a database, and
             // `resolve_dev_app_id` (crates/zeroship-cli/src/main.rs) reads this
             // variable alone, falling back to the shared local id only when it
-            // is absent. This entry sits after the `process.env` spread, so it
+            // is absent. This entry sits after the `processEnv` spread, so it
             // is the value the child sees either way.
             APP_ID: devAppId,
             DATABASE_URL: databaseUrl,
@@ -1143,13 +1209,14 @@ export function devServerPlugin(
               : {}),
           };
 
+          // Reset the captured tail so a terminal verdict quotes THIS
+          // attempt's output, not a mixture of every attempt's boot banner.
+          runtimeStatus.logTail = [];
+          const spawnedAt = Date.now();
+          let child: ChildProcess;
           try {
-            // Reset the captured tail so a terminal verdict quotes THIS
-            // attempt's output, not a mixture of every attempt's boot banner.
-            runtimeStatus.logTail = [];
-            const spawnedAt = Date.now();
-            const child = spawn(
-              cmd,
+            child = spawn(
+              runtimeCommand.command,
               [
                 "serve",
                 devPublisher?.path ?? bootstrapPath,
@@ -1170,33 +1237,47 @@ export function devServerPlugin(
                 env: childEnv,
               }
             );
-            serverProcess = child;
-            initialStartupFailed = false;
-
-            child.stdout?.on("data", (d: Buffer) => {
-              const msg = d.toString().trim();
-              if (!msg) return;
-              pushRuntimeLog(runtimeStatus, msg);
-              console.log(`[zeroship:api] ${msg}`);
-            });
-
-            child.stderr?.on("data", (d: Buffer) => {
-              const msg = d.toString().trim();
-              if (!msg) return;
-              pushRuntimeLog(runtimeStatus, msg);
-              console.log(`[zeroship:api] ${msg}`);
-            });
-
-            attachRestartHandler(child, spawnedAt);
-            if (healthyTimer) clearTimeout(healthyTimer);
-            healthyTimer = setTimeout(markHealthy, RUNTIME_HEALTHY_MS);
-            healthyTimer.unref?.();
-            console.log(`[zeroship] API server starting on :${devPort}`);
-          } catch {
-            console.warn(
-              "[zeroship] Failed to start API server — zeroship CLI not found"
-            );
+          } catch (error) {
+            reportUnstartable(error instanceof Error ? error.message : String(error));
+            return;
           }
+          serverProcess = child;
+          initialStartupFailed = false;
+
+          // Unhandled, this event is an uncaught exception that takes Vite
+          // down. With no pid the process never existed, which is the start
+          // failure `reportUnstartable` describes; `serverProcess` is cleared
+          // so the supervisor holds no child rather than an exited one. A child
+          // that has a pid is running, and its `error` is a signal `kill()`
+          // could not deliver: reported, and the child left in charge.
+          child.on("error", (error) => {
+            if (child.pid !== undefined) {
+              console.error(`[zeroship] runtime process error: ${error.message}`);
+              return;
+            }
+            if (serverProcess === child) serverProcess = null;
+            reportUnstartable(error.message);
+          });
+
+          child.stdout?.on("data", (d: Buffer) => {
+            const msg = d.toString().trim();
+            if (!msg) return;
+            pushRuntimeLog(runtimeStatus, msg);
+            console.log(`[zeroship:api] ${msg}`);
+          });
+
+          child.stderr?.on("data", (d: Buffer) => {
+            const msg = d.toString().trim();
+            if (!msg) return;
+            pushRuntimeLog(runtimeStatus, msg);
+            console.log(`[zeroship:api] ${msg}`);
+          });
+
+          attachRestartHandler(child, spawnedAt);
+          if (healthyTimer) clearTimeout(healthyTimer);
+          healthyTimer = setTimeout(markHealthy, RUNTIME_HEALTHY_MS);
+          healthyTimer.unref?.();
+          console.log(`[zeroship] API server starting on :${devPort}`);
         };
 
         // Defer spawn until server is listening. spawnRuntime is async —

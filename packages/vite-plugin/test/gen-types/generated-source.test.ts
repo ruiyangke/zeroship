@@ -35,7 +35,7 @@ const MAIN = { label: "main", primary: true } as const;
  * regeneration drifted it.
  */
 function declaredFor(appRoot: string, outDir: string): { label: string; primary: boolean } {
-  const { config } = readProjectConfig(appRoot);
+  const { config } = readProjectConfig(appRoot, { processEnv: {} });
   const database = databaseForOutDir(config, appRoot, outDir);
   assert.ok(database, `${appRoot} must declare the database whose out dir is ${outDir}`);
   return { label: database.label, primary: database.primary };

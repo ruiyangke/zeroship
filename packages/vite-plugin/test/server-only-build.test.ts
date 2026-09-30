@@ -11,7 +11,8 @@
  * calls `emitZship`, which throws `zship: dist dir not found`.
  *
  * This test runs a REAL `vite build` with the full `zeroship()` plugin
- * chain on a server-only fixture and asserts:
+ * chain, given an empty process environment so nothing in the shell reaches
+ * it, on a server-only fixture and asserts:
  *   - the build succeeds
  *   - `dist/app.zship` exists
  *   - the manifest has a `worker` with an `index.js` entry (the RPC
@@ -31,7 +32,7 @@ import { randomUUID } from "node:crypto";
 import { zstdDecompressSync } from "node:zlib";
 import { build as viteBuild } from "vite";
 
-import { zeroship } from "../src/index.js";
+import { zeroshipPlugins } from "../src/plugins.js";
 
 // ── Minimal USTAR reader (manifest.json is the first entry) ────────────────
 
@@ -129,7 +130,7 @@ describe("ISS-59 — server-only app (no index.html) builds to a valid .zship", 
         configFile: false,
         logLevel: "silent",
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        plugins: zeroship() as any,
+        plugins: zeroshipPlugins({}, {}) as any,
       });
 
       const archivePath = resolve(root, "dist", "app.zship");
@@ -213,7 +214,7 @@ describe("ISS-59 — server-only app (no index.html) builds to a valid .zship", 
         logLevel: "silent",
         build: { outDir: "build" },
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        plugins: zeroship() as any,
+        plugins: zeroshipPlugins({}, {}) as any,
       });
 
       const archive = await fs.readFile(resolve(root, "build", "app.zship"));

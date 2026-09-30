@@ -18,6 +18,7 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import {
   mkdtempSync,
   mkdirSync,
@@ -27,7 +28,8 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
   applyProjectConfigOverride,
@@ -69,6 +71,8 @@ const FULL = `{
     }
   }
 }`;
+
+const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 function scratch(files: Record<string, string> = {}): string {
   const root = mkdtempSync(join(tmpdir(), "zs-projcfg-"));
@@ -159,7 +163,7 @@ describe("locating the file", () => {
   test("auto-discovery finds it in the app root, and nowhere else", () => {
     const root = scratch({ [CONFIG_FILENAME]: FULL });
     try {
-      assert.equal(locateProjectConfig(root), join(root, CONFIG_FILENAME));
+      assert.equal(locateProjectConfig(root, {}), join(root, CONFIG_FILENAME));
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -173,7 +177,7 @@ describe("locating the file", () => {
     try {
       const sub = join(root, "packages", "web");
       mkdirSync(sub, { recursive: true });
-      assert.equal(locateProjectConfig(sub), null);
+      assert.equal(locateProjectConfig(sub, {}), null);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -184,14 +188,12 @@ describe("locating the file", () => {
   test("an explicitly named file that does not exist throws; auto-discovery returns null", () => {
     const root = scratch();
     try {
-      assert.equal(locateProjectConfig(root), null);
-      assert.throws(() => locateProjectConfig(root, "nope.jsonc"), /does not exist/);
-      process.env[CONFIG_ENV_VAR] = "also-nope.jsonc";
-      try {
-        assert.throws(() => locateProjectConfig(root), /does not exist/);
-      } finally {
-        delete process.env[CONFIG_ENV_VAR];
-      }
+      assert.equal(locateProjectConfig(root, {}), null);
+      assert.throws(() => locateProjectConfig(root, {}, "nope.jsonc"), /does not exist/);
+      assert.throws(
+        () => locateProjectConfig(root, { [CONFIG_ENV_VAR]: "also-nope.jsonc" }),
+        /does not exist/,
+      );
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -200,13 +202,44 @@ describe("locating the file", () => {
   test("configPath wins over the environment variable", () => {
     const root = scratch({ "a.jsonc": FULL, "b.jsonc": FULL });
     try {
-      process.env[CONFIG_ENV_VAR] = "b.jsonc";
-      try {
-        assert.equal(locateProjectConfig(root, "a.jsonc"), join(root, "a.jsonc"));
-        assert.equal(locateProjectConfig(root), join(root, "b.jsonc"));
-      } finally {
-        delete process.env[CONFIG_ENV_VAR];
-      }
+      const processEnv = { [CONFIG_ENV_VAR]: "b.jsonc" };
+      assert.equal(locateProjectConfig(root, processEnv, "a.jsonc"), join(root, "a.jsonc"));
+      assert.equal(locateProjectConfig(root, processEnv), join(root, "b.jsonc"));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  // `zeroship()` hands the locator this process's LIVE environment, not a copy
+  // taken when the plugin is created: Vite writes `VITE_USER_NODE_ENV`, and
+  // `NODE_ENV` from a `.env` file, after the config file has run. The write
+  // below happens inside a disposable child, after the plugin exists, so this
+  // process's environment is never touched.
+  test("zeroship() locates the file through the live process environment", () => {
+    const root = scratch();
+    try {
+      const probe = join(root, "probe.mjs");
+      const index = pathToFileURL(resolve(PACKAGE_ROOT, "src/index.ts")).href;
+      writeFileSync(probe, [
+        `import { zeroship } from ${JSON.stringify(index)};`,
+        "const plugins = zeroship();",
+        `process.env[${JSON.stringify(CONFIG_ENV_VAR)}] = "written-after.jsonc";`,
+        `const environment = plugins.find((plugin) => plugin.name === "zeroship:environment");`,
+        "try {",
+        `  environment.config({ root: ${JSON.stringify(root)} });`,
+        `  console.log("located nothing");`,
+        "} catch (error) {",
+        "  console.log(error.message);",
+        "}",
+        "",
+      ].join("\n"));
+      const child = spawnSync(process.execPath, ["--import", "tsx", probe], {
+        cwd: PACKAGE_ROOT,
+        env: {},
+        encoding: "utf8",
+      });
+      assert.equal(child.status, 0, child.stderr);
+      assert.match(child.stdout, /ZEROSHIP_CONFIG="written-after\.jsonc" does not exist/);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -221,6 +254,7 @@ describe("locating the file", () => {
     const appRoot = join(root, "apps", "foo");
     try {
       const { config } = readProjectConfig(root, {
+        processEnv: {},
         configPath: "apps/foo/zeroship.jsonc",
       });
       assert.equal(config.build.serverEntry, join(appRoot, "src/server.ts"));
@@ -240,7 +274,7 @@ describe("locating the file", () => {
     symlinkSync(".", join(appRoot, "linked-root"));
     try {
       assert.throws(
-        () => readProjectConfig(root, { configPath: "apps/foo/zeroship.jsonc" }),
+        () => readProjectConfig(root, { configPath: "apps/foo/zeroship.jsonc", processEnv: {} }),
         /build\.dist.*zeroship\.jsonc/,
       );
     } finally {
@@ -384,7 +418,7 @@ describe("validation", () => {
       const root = scratch({ [CONFIG_FILENAME]: body });
       try {
         assert.throws(
-          () => readProjectConfig(root),
+          () => readProjectConfig(root, { processEnv: {} }),
           /build\.dist.*zeroship\.jsonc/,
           `build.dist=${JSON.stringify(dist)} must be refused`,
         );
@@ -406,7 +440,7 @@ describe("validation", () => {
       const root = scratch({ [CONFIG_FILENAME]: body, ...files });
       try {
         assert.throws(
-          () => readProjectConfig(root),
+          () => readProjectConfig(root, { processEnv: {} }),
           /build\.output/,
           `build.output=${JSON.stringify(output)} must be refused`,
         );
@@ -422,7 +456,7 @@ describe("validation", () => {
       "dist/app.zship": "old artifact",
     });
     try {
-      assert.equal(readProjectConfig(root).config.build.output, join(root, "dist/app.zship"));
+      assert.equal(readProjectConfig(root, { processEnv: {} }).config.build.output, join(root, "dist/app.zship"));
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -433,7 +467,7 @@ describe("validation", () => {
     mkdirSync(join(root, "dist"), { recursive: true });
     symlinkSync("../creator-source.ts", join(root, "dist/app.zship"));
     try {
-      assert.throws(() => readProjectConfig(root), /build\.output.*non-artifact/);
+      assert.throws(() => readProjectConfig(root, { processEnv: {} }), /build\.output.*non-artifact/);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -448,7 +482,7 @@ describe("validation", () => {
       const root = scratch({ [CONFIG_FILENAME]: body });
       try {
         assert.throws(
-          () => readProjectConfig(root),
+          () => readProjectConfig(root, { processEnv: {} }),
           /databases\.main\.out/,
           `databases.main.out=${JSON.stringify(out)} must be refused`,
         );
@@ -491,7 +525,7 @@ describe("resolution", () => {
   test("with no file at all, every schema default is applied", () => {
     const root = scratch();
     try {
-      const { config, path } = readProjectConfig(root);
+      const { config, path } = readProjectConfig(root, { processEnv: {} });
       assert.equal(path, null);
       assert.equal(config.build.mode, "full");
       assert.equal(config.build.dist, "dist");
@@ -508,7 +542,7 @@ describe("resolution", () => {
   test("the holder reads the file once per root", () => {
     const root = scratch({ [CONFIG_FILENAME]: FULL });
     try {
-      const holder = createProjectConfigHolder({});
+      const holder = createProjectConfigHolder({ processEnv: {} });
       const a = holder.load(root);
       // Corrupt the file AFTER the first read. A second load that re-parsed
       // would throw; the point of memoising is that the build and the dev
@@ -645,6 +679,7 @@ describe("the config escape hatch", () => {
     const appRoot = join(root, "apps", "foo");
     try {
       const { config } = readProjectConfig(root, {
+        processEnv: {},
         configPath: "apps/foo/zeroship.jsonc",
         override: (current) => ({
           build: { ...current.build, dist: "apps/foo" },
@@ -661,6 +696,7 @@ describe("the config escape hatch", () => {
     try {
       assert.throws(
         () => readProjectConfig(root, {
+          processEnv: {},
           override: (config) => ({ build: { ...config.build, dist: "." } }),
         }),
         /build\.dist.*zeroship\.jsonc/,
@@ -676,6 +712,7 @@ describe("the config escape hatch", () => {
     try {
       assert.throws(
         () => readProjectConfig(root, {
+          processEnv: {},
           override: (config) => ({ build: { ...config.build, dist: "linked-root" } }),
         }),
         /build\.dist.*zeroship\.jsonc/,

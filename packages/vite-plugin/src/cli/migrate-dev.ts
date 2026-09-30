@@ -51,7 +51,7 @@ interface Argv {
   configPath: string;
 }
 
-function parseArgv(argv: string[]): Argv {
+function parseArgv(argv: string[], processEnv: NodeJS.ProcessEnv): Argv {
   let root = process.cwd();
   let dir: string | undefined;
   let out: string | undefined;
@@ -96,7 +96,7 @@ function parseArgv(argv: string[]): Argv {
   // migrations.out: the build had one, the dev server had one,
   // the Rust CLI had one, and this had a fourth pair hand-typed into
   // `parseArgv`. The flags survive as overrides; only the fallback moved.
-  const { config, path: configPath } = readProjectConfig(root);
+  const { config, path: configPath } = readProjectConfig(root, { processEnv });
   const selected = selectDatabase(config, { database });
   // THE DIR FLAGS OVERRIDE PATHS, NOT IDENTITY. This command regenerates
   // `env.db.ts`, which declares the database's entry on `EnvDatabases` under
@@ -124,8 +124,12 @@ function parseArgv(argv: string[]): Argv {
 }
 
 async function main(): Promise<number> {
+  // This command's one read of the process environment: the config locator
+  // (`ZEROSHIP_CONFIG`) and the database URL (`DATABASE_URL`) both take it.
+  const processEnv = process.env;
   const { root, migrationsDir, outDir, label, primary, databaseId, configPath } = parseArgv(
     process.argv.slice(2),
+    processEnv,
   );
   console.log(`[zeroship] migrations=${migrationsDir} out=${outDir} (from ${configPath})`);
 
@@ -147,7 +151,7 @@ async function main(): Promise<number> {
   // 2. Resolve DATABASE_URL through the SAME helper the dev server uses, so this
   //    writes the file the worker will open.
   const { databaseUrl, source } = resolveDatabaseUrl(
-    process.env,
+    processEnv,
     parseDotenvVars(root),
     resolveDevDatabase(root).databaseUrl,
   );

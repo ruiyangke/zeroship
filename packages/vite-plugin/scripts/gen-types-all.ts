@@ -127,7 +127,7 @@ async function runOne(app: ArtifactApp, check: boolean): Promise<string> {
   // `zeroship.jsonc` needed to exist; with the file in place it has nothing
   // left to protect, and the regex (which would match a comment and miss a
   // spread) goes with it.
-  const { config } = readProjectConfig(app.root);
+  const { config } = readProjectConfig(app.root, { processEnv: process.env });
   // The artifacts were discovered by directory, and a workspace has one
   // directory per DATABASE, so the sources are the ones of the database whose
   // `out` is this directory.

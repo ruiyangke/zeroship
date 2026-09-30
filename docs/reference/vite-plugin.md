@@ -68,6 +68,16 @@ holds the runtime port, server calls fail with an `RpcError` whose `code` is
 `UNAVAILABLE` (see [rpc.md](rpc.md#errors-and-retries)), and the dev server
 prints a banner naming the clash and the `devServerPort` fix.
 
+The dev server runs the `zeroship` binary named by `ZEROSHIP_BIN`, else the
+one installed in your project, else `zeroship` on your `PATH`. If that binary
+cannot be run at all - a stale `ZEROSHIP_BIN`, a path that is not an
+executable file, or no CLI installed - the dev server prints
+`Failed to start API server`, naming the binary and which of those three chose
+it, and keeps serving your page. Server calls then fail with `code`
+`UNAVAILABLE`, `retryable: false` and `details.state: "unstartable"`, and are
+never forwarded to whatever else holds the runtime port. Nothing is retried on
+its own: fix the binary, then save a change to your app or restart `pnpm dev`.
+
 ### `devAuth`
 
 The `pnpm dev` implementation of the [platform auth contract](auth.md):

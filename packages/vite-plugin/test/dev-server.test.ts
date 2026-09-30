@@ -1,6 +1,8 @@
 import { after, before, describe, test } from "node:test";
 import assert from "node:assert/strict";
+import { ChildProcess } from "node:child_process";
 import { promises as fs } from "node:fs";
+import http from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -15,6 +17,13 @@ import {
   VITE_RUNTIME_MODULE_ID,
   DEV_RUNTIME_STATE_HEADER,
   DEV_RUNTIME_FRESH_REQUIRED,
+  RUNTIME_HEALTHY_MS,
+  ENV_DEV,
+  ENV_DEV_AUTH_SECRET,
+  ENV_DEV_PORT,
+  ENV_DIE_WITH_PARENT,
+  ENV_ENTRY,
+  ENV_VITE_ORIGIN,
 } from "../src/constants.js";
 import { devServerPlugin } from "../src/dev-server.js";
 import { DEV_APP_ID } from "../src/gen-types/dev-apply.js";
@@ -27,6 +36,26 @@ const BOOTSTRAP_SHIM_PATH = resolve(__dirname, "../src/dev-bootstrap.js");
 
 /** A typed app id that is NOT the shared local one, so the two can be told apart. */
 const DECLARED_APP_ID = "app_034klb07lrb9jgma6imvmx000";
+
+/** Every variable the plugin itself sets on the runtime, for a fixture with a
+ *  server entry, dev auth on and no `.env`. */
+const PLUGIN_RUNTIME_ENV_KEYS = [
+  "APP_ID",
+  "DATABASE_URL",
+  ENV_DEV,
+  ENV_DEV_AUTH_SECRET,
+  ENV_DIE_WITH_PARENT,
+  ENV_ENTRY,
+  ENV_VITE_ORIGIN,
+];
+
+/** Variables the stub's own `/bin/sh` wrapper may export whatever it inherits. */
+const WRAPPER_SHELL_ENV_KEYS = new Set(["OLDPWD", "PWD", "SHLVL", "_"]);
+
+/** The variables the runtime inherited from the plugin, sorted. */
+function inheritedFromPlugin(runtime: RuntimeLog): string[] {
+  return runtime.envKeys.filter((key) => !WRAPPER_SHELL_ENV_KEYS.has(key));
+}
 
 /** A real op.* migration creating `<table>` with one text `<column>`. The
  *  in-process recorder resolves `@zeroship/migrate` and the fold materialises
@@ -83,11 +112,17 @@ interface Harness {
   close: (options?: { expectRuntimeStop?: boolean; cleanup?: boolean }) => Promise<void>;
   cleanup: () => Promise<void>;
   queueHmrChange: (file?: string) => Promise<void>;
+  /** Install the runtime stub at a path relative to the root. */
+  writeRuntimeStub: (relativePath: string) => Promise<void>;
 }
 
 interface RuntimeLog {
   spawnCount: number;
   pid: number;
+  /** The stub file that ran, which tells the project's own bin from a named one. */
+  script: string;
+  /** Every variable the stub inherited, sorted. */
+  envKeys: string[];
   argv: string[];
   env: {
     APP_ID?: string;
@@ -613,6 +648,17 @@ describe("devServerPlugin", () => {
       serveRuntime: true,
     });
     try {
+      // While restarts are still scheduled, the answer tells the client to retry.
+      await waitFor(async () => {
+        const response = await fetch(`${harness.origin}/api/probe`);
+        const body = await response.json() as {
+          retryable?: boolean;
+          details?: { state?: string };
+        };
+        assert.equal(body.details?.state, "failing");
+        assert.equal(body.retryable, true);
+      });
+
       await waitFor(async () => {
         assert.equal(await harness.runtimeSpawnCount(), 4);
         const response = await fetch(`${harness.origin}/api/probe`);
@@ -639,14 +685,14 @@ describe("devServerPlugin", () => {
     }
   });
 
-  test("prefers DATABASE_URL from the parent environment over .env", async () => {
+  test("prefers DATABASE_URL from the given environment over .env", async () => {
     // sqlite: values, not postgres:// — `resolveDatabaseUrl` REJECTS a
     // non-SQLite dev URL outright, so a Postgres URL here would never reach
     // the runtime at all. Precedence is what this case tests; the scheme
     // rejection itself is covered directly by test/dev-database-url.test.ts.
     const harness = await startHarness({
       dotenv: "DATABASE_URL=sqlite:.dotenv-dev.sqlite\n",
-      parentDatabaseUrl: "sqlite:.shell-dev.sqlite",
+      processEnv: () => ({ DATABASE_URL: "sqlite:.shell-dev.sqlite" }),
       devServerPort: 3902,
     });
     try {
@@ -676,12 +722,283 @@ describe("devServerPlugin", () => {
       await harness.close({ expectRuntimeStop: false });
     }
   });
+
+  // WHAT THESE TWO PIN. The runtime command, and the environment the runtime
+  // inherits, come from the environment the plugin is GIVEN, never from this
+  // process's own. Both fixtures hold the same two stubs and differ in ONE
+  // variable, whether the given environment names one, so the fallback to the
+  // project's own bin is measured rather than assumed. The inherited set is
+  // compared whole: a given key must arrive, and nothing else from this
+  // process's environment may.
+  test("runs the runtime ZEROSHIP_BIN names in the given environment", async () => {
+    const harness = await startHarness({
+      devServerPort: 3913,
+      extraRuntimeStubs: ["named-bin/zeroship"],
+      processEnv: (root) => ({ ZEROSHIP_BIN: resolve(root, "named-bin/zeroship") }),
+    });
+    try {
+      const runtime = await harness.runtimeLog();
+      assert.equal(runtime.script, resolve(harness.root, "named-bin/zeroship"));
+      assert.deepEqual(inheritedFromPlugin(runtime), [...PLUGIN_RUNTIME_ENV_KEYS, "ZEROSHIP_BIN"].sort());
+    } finally {
+      await harness.close();
+    }
+  });
+
+  test("runs the project's own runtime when the given environment names none", async () => {
+    const harness = await startHarness({
+      devServerPort: 3914,
+      extraRuntimeStubs: ["named-bin/zeroship"],
+    });
+    try {
+      const runtime = await harness.runtimeLog();
+      assert.equal(runtime.script, resolve(harness.root, "node_modules/.bin/zeroship"));
+      assert.deepEqual(inheritedFromPlugin(runtime), [...PLUGIN_RUNTIME_ENV_KEYS].sort());
+    } finally {
+      await harness.close();
+    }
+  });
+
+  test("takes the runtime port from the given environment when no option names one", async () => {
+    const harness = await startHarness({
+      devServerPort: null,
+      processEnv: () => ({ [ENV_DEV_PORT]: "3915" }),
+    });
+    try {
+      assert.ok((await harness.runtimeLog()).argv.includes("--port=3915"));
+    } finally {
+      await harness.close();
+    }
+  });
+
+  // The boot report inspects a database file, and it has to be the one the
+  // runtime is told to open. Both are resolved from the given environment.
+  test("reports schema state for the database the given environment names", async (t) => {
+    const errors = t.mock.method(console, "error");
+    const harness = await startHarness({
+      devServerPort: 3916,
+      migrations: { migrationSource: migrationCreating("todos", "title") },
+      processEnv: () => ({ DATABASE_URL: "sqlite:.given-db/dev.sqlite" }),
+    });
+    try {
+      assert.equal((await harness.runtimeLog()).env.DATABASE_URL, "sqlite:.given-db/dev.sqlite");
+      const givenDir = resolve(harness.root, ".given-db");
+      await waitFor(async () => {
+        const printed = errors.mock.calls.map((call) => call.arguments.join(" "));
+        assert.ok(
+          printed.some((line) => line.includes("dev schema NOT applied") && line.includes(givenDir)),
+          `expected a schema report naming ${givenDir}, got ${JSON.stringify(printed)}`,
+        );
+      });
+    } finally {
+      await harness.close();
+    }
+  });
+
+  // WHAT THE NEXT FOUR PIN. A command that cannot be executed reaches the dev
+  // server by one of two roads: Node throws from `spawn` itself (ENOTDIR,
+  // ENAMETOOLONG, ETXTBSY, an invalid argument), or it reports the failure
+  // afterwards on the child's `error` event (ENOENT, EACCES), which unhandled
+  // takes Vite down with it. Either way the failure must reach the developer,
+  // Vite must keep serving, and requests must be answered HERE - another
+  // process holding the runtime port would otherwise answer them.
+  test("reports a runtime command that cannot be executed and keeps serving", async (t) => {
+    const devServerPort = 3912;
+    const decoy = await startDecoy(devServerPort);
+    const errors = t.mock.method(console, "error");
+    const harness = await startHarness({
+      devServerPort,
+      awaitRuntime: false,
+      processEnv: (root) => ({ ZEROSHIP_BIN: resolve(root, "missing/zeroship") }),
+    });
+    const missing = resolve(harness.root, "missing/zeroship");
+    try {
+      await waitForStartFailureLine(() => printedLines(errors), missing);
+      await assertAnsweredForUnstartable(harness.origin, missing);
+      assert.equal(decoy.hits(), 0, "a request reached the process holding the runtime port");
+
+      const poll = await fetch(`${harness.origin}${HMR_POLL_PATH}`);
+      assert.equal(poll.status, 200, "Vite keeps serving after the runtime failed to start");
+
+      // The verdict outlives the window after which a live child is presumed
+      // healthy: a child that never existed must not be promoted to one.
+      await sleep(RUNTIME_HEALTHY_MS + 500);
+      await assertAnsweredForUnstartable(harness.origin, missing);
+      assert.equal(decoy.hits(), 0, "a request reached the process holding the runtime port");
+
+      await assert.rejects(
+        fs.access(harness.runtimeLogPath),
+        "the project's own bin must not stand in for the named command",
+      );
+    } finally {
+      await harness.close({ expectRuntimeStop: false });
+      await decoy.close();
+    }
+  });
+
+  test("reports a runtime command that spawn rejects outright the same way", async (t) => {
+    const devServerPort = 3917;
+    const decoy = await startDecoy(devServerPort);
+    const errors = t.mock.method(console, "error");
+    // A path THROUGH the project's bin, which is a file, so `spawn` throws
+    // ENOTDIR instead of returning a child.
+    const harness = await startHarness({
+      devServerPort,
+      awaitRuntime: false,
+      processEnv: (root) => ({ ZEROSHIP_BIN: resolve(root, "node_modules/.bin/zeroship/sub") }),
+    });
+    const throughFile = resolve(harness.root, "node_modules/.bin/zeroship/sub");
+    try {
+      await waitForStartFailureLine(() => printedLines(errors), throughFile);
+      await assertAnsweredForUnstartable(harness.origin, throughFile);
+      assert.equal(decoy.hits(), 0, "a request reached the process holding the runtime port");
+      await assert.rejects(
+        fs.access(harness.runtimeLogPath),
+        "the project's own bin must not stand in for the named command",
+      );
+    } finally {
+      await harness.close({ expectRuntimeStop: false });
+      await decoy.close();
+    }
+  });
+
+  test("an app change starts the runtime once the missing command exists", async () => {
+    const harness = await startHarness({
+      devServerPort: 3918,
+      awaitRuntime: false,
+      serveRuntime: true,
+      processEnv: (root) => ({ ZEROSHIP_BIN: resolve(root, "missing/zeroship") }),
+    });
+    const missing = resolve(harness.root, "missing/zeroship");
+    try {
+      await waitFor(async () => {
+        await assertAnsweredForUnstartable(harness.origin, missing);
+      });
+
+      await harness.writeRuntimeStub("missing/zeroship");
+      await fs.writeFile(resolve(harness.root, "src/value.ts"), "export const answer = 43;\n");
+
+      await waitFor(async () => {
+        const response = await fetch(`${harness.origin}/api/probe`);
+        assert.equal(response.status, 200);
+        assert.equal(await response.text(), "runtime-ok");
+      });
+      assert.equal((await harness.runtimeLog()).script, missing);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  // A live child emits `error` too, when `kill()` cannot signal it (EPERM).
+  // Node's own reporting of that is reproduced on the prototype, because no
+  // unprivileged fixture can make a signal to its own child fail.
+  test("a runtime that cannot be signalled is not reported as a failed start", async (t) => {
+    const errors = t.mock.method(console, "error");
+    const harness = await startHarness({ devServerPort: 3919, serveRuntime: true });
+    const kill = t.mock.method(ChildProcess.prototype, "kill", function (this: ChildProcess) {
+      this.emit("error", Object.assign(new Error("kill EPERM"), { code: "EPERM", syscall: "kill" }));
+      return false;
+    });
+    try {
+      await waitForStatus(`${harness.origin}/api/probe`, 200);
+      // An app change replaces the child, which starts with a signal to it.
+      await fs.writeFile(resolve(harness.root, "src/value.ts"), "export const answer = 43;\n");
+      await waitFor(async () => {
+        assert.ok(kill.mock.callCount() > 0, "the dev server signalled its runtime");
+        assert.ok(
+          printedLines(errors).some((line) => line.includes("kill EPERM")),
+          "the failed signal is reported",
+        );
+      });
+
+      assert.equal(
+        printedLines(errors).some((line) => line.includes("Failed to start API server")),
+        false,
+        "a running child was reported as never started",
+      );
+      const probe = await fetch(`${harness.origin}/api/probe`);
+      const body = await probe.json() as { details?: { state?: string } };
+      assert.notEqual(body.details?.state, "unstartable");
+    } finally {
+      kill.mock.restore();
+      await harness.close();
+    }
+  });
 });
+
+/** Every line one mocked console method has printed. */
+function printedLines(method: { mock: { calls: { arguments: unknown[] }[] } }): string[] {
+  return method.mock.calls.map((call) => call.arguments.join(" "));
+}
+
+/**
+ * A process holding the runtime port, the way a second example's runtime does.
+ * Probed once before it is handed back, so a forwarded request is observable
+ * rather than silently refused.
+ */
+async function startDecoy(port: number): Promise<{ hits: () => number; close: () => Promise<void> }> {
+  let hits = 0;
+  const decoy = http.createServer((_req, res) => {
+    hits += 1;
+    res.end("another-app");
+  });
+  await new Promise<void>((resolveListen) => decoy.listen(port, resolveListen));
+  assert.equal(await (await fetch(`http://localhost:${port}/`)).text(), "another-app");
+  hits = 0;
+  return {
+    hits: () => hits,
+    close: () => new Promise<void>((resolveClose) => decoy.close(() => resolveClose())),
+  };
+}
+
+/** The terminal line naming the command and the lever that chose it. */
+async function waitForStartFailureLine(printed: () => string[], command: string): Promise<void> {
+  await waitFor(async () => {
+    assert.ok(
+      printed().some((line) =>
+        line.startsWith("[zeroship] Failed to start API server")
+        && line.includes(`${command} (from ZEROSHIP_BIN)`)),
+      `expected a start failure naming ${command} (from ZEROSHIP_BIN), got ${JSON.stringify(printed())}`,
+    );
+  });
+}
+
+/** The answer the proxy owes for a runtime command that never started. */
+async function assertAnsweredForUnstartable(origin: string, command: string): Promise<void> {
+  const probe = await fetch(`${origin}/api/probe`);
+  assert.equal(probe.status, 503);
+  const body = await probe.json() as {
+    code?: string;
+    message?: string;
+    retryable?: boolean;
+    details?: { state?: string };
+  };
+  assert.equal(body.code, "UNAVAILABLE");
+  assert.equal(body.retryable, false);
+  assert.equal(body.details?.state, "unstartable");
+  // No process ran, so the answer may not speak of attempts or a port.
+  assert.match(body.message ?? "", /^zeroship dev runtime could not be started: /);
+  assert.ok(
+    body.message?.includes(`${command} (from ZEROSHIP_BIN)`),
+    `message must name ${command} (from ZEROSHIP_BIN): ${body.message}`,
+  );
+}
 
 async function startHarness(options: {
   dotenv?: string;
-  parentDatabaseUrl?: string;
-  devServerPort?: number;
+  /**
+   * The whole process environment the plugin is given, built from the fixture
+   * root. The spawned stub inherits it, plus the variables the plugin sets
+   * itself and any `.env` entries. An entry absent here is absent for both,
+   * whatever this process's own environment holds.
+   */
+  processEnv?: (root: string) => NodeJS.ProcessEnv;
+  /** Copies of the runtime stub beyond the project's own bin, relative to the root. */
+  extraRuntimeStubs?: string[];
+  /** Wait for a stub to record its spawn before returning. Off when none can start. */
+  awaitRuntime?: boolean;
+  /** The `devServerPort` option; `null` passes none, so the environment decides. */
+  devServerPort?: number | null;
   /** `apps.app.app` for the fixture's one app. Omitted means the file states none. */
   declaredAppId?: string;
   migrations?: {
@@ -697,11 +1014,9 @@ async function startHarness(options: {
   const runtimeLogPath = resolve(root, ".zeroship-runtime.json");
   const runtimeCountPath = resolve(root, ".zeroship-runtime.count");
   const runtimeStopPath = resolve(root, ".zeroship-runtime.stopped");
-  const childScriptPath = resolve(root, "node_modules/.bin/zeroship");
-  const previousDatabaseUrl = process.env.DATABASE_URL;
+  const runtimeStubPaths = ["node_modules/.bin/zeroship", ...(options.extraRuntimeStubs ?? [])];
 
   await fs.mkdir(dirname(serverEntry), { recursive: true });
-  await fs.mkdir(dirname(childScriptPath), { recursive: true });
   await fs.writeFile(
     serverEntry,
     [
@@ -760,75 +1075,85 @@ async function startHarness(options: {
       }),
     );
   }
-  await fs.writeFile(
-    childScriptPath,
-    [
-      "#!/usr/bin/env node",
-      "const { readFileSync, writeFileSync } = require('node:fs');",
-      "const { resolve } = require('node:path');",
-      "const root = process.cwd();",
-      "const logPath = resolve(root, '.zeroship-runtime.json');",
-      "const countPath = resolve(root, '.zeroship-runtime.count');",
-      "const stopPath = resolve(root, '.zeroship-runtime.stopped');",
-      "let spawnCount = 0;",
-      "try {",
-      "  spawnCount = Number(readFileSync(countPath, 'utf8')) || 0;",
-      "} catch {}",
-      "spawnCount += 1;",
-      "writeFileSync(countPath, String(spawnCount));",
-      "writeFileSync(logPath, JSON.stringify({",
-      "  spawnCount,",
-      "  pid: process.pid,",
-      "  argv: process.argv.slice(2),",
-      "  env: {",
-      "    APP_ID: process.env.APP_ID,",
-      "    DATABASE_URL: process.env.DATABASE_URL,",
-      "    ZEROSHIP_DEV: process.env.ZEROSHIP_DEV,",
-      "    ZEROSHIP_ENTRY: process.env.ZEROSHIP_ENTRY,",
-      "    ZEROSHIP_RUNTIME_DESCRIPTOR: process.env.ZEROSHIP_RUNTIME_DESCRIPTOR,",
-      "    ZEROSHIP_VITE_ORIGIN: process.env.ZEROSHIP_VITE_ORIGIN,",
-      "    ZEROSHIP_DIE_WITH_PARENT: process.env.ZEROSHIP_DIE_WITH_PARENT,",
-      "  },",
-      "}, null, 2));",
-      `const rapidExitSpawns = ${options.rapidExitSpawns ?? 0};`,
-      `const serveRuntime = ${options.serveRuntime === true};`,
-      `const freshRuntimeRequired = ${options.freshRuntimeRequired === true};`,
-      `const runtimeStateHeader = ${JSON.stringify(DEV_RUNTIME_STATE_HEADER)};`,
-      `const freshRequired = ${JSON.stringify(DEV_RUNTIME_FRESH_REQUIRED)};`,
-      "const stop = () => {",
-      "  writeFileSync(stopPath, 'stopped');",
-      "  process.exit(0);",
-      "};",
-      "process.on('SIGTERM', stop);",
-      "process.on('SIGINT', stop);",
-      "process.on('SIGUSR2', () => process.exit(1));",
-      "if (spawnCount <= rapidExitSpawns) {",
-      "  setTimeout(() => process.exit(1), 20);",
-      "} else if (serveRuntime) {",
-      "  const { createServer } = require('node:http');",
-      "  const portArg = process.argv.find((arg) => arg.startsWith('--port='));",
-      "  const port = Number(portArg.slice('--port='.length));",
-      "  createServer((_req, res) => {",
-      "    if (freshRuntimeRequired) {",
-      "      res.statusCode = 500;",
-      "      res.setHeader(runtimeStateHeader, freshRequired);",
-      "      res.end('module init failed');",
-      "    } else {",
-      "      res.end('runtime-ok');",
-      "    }",
-      "  }).listen(port);",
-      "} else {",
-      "  setInterval(() => {}, 1000);",
-      "}",
-      "",
-    ].join("\n"),
-    { mode: 0o755 },
-  );
-
-  if (options.parentDatabaseUrl === undefined) {
-    delete process.env.DATABASE_URL;
-  } else {
-    process.env.DATABASE_URL = options.parentDatabaseUrl;
+  // The stub body is CommonJS run by this process's own node. Every command
+  // the plugin can be pointed at is a `/bin/sh` wrapper that names that
+  // interpreter absolutely, because the stub inherits only the environment
+  // the test hands the plugin, which carries no PATH. The wrapper passes its
+  // own path first, so the log says which command ran.
+  const runtimeStubBodyPath = resolve(root, ".zeroship-runtime-stub.cjs");
+  await fs.writeFile(runtimeStubBodyPath, [
+    "const { readFileSync, writeFileSync } = require('node:fs');",
+    "const { resolve } = require('node:path');",
+    "const root = process.cwd();",
+    "const logPath = resolve(root, '.zeroship-runtime.json');",
+    "const countPath = resolve(root, '.zeroship-runtime.count');",
+    "const stopPath = resolve(root, '.zeroship-runtime.stopped');",
+    "const [command, ...args] = process.argv.slice(2);",
+    "let spawnCount = 0;",
+    "try {",
+    "  spawnCount = Number(readFileSync(countPath, 'utf8')) || 0;",
+    "} catch {}",
+    "spawnCount += 1;",
+    "writeFileSync(countPath, String(spawnCount));",
+    "writeFileSync(logPath, JSON.stringify({",
+    "  spawnCount,",
+    "  pid: process.pid,",
+    "  script: command,",
+    "  envKeys: Object.keys(process.env).sort(),",
+    "  argv: args,",
+    "  env: {",
+    "    APP_ID: process.env.APP_ID,",
+    "    DATABASE_URL: process.env.DATABASE_URL,",
+    "    ZEROSHIP_DEV: process.env.ZEROSHIP_DEV,",
+    "    ZEROSHIP_ENTRY: process.env.ZEROSHIP_ENTRY,",
+    "    ZEROSHIP_RUNTIME_DESCRIPTOR: process.env.ZEROSHIP_RUNTIME_DESCRIPTOR,",
+    "    ZEROSHIP_VITE_ORIGIN: process.env.ZEROSHIP_VITE_ORIGIN,",
+    "    ZEROSHIP_DIE_WITH_PARENT: process.env.ZEROSHIP_DIE_WITH_PARENT,",
+    "  },",
+    "}, null, 2));",
+    `const rapidExitSpawns = ${options.rapidExitSpawns ?? 0};`,
+    `const serveRuntime = ${options.serveRuntime === true};`,
+    `const freshRuntimeRequired = ${options.freshRuntimeRequired === true};`,
+    `const runtimeStateHeader = ${JSON.stringify(DEV_RUNTIME_STATE_HEADER)};`,
+    `const freshRequired = ${JSON.stringify(DEV_RUNTIME_FRESH_REQUIRED)};`,
+    "const stop = () => {",
+    "  writeFileSync(stopPath, 'stopped');",
+    "  process.exit(0);",
+    "};",
+    "process.on('SIGTERM', stop);",
+    "process.on('SIGINT', stop);",
+    "process.on('SIGUSR2', () => process.exit(1));",
+    "if (spawnCount <= rapidExitSpawns) {",
+    "  setTimeout(() => process.exit(1), 20);",
+    "} else if (serveRuntime) {",
+    "  const { createServer } = require('node:http');",
+    "  const portArg = args.find((arg) => arg.startsWith('--port='));",
+    "  const port = Number(portArg.slice('--port='.length));",
+    "  createServer((_req, res) => {",
+    "    if (freshRuntimeRequired) {",
+    "      res.statusCode = 500;",
+    "      res.setHeader(runtimeStateHeader, freshRequired);",
+    "      res.end('module init failed');",
+    "    } else {",
+    "      res.end('runtime-ok');",
+    "    }",
+    "  }).listen(port);",
+    "} else {",
+    "  setInterval(() => {}, 1000);",
+    "}",
+    "",
+  ].join("\n"));
+  const writeRuntimeStub = async (relativePath: string) => {
+    const stubPath = resolve(root, relativePath);
+    await fs.mkdir(dirname(stubPath), { recursive: true });
+    await fs.writeFile(
+      stubPath,
+      `#!/bin/sh\nexec ${shellQuote(process.execPath)} ${shellQuote(runtimeStubBodyPath)} "$0" "$@"\n`,
+      { mode: 0o755 },
+    );
+  };
+  for (const stubPath of runtimeStubPaths) {
+    await writeRuntimeStub(stubPath);
   }
 
   const state: TransformState = {
@@ -839,11 +1164,16 @@ async function startHarness(options: {
   // options. A fixture with no migrations writes no zeroship.jsonc, so the
   // holder serves schema defaults; the `config` escape hatch supplies the
   // entry either way, which is the same path a creator with a computed value
-  // takes.
+  // takes. The project config and the dev server read the SAME environment,
+  // as they do under `zeroship()`.
+  const processEnv = options.processEnv?.(root) ?? {};
   const plugins = devServerPlugin(
-    { devServerPort: options.devServerPort ?? 3901 },
+    {
+      devServerPort: options.devServerPort === null ? undefined : options.devServerPort ?? 3901,
+      processEnv,
+    },
     state,
-    createProjectConfigHolder({ override: { build: { serverEntry } } as never }),
+    createProjectConfigHolder({ override: { build: { serverEntry } } as never, processEnv }),
   );
   const devServerPluginImpl = plugins.find((plugin) => plugin.name === "zeroship:dev-server");
   assert.ok(devServerPluginImpl?.hotUpdate, "expected dev-server plugin with hotUpdate hook");
@@ -879,9 +1209,11 @@ async function startHarness(options: {
     assert.ok(addr && typeof addr === "object", "expected Vite HTTP server to listen on a socket");
     const origin = `http://127.0.0.1:${addr.port}`;
 
-    await waitFor(async () => {
-      await fs.access(runtimeLogPath);
-    });
+    if (options.awaitRuntime ?? true) {
+      await waitFor(async () => {
+        await fs.access(runtimeLogPath);
+      });
+    }
 
     return {
       root,
@@ -920,32 +1252,30 @@ async function startHarness(options: {
           }
         }
         if (cleanup) {
-          await cleanupRoot(root, previousDatabaseUrl);
+          await cleanupRoot(root);
         }
       },
-      cleanup: async () => cleanupRoot(root, previousDatabaseUrl),
+      cleanup: async () => cleanupRoot(root),
       queueHmrChange: async (file = serverEntry) => {
         await devServerPluginImpl.hotUpdate!({ file } as any);
       },
+      writeRuntimeStub,
     };
   } catch (error) {
     if (server) {
       await server.close().catch(() => {});
     }
-    await cleanupRoot(root, previousDatabaseUrl);
+    await cleanupRoot(root);
     throw error;
   }
 }
 
-async function cleanupRoot(
-  root: string,
-  previousDatabaseUrl: string | undefined,
-): Promise<void> {
-  if (previousDatabaseUrl === undefined) {
-    delete process.env.DATABASE_URL;
-  } else {
-    process.env.DATABASE_URL = previousDatabaseUrl;
-  }
+/** One POSIX shell word holding `value` verbatim. */
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'\\''`)}'`;
+}
+
+async function cleanupRoot(root: string): Promise<void> {
   await fs.rm(root, { recursive: true, force: true });
 }
 

@@ -272,8 +272,16 @@ export type ProjectConfigOverride =
  * An explicitly named file that does not exist THROWS. Only auto-discovery is
  * allowed to come up empty, because that is the `zeroship()`-in-a-scratch-
  * directory case the plugin must keep serving.
+ *
+ * `processEnv` is the environment `ZEROSHIP_CONFIG` is read from. It is a
+ * parameter, never this process's own environment read here, so the caller
+ * decides which environment applies.
  */
-export function locateProjectConfig(root: string, configPath?: string): string | null {
+export function locateProjectConfig(
+  root: string,
+  processEnv: NodeJS.ProcessEnv,
+  configPath?: string,
+): string | null {
   if (configPath != null) {
     const p = isAbsolute(configPath) ? configPath : resolve(root, configPath);
     if (!existsSync(p)) {
@@ -281,7 +289,7 @@ export function locateProjectConfig(root: string, configPath?: string): string |
     }
     return p;
   }
-  const fromEnv = process.env[CONFIG_ENV_VAR];
+  const fromEnv = processEnv[CONFIG_ENV_VAR];
   if (fromEnv != null && fromEnv !== "") {
     const p = isAbsolute(fromEnv) ? fromEnv : resolve(root, fromEnv);
     if (!existsSync(p)) {
@@ -988,6 +996,12 @@ export interface ProjectConfigInput {
   configPath?: string;
   environment?: string;
   override?: ProjectConfigOverride;
+  /**
+   * The process environment `ZEROSHIP_CONFIG` is read from. Required, so
+   * every reader states which environment applies: `zeroship()` and the
+   * CLIs pass `process.env`, and a test passes the environment it means.
+   */
+  processEnv: NodeJS.ProcessEnv;
 }
 
 /**
@@ -998,9 +1012,9 @@ export interface ProjectConfigInput {
  */
 export function readProjectConfig(
   root: string,
-  opts: ProjectConfigInput = {},
+  opts: ProjectConfigInput,
 ): { config: ResolvedProjectConfig; path: string | null } {
-  const path = locateProjectConfig(root, opts.configPath);
+  const path = locateProjectConfig(root, opts.processEnv, opts.configPath);
   const configRoot = path == null ? resolve(root) : dirname(path);
   const base = path == null
     ? defaultProjectConfig()

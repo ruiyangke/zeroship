@@ -17,17 +17,8 @@
 /// <reference path="./client-manifest.d.ts" />
 
 import type { Plugin } from "vite";
-import { transformPlugin, type TransformState } from "./transform.js";
-import {
-  createProjectConfigHolder,
-  type ProjectConfigHolder,
-  type ProjectConfigInput,
-  type ProjectConfigOverride,
-} from "./project-config/index.js";
-import { devServerPlugin } from "./dev-server.js";
-import { buildPlugin } from "./build.js";
-import { nodeCompatPlugin, nodeInjectPlugin } from "./node-compat.js";
-import { zeroshipModulePlugin } from "./zeroship-module.js";
+import type { ProjectConfigOverride } from "./project-config/index.js";
+import { zeroshipPlugins } from "./plugins.js";
 
 /**
  * One configured dev-auth user (all fields optional; sensible defaults).
@@ -125,33 +116,16 @@ export interface ZeroshipOptions {
 }
 
 export function zeroship(options: ZeroshipOptions = {}): Plugin[] {
-  // Shared state across plugins
-  const state: TransformState = {
-    serverFunctionMap: new Map(),
-    discoveredProcedures: [],
-    discoveredSchedules: [],
-    discoveredWorkflows: [],
-  };
-
-  // ONE reader, shared by the build and dev-server plugins. Two independent
-  // reads of the same file is how the two halves of one tool come to disagree,
-  // which is the shape this whole change exists to remove -- so the holder
-  // memoises per root and both plugins take the same instance.
-  const input: ProjectConfigInput = {
-    configPath: options.configPath,
-    environment: options.env,
-    override: options.config,
-  };
-  const project: ProjectConfigHolder = createProjectConfigHolder(input);
-
-  return [
-    nodeCompatPlugin(),
-    nodeInjectPlugin(),
-    zeroshipModulePlugin(),
-    transformPlugin(state),
-    ...devServerPlugin(options, state, project),
-    buildPlugin(state, project, options.app),
-  ];
+  // Where the plugin takes the process environment. The project-config
+  // locator and the dev server, with the runtime it spawns, take it as an
+  // input instead of reading `process.env` themselves. It is the live object
+  // rather than a copy, because the environment can change after this call:
+  // once the config file has run, Vite writes `VITE_USER_NODE_ENV` from a
+  // `.env` file's `NODE_ENV`, and `NODE_ENV` itself when that value is
+  // `development`. A config file that writes `process.env` itself, as
+  // meal-kit's `useWorkspaceEnvironment()` does, is honoured wherever in the
+  // file the write sits.
+  return zeroshipPlugins(options, process.env);
 }
 
 export default zeroship;
