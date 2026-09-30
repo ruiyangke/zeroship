@@ -136,11 +136,12 @@ impl DbBinding {
     ///
     /// # Errors
     ///
-    /// [`DbError`] carrying [`RoleNameTooLong`] when the composed binding role
-    /// would not fit a `PostgreSQL` identifier. It is refused rather than
-    /// shortened, because the binding id is the LAST component of the name and
-    /// a truncation drops the bytes that tell two bindings apart, collapsing
-    /// them onto one role.
+    /// [`DbError`] carrying
+    /// [`RoleNameTooLong`](zeroship_core::database_role::RoleNameTooLong) when
+    /// the composed binding role would not fit a `PostgreSQL` identifier. It is
+    /// refused rather than shortened, because the binding id is the LAST
+    /// component of the name and a truncation drops the bytes that tell two
+    /// bindings apart, collapsing them onto one role.
     pub fn to_database(
         app_id: impl Into<String>,
         deploy_token: impl Into<String>,

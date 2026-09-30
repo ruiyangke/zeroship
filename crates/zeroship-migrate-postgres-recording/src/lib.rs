@@ -17,10 +17,10 @@
 //! PostgreSQL backend, and they live in `zeroship-migrate/tests/pg_engine/`.
 //!
 //! A copy of the recorder on each side is the real hazard: its canned catalog and
-//! journal rows are the shared premise of both suites, and two copies drift silently
-//! - one suite would go on asserting against a row shape the other had already
-//! corrected. So there is ONE recorder, it lives here, and both sides name this
-//! crate under `[dev-dependencies]`.
+//! journal rows are the shared premise of both suites, and two copies drift
+//! silently: one suite would go on asserting against a row shape the other had
+//! already corrected. So there is ONE recorder, it lives here, and both sides name
+//! this crate under `[dev-dependencies]`.
 //!
 //! This crate reaches the contract (`zeroship-migrate-backend`) and the IR
 //! (`zeroship-migrate-ir`) and neither the vendor nor the engine, so the dependency

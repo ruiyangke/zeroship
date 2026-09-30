@@ -54,9 +54,10 @@ pub struct RolloutPolicy {
 /// instance gave that for free while the inputs were a second binding on the
 /// same server. An API call, a replicated projection and a lagging replica do
 /// not, so this store no longer assumes it: every answer carries a
-/// [`SourceWatermark`], and [`publish`] refuses one below the watermark the
-/// ledger already holds. See the comment at that comparison for what the
-/// watermark means and why the refusal is the safe direction.
+/// [`SourceWatermark`](zeroship_core::workflow_app_facts::SourceWatermark), and
+/// [`publish`] refuses one below the watermark the ledger already holds. See the
+/// comment at that comparison for what the watermark means and why the refusal
+/// is the safe direction.
 #[derive(Clone, Debug)]
 pub struct ControlPolicyStore {
     facts: Rc<dyn AppFactsSource>,

@@ -1064,11 +1064,13 @@ async fn drive_until_disposed(
         consumer.run_until(async {
             loop {
                 manager.publish(&fixture.app).await;
-                let probes = fixture.loader.probes.borrow();
-                if !probes.is_empty() && probes.iter().all(|probe| probe.strong_count() == 0) {
+                let released = {
+                    let probes = fixture.loader.probes.borrow();
+                    !probes.is_empty() && probes.iter().all(|probe| probe.strong_count() == 0)
+                };
+                if released {
                     return;
                 }
-                drop(probes);
                 compio::time::sleep(Duration::from_millis(5)).await;
             }
         }),

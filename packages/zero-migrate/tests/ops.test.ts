@@ -2786,69 +2786,67 @@ test("platform corpus domain checks record byte-identical VALUE colRef ops", asy
   const migration = await importPlatformCorpusMigration(corpusRel);
   const ops = recordMigration(migration, { irVersion: 0 }).envelope.ops as any[];
   const domainOps = ops.filter((op) => op.op === "createDomain");
-  const inDomain = (name: string, elems: string[]) => ({
-    op: "createDomain",
-    name,
-    schema: "zeroship",
-    as: "text",
-    check: { node: "inList", expr: { node: "colRef", name: "VALUE" }, elems, negated: false },
-  });
-  const expected = [
-    inDomain("account_state", ["active", "past_due", "suspended"]),
-    inDomain("billing_notification_kind", [
-      "payment_failed",
-      "past_due",
-      "suspended",
-      "recovered",
-      "invoice_finalized",
-      "refunded",
-      "disputed",
-      "payout_failed",
-      "checkout_failed",
-      "spend_warn",
-      "spend_degrade",
-      "spend_block",
-    ]),
-    {
+  // A census over nothing would pass every assertion below.
+  assert.ok(domainOps.length > 0, `${corpusRel} records no createDomain op`);
+
+  // The domain's own value is the one column a domain CHECK may name, and it
+  // records as exactly this node: no table qualifier, no other key.
+  const valueRef = JSON.stringify({ node: "colRef", name: "VALUE" });
+  const colRefs = (node: unknown): string[] => {
+    if (Array.isArray(node)) return node.flatMap(colRefs);
+    if (node === null || typeof node !== "object") return [];
+    const self = (node as { node?: unknown }).node === "colRef" ? [JSON.stringify(node)] : [];
+    return [...self, ...Object.values(node).flatMap(colRefs)];
+  };
+  for (const op of domainOps) {
+    assert.equal(op.schema, "zeroship", `domain ${op.name} is created outside the platform schema`);
+    const refs = colRefs(op.check);
+    assert.ok(refs.length > 0, `domain ${op.name}'s check never reads the domain value`);
+    for (const ref of refs) {
+      assert.equal(ref, valueRef, `domain ${op.name}'s check reads ${ref}, not the domain value`);
+    }
+  }
+
+  // A text domain is an enumeration: its check is a plain membership test of
+  // the value against a nonempty list of string literals.
+  const textDomains = domainOps.filter((op) => op.as === "text");
+  assert.ok(textDomains.length > 0, `${corpusRel} records no text domain`);
+  for (const op of textDomains) {
+    const { check } = op;
+    assert.deepEqual(
+      Object.keys(check).sort(),
+      ["elems", "expr", "negated", "node"],
+      `domain ${op.name}'s check is not a bare membership test`,
+    );
+    assert.equal(check.node, "inList", `domain ${op.name}'s check is not an inList`);
+    assert.equal(JSON.stringify(check.expr), valueRef, `domain ${op.name} tests something other than its value`);
+    assert.equal(check.negated, false, `domain ${op.name}'s membership test is negated`);
+    assert.ok(
+      Array.isArray(check.elems) && check.elems.length > 0,
+      `domain ${op.name} admits no value`,
+    );
+    for (const elem of check.elems) {
+      assert.equal(typeof elem, "string", `domain ${op.name} lists a non-string value ${JSON.stringify(elem)}`);
+    }
+  }
+
+  // One domain in full, so the recording is pinned byte for byte somewhere. The
+  // other domains' value lists belong to the Rust suites that use them.
+  assert.equal(
+    JSON.stringify(domainOps.find((op) => op.name === "account_state")),
+    JSON.stringify({
       op: "createDomain",
-      name: "billing_period",
+      name: "account_state",
       schema: "zeroship",
-      as: "date",
+      as: "text",
       check: {
-        node: "binOp",
-        op: "eq",
-        lhs: { node: "extract", field: "day", from: { node: "colRef", name: "VALUE" } },
-        rhs: { node: "literal", value: 1 },
+        node: "inList",
+        expr: { node: "colRef", name: "VALUE" },
+        elems: ["active", "past_due", "suspended"],
+        negated: false,
       },
-    },
-    inDomain("credit_entry_kind", [
-      "grant",
-      "promo",
-      "goodwill",
-      "refund_to_credit",
-      "consumed",
-      "void_reversal",
-      "refund_clawback",
-    ]),
-    inDomain("dispute_status", ["open", "won", "lost"]),
-    inDomain("invoice_payment_kind", ["charge", "dispute_debit", "dispute_reversal"]),
-    inDomain("invoice_status", ["draft", "finalized", "void"]),
-    inDomain("metric_kind", ["platform", "primitive", "custom"]),
-    inDomain("notification_status", ["pending", "sent"]),
-    inDomain("reconciliation_finding_kind", [
-      "missed_invoice_payment",
-      "invoice_status_drift",
-      "refund_status_drift",
-      "dispute_status_drift",
-      "missing_dispute",
-      "provider_reject",
-    ]),
-    inDomain("reconciliation_finding_severity", ["low", "medium", "high"]),
-    inDomain("refund_destination", ["cash", "credit"]),
-    inDomain("refund_status", ["pending", "issued", "failed", "canceled"]),
-    inDomain("spend_state", ["allow", "warn", "degrade", "block"]),
-  ];
-  assert.equal(JSON.stringify(domainOps), JSON.stringify(expected));
+    }),
+  );
 });
 
 test("view builder records groupBy and having in the structured SelectAst", () => {

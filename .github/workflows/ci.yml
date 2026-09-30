@@ -22,16 +22,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/nix-toolchain
-      # Build SDK sources before Cargo: zeroship-data-v8 embeds the database facade.
-      # runtime entry, and zeroship-data-v8 embeds the DB internal adapter.
-      # These gitignored build outputs are absent from a fresh checkout.
+      # Build the JavaScript packages before Cargo. zeroship-data-v8 embeds the DB
+      # adapter bundle with `include_str!`, and its test module
+      # (src/tests/startup_policy.rs) embeds the built DB SDK bundle too. Both are
+      # gitignored, so a fresh checkout has neither. The root `build` script is the
+      # one definition of the package build order: the schema leaf comes before
+      # the migration DSL and the DB SDK that inline it.
       - uses: actions/setup-node@v4
         with:
           node-version: 22
       - run: pnpm install --frozen-lockfile
-      # The vendored engine ships no dist/ and the vite-plugin imports it, so it
-      # is built before the SDKs. Same ordering as the `sdk` job.
-      - run: pnpm --filter @zeroship/migrate build
       - run: pnpm build
       # This is the no-hoist condition the gate must survive. Prove the root
       # import fails for the expected reason, then prove the declaring package
@@ -349,7 +349,6 @@ jobs:
         with:
           node-version: 22
       - run: pnpm install --frozen-lockfile
-      - run: pnpm --filter @zeroship/migrate build
       - run: pnpm build
       - name: Run native data tests with owned PostgreSQL
         run: cargo xtask test data
@@ -374,28 +373,21 @@ jobs:
       - name: Run native worker tests with owned services
         run: cargo xtask test worker
 
-  # Gate the SDK type-level + unit suites. In particular this runs
-  # @zeroship/migrate's `check` (tsc + the `tsconfig.types.json`
-  # `@ts-expect-error` structural-safety / names-stay-strings suite) and its
-  # node:test suite, so the tsc-as-assertion structural proof can no longer
-  # silently rot - the assertion is now gated, not human-run-only.
+  # Gate the SDK type-level and unit suites. This includes @zeroship/migrate's
+  # `check` (tsc plus the `tsconfig.types.json` `@ts-expect-error`
+  # structural-safety and names-stay-strings suite) and its node:test suite, so
+  # the tsc-as-assertion structural proof is a CI gate.
   sdk:
     runs-on: ubuntu-latest
     steps:
-      # This checkout once omitted submodules, which was invisible until the
-      # engine became a workspace member: the vendored tree came up empty, the
-      # workspace globs matched nothing, and install failed on an unresolvable
-      # link. The engine is in-tree now, so nothing here depends on a submodule.
       - uses: actions/checkout@v4
       - uses: ./.github/actions/nix-toolchain
       - uses: actions/setup-node@v4
         with:
           node-version: 22
       - run: pnpm install --frozen-lockfile
-      # The vendored engine ships no dist/ (it is gitignored there and built
-      # from source), so it has to be built before anything that imports it.
-      - run: pnpm --filter @zeroship/migrate build
-      # The migrate type layer reads @zeroship/db's built types; build SDKs first.
+      # The checks below resolve workspace packages through their built types:
+      # @zeroship/migrate's `check` reads @zeroship/schema's.
       - run: pnpm build
       # Ticket #267 - @zeroship/db's base `typecheck` (`tsc --noEmit`) reads
       # `include: ["src"]`, so nothing under tests/ was ever in the tsc

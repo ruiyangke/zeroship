@@ -50,7 +50,7 @@ export interface AdvisoryDto {
  *
  * `req.driver` selects WHO OPENS THE CONNECTION and `req.dialect` selects WHICH
  * VENDOR, and they are checked against each other in one place
- * ([`ApplyTarget::resolve`]). A `"host"` driver hands the plan to the
+ * ([`DriverTarget::resolve`]). A `"host"` driver hands the plan to the
  * `host_driver` callback over the `SqlSession` seam; an `"inProcess"` driver opens
  * the hardened bundled-rusqlite connections on the engine worker thread and takes
  * no callback. SQLite is not a different kind of apply - it is the dialect with no
