@@ -8,7 +8,7 @@ use crate::{
 #[compio::test]
 async fn sqlite_named_outputs_follow_the_current_generation_without_object_storage() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("zs-workflow.sqlite");
+    let path = journal_file(dir.path());
     schema::initialize_sqlite(&path).unwrap();
     output_contract(Rc::new(sqlite_store(&path).await)).await;
 }

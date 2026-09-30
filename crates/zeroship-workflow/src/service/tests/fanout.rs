@@ -1,6 +1,6 @@
 #![expect(
     clippy::future_not_send,
-    reason = "fanout tests use native compio creator journals"
+    reason = "fanout tests use native compio journals"
 )]
 
 use super::*;
@@ -143,7 +143,7 @@ macro_rules! paired {
         async fn $sqlite() {
             let directory = tempfile::tempdir().unwrap();
             Box::pin($case(Rc::new(
-                sqlite_store(&directory.path().join("zs-workflow.sqlite")).await,
+                sqlite_store(&journal_file(directory.path())).await,
             )))
             .await;
         }

@@ -1,4 +1,4 @@
-//! Ordered manager-delivered lifecycle application in the customer journal.
+//! Ordered manager-delivered lifecycle application in the journal.
 
 #![expect(
     clippy::future_not_send,

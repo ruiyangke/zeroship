@@ -7,12 +7,7 @@ async fn postgres_management_receipt_read_waits_for_atomic_application() {
         registered_service(Rc::new(fixture.store.clone())).await;
     let run = start(&service, &app_id).await;
     let scope = service.fixture_app(app_id.clone());
-    let reader_store = orm_store(
-        &fixture
-            .admin_url
-            .replacen("postgres@", "customer_worker@", 1),
-        crate::service::store::SchemaName::new("customer").unwrap(),
-    )
+    let reader_store = orm_store(&fixture.journal_url)
     .await;
     let reader = WorkflowService::open(Rc::new(reader_store), service.policies.clone())
         .await
@@ -35,7 +30,7 @@ async fn postgres_management_receipt_read_waits_for_atomic_application() {
         compio::time::timeout(Duration::from_secs(10), async {
             loop {
                 let blocked = barrier.observer.query(
-                    "SELECT pid FROM pg_stat_activity WHERE usename='customer_worker' AND wait_event_type='Lock' AND $1=ANY(pg_blocking_pids(pid))",
+                    "SELECT pid FROM pg_stat_activity WHERE usename='zeroship_workflow' AND wait_event_type='Lock' AND $1=ANY(pg_blocking_pids(pid))",
                     &[&worker],
                 ).await.unwrap();
                 if !blocked.is_empty() { return; }

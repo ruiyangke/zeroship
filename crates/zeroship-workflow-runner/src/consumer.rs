@@ -285,7 +285,7 @@ impl<J> Drop for Claim<J> {
     }
 }
 
-/// A bounded job consumer with no customer journal discovery or scheduling loop.
+/// A bounded job consumer with no journal discovery or scheduling loop.
 /// Each occupied slot includes claim I/O, execution, settlement and joined shutdown.
 pub struct JobConsumer<T: JobTransport> {
     transport: Rc<T>,

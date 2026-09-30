@@ -1275,7 +1275,7 @@ fn authorize_task(
     Ok(())
 }
 
-/// How long one attempt may wait on the creator journal.
+/// How long one attempt may wait on the journal.
 ///
 /// An attempt holds a journal connection from BEGIN through COMMIT and takes
 /// the app-state row lock that every other attempt for the same app also

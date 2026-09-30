@@ -2,7 +2,7 @@
 
 Native platform workflow coordination. This crate owns worker registration,
 placement, calendar scheduling, management commands, the durable metadata queue and the deployment
-retention ledger through the shared Rust ORM. It has no customer journal,
+retention ledger through the shared Rust ORM. It has no workflow journal,
 payload storage or V8 dependency.
 
 `coordinator::Coordinator` uses the queue's bound database and app-scope lock.
@@ -26,8 +26,8 @@ commit charges elapsed time against the originally observed assignment authority
 Redelivery is bounded by the app policy's `max_delivery_attempts`, which the
 caller supplies from its own policy authority: a job that reached it in counted
 executions is no longer a candidate. Lease renewal is the manager's only evidence
-that an attempt began, so it is what counts, and a claim the creator journal
-deferred spends nothing. Nothing settles an exhausted job; no executor produced
+that an attempt began, so it is what counts, and a claim the journal deferred
+spends nothing. Nothing settles an exhausted job; no executor produced
 an outcome for it, and the row keeps its attempt history and so keeps its
 deployment. What keeps a hung run from arriving there is the creator engine,
 which counts the dispatches of one frontier that reported nothing and settles
@@ -140,7 +140,7 @@ epoch handshake still require integration before enabling customer ingress.
 
 `deployments::DeploymentHolds` belongs in Control or the local platform host.
 It records normal app deployments and generation-fenced retention holds. Manager
-queue ownership and customer journal ownership require separate host authority;
+queue ownership and journal ownership require separate host authority;
 the journal hold API does not grant manager access.
 
 `local::LocalPlatform` binds the local host's single platform metadata file. Its

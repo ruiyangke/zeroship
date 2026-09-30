@@ -1,7 +1,8 @@
 use super::*;
 use crate::{
     journal_fixture::{
-        journal_row_count, leased_policy, registered_service, sqlite_store, PostgresFixture,
+        journal_file, journal_row_count, leased_policy, registered_service, sqlite_store,
+        PostgresFixture,
     },
     service_binding::ServiceFixture,
     PayloadObjects, PayloadRead, RunPayloads, TaskPayloadReader, TaskPayloads,
@@ -179,7 +180,7 @@ async fn stored_rows(store: &OrmStore, task: &TaskAssignment) -> usize {
 #[compio::test]
 async fn sqlite_output_preparation_and_retryable_uploads() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("zs-workflow.sqlite");
+    let path = journal_file(dir.path());
     schema::initialize_sqlite(&path).unwrap();
     output_contract(Rc::new(sqlite_store(&path).await)).await;
 }
@@ -192,7 +193,7 @@ async fn postgres_output_preparation_and_retryable_uploads() {
 #[compio::test]
 async fn sqlite_every_run_output_is_a_payload_reference() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("zs-workflow.sqlite");
+    let path = journal_file(dir.path());
     schema::initialize_sqlite(&path).unwrap();
     run_output_reference_contract(Rc::new(sqlite_store(&path).await)).await;
 }
@@ -739,7 +740,7 @@ async fn output_contract(store: Rc<OrmStore>) {
 #[compio::test]
 async fn staging_refuses_an_upload_receipt_that_answers_with_another_descriptor() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("zs-workflow.sqlite");
+    let path = journal_file(dir.path());
     schema::initialize_sqlite(&path).unwrap();
     let store = Rc::new(sqlite_store(&path).await);
     let objects = PayloadObjects::open(StorageStore::from_backend(Arc::new(LocalFs::new(
@@ -988,7 +989,7 @@ impl TaskPayloads for RemoteLikeTasks {
 #[compio::test]
 async fn a_batch_truncated_for_size_still_owes_its_accepted_prefix() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("zs-workflow.sqlite");
+    let path = journal_file(dir.path());
     schema::initialize_sqlite(&path).unwrap();
     let store = Rc::new(sqlite_store(&path).await);
     let (service, app, _, _deployments) = registered_service(store).await;

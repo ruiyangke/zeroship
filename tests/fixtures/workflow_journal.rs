@@ -1,8 +1,15 @@
-//! Creator journals on SQLite and PostgreSQL, and apps registered on them.
+//! The workflow journal on `SQLite` and `PostgreSQL`, opened where every host opens
+//! it, and apps registered on it.
 //!
-//! Both halves of the workflow engine open journals this way. The declaring
-//! module supplies the sibling fixtures this one composes: `deployment_fixture`,
-//! `manager_queue` and `service_binding`.
+//! Both halves of the workflow engine open journals this way. Every store here
+//! comes from `HostStorage`, so it is on `journal_binding()` exactly as the
+//! production service's and `zeroship serve`'s are. On `PostgreSQL` the journal
+//! carries the posture `db/migrations-ts/20260919000000_workflow_journal.ts`
+//! leaves it in: `JOURNAL_SCHEMA` and its tables owned by the migration role,
+//! and the service login holding schema usage and table DML and nothing else.
+//!
+//! The declaring module supplies the sibling fixtures this one composes:
+//! `deployment_fixture`, `manager_queue` and `service_binding`.
 
 #![allow(
     dead_code,
@@ -17,18 +24,31 @@ use super::{
     deployment_fixture::Deployments, manager_queue::open_epoch, service_binding::ServiceFixture,
 };
 use compio_postgres::NoTls;
-use std::{path::Path, rc::Rc, sync::Arc};
+use std::{
+    path::{Path, PathBuf},
+    rc::Rc,
+    sync::Arc,
+};
 use testcontainers::{
     core::{IntoContainerPort, WaitFor},
     runners::SyncRunner,
     Container, GenericImage, ImageExt,
 };
 use zeroship_core::{app_id::AppId, typed_id};
+use zeroship_data_orm::connection::ConnectionFactory;
 use zeroship_workflow::service::{
     schema,
-    store::{OrmStore, SchemaName},
+    store::{HostStorage, OrmStore, SchemaName, JOURNAL_SCHEMA},
     AppPolicy, DeployRegistration, HostPolicies, PolicySnapshot, WorkflowService,
 };
+
+/// The role that owns the journal's schema and tables, as the platform
+/// migrations create it.
+pub const JOURNAL_OWNER: &str = "zeroship_workflow_migrator";
+
+/// The login the journal is read and written through: the workflow service's,
+/// which the platform migration grants the journal to.
+pub const JOURNAL_LOGIN: &str = "zeroship_workflow";
 
 /// Host policy whose authority expires, as a worker's does once the manager
 /// leases it rather than the configuration granting it.
@@ -42,33 +62,44 @@ pub fn leased_policy(revision: i64, policy: AppPolicy) -> PolicySnapshot {
     .with_ingress_epoch(Some(open_epoch()))
 }
 
+/// The file the journal binding keeps the journal in, inside `directory`.
+///
+/// On `SQLite` the binding's schema is the `ATTACH` alias, and the backend keeps an
+/// attached alias in `zs-<alias>.sqlite` beside the session file.
+pub fn journal_file(directory: &Path) -> PathBuf {
+    directory.join(format!("zs-{JOURNAL_SCHEMA}.sqlite"))
+}
+
+/// The journal a host opens over a session file in `path`'s directory, installed.
+///
+/// Only the directory is read. The journal is kept in [`journal_file`] of it,
+/// which is the path a case that installs, reads or faults the file directly
+/// must name.
 pub async fn sqlite_store(path: &Path) -> OrmStore {
-    let store = orm_store(
-        &format!(
-            "sqlite:{}",
-            path.parent().unwrap().join("orm.sqlite").display()
-        ),
-        SchemaName::new("workflow").unwrap(),
-    )
+    let directory = path.parent().expect("the path has a directory");
+    let store = orm_store(&format!(
+        "sqlite:{}",
+        directory.join("orm.sqlite").display()
+    ))
     .await;
     schema::initialize_local(&store).await.unwrap();
     store
 }
 
-pub async fn orm_store(url: &str, schema: SchemaName) -> OrmStore {
-    OrmStore::connect(
-        zeroship_data_orm::binding::DbBinding::platform("workflow", "test-deployment", schema),
-        &zeroship_data_orm::connection::ConnectionFactory::for_platform_url(url).unwrap(),
-        zeroship_data_orm::encryption::ProjectKeySource::unavailable(),
-    )
-    .await
-    .unwrap()
+/// The journal a host opens over `url`: `HostStorage`, so `journal_binding()`.
+pub async fn orm_store(url: &str) -> OrmStore {
+    HostStorage::new(ConnectionFactory::for_platform_url(url).unwrap())
+        .open()
+        .await
+        .unwrap()
 }
 
 pub struct PostgresFixture {
     _container: Container<GenericImage>,
     pub store: OrmStore,
     pub admin_url: String,
+    /// The server `admin_url` names, authenticated as [`JOURNAL_LOGIN`].
+    pub journal_url: String,
 }
 impl PostgresFixture {
     pub async fn start() -> Self {
@@ -84,37 +115,58 @@ impl PostgresFixture {
         let port = container.get_host_port_ipv4(5432).unwrap();
         let admin_url = format!("postgres://postgres@{host}:{port}/postgres");
         let admin = connect(&admin_url).await;
+        // The journal's owner and login, and the four platform roles the journal
+        // must stay closed to.
         admin
-            .batch_execute(
-                "CREATE ROLE customer_migrator NOLOGIN; \
-             CREATE ROLE customer_worker LOGIN; CREATE ROLE app_customer_role NOLOGIN; \
-             GRANT app_customer_role TO customer_worker; CREATE ROLE zeroship_worker LOGIN; \
-             CREATE ROLE zeroship_gateway LOGIN; CREATE ROLE zeroship_app LOGIN; \
-             CREATE ROLE zeroship_control LOGIN; CREATE ROLE zeroship_workflow LOGIN; \
-             CREATE SCHEMA customer AUTHORIZATION customer_migrator; \
-             SET ROLE customer_migrator;",
-            )
+            .batch_execute(&format!(
+                "CREATE ROLE {JOURNAL_OWNER} NOLOGIN; CREATE ROLE {JOURNAL_LOGIN} LOGIN; \
+                 CREATE ROLE zeroship_worker LOGIN; CREATE ROLE zeroship_gateway LOGIN; \
+                 CREATE ROLE zeroship_app LOGIN; CREATE ROLE zeroship_control LOGIN;"
+            ))
             .await
             .unwrap();
-        let schema_name = SchemaName::new("customer").unwrap();
-        admin
-            .batch_execute(&schema::postgres_sql(&schema_name))
-            .await
-            .unwrap();
-        admin.batch_execute(
-            "RESET ROLE; GRANT USAGE ON SCHEMA customer TO app_customer_role; \
-             GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA customer TO app_customer_role;"
-        ).await.unwrap();
+        install_journal(&admin).await;
+        grant_journal(&admin).await;
+        let journal_url = format!("postgres://{JOURNAL_LOGIN}@{host}:{port}/postgres");
         Self {
             _container: container,
-            store: orm_store(
-                &format!("postgres://customer_worker@{host}:{port}/postgres"),
-                schema_name,
-            )
-            .await,
+            store: orm_store(&journal_url).await,
             admin_url,
+            journal_url,
         }
     }
+}
+
+/// Install the journal into `admin`'s database as the platform migration does:
+/// [`JOURNAL_SCHEMA`] and every table in it owned by [`JOURNAL_OWNER`].
+pub async fn install_journal(admin: &compio_postgres::Client) {
+    admin
+        .batch_execute(&format!(
+            "CREATE SCHEMA {JOURNAL_SCHEMA} AUTHORIZATION {JOURNAL_OWNER}; \
+             SET ROLE {JOURNAL_OWNER};"
+        ))
+        .await
+        .unwrap();
+    admin
+        .batch_execute(&schema::postgres_sql(
+            &SchemaName::new(JOURNAL_SCHEMA).unwrap(),
+        ))
+        .await
+        .unwrap();
+    admin.batch_execute("RESET ROLE;").await.unwrap();
+}
+
+/// Grant `admin`'s journal to [`JOURNAL_LOGIN`] as the platform migrations do:
+/// usage on the schema and DML on its tables, and no DDL.
+pub async fn grant_journal(admin: &compio_postgres::Client) {
+    admin
+        .batch_execute(&format!(
+            "GRANT USAGE ON SCHEMA {JOURNAL_SCHEMA} TO {JOURNAL_LOGIN}; \
+             GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA {JOURNAL_SCHEMA} \
+             TO {JOURNAL_LOGIN};"
+        ))
+        .await
+        .unwrap();
 }
 
 pub async fn connect(url: &str) -> compio_postgres::Client {

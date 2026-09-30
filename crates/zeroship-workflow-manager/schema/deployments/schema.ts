@@ -1,6 +1,6 @@
 import { table, t, now } from "../../../../packages/zero-migrate/dist/index.js";
 
-// Platform deployment metadata. The customer workflow journal does not use it.
+// Platform deployment metadata. The workflow journal does not use it.
 export function deploymentSchema(namespace) {
   const deploys = table("app_deploys", { schema: namespace });
   deploys.create({

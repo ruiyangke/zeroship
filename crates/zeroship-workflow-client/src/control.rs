@@ -16,7 +16,7 @@ use zeroship_core::{
 /// A runtime-local coordinator client bound to the trusted Control signer.
 ///
 /// The client exchanges placement, management and schedule metadata. Assignment receipts
-/// never grant access to customer credentials, journals or payloads.
+/// never grant access to customer credentials, the workflow journal or payloads.
 #[derive(Clone, Debug)]
 pub struct ControlCoordinator {
     transport: Transport,

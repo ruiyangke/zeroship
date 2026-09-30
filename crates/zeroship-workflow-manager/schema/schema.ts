@@ -24,8 +24,8 @@ export const managerIdentityColumns = {
   schedule_occurrences: ["id", "app_id", "schedule_id", "run_id", "job_id", "activation_id"],
 };
 
-// Queue records carry closed job metadata; customer history and payloads stay
-// in the worker's creator database and object storage.
+// Queue records carry closed job metadata; run history stays in the workflow
+// journal and payloads in object storage.
 export function workflowManagerSchema(namespace) {
   const text = () => t.text().required();
   const integer = () => t.bigInt().required();

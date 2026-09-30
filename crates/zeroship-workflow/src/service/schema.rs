@@ -33,11 +33,12 @@ pub async fn initialize_local(store: &super::store::OrmStore) -> Result<(), Work
 
 pub use zeroship_workflow_schema::SQLITE_SQL;
 
-/// Instantiate canonical DDL in the customer's resolved physical schema.
-/// The provisioning host supplies its own authorized migration connection.
+/// Instantiate the canonical `PostgreSQL` DDL in `schema`. Whoever applies it
+/// supplies its own authorized connection.
 ///
 /// The substitution itself lives in `zeroship-workflow-schema` beside the
-/// artifact it binds, so the installer and this engine cannot disagree about it.
+/// artifact it binds. The platform migration that installs the journal into
+/// [`super::store::JOURNAL_SCHEMA`] reads the same artifact.
 #[must_use]
 pub fn postgres_sql(schema: &super::store::SchemaName) -> String {
     zeroship_workflow_schema::postgres_sql(schema.as_str())

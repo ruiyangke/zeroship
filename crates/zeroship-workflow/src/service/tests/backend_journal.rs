@@ -58,8 +58,8 @@ async fn run_ids(store: &Rc<OrmStore>, app: &AppId) -> Vec<String> {
 async fn a_backend_reads_and_writes_the_journal_it_was_built_over() {
     let home_directory = tempfile::tempdir().unwrap();
     let away_directory = tempfile::tempdir().unwrap();
-    let home_store = Rc::new(sqlite_store(&home_directory.path().join("zs-workflow.sqlite")).await);
-    let away_store = Rc::new(sqlite_store(&away_directory.path().join("zs-workflow.sqlite")).await);
+    let home_store = Rc::new(sqlite_store(&journal_file(home_directory.path())).await);
+    let away_store = Rc::new(sqlite_store(&journal_file(away_directory.path())).await);
     let deployments = Deployments::new().await;
     let policies = Arc::new(HostPolicies::default());
     let app = AppId::mint();
@@ -134,8 +134,8 @@ async fn a_backend_reads_and_writes_the_journal_it_was_built_over() {
 async fn into_backend_refuses_a_journal_from_another_policy_registry() {
     let home_directory = tempfile::tempdir().unwrap();
     let away_directory = tempfile::tempdir().unwrap();
-    let home_store = Rc::new(sqlite_store(&home_directory.path().join("zs-workflow.sqlite")).await);
-    let away_store = Rc::new(sqlite_store(&away_directory.path().join("zs-workflow.sqlite")).await);
+    let home_store = Rc::new(sqlite_store(&journal_file(home_directory.path())).await);
+    let away_store = Rc::new(sqlite_store(&journal_file(away_directory.path())).await);
     let (home, app, _, _deployments) = registered_service(home_store).await;
     let objects = Objects::new();
 
@@ -174,7 +174,7 @@ async fn into_backend_refuses_a_journal_from_another_policy_registry() {
 #[compio::test]
 async fn a_malformed_run_id_is_refused_rather_than_reported_missing() {
     let directory = tempfile::tempdir().unwrap();
-    let store = Rc::new(sqlite_store(&directory.path().join("zs-workflow.sqlite")).await);
+    let store = Rc::new(sqlite_store(&journal_file(directory.path())).await);
     let deployments = Deployments::new().await;
     let policies = Arc::new(HostPolicies::default());
     let app = AppId::mint();

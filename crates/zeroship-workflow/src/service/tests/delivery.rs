@@ -33,7 +33,7 @@ async fn postgres_delivery_receipt_failure_rolls_back_checkpoint() {
     let job = publish(&scope, &manager).await;
     let grant = manager.queue.claim(&owner).await.unwrap().unwrap();
     let claimed = task(scope.accept_job(&grant).await.unwrap());
-    admin.batch_execute("CREATE FUNCTION customer.fail_receipt() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected receipt failure'; END $$; CREATE TRIGGER fail_receipt BEFORE UPDATE ON customer.__zeroship_workflow_job_receipts FOR EACH ROW EXECUTE FUNCTION customer.fail_receipt();").await.unwrap();
+    admin.batch_execute("CREATE FUNCTION workflow_manager.fail_receipt() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected receipt failure'; END $$; CREATE TRIGGER fail_receipt BEFORE UPDATE ON workflow_manager.__zeroship_workflow_job_receipts FOR EACH ROW EXECUTE FUNCTION workflow_manager.fail_receipt();").await.unwrap();
     let checkpoint = execution(
         json!([{"kind":"Sleep", "ordinal":0, "name":"delay", "nameOccurrence":0, "wakeAt":chrono::Utc::now()+chrono::Duration::hours(1)}]),
     );
@@ -41,7 +41,7 @@ async fn postgres_delivery_receipt_failure_rolls_back_checkpoint() {
         .complete_job(&claimed, &grant, checkpoint.clone())
         .await
         .is_err());
-    admin.batch_execute("DROP TRIGGER fail_receipt ON customer.__zeroship_workflow_job_receipts; DROP FUNCTION customer.fail_receipt();").await.unwrap();
+    admin.batch_execute("DROP TRIGGER fail_receipt ON workflow_manager.__zeroship_workflow_job_receipts; DROP FUNCTION workflow_manager.fail_receipt();").await.unwrap();
     assert!(scope.job_receipt(&job).await.unwrap().is_none());
     assert!(scope.pending_jobs(None, 10).await.unwrap().is_empty());
     let tx = service.begin().await.unwrap();
@@ -71,7 +71,7 @@ macro_rules! case {
         async fn $sqlite() {
             let dir = tempfile::tempdir().unwrap();
             $contract(Rc::new(
-                sqlite_store(&dir.path().join("zs-workflow.sqlite")).await,
+                sqlite_store(&journal_file(dir.path())).await,
             ))
             .await;
         }

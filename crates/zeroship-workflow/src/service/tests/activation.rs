@@ -755,8 +755,8 @@ impl ReceiptFault {
                 }).await.unwrap();
             }
             Self::Postgres(client) => client.batch_execute(if enabled {
-                "CREATE FUNCTION customer.activation_receipt_fault() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'activation receipt fault'; END $$; CREATE TRIGGER activation_receipt_fault BEFORE UPDATE OF outcome ON customer.__zeroship_workflow_job_receipts FOR EACH ROW EXECUTE FUNCTION customer.activation_receipt_fault();"
-            } else { "DROP TRIGGER activation_receipt_fault ON customer.__zeroship_workflow_job_receipts; DROP FUNCTION customer.activation_receipt_fault();" }).await.unwrap(),
+                "CREATE FUNCTION workflow_manager.activation_receipt_fault() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'activation receipt fault'; END $$; CREATE TRIGGER activation_receipt_fault BEFORE UPDATE OF outcome ON workflow_manager.__zeroship_workflow_job_receipts FOR EACH ROW EXECUTE FUNCTION workflow_manager.activation_receipt_fault();"
+            } else { "DROP TRIGGER activation_receipt_fault ON workflow_manager.__zeroship_workflow_job_receipts; DROP FUNCTION workflow_manager.activation_receipt_fault();" }).await.unwrap(),
         }
     }
 }

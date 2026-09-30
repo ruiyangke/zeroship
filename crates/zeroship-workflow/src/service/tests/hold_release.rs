@@ -1,5 +1,5 @@
 //! The delivered release job gives a superseded deployment's journal hold back
-//! only when nothing in the customer journal still depends on it.
+//! only when nothing in the journal still depends on it.
 #![expect(
     clippy::future_not_send,
     reason = "release tests own compio-local journals and clients"
@@ -62,7 +62,7 @@ impl JobLease for Lease {
 async fn sqlite_release_job_refuses_a_needed_deployment_and_gives_back_an_unused_one() {
     let dir = tempfile::tempdir().unwrap();
     release_contract(Rc::new(
-        sqlite_store(&dir.path().join("customer.sqlite")).await,
+        sqlite_store(&journal_file(dir.path())).await,
     ))
     .await;
 }
@@ -201,7 +201,7 @@ impl DeploymentHoldClient for Stalled {
 async fn sqlite_release_job_ends_a_stalled_attempt_at_the_io_ceiling() {
     let dir = tempfile::tempdir().unwrap();
     io_ceiling(Rc::new(
-        sqlite_store(&dir.path().join("customer.sqlite")).await,
+        sqlite_store(&journal_file(dir.path())).await,
     ))
     .await;
 }

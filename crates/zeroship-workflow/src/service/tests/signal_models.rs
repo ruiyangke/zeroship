@@ -8,7 +8,7 @@ use zeroship_data_orm::orm::FindOptions;
 #[compio::test]
 async fn sqlite_signal_window_includes_its_edges_and_consumes_each_message_once() {
     let directory = tempfile::tempdir().unwrap();
-    let store = sqlite_store(&directory.path().join("zs-workflow.sqlite")).await;
+    let store = sqlite_store(&journal_file(directory.path())).await;
     window_contract(Rc::new(store)).await;
 }
 
@@ -111,7 +111,7 @@ async fn window_contract(store: Rc<OrmStore>) {
 #[compio::test]
 async fn sqlite_a_checkpoint_carrying_a_signal_consumption_is_refused() {
     let directory = tempfile::tempdir().unwrap();
-    let store = sqlite_store(&directory.path().join("zs-workflow.sqlite")).await;
+    let store = sqlite_store(&journal_file(directory.path())).await;
     forged_consumption_contract(Rc::new(store)).await;
 }
 

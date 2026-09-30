@@ -9,7 +9,7 @@ use zeroship_core::service_assertion::{ServiceSigningKey, ServiceTrustBundle};
 #[compio::test]
 async fn sqlite_independent_hosts_initialize_topics_without_resetting_revocation() {
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("zs-workflow.sqlite");
+    let path = journal_file(directory.path());
     let first = sqlite_store(&path).await;
     let second = sqlite_store(&path).await;
     initialization_contract(first, second).await;
@@ -18,12 +18,7 @@ async fn sqlite_independent_hosts_initialize_topics_without_resetting_revocation
 #[compio::test]
 async fn postgres_independent_hosts_initialize_topics_without_resetting_revocation() {
     let fixture = PostgresFixture::start().await;
-    let second = orm_store(
-        &fixture
-            .admin_url
-            .replacen("postgres@", "customer_worker@", 1),
-        super::super::store::SchemaName::new("customer").unwrap(),
-    )
+    let second = orm_store(&fixture.journal_url)
     .await;
     initialization_contract(fixture.store.clone(), second).await;
 }

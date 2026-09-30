@@ -13,7 +13,7 @@ use zeroship_data_orm::{
 #[compio::test]
 async fn sqlite_compensation_failures_span_pages_without_crossing_scope() {
     let directory = tempfile::tempdir().unwrap();
-    let store = sqlite_store(&directory.path().join("zs-workflow.sqlite")).await;
+    let store = sqlite_store(&journal_file(directory.path())).await;
     compensation_contract(Rc::new(store)).await;
 }
 
@@ -26,7 +26,7 @@ async fn postgres_compensation_failures_span_pages_without_crossing_scope() {
 #[compio::test]
 async fn sqlite_continuation_keeps_accepted_parent_targets_across_pages() {
     let directory = tempfile::tempdir().unwrap();
-    let store = sqlite_store(&directory.path().join("zs-workflow.sqlite")).await;
+    let store = sqlite_store(&journal_file(directory.path())).await;
     continuation_contract(Rc::new(store)).await;
 }
 

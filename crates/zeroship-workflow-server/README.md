@@ -12,7 +12,7 @@ to claim.
 Before publishing queue dependencies, the manager records its retention intent
 and obtains a deployment hold through Control. The server signs these requests
 as `svc/workflow`; Control derives the app's queue holder independently from
-worker journal holders. Queue retention carries no worker assignment or customer
+the journal's holder. Queue retention carries no worker assignment or customer
 database credentials. Each HTTP thread owns its bounded Control client.
 
 The [manager and job queue design](../../docs/proposals/2026-09-11-workflow-worker.md)
@@ -107,15 +107,15 @@ cannot update app or plan inputs or access creator storage.
 
 Assignments and mutation receipts survive restart. Wake revisions reject stale
 or conflicting publication. A worker cannot release the last active placement;
-missing owners expose the app for host-driven recovery and a customer-journal
-rescan, even when the previous worker never published a hint. Creator task claims
-and management application remain transactions in the customer's database.
+missing owners expose the app for host-driven recovery and a journal rescan, even
+when the previous worker never published a hint. Task claims and management
+application are transactions in the journal, which is this service's own.
 
 The platform migration creates `workflow_manager` metadata under a migration
 owner and grants the `zeroship_workflow` login ordinary DML. Runtime verifies the
 schema fingerprint and rejects elevated roles, role memberships, DDL and
 mutable schema fingerprints. It can read enrolled worker verification keys and
-maintain service-assertion receipts, with no journal or customer-table grants.
+maintain service-assertion receipts, and it holds no grant on a creator table.
 Loss of the shared authentication connection stops the process for supervisor
 recovery instead of leaving a listener attached to a dead verifier connection.
 

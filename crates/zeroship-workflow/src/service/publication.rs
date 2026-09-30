@@ -1,4 +1,4 @@
-//! Creator-owned, immutable queue publication intents.
+//! Journal-owned, immutable queue publication intents.
 //!
 //! Journal transitions write intents before COMMIT. Network publication happens
 //! after it; only a matching manager receipt confirms an intent. Neither history
@@ -17,7 +17,7 @@
 
 #![expect(
     clippy::future_not_send,
-    reason = "creator journal and metadata transport use their owning compio thread"
+    reason = "journal and metadata transport use their owning compio thread"
 )]
 
 use super::{

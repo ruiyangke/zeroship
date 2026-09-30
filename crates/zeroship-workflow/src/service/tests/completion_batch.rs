@@ -19,7 +19,7 @@ use crate::{service::AppWorkflows, WorkflowExecution};
 #[compio::test]
 async fn sqlite_a_completion_past_the_frontier_ceiling_is_refused_whole() {
     let directory = tempfile::tempdir().unwrap();
-    let store = sqlite_store(&directory.path().join("zs-workflow.sqlite")).await;
+    let store = sqlite_store(&journal_file(directory.path())).await;
     Box::pin(width_contract(Rc::new(store))).await;
 }
 
@@ -32,7 +32,7 @@ async fn postgres_a_completion_past_the_frontier_ceiling_is_refused_whole() {
 #[compio::test]
 async fn sqlite_a_completion_carrying_no_outcome_is_refused() {
     let directory = tempfile::tempdir().unwrap();
-    let store = sqlite_store(&directory.path().join("zs-workflow.sqlite")).await;
+    let store = sqlite_store(&journal_file(directory.path())).await;
     Box::pin(floor_contract(Rc::new(store))).await;
 }
 

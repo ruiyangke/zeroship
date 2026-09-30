@@ -1,7 +1,8 @@
-//! Deployment retention clients for the hosts that hold a journal: a customer
-//! worker on an app placement, and the workflow service that holds the journals
-//! themselves. Platform catalog storage belongs to the workflow manager and is
-//! supplied through the host's scoped client.
+//! Deployment retention clients for the hosts that hold a journal.
+//!
+//! The workflow service holds every app's journal, and a local host holds the
+//! one it serves. Platform catalog storage belongs to the workflow manager and
+//! is supplied through the host's scoped client.
 
 use crate::WorkflowServiceError;
 use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc};
@@ -14,8 +15,8 @@ use zeroship_workflow_client::Options;
 mod remote;
 pub use remote::RemoteDeploymentHolds;
 
-/// Host-authenticated access to deployment metadata for a single app journal.
-/// A customer worker receives this client, never the platform database.
+/// Host-authenticated access to deployment metadata for one app's journal rows.
+/// A host receives this client, never the platform database.
 #[async_trait::async_trait(?Send)]
 pub trait DeploymentHoldClient {
     fn scope(&self) -> &HoldScope;
@@ -44,9 +45,8 @@ pub trait DeploymentHoldAuthority {
 
 /// The authority of a host that runs one assigned app.
 ///
-/// A customer worker on an app placement holds this, and so does a local host
-/// on the app it serves. The client's own scope names that app, so the scoping
-/// has one statement and no roster to widen.
+/// A local host holds this on the app it serves. The client's own scope names
+/// that app, so the scoping has one statement and no roster to widen.
 pub struct AssignedHolds(Rc<dyn DeploymentHoldClient>);
 
 impl std::fmt::Debug for AssignedHolds {

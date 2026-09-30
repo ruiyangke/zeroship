@@ -54,7 +54,7 @@ impl DeploymentHoldClient for LostReplies {
 async fn sqlite_deployment_intents_recover_lost_replies_and_close_admission() {
     let dir = tempfile::tempdir().unwrap();
     recovery_contract(Rc::new(
-        sqlite_store(&dir.path().join("customer.sqlite")).await,
+        sqlite_store(&journal_file(dir.path())).await,
     ))
     .await;
 }
@@ -224,7 +224,7 @@ async fn recovery_contract(store: Rc<OrmStore>) {
 async fn sqlite_retained_generations_keep_their_deployment_hold() {
     let dir = tempfile::tempdir().unwrap();
     dependencies_contract(Rc::new(
-        sqlite_store(&dir.path().join("customer.sqlite")).await,
+        sqlite_store(&journal_file(dir.path())).await,
     ))
     .await;
 }
@@ -331,7 +331,7 @@ impl<C: DeploymentHoldClient> DeploymentHoldClient for GatedReply<C> {
 async fn sqlite_old_acknowledgements_cannot_reopen_reacquired_holds() {
     let dir = tempfile::tempdir().unwrap();
     stale_contract(Rc::new(
-        sqlite_store(&dir.path().join("customer.sqlite")).await,
+        sqlite_store(&journal_file(dir.path())).await,
     ))
     .await;
 }
@@ -504,7 +504,7 @@ impl DeploymentHoldClient for MismatchedReceipt {
 async fn sqlite_receipts_require_complete_intent_identity() {
     let dir = tempfile::tempdir().unwrap();
     receipt_contract(Rc::new(
-        sqlite_store(&dir.path().join("customer.sqlite")).await,
+        sqlite_store(&journal_file(dir.path())).await,
     ))
     .await;
 }
@@ -587,7 +587,7 @@ impl DeploymentHoldClient for NoPlatformIo {
 async fn sqlite_only_acquiring_deployment_holds_allow_unresolved_hashes() {
     let dir = tempfile::tempdir().unwrap();
     unresolved_hash_contract(Rc::new(
-        sqlite_store(&dir.path().join("customer.sqlite")).await,
+        sqlite_store(&journal_file(dir.path())).await,
     ))
     .await;
 }
@@ -692,7 +692,7 @@ async fn unresolved_hash_contract(store: Rc<OrmStore>) {
 async fn sqlite_concurrent_hold_resolution_preserves_the_bound_hash() {
     let dir = tempfile::tempdir().unwrap();
     concurrent_resolution_contract(Rc::new(
-        sqlite_store(&dir.path().join("customer.sqlite")).await,
+        sqlite_store(&journal_file(dir.path())).await,
     ))
     .await;
 }

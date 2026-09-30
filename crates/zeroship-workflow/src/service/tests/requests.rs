@@ -8,7 +8,7 @@ use zeroship_core::service_assertion::{ServiceSigningKey, ServiceTrustBundle};
 #[compio::test]
 async fn sqlite_aged_request_receipts_survive_reopen_and_lifecycle_changes() {
     let directory = tempfile::tempdir().unwrap();
-    let store = sqlite_store(&directory.path().join("zs-workflow.sqlite")).await;
+    let store = sqlite_store(&journal_file(directory.path())).await;
     lifecycle_receipts(Rc::new(store)).await;
 }
 
@@ -21,7 +21,7 @@ async fn postgres_aged_request_receipts_survive_reopen_and_lifecycle_changes() {
 #[compio::test]
 async fn sqlite_aged_token_receipts_cannot_refresh_revoked_authority() {
     let directory = tempfile::tempdir().unwrap();
-    let store = sqlite_store(&directory.path().join("zs-workflow.sqlite")).await;
+    let store = sqlite_store(&journal_file(directory.path())).await;
     token_receipts(Rc::new(store)).await;
 }
 

@@ -22,7 +22,7 @@ use fixture::{active, restarted, started, transition, Grant};
 #[compio::test]
 async fn sqlite_management_receipts_survive_app_receipt_loss_and_worker_reopen() {
     let directory = tempfile::tempdir().unwrap();
-    let store = sqlite_store(&directory.path().join("zs-workflow.sqlite")).await;
+    let store = sqlite_store(&journal_file(directory.path())).await;
     replay_contract(Rc::new(store)).await;
 }
 
@@ -35,7 +35,7 @@ async fn postgres_management_receipts_survive_app_receipt_loss_and_worker_reopen
 #[compio::test]
 async fn sqlite_management_preserves_rejections_and_retries_transient_failures() {
     let directory = tempfile::tempdir().unwrap();
-    let store = sqlite_store(&directory.path().join("zs-workflow.sqlite")).await;
+    let store = sqlite_store(&journal_file(directory.path())).await;
     outcome_contract(Rc::new(store)).await;
 }
 
@@ -48,7 +48,7 @@ async fn postgres_management_preserves_rejections_and_retries_transient_failures
 #[compio::test]
 async fn sqlite_management_receipt_failure_rolls_back_restart() {
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("zs-workflow.sqlite");
+    let path = journal_file(directory.path());
     let store = sqlite_store(&path).await;
     atomicity_contract(Rc::new(store), ReceiptFault::Sqlite(path)).await;
 }
@@ -154,7 +154,7 @@ async fn postgres_management_database_denial_remains_retryable() {
     let scope = service.fixture_app(local.clone());
     let request = started(&local, &run, 1);
     let admin = connect(&fixture.admin_url).await;
-    admin.batch_execute("REVOKE INSERT ON customer.__zeroship_workflow_management_receipts FROM app_customer_role")
+    admin.batch_execute("REVOKE INSERT ON workflow_manager.__zeroship_workflow_management_receipts FROM zeroship_workflow")
         .await.unwrap();
     let result = scope.management_outcome(&request).await;
     assert!(
@@ -164,7 +164,7 @@ async fn postgres_management_database_denial_remains_retryable() {
     assert_rolled_back(&service, &local, &run, &request).await;
     admin
         .batch_execute(
-            "GRANT INSERT ON customer.__zeroship_workflow_management_receipts TO app_customer_role",
+            "GRANT INSERT ON workflow_manager.__zeroship_workflow_management_receipts TO zeroship_workflow",
         )
         .await
         .unwrap();
@@ -235,7 +235,7 @@ async fn receipt_count(service: &WorkflowService, command: &Grant) -> i64 {
 #[compio::test]
 async fn sqlite_partial_restart_receipt_carries_its_prefix_and_source_pin() {
     let directory = tempfile::tempdir().unwrap();
-    let store = sqlite_store(&directory.path().join("zs-workflow.sqlite")).await;
+    let store = sqlite_store(&journal_file(directory.path())).await;
     prefix_receipt_contract(Rc::new(store)).await;
 }
 
@@ -777,10 +777,10 @@ impl ReceiptFault {
                 ).unwrap();
             },
             Self::Postgres(url) => connect(url).await.batch_execute(
-                "CREATE FUNCTION customer.management_receipt_fault() RETURNS trigger LANGUAGE plpgsql AS $$
+                "CREATE FUNCTION workflow_manager.management_receipt_fault() RETURNS trigger LANGUAGE plpgsql AS $$
                  BEGIN RAISE EXCEPTION 'management receipt fault'; END $$;
-                 CREATE TRIGGER management_receipt_fault BEFORE UPDATE OF outcome ON customer.__zeroship_workflow_job_receipts
-                 FOR EACH ROW EXECUTE FUNCTION customer.management_receipt_fault();",
+                 CREATE TRIGGER management_receipt_fault BEFORE UPDATE OF outcome ON workflow_manager.__zeroship_workflow_job_receipts
+                 FOR EACH ROW EXECUTE FUNCTION workflow_manager.management_receipt_fault();",
             ).await.unwrap(),
         }
     }
@@ -790,8 +790,8 @@ impl ReceiptFault {
             Self::Sqlite(path) => rusqlite::Connection::open(path).unwrap()
                 .execute_batch("DROP TRIGGER management_receipt_fault").unwrap(),
             Self::Postgres(url) => connect(url).await.batch_execute(
-                "DROP TRIGGER management_receipt_fault ON customer.__zeroship_workflow_job_receipts;
-                 DROP FUNCTION customer.management_receipt_fault();",
+                "DROP TRIGGER management_receipt_fault ON workflow_manager.__zeroship_workflow_job_receipts;
+                 DROP FUNCTION workflow_manager.management_receipt_fault();",
             ).await.unwrap(),
         }
     }
@@ -815,13 +815,13 @@ impl PgBarrier {
     async fn install(url: &str, site: BarrierSite) -> Self {
         let blocker = connect(url).await;
         blocker.batch_execute(
-            "CREATE FUNCTION customer.management_barrier() RETURNS trigger LANGUAGE plpgsql AS $$
+            "CREATE FUNCTION workflow_manager.management_barrier() RETURNS trigger LANGUAGE plpgsql AS $$
              BEGIN PERFORM pg_advisory_xact_lock(73921861); RETURN NEW; END $$;",
         ).await.unwrap();
         blocker.batch_execute(match site {
-            BarrierSite::AppLock => "CREATE TRIGGER management_barrier BEFORE UPDATE ON customer.__zeroship_workflow_app_state FOR EACH ROW EXECUTE FUNCTION customer.management_barrier()",
-            BarrierSite::Receipt => "CREATE TRIGGER management_barrier BEFORE UPDATE OF outcome ON customer.__zeroship_workflow_job_receipts FOR EACH ROW EXECUTE FUNCTION customer.management_barrier()",
-            BarrierSite::Lifecycle => "CREATE TRIGGER management_barrier BEFORE UPDATE ON customer.__zeroship_workflow_runs FOR EACH ROW WHEN (OLD.generation IS DISTINCT FROM NEW.generation) EXECUTE FUNCTION customer.management_barrier()",
+            BarrierSite::AppLock => "CREATE TRIGGER management_barrier BEFORE UPDATE ON workflow_manager.__zeroship_workflow_app_state FOR EACH ROW EXECUTE FUNCTION workflow_manager.management_barrier()",
+            BarrierSite::Receipt => "CREATE TRIGGER management_barrier BEFORE UPDATE OF outcome ON workflow_manager.__zeroship_workflow_job_receipts FOR EACH ROW EXECUTE FUNCTION workflow_manager.management_barrier()",
+            BarrierSite::Lifecycle => "CREATE TRIGGER management_barrier BEFORE UPDATE ON workflow_manager.__zeroship_workflow_runs FOR EACH ROW WHEN (OLD.generation IS DISTINCT FROM NEW.generation) EXECUTE FUNCTION workflow_manager.management_barrier()",
         }).await.unwrap();
         let blocker_pid = blocker
             .query_one("SELECT pg_backend_pid()", &[])
@@ -844,7 +844,7 @@ impl PgBarrier {
         compio::time::timeout(Duration::from_secs(10), async {
             loop {
                 let waiting = self.observer.query(
-                    "SELECT pid FROM pg_stat_activity WHERE usename='customer_worker' AND wait_event_type='Lock' AND $1=ANY(pg_blocking_pids(pid))",
+                    "SELECT pid FROM pg_stat_activity WHERE usename='zeroship_workflow' AND wait_event_type='Lock' AND $1=ANY(pg_blocking_pids(pid))",
                     &[&self.blocker_pid],
                 ).await.unwrap();
                 if let Some(worker) = waiting.first() {
@@ -893,19 +893,19 @@ impl PgBarrier {
         self.blocker
             .batch_execute(match self.site {
                 BarrierSite::AppLock => {
-                    "DROP TRIGGER management_barrier ON customer.__zeroship_workflow_app_state"
+                    "DROP TRIGGER management_barrier ON workflow_manager.__zeroship_workflow_app_state"
                 }
                 BarrierSite::Receipt => {
-                    "DROP TRIGGER management_barrier ON customer.__zeroship_workflow_job_receipts"
+                    "DROP TRIGGER management_barrier ON workflow_manager.__zeroship_workflow_job_receipts"
                 }
                 BarrierSite::Lifecycle => {
-                    "DROP TRIGGER management_barrier ON customer.__zeroship_workflow_runs"
+                    "DROP TRIGGER management_barrier ON workflow_manager.__zeroship_workflow_runs"
                 }
             })
             .await
             .unwrap();
         self.blocker
-            .batch_execute("DROP FUNCTION customer.management_barrier()")
+            .batch_execute("DROP FUNCTION workflow_manager.management_barrier()")
             .await
             .unwrap();
     }
@@ -1062,7 +1062,7 @@ async fn postgres_management_app_lock_wait_keeps_original_policy_deadline() {
 #[compio::test]
 async fn sqlite_management_captures_policy_before_waiting_for_journal() {
     let directory = tempfile::tempdir().unwrap();
-    let store = sqlite_store(&directory.path().join("zs-workflow.sqlite")).await;
+    let store = sqlite_store(&journal_file(directory.path())).await;
     waiting_authority_contract(Rc::new(store)).await;
 }
 

@@ -1,4 +1,4 @@
-//! Creator-owned bounded propagation of cancellation and terminal results
+//! Journal-owned bounded propagation of cancellation and terminal results
 //! across child dependencies.
 //!
 //! A settling or terminal generation records one obligation and its first page

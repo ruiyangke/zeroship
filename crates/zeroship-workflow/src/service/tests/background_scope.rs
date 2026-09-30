@@ -1,6 +1,6 @@
 #![expect(
     clippy::future_not_send,
-    reason = "background contracts run customer storage on their compio thread"
+    reason = "background contracts run journal storage on their compio thread"
 )]
 
 use super::objects::Objects;
@@ -11,7 +11,7 @@ use std::time::Instant;
 #[compio::test]
 async fn sqlite_background_work_uses_only_host_assigned_apps() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("zs-workflow.sqlite");
+    let path = journal_file(dir.path());
     schema::initialize_sqlite(&path).unwrap();
     background_contract(Rc::new(sqlite_store(&path).await)).await;
 }

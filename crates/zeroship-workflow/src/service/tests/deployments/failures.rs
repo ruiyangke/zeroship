@@ -100,7 +100,7 @@ impl BlobStore for Faults {
 #[compio::test]
 async fn sqlite_artifact_io_does_not_block_work_or_revoke_a_repair() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("zs-workflow.sqlite");
+    let path = journal_file(dir.path());
     schema::initialize_sqlite(&path).unwrap();
     Box::pin(fault_contract(Rc::new(sqlite_store(&path).await))).await;
 }
@@ -170,7 +170,7 @@ async fn fault_contract(store: Rc<OrmStore>) {
         result
     });
     concurrent
-        .expect("artifact read held the customer app lock")
+        .expect("artifact read held the journal's app lock")
         .unwrap();
     activated.unwrap();
     let new = scope
@@ -200,7 +200,7 @@ async fn fault_contract(store: Rc<OrmStore>) {
         result
     });
     repaired
-        .expect("artifact read held the customer app lock")
+        .expect("artifact read held the journal's app lock")
         .unwrap();
     assert!(matches!(stale, Err(WorkflowServiceError::Unavailable(_))));
     next_image.assert_loaded(&tasks.executable(&new_task).await.unwrap());

@@ -133,8 +133,8 @@ mod topic_initialization;
 use deployment_fixture::{Deployments, Sources};
 pub(super) use manager_queue::open_epoch;
 pub(super) use journal_fixture::{
-    connect, leased_policy, orm_store, registered_service, registered_with_deployments,
-    sqlite_store, PostgresFixture,
+    connect, grant_journal, install_journal, journal_file, leased_policy, orm_store,
+    registered_service, registered_with_deployments, sqlite_store, PostgresFixture,
 };
 pub(super) use service_binding::ServiceFixture;
 
@@ -394,7 +394,7 @@ pub(super) async fn deliver_propagations(
 #[compio::test]
 async fn sqlite_app_operations_are_scoped_and_retryable() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("zs-workflow.sqlite");
+    let path = journal_file(dir.path());
     schema::initialize_sqlite(&path).unwrap();
     app_contract(Rc::new(sqlite_store(&path).await)).await;
 }
@@ -490,7 +490,7 @@ async fn app_contract(store: Rc<OrmStore>) {
 #[compio::test]
 async fn sqlite_schema_constraints_and_transaction_rollback() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("zs-workflow.sqlite");
+    let path = journal_file(dir.path());
     schema::initialize_sqlite(&path).unwrap();
     let store = sqlite_store(&path).await;
     storage_contract(&store).await;
@@ -560,60 +560,76 @@ async fn insert_run(
     journal_insert(tx, "runs", json!({"app_id":app, "id":id, "workflow_name":"Checkout", "deploy_id":deploy, "generation":0, "state":"queued", "control":"none", "lease_epoch":0, "cascade":0, "depth":0, "created_at":0, "signal_epoch":0, "parent_id":parent})).await
 }
 
+/// The journal's `PostgreSQL` posture is the platform migration's: the service
+/// login reads and writes the journal and changes none of its shape, and the
+/// other platform roles reach nothing in it.
 #[compio::test]
-async fn customer_runtime_has_dml_without_ddl_and_platform_roles_have_no_access() {
+async fn journal_login_has_dml_without_ddl_and_other_platform_roles_have_no_access() {
     let fixture = PostgresFixture::start().await;
     fixture.store.verify().await.unwrap();
     let admin = connect(&fixture.admin_url).await;
+    let runtime = connect(&fixture.journal_url).await;
+    // THE CONTROL for every refusal below: the same statements against the same
+    // table succeed for the journal's own login, so a refusal is the role's
+    // rather than a table that is not there.
+    runtime
+        .batch_execute("SELECT * FROM workflow_manager.__zeroship_workflow_runs")
+        .await
+        .unwrap();
+    runtime
+        .batch_execute("DELETE FROM workflow_manager.__zeroship_workflow_runs")
+        .await
+        .unwrap();
     for role in [
         "zeroship_worker",
         "zeroship_gateway",
         "zeroship_app",
         "zeroship_control",
-        "zeroship_workflow",
     ] {
         let url = fixture
             .admin_url
             .replacen("postgres@", &format!("{role}@"), 1);
         let client = connect(&url).await;
         assert!(client
-            .batch_execute("SELECT * FROM customer.__zeroship_workflow_runs")
+            .batch_execute("SELECT * FROM workflow_manager.__zeroship_workflow_runs")
             .await
             .is_err());
         assert!(client
-            .batch_execute("DELETE FROM customer.__zeroship_workflow_runs")
+            .batch_execute("DELETE FROM workflow_manager.__zeroship_workflow_runs")
             .await
             .is_err());
         assert!(client
-            .batch_execute("SET ROLE customer_migrator")
+            .batch_execute("SET ROLE zeroship_workflow_migrator")
             .await
             .is_err());
+    }
+    for role in [
+        journal_fixture::JOURNAL_LOGIN,
+        "zeroship_worker",
+        "zeroship_gateway",
+        "zeroship_app",
+        "zeroship_control",
+    ] {
         let member: bool = admin
             .query_one(
-                "SELECT pg_has_role($1, 'customer_migrator', 'MEMBER')",
+                "SELECT pg_has_role($1, 'zeroship_workflow_migrator', 'MEMBER')",
                 &[&role],
             )
             .await
             .unwrap()
             .get(0);
-        assert!(!member);
+        assert!(!member, "{role} must not hold the journal owner's authority");
     }
-    let runtime = connect(
-        &fixture
-            .admin_url
-            .replacen("postgres@", "customer_worker@", 1),
-    )
-    .await;
     assert!(runtime
-        .batch_execute("CREATE TABLE customer.unauthorized (id text)")
+        .batch_execute("CREATE TABLE workflow_manager.unauthorized (id text)")
         .await
         .is_err());
     assert!(runtime
-        .batch_execute("ALTER TABLE customer.__zeroship_workflow_runs ADD COLUMN unauthorized text")
+        .batch_execute("ALTER TABLE workflow_manager.__zeroship_workflow_runs ADD COLUMN unauthorized text")
         .await
         .is_err());
     assert!(runtime
-        .batch_execute("SET ROLE customer_migrator")
+        .batch_execute("SET ROLE zeroship_workflow_migrator")
         .await
         .is_err());
 }
@@ -621,7 +637,7 @@ async fn customer_runtime_has_dml_without_ddl_and_platform_roles_have_no_access(
 #[test]
 fn local_initialization_never_resets_an_incompatible_journal() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("zs-workflow.sqlite");
+    let path = journal_file(dir.path());
     let conn = rusqlite::Connection::open(&path).unwrap();
     conn.execute_batch(
         "CREATE TABLE __zeroship_workflow_runs (id text); INSERT INTO __zeroship_workflow_runs VALUES ('retained')",
@@ -648,7 +664,7 @@ fn local_initialization_refuses_a_journal_whose_fingerprint_moved() {
     use zeroship_workflow_schema::{fingerprint, SQLITE, STAMP_ROW_ID, STAMP_TABLE, VERSION};
 
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("zs-workflow.sqlite");
+    let path = journal_file(dir.path());
     schema::initialize_sqlite(&path).unwrap();
     let conn = rusqlite::Connection::open(&path).unwrap();
     conn.execute_batch(
@@ -705,7 +721,7 @@ fn local_initialization_refuses_a_journal_whose_fingerprint_moved() {
 #[compio::test]
 async fn sqlite_task_leases_and_receipts_preserve_the_frontier() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("zs-workflow.sqlite");
+    let path = journal_file(dir.path());
     schema::initialize_sqlite(&path).unwrap();
     task_contract(Rc::new(sqlite_store(&path).await)).await;
 }
@@ -952,7 +968,7 @@ async fn task_contract(store: Rc<OrmStore>) {
 #[compio::test]
 async fn sqlite_lifecycle_children_and_restart_share_service_transitions() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("zs-workflow.sqlite");
+    let path = journal_file(dir.path());
     schema::initialize_sqlite(&path).unwrap();
     behavior_contract(Rc::new(sqlite_store(&path).await)).await;
 }
@@ -1302,7 +1318,7 @@ async fn behavior_contract(store: Rc<OrmStore>) {
 #[compio::test]
 async fn sqlite_concurrent_admission_cycles_and_compensation_retries() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("zs-workflow.sqlite");
+    let path = journal_file(dir.path());
     schema::initialize_sqlite(&path).unwrap();
     review_contract(Rc::new(sqlite_store(&path).await)).await;
 }
@@ -1596,7 +1612,7 @@ async fn delayed_lease_write(table: &str, operation: &str, heartbeat: bool) {
         .await
         .unwrap();
     let admin = connect(&fixture.admin_url).await;
-    admin.batch_execute(&format!("CREATE SEQUENCE customer.delayed_write_calls; GRANT USAGE ON SEQUENCE customer.delayed_write_calls TO app_customer_role; CREATE FUNCTION customer.delay_write() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM nextval('customer.delayed_write_calls'); PERFORM pg_sleep(0.5); RETURN NEW; END $$; CREATE TRIGGER delay_write BEFORE {operation} ON customer.__zeroship_workflow_{table} FOR EACH ROW EXECUTE FUNCTION customer.delay_write();")).await.unwrap();
+    admin.batch_execute(&format!("CREATE SEQUENCE workflow_manager.delayed_write_calls; GRANT USAGE ON SEQUENCE workflow_manager.delayed_write_calls TO zeroship_workflow; CREATE FUNCTION workflow_manager.delay_write() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM nextval('workflow_manager.delayed_write_calls'); PERFORM pg_sleep(0.5); RETURN NEW; END $$; CREATE TRIGGER delay_write BEFORE {operation} ON workflow_manager.__zeroship_workflow_{table} FOR EACH ROW EXECUTE FUNCTION workflow_manager.delay_write();")).await.unwrap();
     let worker = super::WorkerIdentity::new("worker".into()).unwrap();
     let task = service.poll(&worker).await.unwrap().unwrap();
     if heartbeat {
@@ -1614,7 +1630,7 @@ async fn delayed_lease_write(table: &str, operation: &str, heartbeat: bool) {
     }
     // Sequences survive rollback, proving this reached the delayed database write.
     assert!(admin
-        .query_one("SELECT is_called FROM customer.delayed_write_calls", &[])
+        .query_one("SELECT is_called FROM workflow_manager.delayed_write_calls", &[])
         .await
         .unwrap()
         .get::<_, bool>(0));
@@ -1648,7 +1664,7 @@ async fn delayed_lease_write(table: &str, operation: &str, heartbeat: bool) {
     );
     admin
         .batch_execute(&format!(
-            "DROP TRIGGER delay_write ON customer.__zeroship_workflow_{table};"
+            "DROP TRIGGER delay_write ON workflow_manager.__zeroship_workflow_{table};"
         ))
         .await
         .unwrap();
@@ -1668,7 +1684,7 @@ async fn delayed_lease_write(table: &str, operation: &str, heartbeat: bool) {
 #[compio::test]
 async fn sqlite_signal_completion_races_do_not_lose_wakeups() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("zs-workflow.sqlite");
+    let path = journal_file(dir.path());
     schema::initialize_sqlite(&path).unwrap();
     signal_race_contract(Rc::new(sqlite_store(&path).await)).await;
 }
@@ -1764,7 +1780,7 @@ async fn signal_race_contract(store: Rc<OrmStore>) {
 #[compio::test]
 async fn sqlite_topic_fanout_preserves_recipient_scope_after_restart() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("zs-workflow.sqlite");
+    let path = journal_file(dir.path());
     schema::initialize_sqlite(&path).unwrap();
     broadcast_contract(Rc::new(sqlite_store(&path).await)).await;
 }
@@ -1923,7 +1939,7 @@ async fn broadcast_contract(store: Rc<OrmStore>) {
 #[compio::test]
 async fn sqlite_signal_ingress_enforces_scopes_epochs_and_receipts() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("zs-workflow.sqlite");
+    let path = journal_file(dir.path());
     schema::initialize_sqlite(&path).unwrap();
     ingress_contract(Rc::new(sqlite_store(&path).await)).await;
 }

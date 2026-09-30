@@ -19,7 +19,7 @@ use zeroship_data_orm::{orm::Entity, value};
 
 impl AppWorkflows {
     /// Close admission for a deployment the app no longer selects, check every
-    /// customer dependency under the app lock, and commit the release intent.
+    /// journal dependency under the app lock, and commit the release intent.
     /// The manager publishes this job; a worker cannot, and neither decides the
     /// journal's dependencies on its behalf.
     ///

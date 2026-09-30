@@ -1730,7 +1730,7 @@ case!(
 
 /// A body that never completes stops being redelivered once the job's counted
 /// executions reach the app's budget. Renewal is the only evidence an attempt
-/// began: a claim the creator journal defers never renews, so capacity pressure
+/// began: a claim the journal defers never renews, so capacity pressure
 /// and a paused dispatch cannot spend the budget. Nothing settles an exhausted
 /// job, because no executor produced an outcome for it.
 async fn delivery_budget_bounds_redelivery(fixture: &Fixture) {
