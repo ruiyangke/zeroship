@@ -3,29 +3,23 @@
 //! When a `&mut self` method's body invokes a user-supplied JS callback
 //! (e.g. `Local<Function>::call`, fired event handler, `dispatchEvent`),
 //! the callback can synchronously re-enter the SAME instance via the
-//! prototype: `this.method(...)` from JS. Pre-fix, the macro
-//! materialised a fresh `&mut Self` from the External pointer in
-//! internal field 0 on every call — re-entry produced two aliased
-//! `&mut Self` references, which is UB. The cryptic symptom (when the
-//! user wrapped state in an inner `RefCell`) was a `RefCell already
-//! mutably borrowed` panic from deep inside V8.
+//! prototype: `this.method(...)` from JS. Materialising a second
+//! `&mut Self` from the External pointer in internal field 0 would
+//! alias the first, which is UB.
 //!
-//! The fix in `gen_reentry_guard` emits a per-method, per-instance
-//! thread-local `RefCell<HashSet<usize>>` keyed by the External addr.
-//! On entry: insert; if already present, throw a V8 TypeError with a
-//! clear message and return BEFORE the unsafe `&mut Self`
-//! materialisation. On scope exit (RAII drop guard): remove.
+//! `gen_reentry_guard` emits, per method, a thread-local
+//! `Cell<[Option<usize>; 8]>` holding the External addresses of the
+//! instances that have that method in flight on this thread. On entry:
+//! if the address is already present, throw a V8 TypeError naming the
+//! class and method and return BEFORE the unsafe `&mut Self`
+//! materialisation; otherwise store it in the first empty slot. On
+//! scope exit an RAII drop guard clears that slot. Because the array
+//! holds every in-flight address, the 3-deep nesting case `a → b → a`
+//! throws on the inner `a`.
 //!
-//! Earlier versions explored a single-slot `Cell<Option<usize>>` as a memory
-//! optimisation but reverted the migration after discovering a
-//! soundness gap for the 3-deep nesting case `a → b → a` (see
-//! `nested_cross_instance_then_same_instance_throws` below — the
-//! regression test that pinned the gap). HashSet ships unchanged.
-//!
-//! Implementation note: we throw a V8 TypeError rather than `panic!`
-//! because Rust's panic runtime can't unwind through V8's C++ frames
-//! (SIGABRT on Linux). The user-facing message is still way clearer
-//! than the pre-fix cryptic RefCell-already-mutably-borrowed panic.
+//! The guard throws a V8 TypeError rather than calling `panic!` because
+//! Rust's panic runtime can't unwind through V8's C++ frames (SIGABRT
+//! on Linux).
 //!
 //! Coverage:
 //!   - Synchronous re-entry from a JS callback throws a TypeError
@@ -37,6 +31,8 @@
 //!   - The guard releases on RAII drop: a re-entry throw on instance A
 //!     doesn't leave instance A "occupied" — a fresh outer call on A
 //!     after the throw works again.
+//!   - Cross-instance nesting `a → b → a` throws on the inner `a`, and
+//!     after a nested `a → b` call unwinds every slot is empty again.
 #![allow(unsafe_code)]
 
 use std::cell::Cell;
@@ -328,16 +324,11 @@ fn guard_releases_after_throw() {
 }
 
 // ---------------------------------------------------------------------------
-// Restore-prior nesting: A → B → A. With the single-slot
-// `Cell<Option<usize>>`, the guard's correctness depends on the drop
-// guard restoring the PRIOR value (not just None) so that, after the
-// inner B-call's drop guard fires, the slot is `Some(a_addr)` again —
-// which means a synchronous attempt to re-enter A from inside B's body
-// MUST still fire the guard (A is still in-flight on the call stack).
-// This pins the cross-instance + same-method nesting semantic that the
-// HashSet variant got "for free" (`HashSet.contains(a_addr)` after B's
-// `remove(b_addr)` is still true). With the Cell variant, the
-// correctness comes from the restore-prior-on-drop pattern.
+// Cross-instance nesting: A → B → A. B's callback re-enters A while A
+// is still in flight on the call stack. The slot array then holds both
+// addresses, so the membership scan finds A and the inner call MUST
+// throw. A guard that remembered only the most recent caller would
+// see B here and let the aliasing `&mut Self` through.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -383,9 +374,9 @@ fn nested_cross_instance_then_same_instance_throws() {
 }
 
 // ---------------------------------------------------------------------------
-// Slot fully restores after nested return. After the A→B→A throw test,
-// the drop chain MUST leave __INFLIGHT[tickle] = None. A fresh top-level
-// call on either A or B must NOT throw.
+// Slots clear after a nested return. Once an outer A → B call unwinds,
+// the drop guards MUST have emptied every `tickle` slot, so a fresh
+// top-level call on either A or B must NOT throw.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -404,11 +395,11 @@ fn slot_clears_after_nested_unwind() {
         const b = new Reenterable(22);
         a.set_callback(() => { b.tickle(); });
         b.set_callback(() => {});
-        // Outer A → inner B → done. After the outer unwinds, the
-        // thread's __INFLIGHT[tickle] slot MUST be None again.
+        // Outer A → inner B → done. After the outer unwinds, every
+        // `tickle` slot on this thread MUST be empty again.
         const first = a.tickle();
-        // Same instances, fresh top-level call. The Cell-restore-prior
-        // semantics are correct iff this returns 11 (no false-positive
+        // Same instances, fresh top-level call. This returns 11 only
+        // if the drop guards emptied the slots (no false-positive
         // re-entry throw).
         a.set_callback(() => {});  // make a's callback a no-op
         const second = a.tickle();

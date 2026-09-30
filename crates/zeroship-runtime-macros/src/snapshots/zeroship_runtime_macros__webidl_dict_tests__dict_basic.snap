@@ -1,6 +1,5 @@
 ---
-source: crates/runtime-macros/src/webidl_dict_tests.rs
-assertion_line: 42
+source: crates/zeroship-runtime-macros/src/webidl_dict_tests.rs
 expression: format_expansion(out)
 ---
 impl RequestInit {
@@ -27,7 +26,8 @@ impl RequestInit {
                     ::zeroship_runtime::macro_runtime::state::OpError::type_error(
                         concat!(
                             "Cannot convert value to dictionary `",
-                            stringify!(RequestInit), "` — value is not an object",
+                            stringify!(RequestInit),
+                            "` — value is not an object",
                         ),
                     ),
                 );

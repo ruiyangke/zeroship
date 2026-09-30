@@ -1,6 +1,5 @@
 ---
-source: crates/runtime-macros/src/webidl_dict_tests.rs
-assertion_line: 57
+source: crates/zeroship-runtime-macros/src/webidl_dict_tests.rs
 expression: format_expansion(out)
 ---
 impl AbortHolder {
@@ -27,7 +26,8 @@ impl AbortHolder {
                     ::zeroship_runtime::macro_runtime::state::OpError::type_error(
                         concat!(
                             "Cannot convert value to dictionary `",
-                            stringify!(AbortHolder), "` — value is not an object",
+                            stringify!(AbortHolder),
+                            "` — value is not an object",
                         ),
                     ),
                 );

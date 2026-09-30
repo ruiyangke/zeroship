@@ -1,5 +1,5 @@
 ---
-source: crates/runtime-macros/src/v8_iterable_tests.rs
+source: crates/zeroship-runtime-macros/src/v8_iterable_tests.rs
 expression: format_expansion(out)
 ---
 /// Default-pair iterator companion for the parent class
@@ -184,7 +184,8 @@ pub(crate) fn __zs_iter_construct_throws(
     let __msg = v8::String::new(
             scope,
             ::std::concat!(
-                "Illegal constructor: ", "HeadersIterator",
+                "Illegal constructor: ",
+                "HeadersIterator",
                 " can only be created via the parent's keys() / values() / entries()",
             ),
         )
@@ -336,8 +337,9 @@ pub(crate) fn __Headers_for_each(
     let mut __cursor: usize = 0;
     let __inflight_addr = __ext.value() as usize;
     ::std::thread_local! {
-        static __ZS_VALUE_PAIRS_INFLIGHT : ::std::cell::Cell < [::std::option::Option <
-        usize >; 8], > = ::std::cell::Cell::new([::std::option::Option::None; 8]);
+        static __ZS_VALUE_PAIRS_INFLIGHT: ::std::cell::Cell<
+            [::std::option::Option<usize>; 8],
+        > = ::std::cell::Cell::new([::std::option::Option::None; 8]);
     }
     let __slot_index: ::std::option::Option<usize> = __ZS_VALUE_PAIRS_INFLIGHT
         .with(|__s| {
@@ -496,8 +498,9 @@ pub(crate) fn __Headers_iter_next(
     };
     let __inflight_addr = __parent_ext.value() as usize;
     ::std::thread_local! {
-        static __ZS_VALUE_PAIRS_INFLIGHT : ::std::cell::Cell < [::std::option::Option <
-        usize >; 8], > = ::std::cell::Cell::new([::std::option::Option::None; 8]);
+        static __ZS_VALUE_PAIRS_INFLIGHT: ::std::cell::Cell<
+            [::std::option::Option<usize>; 8],
+        > = ::std::cell::Cell::new([::std::option::Option::None; 8]);
     }
     let __slot_index: ::std::option::Option<usize> = __ZS_VALUE_PAIRS_INFLIGHT
         .with(|__s| {

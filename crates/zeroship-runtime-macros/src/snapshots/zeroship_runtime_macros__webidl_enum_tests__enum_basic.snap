@@ -1,6 +1,5 @@
 ---
-source: crates/runtime-macros/src/webidl_enum_tests.rs
-assertion_line: 44
+source: crates/zeroship-runtime-macros/src/webidl_enum_tests.rs
 expression: format_expansion(out)
 ---
 impl RequestMode {
@@ -53,7 +52,8 @@ impl ::zeroship_runtime::macro_runtime::convert::WebIdlConvertible for RequestMo
                                 __tc,
                                 __exc,
                                 concat!(
-                                    "Cannot convert value to enum `", stringify!(RequestMode),
+                                    "Cannot convert value to enum `",
+                                    stringify!(RequestMode),
                                     "` (user code threw)",
                                 ),
                             ),
@@ -62,7 +62,8 @@ impl ::zeroship_runtime::macro_runtime::convert::WebIdlConvertible for RequestMo
                         ::std::result::Result::Err(
                             ::zeroship_runtime::macro_runtime::state::OpError::type_error(
                                 concat!(
-                                    "Cannot convert value to enum `", stringify!(RequestMode),
+                                    "Cannot convert value to enum `",
+                                    stringify!(RequestMode),
                                     "` (ToString failed)",
                                 ),
                             ),
@@ -77,7 +78,8 @@ impl ::zeroship_runtime::macro_runtime::convert::WebIdlConvertible for RequestMo
                 ::zeroship_runtime::macro_runtime::state::OpError::type_error(
                     format!(
                         "Cannot convert value `{}` to enum `{}`. Expected one of: {}",
-                        __rust_str, stringify!(RequestMode),
+                        __rust_str,
+                        stringify!(RequestMode),
                         "'navigate', 'same-origin', 'no-cors', 'cors'",
                     ),
                 )

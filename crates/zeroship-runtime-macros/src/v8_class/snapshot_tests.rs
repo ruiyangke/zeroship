@@ -1,20 +1,17 @@
-//! Codegen snapshot tests for `#[v8_state_marker]`.
+//! Codegen snapshot tests for `#[v8_class]`.
 //!
-//! Lock the macro's emission against unintended drift. Per design §5.1
-//! / §6.4: the no-attribute path is required to be byte-identical to
-//! the old emission shape (modulo the qualified Private-symbol name in
-//! row 16). The new `#[v8_state_marker]` path is also snapshotted so a
-//! future change can detect drift in either direction.
+//! Each test expands one representative impl through `expand_tokens`
+//! and snapshots the prettyplease-formatted output, so any change to
+//! the emitted code surfaces as a reviewable diff. The shapes are the
+//! no-attribute path, the `#[v8_state_marker]` path and a variadic
+//! method. Bumps require `cargo insta accept` with reviewer audit.
 //!
-//! We snapshot the prettyplease-formatted output of `expand_tokens` so
-//! the snapshot stays human-readable across rustc / quote tweaks. Bumps
-//! require `cargo insta accept` with reviewer audit (design §8 settled-
-//! question 9).
+//! A snapshot records text, not behaviour. What the emitted code does
+//! is asserted by the `v8_*_smoke.rs` tests in
+//! `crates/zeroship-runtime/tests/`, and the macro's diagnostics by the
+//! trybuild suites beside them, which check the real compiler's output.
 //!
-//! Extracted out of `mod.rs` so the module head stays a thin
-//! orchestrator. The snapshot files themselves live in
-//! `crates/runtime-macros/src/v8_class/snapshots/` (paths unchanged
-//! across the move).
+//! insta resolves the snapshot files to `snapshots/` beside this module.
 
 use super::expand_tokens;
 use proc_macro2::TokenStream as TokenStream2;
@@ -29,11 +26,9 @@ fn format_expansion(out: TokenStream2) -> String {
     prettyplease::unparse(&parsed)
 }
 
-/// Insta inline snapshot for the no-attribute (control) shape — a
-/// `#[v8_class] impl Foo { ... }` with one constructor + one method
-/// + one getter + one setter. Locks the byte-identical-emission
-///   invariant that the no-attribute path must satisfy
-///   (design §5.1 over CloseEventState / AbortSignal / Blob).
+/// Snapshot of the no-attribute shape — a `#[v8_class] impl Foo { ... }`
+/// with one constructor, one method, one getter and one setter. The
+/// marker and the receiver are both `Foo`.
 #[test]
 fn snapshot_class_basic() {
     let item = quote! {
@@ -65,8 +60,7 @@ fn snapshot_class_basic() {
     insta::assert_snapshot!("class_basic", format_expansion(out));
 }
 
-/// Insta inline snapshot for the new `#[v8_state_marker(Marker)]
-/// impl State` shape. The marker (`Marker`) drives JS-class
+/// Snapshot of the `#[v8_state_marker(Marker)] impl State` shape. The marker (`Marker`) drives JS-class
 /// identity; the receiver (`State`) drives the `Box<State>` payload
 /// and per-method receiver type.
 #[test]
@@ -133,26 +127,4 @@ fn snapshot_class_with_variadic_method() {
     };
     let out = expand_tokens(quote! {}, item);
     insta::assert_snapshot!("class_with_variadic_method", format_expansion(out));
-}
-
-/// Hard-error snapshot: marker == receiver. Per design §4.7 the
-/// macro emits a clear compile_error rather than silently treating
-/// it as a no-op (which would mask a typo'd marker name).
-#[test]
-fn snapshot_class_marker_equals_receiver_errors() {
-    let item = quote! {
-        #[v8_state_marker(Foo)]
-        impl Foo {
-            #[v8_constructor]
-            fn new() -> Foo { Foo }
-        }
-    };
-    let out = expand_tokens(quote! {}, item);
-    // Compile-error tokens still parse as a valid syn::File (each
-    // `compile_error!(...)` is an item-level macro invocation), so
-    // prettyplease can format them.
-    insta::assert_snapshot!(
-        "class_marker_equals_receiver_errors",
-        format_expansion(out)
-    );
 }

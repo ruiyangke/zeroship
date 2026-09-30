@@ -335,8 +335,9 @@ pub(crate) fn __Foo_touch_callback(
     };
     let __inflight_addr = __ext.value() as usize;
     ::std::thread_local! {
-        static __INFLIGHT : ::std::cell::Cell < [::std::option::Option < usize >; 8] > =
-        ::std::cell::Cell::new([::std::option::Option::None; 8]);
+        static __INFLIGHT: ::std::cell::Cell<[::std::option::Option<usize>; 8]> = ::std::cell::Cell::new(
+            [::std::option::Option::None; 8],
+        );
     }
     let __slot_index: ::std::option::Option<usize> = __INFLIGHT
         .with(|__s| {
@@ -455,8 +456,9 @@ pub(crate) fn __Foo_set_value_callback(
     };
     let __inflight_addr = __ext.value() as usize;
     ::std::thread_local! {
-        static __INFLIGHT : ::std::cell::Cell < [::std::option::Option < usize >; 8] > =
-        ::std::cell::Cell::new([::std::option::Option::None; 8]);
+        static __INFLIGHT: ::std::cell::Cell<[::std::option::Option<usize>; 8]> = ::std::cell::Cell::new(
+            [::std::option::Option::None; 8],
+        );
     }
     let __slot_index: ::std::option::Option<usize> = __INFLIGHT
         .with(|__s| {

@@ -13,15 +13,22 @@ quote = { workspace = true }
 proc-macro2 = { workspace = true }
 
 [dev-dependencies]
-# Insta snapshot tests for the v8_class proc-macro's emit. Locks the
-# no-attribute path against drift (design `docs/archive/macro-v8-state.md`
-# §5.1 / §6.4) and the new `#[v8_state_marker]` path against unintended
-# changes. Bumps require `cargo insta accept` with reviewer audit.
+# Insta snapshot tests of the code the macros emit (`#[v8_class]` with and
+# without `#[v8_state_marker]`, the `v8_iterable` companion, and the
+# `WebIdlDict` / `WebIdlEnum` derives), so any change to it surfaces as a
+# reviewable diff. Bumps require `cargo insta accept` with reviewer audit.
 insta = "1"
 # Unit tests parse the macro output back through syn for round-trip
 # verification — so the snapshot stays human-readable rather than a
 # whitespace-fragile token blob.
-prettyplease = "0.2"
+#
+# `verbatim` decides how the printer lays out standard-library macro
+# invocations such as `thread_local!`, `concat!` and `format!`.
+# Cargo unifies features across everything in one build, so any package
+# built alongside this one can switch it on (bindgen does). Declaring it
+# here gives the snapshots one layout whether this crate is tested alone
+# or with the whole workspace.
+prettyplease = { version = "0.2", features = ["verbatim"] }
 
 [lints]
 workspace = true

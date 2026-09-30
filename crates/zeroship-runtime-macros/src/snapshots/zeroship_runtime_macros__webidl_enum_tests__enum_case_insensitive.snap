@@ -1,6 +1,5 @@
 ---
-source: crates/runtime-macros/src/webidl_enum_tests.rs
-assertion_line: 64
+source: crates/zeroship-runtime-macros/src/webidl_enum_tests.rs
 expression: format_expansion(out)
 ---
 impl HashAlgo {
@@ -55,7 +54,8 @@ impl ::zeroship_runtime::macro_runtime::convert::WebIdlConvertible for HashAlgo 
                                 __tc,
                                 __exc,
                                 concat!(
-                                    "Cannot convert value to enum `", stringify!(HashAlgo),
+                                    "Cannot convert value to enum `",
+                                    stringify!(HashAlgo),
                                     "` (user code threw)",
                                 ),
                             ),
@@ -64,7 +64,8 @@ impl ::zeroship_runtime::macro_runtime::convert::WebIdlConvertible for HashAlgo 
                         ::std::result::Result::Err(
                             ::zeroship_runtime::macro_runtime::state::OpError::type_error(
                                 concat!(
-                                    "Cannot convert value to enum `", stringify!(HashAlgo),
+                                    "Cannot convert value to enum `",
+                                    stringify!(HashAlgo),
                                     "` (ToString failed)",
                                 ),
                             ),
@@ -79,7 +80,8 @@ impl ::zeroship_runtime::macro_runtime::convert::WebIdlConvertible for HashAlgo 
                 ::zeroship_runtime::macro_runtime::state::OpError::type_error(
                     format!(
                         "Cannot convert value `{}` to enum `{}`. Expected one of: {}",
-                        __rust_str, stringify!(HashAlgo),
+                        __rust_str,
+                        stringify!(HashAlgo),
                         "'SHA-1', 'SHA-256', 'SHA-512'",
                     ),
                 )
