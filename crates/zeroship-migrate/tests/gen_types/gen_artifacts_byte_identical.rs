@@ -15,10 +15,10 @@
 //!
 //! The production contexts are deliberately different. The build uses `public` and
 //! the generated TypeScript copy of the schema-emit inject charter. The service uses
-//! the app id as its schema and the exact app-bound default confined policy composed
-//! by `zeroship-migrate-server`. This test feeds each side only the inputs it actually
-//! owns. It also reverses the request's document vector so the service arm has to
-//! restore the filename order that its apply loop uses.
+//! the schema it derives from the target database and the exact schema-bound default
+//! confined policy composed by `zeroship-migrate-server`. This test feeds each side
+//! only the inputs it actually owns. It also reverses the request's document vector
+//! so the service arm has to restore the filename order that its apply loop uses.
 //!
 //! The fixture includes a foreign key because FK definitions embed `project_schema`.
 //! A one-table fixture with no schema-sensitive carrier would let the two schema inputs
@@ -254,10 +254,11 @@ fn raw_ops(documents: &[IrDocumentFixture]) -> Vec<Op> {
 
 /// Render the request as the migration service can immediately after apply.
 ///
-/// This follows the service's real seams: filename order, app id schema, exact
-/// app-bound default confined policy, then the op renderer's production policy-
-/// resolution seam. A normal recorded migration set has no optional policy
-/// draft, so the default/no-draft branch is the production build-to-server path.
+/// This follows the service's real seams: filename order, the database-derived
+/// schema, exact schema-bound default confined policy, then the op renderer's
+/// production policy-resolution seam. A normal recorded migration set has no
+/// optional policy draft, so the default/no-draft branch is the production
+/// build-to-server path.
 fn render_as_migration_service(
     mut documents: Vec<IrDocumentFixture>,
 ) -> (String, GeneratedArtifacts) {
@@ -274,11 +275,11 @@ fn render_as_migration_service(
         "the server render consumes the same filename order as apply"
     );
 
-    let app_id = zeroship_core::app_id::AppId::mint();
+    let database = zeroship_core::DatabaseId::mint();
     let policy_config =
         migrate_server_policy::ManagedPolicyConfig::default_confined(vec![0_u8; 32], 1)
             .expect("the production default confined policy loads");
-    let project_schema = zeroship_core::app_derivation::schema_name(&app_id);
+    let project_schema = zeroship_core::database_derivation::schema_name(&database);
     let effective = policy_config
         .compose_effective_for_schema(&project_schema, None, None)
         .expect("the service composes its no-draft policy for that schema");

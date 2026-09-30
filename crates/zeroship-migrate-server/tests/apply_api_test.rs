@@ -1507,7 +1507,7 @@ async fn apply_api_applies_ir_into_the_named_databases_schema_pg() {
     );
     assert!(
         table_exists(&conn, &database_derivation::schema_name(&database), "notes").await,
-        "notes table must exist in the per-app schema"
+        "notes table must exist in the database schema"
     );
     assert!(
         !table_exists(&conn, "public", "notes").await,

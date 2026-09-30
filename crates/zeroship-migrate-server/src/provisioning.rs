@@ -1,11 +1,12 @@
-//! Per-project migrator-role + schema provisioning, over the raw compio
+//! Migrator-role grants and the unmask audit table, over the raw compio
 //! `Client`.
 //!
 //! The published `zero-migrate` engine is driver-free, so it cannot own this
-//! DDL: it exports only
-//! [`migrator_role_name`](zeroship_migrate_postgres::role::migrator_role_name)
-//! (pure identifier derivation), and this module supplies the DDL that
-//! establishes the least-privilege `migrator_<project>_<hash>` role.
+//! DDL. A database's schema and the `zs_db_<dbs>_mig` role that owns it are
+//! minted by the cluster reconciler
+//! (`crate::datastore::cluster::converge_database`); an apply names that role
+//! through `migrator_executor_config_for_role` and re-asserts its
+//! least-privilege grant set with [`provision_migrator`].
 //!
 //! The provisioning runs over the SAME raw compio `Client` the service already
 //! holds (borrowed from the [`CompioPgSession`](crate::session::CompioPgSession)
@@ -17,19 +18,21 @@
 //! The migrator role gets EXACTLY:
 //! - `NOSUPERUSER NOCREATEROLE NOCREATEDB NOLOGIN NOBYPASSRLS` — no escalation
 //!   surface.
-//! - OWNS the project schema (its DDL + `ALTER DEFAULT PRIVILEGES` targets work),
-//!   with `CREATE, USAGE` on it. The engine journal lives in that same schema
-//!   under the `__zeroship_` prefix, so the migrator owns the journal too. That is
-//!   accepted: an owner's privileges are implicit and cannot be revoked away, so
-//!   the only honest position is that the record of what ran belongs to the tenant
-//!   whose schema it describes. The platform keeps no counter-record, so this
-//!   journal is the only record of what ran - and it belongs to the tenant.
-//! - `search_path` = project schema FIRST, then extension schema(s) (default
+//! - OWNS the database schema (its DDL + `ALTER DEFAULT PRIVILEGES` targets
+//!   work), with `CREATE, USAGE` on it. The engine journal lives in that same
+//!   schema under the `__zeroship_` prefix, so the migrator owns the journal too.
+//!   That is accepted: an owner's privileges are implicit and cannot be revoked
+//!   away, so the only honest position is that the record of what ran belongs to
+//!   the tenant whose schema it describes. The platform keeps no counter-record,
+//!   so this journal is the only record of what ran - and it belongs to the
+//!   tenant.
+//! - `search_path` = database schema FIRST, then extension schema(s) (default
 //!   `public`, resolution-only) so unqualified `vector(N)`/`geography(...)`
 //!   resolve.
 //! - `REVOKE ALL` then `GRANT USAGE` on the extension schema(s): resolve the
 //!   shared extension types, never create/write there.
-//! - No grant on `control`/`auth`/`billing`/other project schemas — deny-by-absence.
+//! - No grant on `control`/`auth`/`billing`/other database schemas —
+//!   deny-by-absence.
 //!
 //! Every statement is idempotent (role creation guarded on `pg_roles`, all
 //! GRANT/ALTER/REVOKE naturally idempotent), so it is safe to run on every apply.
@@ -37,7 +40,6 @@
 use compio_postgres::Client;
 use zeroship_migrate::ExecutorConfig;
 use zeroship_migrate_postgres::confinement::PostgresConfinementExt;
-use zeroship_migrate_postgres::role::migrator_role_name;
 
 use crate::policy::confined_guard_policy_for_schema;
 
@@ -50,17 +52,6 @@ pub enum ProvisionRoleError {
     /// The derived role name was empty or otherwise unusable.
     #[error("invalid migrator role name derived from project id '{0}'")]
     BadRoleName(String),
-}
-
-/// Error creating the data schema and its least-privilege migrator role.
-#[derive(Debug, thiserror::Error)]
-pub enum ProvisionDatabaseError {
-    /// PostgreSQL refused creation of the data schema.
-    #[error("database schema provision: {0}")]
-    Schema(#[source] compio_postgres::Error),
-    /// PostgreSQL refused or could not derive the migrator role.
-    #[error(transparent)]
-    Role(#[from] ProvisionRoleError),
 }
 
 fn quote_ident(ident: &str) -> String {
@@ -93,40 +84,6 @@ pub(crate) fn migrator_executor_config_for_role(schema: &str, role: &str) -> Exe
     .with_migrator_role(role.to_string());
     config.confinement.meta_schema = schema.to_string();
     config
-}
-
-/// The same identity for a PLATFORM schema, whose owner is derived from the
-/// schema because no other entity names it.
-pub(crate) fn migrator_executor_config(
-    schema: &str,
-) -> Result<(ExecutorConfig, String), ProvisionRoleError> {
-    let role = migrator_role_name(schema)
-        .map_err(|_| ProvisionRoleError::BadRoleName(schema.to_string()))?;
-    Ok((migrator_executor_config_for_role(schema, &role), role))
-}
-
-/// Idempotently create one schema and the least-privilege migrator role that
-/// owns it.
-///
-/// Schema-addressed: the owner is derived from the schema text, because no
-/// database entity names the schema. A CREATOR database's schema is not created
-/// here: the cluster reconciler owns that, because the schema's owner and its
-/// two capability roles are derived from the database id and must be minted in
-/// one transaction with the epoch row that names them.
-pub async fn provision_database(
-    admin: &Client,
-    schema: &str,
-) -> Result<(), ProvisionDatabaseError> {
-    let (config, _) = migrator_executor_config(schema)?;
-    admin
-        .batch_execute(&format!(
-            "CREATE SCHEMA IF NOT EXISTS {}",
-            quote_ident(schema)
-        ))
-        .await
-        .map_err(ProvisionDatabaseError::Schema)?;
-    provision_migrator(admin, &config).await?;
-    Ok(())
 }
 
 /// Retry a batch statement over the brief `tuple concurrently updated` catalog
@@ -275,28 +232,28 @@ pub async fn provision_migrator(
     Ok(())
 }
 
-/// The unqualified name of the per-app unmask audit table.
+/// The unqualified name of a database's unmask audit table.
 ///
 /// The PostgreSQL and SQLite creators and the ORM writer are kept in sync by
 /// `crates/zeroship-data-v8/tests/audit_table_parity.rs`.
 pub const AUDIT_UNMASK_TABLE: &str = "__zeroship_audit_unmask";
 
-/// The DDL that gives an app its unmask audit table, in the app's OWN schema.
+/// The DDL that gives a database its unmask audit table, in its OWN schema.
 ///
 /// # Why this is here and not in the worker
 ///
 /// The migration service owns this DDL so the creator runtime emits no schema
-/// changes. The table stays in the app schema and the runtime writes it through
-/// ordinary parameterized SQL.
+/// changes. The table stays in the database schema and the runtime writes it
+/// through ordinary parameterized SQL.
 ///
 /// # Idempotence
 ///
 /// `IF NOT EXISTS` throughout, so it is safe on every apply, which is how a
-/// redeploy of an app provisioned before this table existed acquires it.
+/// database provisioned before this table existed acquires it on its next apply.
 #[must_use]
-pub fn audit_unmask_table_sql(app_schema: &str) -> String {
-    let schema_q = quote_ident(app_schema);
-    let schema_lit = quote_lit(app_schema);
+pub fn audit_unmask_table_sql(schema: &str) -> String {
+    let schema_q = quote_ident(schema);
+    let schema_lit = quote_lit(schema);
     let table_q = quote_ident(AUDIT_UNMASK_TABLE);
     let table_lit = quote_lit(AUDIT_UNMASK_TABLE);
     format!(
@@ -411,7 +368,7 @@ pub async fn grant_audit_unmask_to_capabilities(
     .await
 }
 
-/// Idempotently establish an app's unmask audit table, as an admin principal.
+/// Idempotently establish a database's unmask audit table, as an admin principal.
 ///
 /// Runs [`audit_unmask_table_sql`], the one generator for this DDL. Exported so a
 /// caller that needs the table reaches this statement rather than writing a
@@ -423,9 +380,9 @@ pub async fn grant_audit_unmask_to_capabilities(
 /// connection is not the admin principal this expects.
 pub async fn provision_audit_unmask_table(
     admin: &Client,
-    app_schema: &str,
+    schema: &str,
 ) -> Result<(), compio_postgres::Error> {
-    exec_retry(admin, &audit_unmask_table_sql(app_schema)).await
+    exec_retry(admin, &audit_unmask_table_sql(schema)).await
 }
 
 #[cfg(test)]
@@ -434,9 +391,9 @@ mod audit_unmask_tests {
     use uuid::Uuid;
 
     /// The identifier goes through `quote_ident`, which doubles embedded quotes.
-    /// The app schema is a UUID in production, but this generator is exported and
-    /// a caller passing anything else must not be able to break out of the
-    /// identifier.
+    /// The schema is a derived `db_<dbs>` name in production, but this generator
+    /// is exported and a caller passing anything else must not be able to break
+    /// out of the identifier.
     #[test]
     fn app_schema_is_quoted_not_interpolated_raw() {
         let sql = audit_unmask_table_sql("a\"; DROP SCHEMA public; --");

@@ -761,12 +761,6 @@ impl std::fmt::Display for DbError {
 
 impl std::error::Error for DbError {}
 
-impl From<zeroship_core::database_role::PerAppRoleNameError> for DbError {
-    fn from(error: zeroship_core::database_role::PerAppRoleNameError) -> Self {
-        Self::internal(format!("db: {error}"))
-    }
-}
-
 impl From<zeroship_core::database_role::RoleNameTooLong> for DbError {
     fn from(error: zeroship_core::database_role::RoleNameTooLong) -> Self {
         Self::internal(format!("db: {error}"))

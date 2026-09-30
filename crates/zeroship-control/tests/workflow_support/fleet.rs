@@ -16,8 +16,8 @@ use testcontainers::{core::WaitFor, runners::SyncRunner, Container, GenericImage
 use uuid::Uuid;
 use zeroship_core::service_assertion::ServiceSigningKey;
 use zeroship_core::service_peers::service_issuer;
-use zeroship_core::AppId;
-use zeroship_core::UserId;
+use zeroship_core::database_role::DatabaseCapability;
+use zeroship_core::{AppId, BindingId, DatabaseId, UserId};
 
 pub const CONTROL_KEY: &str = "test-control-key";
 const MASTER_KEY: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -142,6 +142,11 @@ pub struct Fleet {
     /// Present only when [`FleetOptions::workflow_manager`] asked for one.
     pub manager_url: Option<String>,
     pub app_id: AppId,
+    /// The creator database this fleet's app is bound to, on the creator zone.
+    pub creator_database: DatabaseId,
+    /// The app's read-write binding to [`Self::creator_database`]: the role
+    /// the worker narrows to before it reaches that database's tables.
+    pub binding: BindingId,
     pub deploy_id: String,
     pub blob_root: PathBuf,
 }
@@ -209,6 +214,8 @@ impl Fleet {
                 .workflow_manager
                 .then(|| format!("http://127.0.0.1:{}", port())),
             app_id: AppId::mint(),
+            creator_database: DatabaseId::mint(),
+            binding: BindingId::mint(),
             deploy_id: String::new(),
         };
         fs::create_dir_all(&fleet.blob_root).unwrap();
@@ -516,42 +523,37 @@ impl Fleet {
                 .unwrap();
         let driver = compio::runtime::spawn(connection.run());
         // THE CREATOR ZONE. Every schema statement below runs on the creator
-        // database, which has no platform schema;  above stays on the
+        // database, which has no platform schema; `pg` above stays on the
         // platform one and is used only for platform catalog rows.
         let (mut creator_pg, creator_connection) =
             compio_postgres::connect(&fleet.database.creator_url(), compio_postgres::NoTls)
                 .await
                 .unwrap();
         let creator_driver = compio::runtime::spawn(creator_connection.run());
-        // The PLATFORM schema this app's workflow journal lives in, composed
-        // from the app id. It is not a creator database and no binding reaches
-        // it.
-        zeroship_migrate_server::provisioning::provision_database(&creator_pg, fleet.app_id.as_str())
-            .await
-            .unwrap();
         // THE CREATOR DATABASE. Declared on the platform side exactly as
-        // Control declares one, converged on the creator side exactly as the
-        // cluster reconciler converges one, and bound to this app - the apply
-        // below writes into ITS schema and admits against ITS binding.
-        let database = zeroship_core::DatabaseId::mint();
-        declare_creator_database(&pg, &fleet.app_id, &database).await;
+        // Control declares one, converged and granted on the creator side
+        // exactly as the cluster reconciler converges and grants one, and bound
+        // to this app - the apply below writes into ITS schema, and the worker
+        // reaches it through ITS binding role.
+        declare_creator_database(&pg, &fleet.app_id, &fleet.creator_database, &fleet.binding)
+            .await;
         zeroship_migrate_server::datastore::cluster::apply_bootstrap_corpus(&creator_pg)
             .await
             .expect("bootstrap the creator cluster");
-        zeroship_migrate_server::datastore::cluster::converge_database(&mut creator_pg, &database)
-            .await
-            .expect("converge the creator database");
-        if fleet.manager_url.is_some() {
-            // The creator journal is migration-path DDL: the worker's host
-            // never creates it. Installing it before the apply below leaves it
-            // inside the apply's schema-wide runtime-role grant, so the worker
-            // reaches it exactly as it reaches the creator's own tables.
-            let schema = zeroship_workflow::service::store::SchemaName::new(fleet.app_id.as_str())
-                .expect("the app's schema name");
-            creator_pg.batch_execute(&zeroship_workflow::service::schema::postgres_sql(&schema))
-                .await
-                .expect("install the creator workflow journal");
-        }
+        zeroship_migrate_server::datastore::cluster::converge_database(
+            &mut creator_pg,
+            &fleet.creator_database,
+        )
+        .await
+        .expect("converge the creator database");
+        zeroship_migrate_server::datastore::cluster::grant_binding(
+            &creator_pg,
+            &fleet.binding,
+            &fleet.creator_database,
+            DatabaseCapability::ReadWrite,
+        )
+        .await
+        .expect("grant the fleet app's binding");
         let request = serde_json::from_slice(
             &fs::read(schema_work.join("generated/apply-request.json")).unwrap(),
         )
@@ -564,7 +566,7 @@ impl Fleet {
         zeroship_migrate_server::apply::apply_ir_documents(
             &fleet.database.creator_url(),
             &schema_work,
-            &database,
+            &fleet.creator_database,
             &request,
             &policy,
             &owner,
@@ -837,7 +839,8 @@ fn pack(path: &Path) {
 async fn declare_creator_database(
     pg: &compio_postgres::Client,
     app: &AppId,
-    database: &zeroship_core::DatabaseId,
+    database: &DatabaseId,
+    binding: &BindingId,
 ) {
     let project: String = pg
         .query_one(
@@ -889,12 +892,13 @@ async fn declare_creator_database(
     pg.execute(
         "INSERT INTO zeroship.database_bindings \
              (id, app_id, database_id, project_id, capability, status, observed_generation) \
-         VALUES ($1, $2, $3, $4, 'readwrite', 'active', 1)",
+         VALUES ($1, $2, $3, $4, $5, 'active', 1)",
         &[
-            &zeroship_core::BindingId::mint().as_str().to_owned(),
+            &binding.as_str(),
             &app.as_str(),
             &database.as_str(),
             &project,
+            &DatabaseCapability::ReadWrite.as_wire(),
         ],
     )
     .await

@@ -109,9 +109,9 @@ impl Database {
         url.set_path(&format!("/{name}"));
 
         // The creator database carries NO platform schema, so it is created
-        // empty rather than cloned from anything. Its app schemas arrive the
-        // way production's do: through the migration service's provisioning and
-        // apply path.
+        // empty rather than cloned from anything. Its database schemas arrive
+        // the way production's do: converged by the cluster reconciler's
+        // statements and migrated through the migration service's apply path.
         let creator_name = format!("creator_{}", uuid::Uuid::new_v4().simple());
         let mut creator = url::Url::parse(&template.creator_url).unwrap();
         creator.set_path("/postgres");
@@ -132,10 +132,10 @@ impl Database {
         self.url.clone()
     }
 
-    /// The CREATOR database: the worker and the app schemas it runs creator
-    /// code against. It holds no workflow journal, and no `zeroship` schema -
-    /// that absence is what the worker's boot posture gate refuses to start
-    /// without.
+    /// The CREATOR database: the worker and the database schemas it runs
+    /// creator code against. It holds no workflow journal, and no `zeroship`
+    /// schema - that absence is what the worker's boot posture gate refuses to
+    /// start without.
     pub fn creator_url(&self) -> String {
         self.creator_url.clone()
     }

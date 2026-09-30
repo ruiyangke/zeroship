@@ -314,15 +314,14 @@ design exists to remove.
 The physical schema name `db_<id>` is derived, never stored, and it lives in
 `crates/zeroship-core/src/database_derivation.rs`, a sibling of
 `crates/zeroship-core/src/app_derivation.rs` rather than an addition to it. Both exist for the
-same reason - so the data plane and the migration service cannot answer the question differently
-- but they are kept apart because the app-keyed derivations do not all retire: the lifecycle lock
-seed stays app-keyed, and so does the workflow journal until
-`docs/proposals/2026-09-19-workflow-journal-relocation.md` moves it. One module holding both would
-invite a future reader to assume every derivation in it moved.
+same reason - so services in separate processes cannot answer the question differently - but they
+are kept apart because what stays app-keyed names no database object: the gateway's ring key and
+the app-lifecycle lock seed. One module holding both would invite a future reader to assume every
+derivation in it moved.
 
-The text layer beneath them is shared: `crates/zeroship-core/src/database_role.rs` composes every
-role name and refuses one it would have truncated, so the 63-byte ceiling is enforced at a single
-site rather than once per caller.
+The text layer beneath the database derivations is `crates/zeroship-core/src/database_role.rs`: it
+composes every role name and refuses one it would have truncated, so the 63-byte ceiling is
+enforced at a single site rather than once per caller.
 
 There is no `engine` column. The hosted tier is PostgreSQL only per the AGENTS.md invariant,
 and SQLite is the dev tier, which has no control plane at all.
@@ -787,10 +786,9 @@ itself comes from `binding_role_name` (`crates/zeroship-core/src/database_role.r
 composes `format!("zs_bind_{binding_id}")` and refuses a name PostgreSQL would truncate.
 
 The data plane narrows per transaction with `SET LOCAL ROLE "zs_bind_<bnd>"` as the first
-statement of the setup batch that already exists
-(`crates/zeroship-data-orm/src/backend/postgres/pg_session_sql.rs`): same statement, same batch
-position, no extra round trip. It replaces the per-app role name composed by
-`crates/zeroship-core/src/database_role.rs` in that builder and nowhere else.
+statement of the transaction's setup batch
+(`crates/zeroship-data-orm/src/backend/postgres/pg_session_sql.rs`), so narrowing costs no extra
+round trip.
 
 **The role must be per binding, not per database.** `SET ROLE` authorizes against the transitive
 closure of the memberships held by the role that *connected*, which here is always the shared
@@ -1492,10 +1490,12 @@ The step order in `crates/zeroship-data-orm/src/cdc/lifecycle.rs` and
 | subscription gate, keyed on the app | keyed on the database: refuse while any subscription on any binding holder is observable |
 | drain the broker | the broker's routing table gains the database, so this fans out to every binding holder |
 | consumer cancel plus slot teardown | **No shared CDC object is dropped.** The relay-owned slot, stream and publication live for the Datastore; remove only this Database's publication members and fan-out routes |
-| `DROP SCHEMA "<app_id>" CASCADE` | `DROP SCHEMA "db_<dbs>" CASCADE` |
-| `DROP ROLE "app_<id>_role"` | `DROP ROLE zs_db_<dbs>_{mig,rw,ro}`, still after the schema |
 
 The third is the one that fails silently if it is ported rather than re-keyed.
+
+The schema and its roles go last, in `drop_database`
+(`crates/zeroship-migrate-server/src/datastore/cluster.rs`): `DROP SCHEMA "db_<dbs>" CASCADE`, then
+`zs_db_<dbs>_{mig,rw,ro,unmask}`, after the schema because the migrator owns it.
 
 **Retire a datastore.** Only when it holds no database. With relocation unsupported, that means
 waiting for its databases to be deleted, or replacing the cluster underneath it instead.
@@ -2143,27 +2143,6 @@ Each records something that was tried or specified and broke.
   precedent for it: corrupting that one breaks only the creator, which is why
   `docs/proposals/2026-08-28-migration-record-consolidation.md` accepts it there and why it does
   not transfer here.
-
-- **Do not re-key `app_derivation::schema_name` without deciding where the workflow journal
-  goes.** It returns the app id, and `workflow_host::app_schema` composes the journal's home
-  from it through `DbBinding::platform` - the trusted-service constructor, which carries no
-  database edge and never consults `SuppliedAppBindings`. So plurality cannot split the journal
-  today, and that is an accident of the derivation rather than a decision. Re-keying it to a
-  database MOVES the journal: rows already written stay in a schema nothing points at afterwards,
-  not deleted and not read, with no compile error to say so.
-
-  **The migration service's re-key went around this, not through it.** The apply derives its
-  schema from `database_derivation::schema_name`, so a creator's tables follow the database
-  while the journal stays where the app id puts it. That is why the tripwire below did not fire
-  and why the journal's home is still an open decision rather than one this change made.
-  Where a journal lives is the host's choice: `JournalLocation::CreatorSchema` puts it beside
-  the creator's tables and `JournalLocation::Service` puts it in a schema the service owns
-  (`crates/zeroship-worker/src/workflow_host.rs`), so a re-key moves the first arm only.
-  `a_creator_journal_answers_each_app_its_own_schema`
-  (`crates/zeroship-worker/src/workflow_host/tests.rs`) asserts that arm answers the app id
-  itself, so it trips on exactly that change and explains the consequence where the person doing
-  the re-key will meet it. The reasoning lives in that test, deliberately not restated here: two
-  copies of an argument drift and the test is the one that fails.
 
 - **Do not reintroduce a control-side record of what migrations ran.** The engine journal in the
   creator's own schema is the only record. A creator can destroy their own journal, and that is

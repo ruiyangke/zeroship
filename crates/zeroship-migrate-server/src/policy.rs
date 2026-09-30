@@ -622,12 +622,16 @@ impl ManagedPolicyError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    // A minted app id is a convenient source of a well-formed, unique schema
-    // NAME for these cases. Nothing in this module takes an app id any more -
-    // the ceiling is selected by tier and bound to a schema.
-    use zeroship_core::{app_derivation, AppId};
+    use zeroship_core::{database_derivation, DatabaseId};
 
     const KEY: &[u8] = b"migrated test seal key 32 bytes min";
+
+    /// A well-formed, unique schema name, derived the way an apply derives the
+    /// schema it binds the ceiling to. Nothing in this module takes a database
+    /// id: the ceiling is selected by tier and bound to a schema.
+    fn fresh_schema() -> String {
+        database_derivation::schema_name(&DatabaseId::mint())
+    }
 
     fn config() -> ManagedPolicyConfig {
         ManagedPolicyConfig::default_confined(KEY, 42).expect("test policy config")
@@ -667,8 +671,7 @@ mod tests {
     /// We author none, so that arm is unreachable here and is not asserted.
     #[test]
     fn within_one_layer_a_false_grant_does_not_carve_out_but_exclude_does() {
-        let app_id = AppId::mint();
-        let schema = app_derivation::schema_name(&app_id);
+        let schema = fresh_schema();
         let draft_toml = format!(
             r#"policy_version = 1
 
@@ -702,7 +705,7 @@ scope = {{ include = ["{schema}.secret"] }}
             })
             .expect("draft parses");
         assert!(
-            cfg.compose_effective_for_schema(app_id.as_str(), Some("probe"), Some(&draft))
+            cfg.compose_effective_for_schema(&schema, Some("probe"), Some(&draft))
                 .is_ok(),
             "a `value = false` rule in the SAME layer is expected to be inert; if this \
              now REFUSES, the engine gained within-layer masking and the warning in \
@@ -727,7 +730,7 @@ scope = {{ include = ["{schema}"], exclude = ["{schema}.secret"] }}
             })
             .expect("draft parses");
         let err = cfg
-            .compose_effective_for_schema(app_id.as_str(), Some("probe"), Some(&draft))
+            .compose_effective_for_schema(&schema, Some("probe"), Some(&draft))
             .expect_err("`exclude` DOES restrict, so the excluded table must be refused");
         assert!(matches!(err, ManagedPolicyError::Compose(_)));
     }
@@ -754,10 +757,10 @@ scope = {{ include = ["{schema}"], exclude = ["{schema}.secret"] }}
     #[test]
     fn no_draft_uses_default_confined_ceiling() {
         let cfg = config();
-        let app_id = AppId::mint();
+        let schema = fresh_schema();
 
         let effective = cfg
-            .compose_effective_for_schema(app_id.as_str(), None, None)
+            .compose_effective_for_schema(&schema, None, None)
             .expect("no draft should resolve to default ceiling");
 
         assert_eq!(effective.ceiling_id, "confined-default");
@@ -767,10 +770,10 @@ scope = {{ include = ["{schema}"], exclude = ["{schema}.secret"] }}
         assert_eq!(effective.managed.destructive_ops, DestructiveOps::Allow);
         // No `safety.require_approval` obligation on the default confined ceiling.
         assert_eq!(
-            effective.approval_level(app_id.as_str()),
+            effective.approval_level(&schema),
             ApprovalLevel::Never
         );
-        let app_schema = app_id.as_str().to_owned();
+        let app_schema = schema;
         let guard = zeroship_migrate::guard::GuardConfig::from_policy(
             effective.policy.clone(),
             zeroship_migrate_postgres::DIALECT,
@@ -804,7 +807,7 @@ scope = {{ include = ["{schema}"], exclude = ["{schema}.secret"] }}
     /// it fires on anything that can actually appear.
     #[test]
     fn app_binding_refuses_a_schema_key_it_cannot_confine() {
-        let app_schema = app_derivation::schema_name(&AppId::mint());
+        let app_schema = fresh_schema();
         let charter = format!(
             "{CONFINED_GUARD_CHARTER_TOML}\n\
              [[grant]]\n\
@@ -827,11 +830,11 @@ scope = {{ include = ["{schema}"], exclude = ["{schema}.secret"] }}
             .expect("the shipped guard charter must still bind");
     }
 
-    /// Lowercase typed app ids keep an unquoted policy scope aligned with the
-    /// physical schema name after policy normalization.
+    /// A lowercase derived database schema keeps an unquoted policy scope
+    /// aligned with the physical schema name after policy normalization.
     #[test]
     fn confined_guard_preserves_schema_bound_grants_without_inject() {
-        let app_schema = app_derivation::schema_name(&AppId::mint());
+        let app_schema = fresh_schema();
         let guard_policy = confined_guard_policy_for_schema(&app_schema)
             .expect("fixed no-inject guard charter composes");
         let lower_charter = bind_confined_charter_to_schema(CONFINED_CEILING_TOML, &app_schema)
@@ -888,7 +891,7 @@ scope = {{ include = ["{schema}"], exclude = ["{schema}.secret"] }}
     #[test]
     fn require_approval_obligation_is_read_from_the_composed_policy() {
         let cfg = config();
-        let app_id = AppId::mint();
+        let schema = fresh_schema();
         // A creator draft that authors the sealed approval obligation as a normal
         // `[[require]]` — `always`, scoped to the whole DB.
         let draft_toml = r#"policy_version = 1
@@ -905,10 +908,10 @@ scope = "all"
             })
             .expect("approval obligation draft parses");
         let effective = cfg
-            .compose_effective_for_schema(app_id.as_str(), None, Some(&draft))
+            .compose_effective_for_schema(&schema, None, Some(&draft))
             .expect("obligation draft composes (composes UP)");
         assert_eq!(
-            effective.approval_level(&app_derivation::schema_name(&app_id)),
+            effective.approval_level(&schema),
             ApprovalLevel::Always,
             "the composed policy must surface the sealed require_approval obligation"
         );
@@ -917,7 +920,7 @@ scope = "all"
     #[test]
     fn tighter_draft_composes_to_the_draft() {
         let cfg = config();
-        let app_id = AppId::mint();
+        let schema = fresh_schema();
         // A draft that only TIGHTENS: forbid destructive ops.
         //
         // A `runtime.*` knob cannot appear here as a "tighter timeout" tightening:
@@ -941,7 +944,7 @@ scope = "all"
             .expect("tightening draft parses");
 
         let effective = cfg
-            .compose_effective_for_schema(app_id.as_str(), None, Some(&draft))
+            .compose_effective_for_schema(&schema, None, Some(&draft))
             .expect("strict draft should compose");
 
         assert_eq!(effective.managed.destructive_ops, DestructiveOps::Forbid);
@@ -950,7 +953,7 @@ scope = "all"
     #[test]
     fn draft_permission_escalation_is_rejected_not_clamped() {
         let cfg = config();
-        let app_id = AppId::mint();
+        let schema = fresh_schema();
         // The confined ceiling does NOT grant `sql.raw`; a draft that does
         // escalates beyond the ceiling.
         let draft_toml = r#"policy_version = 1
@@ -968,7 +971,7 @@ scope = "all"
             .expect("escalating draft still parses (rejected at compose)");
 
         let err = cfg
-            .compose_effective_for_schema(app_id.as_str(), None, Some(&draft))
+            .compose_effective_for_schema(&schema, None, Some(&draft))
             .expect_err("raw_sql exceeds the confined ceiling");
 
         assert!(matches!(err, ManagedPolicyError::Compose(_)));
@@ -978,7 +981,7 @@ scope = "all"
     #[test]
     fn draft_cannot_escape_the_app_schema_boundary() {
         let cfg = config();
-        let app_id = AppId::mint();
+        let schema = fresh_schema();
         let draft = cfg
             .parse_draft(&CreatorPolicyDraft {
                 filename: MIGRATE_POLICY_FILENAME,
@@ -993,7 +996,7 @@ scope = "all"
             .expect("cross-schema draft parses before admission");
 
         let err = cfg
-            .compose_effective_for_schema(app_id.as_str(), None, Some(&draft))
+            .compose_effective_for_schema(&schema, None, Some(&draft))
             .expect_err("authority outside the app schema must be rejected");
         assert!(matches!(err, ManagedPolicyError::Compose(_)));
         assert!(err.is_creator_fault());
@@ -1015,7 +1018,7 @@ scope = "all"
     #[test]
     fn draft_all_scope_on_a_literal_bound_key_refuses_as_not_representable() {
         let cfg = config();
-        let app_id = AppId::mint();
+        let schema = fresh_schema();
         let draft = cfg
             .parse_draft(&CreatorPolicyDraft {
                 filename: MIGRATE_POLICY_FILENAME,
@@ -1030,7 +1033,7 @@ scope = "all"
             .expect("all-scoped draft parses before admission");
 
         let err = cfg
-            .compose_effective_for_schema(app_id.as_str(), None, Some(&draft))
+            .compose_effective_for_schema(&schema, None, Some(&draft))
             .expect_err("scope=all against a literal-bound rule must be refused");
         assert!(
             matches!(
@@ -1064,8 +1067,7 @@ scope = "all"
     #[test]
     fn draft_glob_scope_anchored_on_the_granted_schema_is_still_rejected() {
         let cfg = config();
-        let app_id = AppId::mint();
-        let app_schema = app_derivation::schema_name(&app_id);
+        let app_schema = fresh_schema();
         // The glob's literal prefix IS the granted schema; the glob also covers
         // sibling schemas the ceiling never granted.
         let draft_toml = format!(
@@ -1085,7 +1087,7 @@ scope = {{ include = ["{app_schema}*"] }}
             .expect("glob-scoped draft parses before admission");
 
         let err = cfg
-            .compose_effective_for_schema(app_id.as_str(), None, Some(&draft))
+            .compose_effective_for_schema(&app_schema, None, Some(&draft))
             .expect_err("a glob reaching beyond the bound app schema must be rejected");
         assert!(matches!(err, ManagedPolicyError::Compose(_)));
         assert!(err.is_creator_fault());
@@ -1109,10 +1111,10 @@ scope = {{ include = ["{app_schema}*"] }}
     #[test]
     fn sealed_effective_policy_round_trips() {
         let cfg = config();
-        let app_id = AppId::mint();
+        let schema = fresh_schema();
 
         let sealed = cfg
-            .seal_for_schema(app_id.as_str(), None, None)
+            .seal_for_schema(&schema, None, None)
             .expect("default confined policy should seal");
 
         // The seal verifies against the exact composed policy it covers.
