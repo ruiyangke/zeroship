@@ -3,7 +3,7 @@
 # without an inject rule so it can vet the CREATE TABLE emitted by that lower.
 #
 # The managed server binds the creation and movement grants below, plus the
-# default-deny cross-schema grant, to one exact app schema before composing this
+# default-deny cross-schema grant, to one exact database schema before composing this
 # charter. Keep these grants aligned with confined.policy.toml.
 #
 # THE ONE INTENTIONAL DIFFERENCE is that this charter is used ALONE, while

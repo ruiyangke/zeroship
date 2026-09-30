@@ -235,7 +235,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let reconcile_interval = *settings.reconcile_interval_seconds.get();
     if provision_database_url.trim().is_empty() {
         tracing::error!(
-            "migrated: --provision-database-url-file / ZEROSHIP_MIGRATE_SERVER_PROVISION_DATABASE_URL is required for per-app schema provisioning"
+            "migrated: --provision-database-url-file / ZEROSHIP_MIGRATE_SERVER_PROVISION_DATABASE_URL is required to reconcile the cluster's databases and apply their migrations"
         );
         std::process::exit(1);
     }
