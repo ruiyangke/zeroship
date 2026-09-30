@@ -2,7 +2,7 @@
 //! this process's journal maintenance lane, all over the workflow journal and
 //! the app's storage. Manager metadata stays on the manager thread, reached
 //! through its client. Neither side opens the other's storage, and no loop here
-//! scans the creator journal for runnable work - the queue names every row
+//! scans the journal for runnable work - the queue names every row
 //! either lane takes.
 
 #![expect(

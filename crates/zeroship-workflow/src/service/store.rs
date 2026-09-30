@@ -1,4 +1,4 @@
-//! Customer-bound journal execution through the shared Rust ORM.
+//! Workflow journal execution through the shared Rust ORM.
 
 use crate::{
     service::{models, schema},
@@ -49,17 +49,33 @@ pub fn journal_binding() -> DbBinding {
     )
 }
 
-/// Journal storage a host passes to its workflow thread, bound through
-/// [`journal_binding`].
+/// The journal storage a host opens: a connection, and nothing that could
+/// place the journal anywhere but [`journal_binding`].
+///
+/// A host chooses which database server the journal is on and never where on
+/// it, so the binding is not a value a caller supplies. Nor is a project key:
+/// the journal declares no encrypted column, so its store resolves none.
 #[derive(Clone, Debug)]
 pub struct HostStorage {
-    pub connection: ConnectionFactory,
-    pub keys: ProjectKeySource,
-    pub binding: DbBinding,
+    connection: ConnectionFactory,
 }
 impl HostStorage {
+    #[must_use]
+    pub const fn new(connection: ConnectionFactory) -> Self {
+        Self { connection }
+    }
+
+    /// Open the journal on [`journal_binding`] over this storage's connection.
+    ///
+    /// # Errors
+    /// Reports a connection the ORM refuses to open.
     pub async fn open(&self) -> Result<OrmStore, WorkflowServiceError> {
-        OrmStore::connect(self.binding.clone(), &self.connection, self.keys.clone()).await
+        OrmStore::connect(
+            journal_binding(),
+            &self.connection,
+            ProjectKeySource::unavailable(),
+        )
+        .await
     }
 }
 
@@ -101,7 +117,7 @@ fn invalid_row(key: &str) -> WorkflowServiceError {
     WorkflowServiceError::Internal(format!("invalid workflow database field {key}"))
 }
 
-/// How long the customer's database clock may take to answer before the
+/// How long the journal database's clock may take to answer before the
 /// journal names it as the stall.
 ///
 /// This is a fact about the clock, and it stays independent of
@@ -127,7 +143,7 @@ fn clock_unavailable() -> WorkflowServiceError {
     WorkflowServiceError::Unavailable("workflow database clock unavailable".into())
 }
 
-/// Customer journal and database clock on the host's compio thread.
+/// The workflow journal and its database clock on the host's compio thread.
 #[derive(Clone, Debug)]
 pub struct OrmStore {
     database: Database,
@@ -292,7 +308,7 @@ impl std::fmt::Debug for Transaction {
     }
 }
 impl Transaction {
-    /// The ORM handle this transaction scopes to the creator journal.
+    /// The ORM handle this transaction scopes to the workflow journal.
     #[must_use]
     pub fn database(&self) -> &Database {
         &self.database
@@ -364,7 +380,7 @@ impl Transaction {
         }
     }
     pub(crate) async fn now(&mut self) -> Result<i64, WorkflowServiceError> {
-        // This query reads only the customer's database clock, never journal
+        // This query reads only the journal database's clock, never journal
         // rows. A separate pool avoids borrowing a held transaction's lease.
         //
         // The ORM cannot compile this. `Expression::CurrentTimestamp` is

@@ -1,26 +1,21 @@
 use std::path::Path;
-use zeroship_data_orm::{
-    binding::DbBinding, connection::ConnectionFactory, encryption::ProjectKeySource,
-};
+use zeroship_data_orm::connection::ConnectionFactory;
 use zeroship_workflow::service::{
     schema,
-    store::{OrmStore, SchemaName},
+    store::{HostStorage, OrmStore},
 };
 
+/// A journal opened the way a host opens it, over a session file in
+/// `directory`.
 pub async fn store(directory: &Path) -> OrmStore {
-    let store = OrmStore::connect(
-        DbBinding::platform(
-            "workflow",
-            "test-deployment",
-            SchemaName::new("workflow").unwrap(),
-        ),
-        &ConnectionFactory::for_platform_url(&format!(
+    let store = HostStorage::new(
+        ConnectionFactory::for_platform_url(&format!(
             "sqlite:{}",
             directory.join("app.sqlite").display()
         ))
         .unwrap(),
-        ProjectKeySource::unavailable(),
     )
+    .open()
     .await
     .unwrap();
     schema::initialize_local(&store).await.unwrap();

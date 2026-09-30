@@ -6,7 +6,7 @@ use crate::{
 };
 use zeroship_workflow::service::{
     schema,
-    store::{OrmStore, SchemaName},
+    store::HostStorage,
     PolicySnapshot, TaskAssignment, WorkflowService,
 };
 use serde_json::{json, Value};

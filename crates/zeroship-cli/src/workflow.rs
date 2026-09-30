@@ -26,10 +26,9 @@ use std::{
 };
 use zeroship_bundle::LoadedWorker;
 use zeroship_core::app_id::AppId;
-use zeroship_data_orm::{connection::ConnectionFactory, encryption::ProjectKeySource};
 use zeroship_runtime::{NativePlugin, RuntimeLimits};
 use zeroship_workflow::service::{
-    store::{journal_binding, HostStorage},
+    store::HostStorage,
     AppBackend,
 };
 use zeroship_storage::StorageStore;
@@ -137,18 +136,6 @@ impl Default for ManagerConfig {
             closing_backoff_ms: 60_000,
             closing_backoff_max_ms: 3_600_000,
         }
-    }
-}
-
-/// The storage the local host opens its workflow journal on: the dev
-/// database's connection, bound where the production service opens its own
-/// journal. On `SQLite` the journal is kept in its own file beside the session
-/// file `connection` opens.
-pub fn journal_storage(connection: ConnectionFactory, keys: ProjectKeySource) -> HostStorage {
-    HostStorage {
-        connection,
-        keys,
-        binding: journal_binding(),
     }
 }
 
