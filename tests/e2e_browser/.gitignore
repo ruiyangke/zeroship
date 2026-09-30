@@ -1,9 +1,8 @@
-# Runtime-generated stack descriptor, written by the stack bring-up.
+# Stack descriptor global setup writes for the specs and its teardown removes.
 .stack.json
 
-# @playwright/test symlink to the on-PATH runner's copy, created at setup time
-# by scripts/link-playwright.sh (machine-specific nix store path — never committed).
-node_modules/
+# Service, build and deploy logs, one directory per run.
+.artifacts/
 
 # Playwright run artifacts.
 test-results/

@@ -1,11 +1,11 @@
-# Browser-level E2E (`tests/e2e_browser/`)
+# Browser-level E2E over a deployed stack (`tests/e2e_browser/`)
 
 Playwright specs that drive a **real Chromium** against a **real, live zeroship
-stack** (control + worker + gateway + ephemeral Postgres), addressing deployed
-apps the way an end user's browser does. This layer asserts the *browser/client*
-contract that the curl harnesses cannot reach: that JavaScript actually boots,
-the SPA mounts and round-trips through RPC into the DOM, SSG is truly static,
-and an RPC stream renders incremental frames in a browser.
+stack** (Control, a worker, the gateway, the CDC relay and an ephemeral
+PostgreSQL), addressing deployed apps the way an end user's browser does. This
+layer asserts the *browser/client* contract of a deployed app: that JavaScript
+actually boots, the SPA mounts and round-trips through RPC into the DOM, SSG is
+truly static, and an RPC stream renders incremental frames in a browser.
 
 ## What it covers
 
@@ -18,54 +18,97 @@ and an RPC stream renders incremental frames in a browser.
 
 ## How to run
 
-You **must** be inside the nix env that exports `PLAYWRIGHT_BROWSERS_PATH`
-(version-matched Chromium) and provides `playwright` 1.58.2 on PATH — the
-npm-downloaded browsers can't link their libs on NixOS; the nix ones can. Do
-**not** install a different Playwright version (skew breaks browser launch).
+From the repo root, inside `nix develop`, with Docker available:
 
 ```bash
-# from the repo root, inside the nix env:
-cd tests/e2e_browser
-playwright test                 # nix playwright on PATH
-# or, equivalently:
-pnpm exec playwright test
+pnpm install
+pnpm build                                          # the SDK, vite-plugin and migration CLI dists setup uses
+pnpm --filter @zeroship/e2e-browser-deployed test
 ```
 
-The stack is an external multi-process Rust deployment, so there is **no
-Playwright `webServer`** and the suite does not bring one up. The gateway port
-is dynamic; specs read it from `.stack.json` (gitignored) via `helpers.ts`, and
-that descriptor is written by whichever bring-up provisioned the stack.
+That one command is the whole run; `node --run test` from this directory runs
+the same script without a package manager. No `cargo xtask` area and no CI job
+runs this suite. `global-setup.ts`:
 
-### Prerequisites
+1. launches Chromium once, so a browser that cannot start fails the run before
+   anything is built;
+2. builds `zeroship`, `zeroship-control`, `zeroship-worker`, `zeroship-gate` and
+   `zeroship-data-cdc-server` from this checkout with `cargo build` (into
+   whatever `CARGO_TARGET_DIR` names);
+3. rebuilds `examples/{csr-todo,ssr-blog,ssg-docs}` from a clean `dist/` with
+   `vite build`, and checks the ssg-docs manifest: no worker, every route served
+   from assets, and the pages the specs load among them (`fixture/bundle.ts`);
+4. starts PostgreSQL and the JWKS identity provider in containers
+   (testcontainers), applies the platform migrations, and starts the services
+   on free loopback ports;
+5. creates one app per example, deploys its `dist/app.zship` with
+   `zeroship deploy`, and waits until each answers through the gateway by the
+   Host a browser sends (and, for the SPA, until its RPC answers);
+6. writes `.stack.json` (gitignored), which `helpers.ts` reads for the gateway
+   port and the app names.
 
-- A release build: `target/release/{zeroship,zeroship-control,zeroship-gate,zeroship-worker}`
-  (`cargo build --release`).
-- `docker` (ephemeral Postgres), `node`, `openssl`.
-- Built example artifacts: `examples/{csr-todo,ssr-blog,ssg-docs}/dist/app.zship`
-  (`pnpm --filter <example> build`). A missing dist makes that example's specs
-  `skip` rather than fail.
+The teardown it returns stops every service, removes the containers, the work
+directory and `.stack.json`, and fails the run if a service died while the
+specs ran.
+
+The services run in process groups of their own, and the testcontainers reaper
+is shared with every other testcontainers process of the same user, so neither
+goes away with the runner. Every way out of the run takes them down:
+
+- SIGINT during the specs: Playwright runs the teardown.
+- SIGINT during bring-up: Playwright does not wait for the setup it
+  interrupted, so the signal handler kills the services and removes the
+  containers, the work directory and `.stack.json` synchronously.
+- SIGTERM or SIGHUP at any point: Playwright handles neither, so the same
+  handler does that and exits with `128 + signal number`.
+- Any other exit that skipped the teardown: an `exit` listener does it.
+
+A signal handler cannot wait on testcontainers' asynchronous client, so those
+paths remove containers with the `docker` CLI. Setup looks each container up
+through the CLI and fails if the CLI reaches a different daemon than the one
+testcontainers chose.
+
+`kill -9` of the runner is the exception. The containers carry the label
+`ai.zeroship.fixture=e2e-browser-deployed`, so
+`docker ps -a --filter label=ai.zeroship.fixture=e2e-browser-deployed` lists
+what such a run left behind. Service, container, build and deploy logs stay in
+`.artifacts/run-*/` (gitignored); a setup failure names the log to read.
+
+There is no Playwright `webServer`: the stack is several processes, not one dev
+server.
+
+### Nothing is skipped
+
+Every example the specs address is built and deployed, or setup fails naming
+the example and the log. A build that exits cleanly without writing
+`dist/app.zship` fails setup too. There is no state in which an example's specs
+report `skipped`.
+
+### The browser has to match the pinned Playwright
+
+`@playwright/test` is the workspace's pinned version, and each Playwright
+release launches one Chromium build, looked up by revision under
+`PLAYWRIGHT_BROWSERS_PATH`. `nix develop` points that variable at the
+flake's `playwright-driver` browsers; browsers downloaded by
+`playwright install` do not load their libraries on NixOS. When the directory
+does not hold the build the pinned version names, step 1 of setup fails,
+naming the pinned version and the path.
 
 ## `*.localhost` addressing
 
-Browsers auto-resolve `*.localhost` → 127.0.0.1 (no `/etc/hosts` needed). A
+Browsers resolve `*.localhost` to 127.0.0.1 with no `/etc/hosts` entry. A
 navigation to `http://<slug>.localhost:<gatePort>/` sends
-`Host: <slug>.localhost:<port>`; the gateway strips `:port` and extracts the
-first subdomain as the app slug
-(`crates/gateway/src/router/dispatch.rs::extract_app_name`), then routes to the
-deployed app. `helpers.ts::appUrl(kind, path)` builds these URLs from the
-descriptor.
+`Host: <slug>.localhost:<port>`; the gateway strips `:port` and takes the first
+label as the app name
+(`crates/zeroship-gateway/src/router/dispatch.rs::extract_app_name`), then
+routes to the deployed app. `helpers.ts::appUrl(kind, path)` builds these URLs
+from the descriptor.
 
-## Division of labour: curl harness vs. browser harness
+## Relationship to `tests/e2e-browser/`
 
-- **A curl-level harness** asserts the **server/wire**
-  contract through the gateway: HTTP status, content-type, cache headers, the
-  presence of SSR markup / hydration `<script>` tags / SPA shell bytes, and the
-  raw SSE data-stream framing over the worker `/dispatch`. It never runs JS.
-- **This Playwright layer** asserts the **browser/client** contract: that the
-  shipped JS *boots* — hydration runs, the SPA mounts, RPC round-trips render
-  into the live DOM, SSG stays static with JS off, and a stream renders frame by
-  frame. It complements, and does not duplicate, the curl harness.
-
-The browser harness uses a private port band (`ZEROSHIP_GATEWAY_PORT=8022`,
-etc.) and `*-bx` app slugs so it can coexist with the curl-harness apps on the
-same host.
+`tests/e2e-browser/` runs each demo's `pnpm dev`: vite plus the local dev
+runtime, no platform. This suite deploys the built bundles onto the platform
+and goes through the gateway, so it is where the deployed shapes are checked:
+a static-only manifest served with no worker, the SPA fallback for deep routes,
+anonymous RPC and streaming admitted by the gateway, and SSR rendered by a
+worker isolate.

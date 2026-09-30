@@ -2224,6 +2224,33 @@ importers:
         specifier: ^4.1.7
         version: 4.1.7(@opentelemetry/api@1.9.0)(@types/node@22.19.17)(happy-dom@20.9.0)(jsdom@29.1.1(@noble/hashes@1.8.0))(msw@2.14.2(@types/node@22.19.17)(typescript@5.9.3))(vite@8.0.10(@types/node@22.19.17)(jiti@2.6.1)(tsx@4.21.0)(yaml@2.8.4))
 
+  tests/e2e_browser:
+    devDependencies:
+      '@playwright/test':
+        specifier: 1.58.2
+        version: 1.58.2
+      '@types/node':
+        specifier: 'catalog:'
+        version: 22.19.17
+      '@zeroship/server':
+        specifier: workspace:*
+        version: link:../../packages/server
+      selfsigned:
+        specifier: ^5.5.0
+        version: 5.5.0
+      smol-toml:
+        specifier: ^1.8.0
+        version: 1.8.0
+      tar:
+        specifier: ^7.5.13
+        version: 7.5.13
+      testcontainers:
+        specifier: ^12.1.0
+        version: 12.1.0(supports-color@8.1.1)
+      typescript:
+        specifier: 'catalog:'
+        version: 5.9.3
+
 packages:
 
   '@adobe/css-tools@4.5.0':

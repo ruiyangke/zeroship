@@ -1,27 +1,15 @@
 import { test, expect } from "@playwright/test";
-import { appSlug, appUrl } from "../helpers";
+import { appUrl } from "../helpers";
 
 // RPC streaming, consumed CLIENT-SIDE in the browser. csr-todo's search box
 // drives `searchTodos` (a `stream()` RPC, kind: "stream") via an async iterator
 // in App.tsx: each yielded Todo is appended to React state and rendered as a
-// new <li>. searchTodos is declared `auth: anonymous, publiclyAccessible: true`
-// (ISS-69), so the anonymous browser reaches it through the gateway.
-//
-// These specs caught ISS-71. Two distinct issues, isolated with raw-fetch probes:
-//   (a) a stale local `packages/rpc/dist` shipped a stream consumer that stalled
-//       after the first frame — fixed by rebuilding the SDK (dist is gitignored;
-//       the source was already correct, so not a committed bug); and
-//   (b) a runtime stream-lifecycle bug (FIXED): the 2nd+ streamed response on an
-//       isolate stalled after its first frame because a streamed dispatch didn't
-//       wake the pump when it had gone idle after a prior request. A pure-runtime
-//       RED test pinned it (crates/zeroship-runtime/tests/iss71_sequential_streams.rs);
-//       fixed by `notify_pump()` on the Stream outcome path. Both specs now pass.
+// new <li>. searchTodos is declared `auth: anonymous, publiclyAccessible: true`,
+// so the anonymous browser reaches it through the gateway.
 test.describe("RPC streaming (csr-todo searchTodos)", () => {
-  test.skip(!appSlug("csr"), "csr-todo not deployed (dist missing)");
-
-  // RELIABLE: the mount default-"build" stream's data frame renders in the
-  // browser DOM — proof that anonymous streaming RPC reaches the browser over the
-  // gateway (the transport works end-to-end into client React state).
+  // The mount default-"build" stream's data frame renders in the browser DOM:
+  // proof that anonymous streaming RPC reaches the browser over the gateway
+  // (the transport works end-to-end into client React state).
   test("a streamed match renders in the browser over the gateway", async ({ page }) => {
     await page.goto(appUrl("csr", "/"), { waitUntil: "domcontentloaded" });
     await expect(page.locator("h1")).toHaveText("csr-todo");
@@ -33,14 +21,12 @@ test.describe("RPC streaming (csr-todo searchTodos)", () => {
     await expect(streamItems.nth(0)).toHaveText("Build the CSR demo");
   });
 
-  // Full incremental multi-frame rendering after a re-query (ISS-71b regression).
-  // The mount "build" stream is the 1st on the isolate; changing the query starts
-  // a 2nd stream — which used to deliver only its first frame and hang, because a
-  // streamed dispatch didn't wake the runtime pump if it had gone idle after the
-  // prior request (the pump drives the response body's async read loop). Fixed by
-  // `notify_pump()` on the Stream outcome path (crates/zeroship-runtime/src/core/runtime.rs),
-  // mirroring the Pending path. Asserts the <li>s climb incrementally to 3 and the
-  // stream TERMINATES (status flips to "3 matches").
+  // Incremental multi-frame rendering after a re-query. The mount "build"
+  // stream is the first on the isolate; changing the query starts a second
+  // stream on the same isolate, which has to deliver every frame and then end.
+  // crates/zeroship-runtime/tests/iss71_sequential_streams.rs pins the runtime
+  // half of that without a browser. Asserts the <li>s climb incrementally to 3
+  // and the stream TERMINATES (status flips to "3 matches").
   test("typing a query streams matches into the DOM one frame at a time", async ({ page }) => {
     await page.goto(appUrl("csr", "/"), { waitUntil: "domcontentloaded" });
     await expect(page.locator("h1")).toHaveText("csr-todo");
@@ -71,7 +57,7 @@ test.describe("RPC streaming (csr-todo searchTodos)", () => {
     await expect(streamItems.nth(2)).toHaveText("Verify the manifest");
 
     // The stream TERMINATES: status flips from "streaming…" to "3 matches"
-    // (the consumer ended the iterator on completion — the ISS-71 regression).
+    // once the consumer's iterator reports completion.
     await expect(streamSection.getByText(/^3 matches$/)).toBeVisible();
 
     const intermediates = [...observed].filter((n) => n > 0 && n < 3);

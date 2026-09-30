@@ -1,13 +1,21 @@
 {
-  "name": "@zeroship/e2e-browser",
+  "name": "@zeroship/e2e-browser-deployed",
   "private": true,
   "version": "0.0.0",
-  "description": "Browser-level (Playwright) E2E for zeroship render modes (CSR/SSR/SSG) over the real gateway.",
+  "description": "Browser-level (Playwright) E2E for zeroship render modes (CSR/SSR/SSG), deployed onto a live stack and reached through the real gateway.",
   "type": "module",
   "scripts": {
-    "test": "playwright test"
+    "test": "playwright test",
+    "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "@playwright/test": "1.58.2"
+    "@playwright/test": "1.58.2",
+    "@types/node": "catalog:",
+    "@zeroship/server": "workspace:*",
+    "selfsigned": "^5.5.0",
+    "smol-toml": "^1.8.0",
+    "tar": "^7.5.13",
+    "testcontainers": "^12.1.0",
+    "typescript": "catalog:"
   }
 }

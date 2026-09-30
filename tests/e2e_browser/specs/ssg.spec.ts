@@ -1,17 +1,15 @@
 import { test, expect } from "@playwright/test";
-import { appSlug, appUrl } from "../helpers";
+import { appUrl } from "../helpers";
 
 // SSG (ssg-docs): three HTML files, NO worker, NO client JavaScript. The deploy
-// manifest's `worker` field is null and every rule is a Static action. The
-// browser contract we assert here:
+// manifest carries no worker, so the gateway serves every page from the
+// bundle's assets. The browser contract we assert here:
 //   1. the prerendered content is in the real DOM (gateway served static bytes)
 //   2. it renders identically with JavaScript DISABLED (truly static — no
 //      hydration, no client framework)
 //   3. an in-app <nav> link performs a real, full-page navigation (because
 //      there is no SPA router to intercept it)
 test.describe("SSG (ssg-docs) — prerendered, zero-JS static", () => {
-  test.skip(!appSlug("ssg"), "ssg-docs not deployed (dist missing)");
-
   test("GET / serves prerendered hero content in the DOM", async ({ page }) => {
     await page.goto(appUrl("ssg", "/"), { waitUntil: "domcontentloaded" });
 

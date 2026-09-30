@@ -1,11 +1,12 @@
 import { defineConfig, devices } from "@playwright/test";
 
-// Browser-level E2E against an EXTERNAL stack (control + worker + gateway +
-// ephemeral PG). There is intentionally NO `webServer`: the stack is a
-// multi-process Rust deployment, not a single dev server, and the specs address
-// it by `<slug>.localhost:<gatePort>` Host routing.
+// Browser-level E2E against a live multi-process stack (control + worker +
+// gateway + ephemeral PostgreSQL) that global-setup.ts builds, starts and tears
+// down. There is no `webServer`: the stack is not a single dev server, and the
+// specs address each deployed app by `<slug>.localhost:<gatePort>` Host
+// routing.
 //
-// baseURL is NOT hardcoded: the gateway port is dynamic and recorded in
+// baseURL is not set: the gateway port is chosen at bring-up and recorded in
 // .stack.json, and helpers.ts builds per-app URLs from that descriptor.
 export default defineConfig({
   testDir: "./specs",
@@ -18,18 +19,18 @@ export default defineConfig({
   expect: { timeout: 15_000 },
   globalSetup: "./global-setup.ts",
   use: {
-    trace: "on-first-retry",
+    trace: "retain-on-failure",
     screenshot: "only-on-failure",
     actionTimeout: 10_000,
     navigationTimeout: 30_000,
   },
   projects: [
     {
-      // Browser comes from the version-matched Nix package via
-      // PLAYWRIGHT_BROWSERS_PATH — run inside the nix env that sets it. The
-      // npm @playwright/test is pinned to 1.58.2 so the chromium revision
-      // matches the nix playwright-driver; npm-downloaded browsers can't link
-      // their libs on NixOS, the Nix ones can. NO executablePath on purpose.
+      // The browser comes from PLAYWRIGHT_BROWSERS_PATH, which has to hold the
+      // Chromium build the pinned @playwright/test names; global setup
+      // launches it first and fails naming both when it cannot. Browsers
+      // downloaded by `playwright install` do not load their libraries on
+      // NixOS.
       name: "chromium",
       use: { ...devices["Desktop Chrome"] },
     },

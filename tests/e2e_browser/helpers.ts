@@ -1,47 +1,23 @@
 import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const DESCRIPTOR = join(__dirname, ".stack.json");
-
-export type AppKind = "csr" | "ssr" | "ssg";
-
-export interface StackDescriptor {
-  gatePort: number;
-  controlPort: number;
-  workerPort: number;
-  work: string;
-  pidfile: string;
-  pgContainer: string;
-  apps: Record<AppKind, string | null>;
-  appIds: Record<AppKind, string | null>;
-}
+import { DESCRIPTOR, type AppKind, type StackDescriptor } from "./fixture/descriptor";
 
 let cached: StackDescriptor | null = null;
 
-export function stack(): StackDescriptor {
-  if (cached) return cached;
-  const raw = readFileSync(DESCRIPTOR, "utf8");
-  cached = JSON.parse(raw) as StackDescriptor;
+function stack(): StackDescriptor {
+  cached ??= JSON.parse(readFileSync(DESCRIPTOR, "utf8")) as StackDescriptor;
   return cached;
-}
-
-/** Slug for an app kind, or null if it wasn't deployed (dist missing). */
-export function appSlug(kind: AppKind): string | null {
-  return stack().apps[kind];
 }
 
 /**
  * Browser-facing URL for a deployed app. `<slug>.localhost` resolves to
- * 127.0.0.1 in every modern browser, and the gateway extracts the slug from
- * the first Host subdomain after stripping `:port`
+ * 127.0.0.1 in every modern browser, and the gateway takes the app name from
+ * the first Host label after stripping `:port`
  * (crates/zeroship-gateway/src/router/dispatch.rs::extract_app_name).
  */
 export function appUrl(kind: AppKind, path = "/"): string {
   const s = stack();
   const slug = s.apps[kind];
-  if (!slug) throw new Error(`app kind '${kind}' was not deployed (no slug in descriptor)`);
+  if (!slug) throw new Error(`the stack descriptor ${DESCRIPTOR} names no '${kind}' app`);
   const p = path.startsWith("/") ? path : `/${path}`;
   return `http://${slug}.localhost:${s.gatePort}${p}`;
 }

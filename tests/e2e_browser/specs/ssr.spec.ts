@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { appSlug, appUrl } from "../helpers";
+import { appUrl } from "../helpers";
 
 // SSR (ssr-blog): each GET is rendered per-request in V8 (react-dom/server
 // renderToString), shipped as HTML with a `window.__SSR_PROPS__` island plus a
@@ -10,8 +10,6 @@ import { appSlug, appUrl } from "../helpers";
 //   2. hydration ACTUALLY BOOTS — the client bundle executes and makes the
 //      page interactive (an onClick that only exists post-hydration fires).
 test.describe("SSR (ssr-blog) — per-request HTML + client hydration", () => {
-  test.skip(!appSlug("ssr"), "ssr-blog not deployed (dist missing)");
-
   test("GET / shows server-rendered post list immediately", async ({ page }) => {
     // Inspect the raw response too: the rendered post title must be in the HTML
     // the server sent, not injected later by client JS.

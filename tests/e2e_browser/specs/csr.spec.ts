@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { appSlug, appUrl } from "../helpers";
+import { appUrl } from "../helpers";
 
 // CSR (csr-todo): the gateway serves a near-empty SPA shell (`<div id="root">`
 // + a `<script type=module>`); ALL UI is rendered client-side by React after
@@ -10,8 +10,6 @@ import { appSlug, appUrl } from "../helpers";
 //   3. client interactivity works (Add local mutates the rendered list)
 //   4. a deep SPA route serves the shell and the client router renders it
 test.describe("CSR (csr-todo) — SPA mount + RPC round-trip", () => {
-  test.skip(!appSlug("csr"), "csr-todo not deployed (dist missing)");
-
   test("the SPA shell contains no app UI before JS runs", async ({ page }) => {
     // Confirm the load-bearing premise: the server shell is empty. With JS
     // disabled, #root has no rendered todo UI — so anything we assert later is
@@ -31,9 +29,8 @@ test.describe("CSR (csr-todo) — SPA mount + RPC round-trip", () => {
   // The SPA mounts and the todo list round-trips through the PUBLIC listTodos
   // RPC over the real browser→gateway→worker→V8 path. csr-todo declares
   // `rpc:listTodos` as `auth: anonymous, publiclyAccessible: true` in
-  // src/server/config.ts (ISS-69), so the anonymous browser reaches it through
-  // the gateway. This is the only spec that proves PUBLIC client RPC over the
-  // gateway — the curl harness deliberately bypasses the gateway via /dispatch.
+  // src/server/config.ts, so the anonymous browser reaches it through the
+  // gateway.
   test("SPA mounts and the todo list round-trips through the listTodos RPC", async ({ page }) => {
     await page.goto(appUrl("csr", "/"), { waitUntil: "domcontentloaded" });
 
@@ -56,9 +53,9 @@ test.describe("CSR (csr-todo) — SPA mount + RPC round-trip", () => {
     await expect(page.getByText(/^4 todos$/)).toBeVisible();
   });
 
-  // The initial "4 todos" precondition comes from the public listTodos RPC
-  // (ISS-69 fixed); Add-local then exercises pure client state on top of it,
-  // proving the mounted SPA re-renders interactively.
+  // The initial "4 todos" precondition comes from the public listTodos RPC;
+  // Add-local then exercises pure client state on top of it, proving the
+  // mounted SPA re-renders interactively.
   test("client interactivity: Add local appends a rendered item", async ({ page }) => {
     await page.goto(appUrl("csr", "/"), { waitUntil: "domcontentloaded" });
     await expect(page.getByText(/^4 todos$/)).toBeVisible();
@@ -84,12 +81,13 @@ test.describe("CSR (csr-todo) — SPA mount + RPC round-trip", () => {
     // The client router (main.tsx) treats any non-/about path as the App view,
     // so the React-rendered <h1>csr-todo</h1> heading appearing on a deep route
     // proves both: the gateway served the index shell as the SPA fallback, AND
-    // the client router mounted the App for that route. (The todo *list* on this
-    // page is RPC-sourced and currently 401s — see ISS-69 — so we assert the
-    // router mount via the heading.)
+    // the client router mounted the App for that route.
     await expect(page.locator("h1")).toHaveText("csr-todo");
     // The stream box's search input is part of the App view → confirms the App
     // (not the About view, not a blank shell) rendered on the deep route.
     await expect(page.getByText("Search stream")).toBeVisible();
+    // The shell a deep route is served loads its script and reaches the RPC
+    // like the root document does: the list arrives over listTodos.
+    await expect(page.getByText(/^4 todos$/)).toBeVisible();
   });
 });
