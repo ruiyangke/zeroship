@@ -33,6 +33,12 @@ use zeroship_core::{
 /// write, none of which this seeding touches. The writes a caller asserts go
 /// through the endpoint, because seeding around a write would prove nothing
 /// about the write.
+///
+/// The app state and `deploys` rows stand in for the activation that enters an
+/// app into this journal and records its deployment, which is the one write on
+/// this host that creates either. That activation is itself under test in
+/// `maintenance_lane`, for an app this never seeded, so this arrangement cannot
+/// hide a journal the service is unable to enter an app into.
 pub async fn seed_run(platform: &platform::Platform, app: &AppId) -> RunId {
     let run = RunId::mint();
     // One deploy per app, derived from the app so that repeated calls for one

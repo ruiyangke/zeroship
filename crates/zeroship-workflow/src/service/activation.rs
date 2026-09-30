@@ -6,7 +6,7 @@
 )]
 
 use super::{
-    app::{encode, lock_app_state},
+    app::{encode, lock_app_state, register_app_state},
     delivery::{self, CapturedLease, JobReceipt},
     deployment_retention::admission_generation,
     deployments::unavailable,
@@ -70,6 +70,11 @@ impl AppWorkflows {
             budget,
             Box::pin(async {
                 let mut tx = self.service.begin().await?;
+                // Control publishes an activation for every deploy of a live
+                // app, so a journal that has never seen this app learns of it
+                // here. The app enters inside this transaction, so an attempt
+                // refused before the commit below leaves no trace of it.
+                register_app_state(&tx, self.app_id()).await?;
                 lock_app_state(&mut tx, self.app_id()).await?;
                 if let Some(receipt) = receipt(&tx, job).await? {
                     tx.commit().await?;

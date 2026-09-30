@@ -9,6 +9,8 @@
     reason = "journal and queue fixtures stay on their compio runtime"
 )]
 
+#[path = "support/deployments.rs"]
+mod deployments;
 #[path = "support/holds.rs"]
 mod holds;
 #[path = "support/journal.rs"]
@@ -34,10 +36,14 @@ use zeroship_core::{
     workflow_coordination::{RequestId, RunId, WorkerId},
     workflow_jobs::{DeploymentId, JobId, JobOperation, JobOutcome, JobSpec},
     workflow_policy::AppPolicy,
+    workflow_schedules::{ActivateSchedules, RegisterSchedules},
 };
 use zeroship_storage::{backend::ListRequest, Namespace, StorageBackendConfig, StorageStore};
 use zeroship_workflow::{
-    service::{maintenance::MaintenanceOptions, publication::JobPublisher, PAYLOAD_NAMESPACE},
+    service::{
+        maintenance::MaintenanceOptions, publication::JobPublisher, DeployRegistration,
+        PAYLOAD_NAMESPACE,
+    },
     InputStager, WorkflowServiceError,
 };
 use zeroship_workflow_manager::{
@@ -46,6 +52,7 @@ use zeroship_workflow_manager::{
     lifecycle::Undeletable,
     policy::{PolicyObservation, PolicySource},
     recovery::Options as RecoveryOptions,
+    scheduling::{Options as SchedulerOptions, Scheduler},
     Error as ManagerError, Queue,
 };
 use zeroship_workflow_server::{
@@ -170,17 +177,68 @@ impl Fixture {
         fixture
     }
 
-    /// Everything an app needs before the lane can sweep it: a live Control
-    /// row, a registered queue scope, the journal rows an app needs to exist at
-    /// all, and an observed policy to bind its journal under.
+    /// Everything an app needs before the lane can sweep it: what [`Self::admit`]
+    /// grants, and the journal rows an app needs to exist at all.
     ///
     /// The lane's operation acts on what this does NOT seed: there is no pending
     /// publication, so the reconciliation page is empty and its phase advances.
     async fn seed(&self, app: &AppId) {
+        self.admit(app).await;
+        journal::seed_run(&self.platform, app).await;
+    }
+
+    /// Everything outside the journal an app needs before the lane can visit
+    /// it: a live Control row, a registered queue scope and an observed policy
+    /// to bind its journal under.
+    async fn admit(&self, app: &AppId) {
         self.platform.seed_app(app).await;
         self.queue.register_scope(app).await.unwrap();
-        journal::seed_run(&self.platform, app).await;
         self.policies.grant(app);
+    }
+
+    /// A lane whose journal activates `registration` for `app`, built the way
+    /// the process builds its own: the retention authority and the asserted
+    /// manifest summary, and no artifact store.
+    async fn hosting(&self, app: &AppId, registration: &DeployRegistration) -> MaintenanceLane {
+        let runs = Rc::new(
+            RunService::connect(
+                &self.platform.runtime_url,
+                self.service.recovery(RecoveryOptions::default()).unwrap(),
+            )
+            .await
+            .unwrap()
+            .with_deployments(deployments::asserted(app, registration)),
+        );
+        lane(&self.queue, &runs, &self.policies, &self.objects)
+    }
+
+    /// The app state rows the journal holds for `app`, and the deployment it
+    /// holds as active.
+    async fn journal_app(&self, app: &AppId) -> (i64, Option<String>) {
+        let entered: i64 = self
+            .platform
+            .admin
+            .query_one(
+                "SELECT COUNT(*) FROM workflow_manager.__zeroship_workflow_app_state \
+                 WHERE app_id=$1",
+                &[&app.as_str()],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        let active = self
+            .platform
+            .admin
+            .query(
+                "SELECT id FROM workflow_manager.__zeroship_workflow_deploys \
+                 WHERE app_id=$1 AND active=1",
+                &[&app.as_str()],
+            )
+            .await
+            .unwrap()
+            .first()
+            .map(|row| row.get(0));
+        (entered, active)
     }
 
     /// A second app this lane can sweep, for cases about which apps a turn
@@ -437,6 +495,76 @@ async fn the_lane_claims_and_settles_a_sweep_that_moves_payload_objects() {
         fixture.row(&creator.id).await.0,
         "ready",
         "creator work stays for the claimant that runs it"
+    );
+}
+
+/// The lane settles an activation for an app its journal has never seen, and
+/// the app is in the journal afterwards.
+///
+/// Every other case here seeds its app through `journal::seed_run`, which writes
+/// the app's state row by hand. This one does not, because nothing on this host
+/// registers an app: Control publishes an activation for every deploy of a live
+/// app, and that activation is the journal's only door. An activation that needed the app
+/// already entered would refuse every deploy of every app this service holds.
+///
+/// The app is admitted everywhere but the journal, and the empty journal read
+/// before the sweep is the control that the row found afterwards is the
+/// activation's own.
+#[compio::test]
+async fn the_lane_activates_an_app_its_journal_has_never_seen() {
+    let fixture = Box::pin(Fixture::new()).await;
+    let app = AppId::mint();
+    fixture.admit(&app).await;
+    let deployment = DeploymentId::mint();
+    let registration = DeployRegistration {
+        id: deployment.as_str().to_owned(),
+        hash: "a".repeat(64),
+        workflows: ["demo".to_owned()].into(),
+        schedules: Vec::new(),
+    };
+    let lane = fixture.hosting(&app, &registration).await;
+    assert_eq!(
+        fixture.journal_app(&app).await,
+        (0, None),
+        "the case is about an app the journal has never seen"
+    );
+    // Enqueued the way Control's publication has the manager enqueue it: the
+    // deployment's calendars prepared, then selected at a revision.
+    let scheduler = Scheduler::new(fixture.queue.clone(), SchedulerOptions::default()).unwrap();
+    scheduler
+        .prepare(&RegisterSchedules {
+            app_id: app.clone(),
+            deployment_id: deployment.clone(),
+            schedules: Vec::new(),
+        })
+        .await
+        .unwrap();
+    let activation = scheduler
+        .activate(&ActivateSchedules {
+            app_id: app.clone(),
+            deployment_id: deployment,
+            revision: 1.try_into().unwrap(),
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        activation.operation,
+        JobOperation::Activate { .. }
+    ));
+
+    let swept = Box::pin(lane.sweep(&app)).await.unwrap();
+    let Swept::Settled(receipt) = swept else {
+        panic!("the lane settles the activation: {swept:?}");
+    };
+    assert_eq!(receipt.job_id, activation.id);
+    assert_eq!(receipt.outcome, JobOutcome::Completed {});
+    let (state, _, worker) = fixture.row(&activation.id).await;
+    assert_eq!(state, "settled");
+    assert_eq!(worker.as_deref(), Some(lane.identity().as_str()));
+    assert_eq!(
+        fixture.journal_app(&app).await,
+        (1, Some(registration.id)),
+        "the activation enters the app and selects the deployment it verified"
     );
 }
 

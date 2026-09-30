@@ -541,7 +541,10 @@ types: its opaque binding is the local fence, while the host/client validates th
 transport identities before installing a snapshot through that binding.
 
 Construct `AppWorkflows` with `WorkflowService::register_app(&binding)` after
-installing a snapshot, or use `bind_app(&binding)` for an existing journal. The handle retains that exact binding; cloning it does
+installing a snapshot, or use `bind_app(&binding)` for an existing journal. An
+Activate job enters its app into the journal inside its own first transaction,
+so a host whose apps arrive by activation, as the workflow service's maintenance
+lane does, binds with `bind_app` alone. The handle retains that exact binding; cloning it does
 not resolve current authority by app ID. `AppBackend`, `ConsumerScope`, runtime
 contexts and queued backend calls preserve the same capability. A retained V8
 handle or old consumer cannot start a fresh mutation by borrowing a replacement's

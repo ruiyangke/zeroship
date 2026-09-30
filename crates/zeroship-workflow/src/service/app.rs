@@ -195,14 +195,7 @@ impl WorkflowService {
             .run(async {
                 captured.check()?;
                 let tx = scope.service.begin().await?;
-                let app = scope.app_id();
-                tx.database()
-                    .collection(models::app_state::Entity::COLLECTION)?
-                    .execute(Operation::Upsert {
-                        document: value!({"id":app.as_str(), "app_id":app.as_str()}),
-                        conflict_fields: value!(["app_id"]),
-                    })
-                    .await?;
+                register_app_state(&tx, scope.app_id()).await?;
                 captured.check()?;
                 tx.commit().await
             })
@@ -606,6 +599,32 @@ pub(crate) async fn lock_app<'a>(
     tx.capture_mutation(app)?;
     let lock = lock_app_state(tx, app).await?;
     Ok((lock, tx.policy(app)?))
+}
+
+/// Enter `app` into the journal, inside the caller's transaction.
+///
+/// [`lock_app_state`] refuses an app without an `app_state` row, and the
+/// journal's app-scoped tables reference that row by foreign key, so this runs
+/// first on any path that can be an app's first journal write. It is
+/// idempotent: an app already entered keeps its epochs, sequences and sweep
+/// positions, because the conflict arm assigns only the identity the insert
+/// carries.
+#[expect(
+    clippy::future_not_send,
+    reason = "journal writes use the creator transaction thread"
+)]
+pub(super) async fn register_app_state(
+    tx: &Transaction,
+    app: &AppId,
+) -> Result<(), WorkflowServiceError> {
+    tx.database()
+        .collection(models::app_state::Entity::COLLECTION)?
+        .execute(Operation::Upsert {
+            document: value!({"id":app.as_str(), "app_id":app.as_str()}),
+            conflict_fields: value!(["app_id"]),
+        })
+        .await?;
+    Ok(())
 }
 
 /// Serialize journal state without granting permission for a fresh mutation.

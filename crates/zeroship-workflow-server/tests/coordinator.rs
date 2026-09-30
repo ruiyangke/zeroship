@@ -445,7 +445,8 @@ async fn management_is_durable_bounded_typed_and_assignment_scoped() {
     let receipt = left.unwrap();
     assert_eq!(receipt, right.unwrap());
     let initial_ids = fixture.stored_ids().await;
-    // Enqueued management is claimable work, so the app now needs an owner.
+    // Enqueued management is a maintenance row, which the lane claims without a
+    // placement, so accepting it leaves the app with no owner.
     assert!(!a.manager.owned(&app).await.unwrap());
     let mut changed = one.clone();
     changed.run_id = RunId::mint();

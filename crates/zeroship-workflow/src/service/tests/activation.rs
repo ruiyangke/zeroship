@@ -136,6 +136,16 @@ case!(
     postgres_activation_ends_a_stalled_attempt_at_the_io_ceiling,
     io_ceiling
 );
+case!(
+    sqlite_activation_enters_an_app_the_journal_has_never_seen,
+    postgres_activation_enters_an_app_the_journal_has_never_seen,
+    unseen_app
+);
+case!(
+    sqlite_reactivation_keeps_the_app_state_it_found,
+    postgres_reactivation_keeps_the_app_state_it_found,
+    reactivation_keeps_app_state
+);
 
 async fn empty_service(
     store: Rc<OrmStore>,
@@ -201,6 +211,145 @@ async fn reopened(service: &WorkflowService) -> WorkflowService {
         .await
         .unwrap()
         .with_deployments(service.deployments.clone().unwrap())
+}
+
+/// A host serving `app` under installed policy, over a journal that has never
+/// seen the app: its binding exists and nothing registered it. The workflow
+/// service's own journal stands here before an app's first activation, because
+/// nothing on that host registers an app.
+async fn unseen_service(store: Rc<OrmStore>, platform: &Deployments) -> (WorkflowService, AppId) {
+    let app = AppId::mint();
+    let service = WorkflowService::open(store, Arc::new(HostPolicies::default()))
+        .await
+        .unwrap()
+        .with_deployments(platform.binding(&[&app]));
+    service
+        .fixture_install(&app, leased_policy(1, AppPolicy::default()))
+        .unwrap();
+    (service, app)
+}
+
+/// The one app state row `app` holds.
+async fn app_state(service: &WorkflowService, app: &AppId) -> Value {
+    let rows = snapshot(service, "app_state", app).await;
+    let [row] = rows.as_slice() else {
+        panic!("an app holds exactly one app state row: {rows:?}");
+    };
+    row.clone()
+}
+
+/// An Activate job for an app the journal has never seen enters the app and
+/// settles, and the app it enters is one the rest of the journal serves.
+///
+/// The expired attempt first is the control for WHERE the app enters. It gets
+/// past the entry and is refused before its commit, and the journal still holds
+/// no row for the app afterwards, so the entry belongs to the attempt's own
+/// transaction rather than committing ahead of it.
+async fn unseen_app(store: Rc<OrmStore>) {
+    let platform = Deployments::new().await;
+    let (service, app) = unseen_service(store, &platform).await;
+    let deployment = platform.deploy(&app).await;
+    let scope = service.fixture_app(app.clone());
+    assert!(
+        snapshot(&service, "app_state", &app).await.is_empty(),
+        "the case is about an app the journal has never seen"
+    );
+
+    let grant = Grant::new(&app, &deployment, 1);
+    let mut expired = grant.clone();
+    expired.expires = Instant::now();
+    let refused = scope.activate_job(&expired).await;
+    assert!(
+        matches!(refused, Err(WorkflowServiceError::Timeout)),
+        "an expired attempt is refused for its lease: {refused:?}"
+    );
+    for table in ["app_state", "deployment_holds", "deploys", "activations"] {
+        assert!(
+            snapshot(&service, table, &app).await.is_empty(),
+            "a refused attempt must leave no {table} row"
+        );
+    }
+
+    let receipt = scope.activate_job(&grant.retry()).await.unwrap();
+    assert_eq!(receipt.outcome, JobOutcome::Completed {});
+    assert_eq!(app_state(&service, &app).await["id"], value!(app.as_str()));
+    assert_eq!(selected(&service, &app).await, deployment.id);
+    let run = scope
+        .start(&RequestId::mint(), "Example", StartOptions::default())
+        .await
+        .unwrap();
+    let tx = service.begin().await.unwrap();
+    let run = journal_rows(&tx, "runs", json!({"id":run.id})).await;
+    assert_eq!(run[0].text("deploy_id").unwrap(), deployment.id);
+    tx.commit().await.unwrap();
+}
+
+/// Re-activation keeps every column of the app state it finds.
+///
+/// Every attempt enters the app again, and an entry that assigned defaults on
+/// conflict would reopen a closed ingress epoch, rewind the signal epoch and
+/// restart every sweep position on each deploy. So each column the entry does
+/// not name is moved off the value the first activation left, and the case
+/// refuses to proceed while any column is unmoved: a reset cannot pass as a
+/// column the arrangement never changed.
+async fn reactivation_keeps_app_state(store: Rc<OrmStore>) {
+    let platform = Deployments::new().await;
+    let (service, app) = unseen_service(store, &platform).await;
+    let first = platform.deploy(&app).await;
+    let second = platform.deploy(&app).await;
+    let scope = service.fixture_app(app.clone());
+    assert_eq!(
+        scope
+            .activate_job(&Grant::new(&app, &first, 1))
+            .await
+            .unwrap()
+            .outcome,
+        JobOutcome::Completed {}
+    );
+    let entered = app_state(&service, &app).await;
+
+    let tx = service.begin().await.unwrap();
+    journal_update(
+        &tx,
+        "app_state",
+        json!({"app_id":app.as_str()}),
+        json!({
+            "signal_epoch":7, "last_polled_at":11, "subscription_sequence":13,
+            "signal_sequence":17, "closed_epoch":3, "collection_revision":19,
+            "collection_after_id":"wjr_a", "collection_upper_id":"wjr_b",
+            "collection_observed_at":23, "reconciliation_revision":29,
+            "reconciliation_phase":"deployment_holds",
+            "reconciliation_after_id":"wjr_c", "reconciliation_upper_id":"wjr_d",
+        }),
+    )
+    .await;
+    tx.commit().await.unwrap();
+    let arranged = app_state(&service, &app).await;
+    let moved: Vec<_> = arranged
+        .as_object()
+        .unwrap()
+        .keys()
+        .filter(|column| !matches!(column.as_str(), "id" | "app_id"))
+        .collect();
+    assert!(!moved.is_empty());
+    for column in moved {
+        assert_ne!(
+            entered[column.as_str()],
+            arranged[column.as_str()],
+            "the arrangement must move {column}"
+        );
+    }
+    assert_eq!(arranged["signal_epoch"], value!(7));
+    assert_eq!(arranged["closed_epoch"], value!(3));
+
+    let grant = Grant::new(&app, &second, 2);
+    let receipt = scope.activate_job(&grant).await.unwrap();
+    assert_eq!(receipt.outcome, JobOutcome::Completed {});
+    assert_eq!(selected(&service, &app).await, second.id);
+    assert_eq!(app_state(&service, &app).await, arranged);
+    // A redelivered attempt enters the app again on its way to the receipt.
+    assert_eq!(scope.activate_job(&grant.retry()).await.unwrap(), receipt);
+    assert_eq!(app_state(&service, &app).await, arranged);
 }
 
 async fn replay_and_order(store: Rc<OrmStore>) {
