@@ -375,7 +375,18 @@ See [Billing & metering](../reference/billing-metering.md) (OpenMeter section
 catches that the in-test mock cannot (eventual-consistency lag + the
 query-window/`time` interaction).
 
-## Postgres connections a worker holds
+## Postgres connections each service holds
+
+Control holds `1 + K + H` sessions however many threads it serves on: one
+shared session, `K = control.catalog_max_connections` catalog sessions and
+`H = control.retention_max_connections` retention sessions, opened at boot,
+plus one request connection for each request or cron call in flight. Its
+thread count does not change that. `docs/runbooks/deploy-server.md` shows how
+to read each source's sessions in `pg_stat_activity`.
+
+Auth, the gateway and the worker open a pool per serving thread, and their
+thread counts default to the host's cores, so what they hold grows with the
+host unless their `--threads` is pinned.
 
 Worker data pools are thread-local and open lazily when a thread first uses
 `env.db`. Their `PoolConfig` bounds connection acquisition and idle retention;

@@ -49,6 +49,7 @@ pub mod publication;
 pub mod refund;
 pub mod registry;
 pub mod reserved_names;
+pub mod sessions;
 pub mod spend;
 pub mod stripe_client;
 pub mod stripe_handlers;

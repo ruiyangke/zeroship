@@ -261,3 +261,299 @@ fn control_serves_readyz_on_an_owned_database() {
         ids.len()
     );
 }
+
+/// Control's key and a peer document naming it, as a serving boot requires.
+fn service_identity(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::create_dir_all(dir).expect("key directory");
+    let service_key = signing_key(0x22);
+    let key = dir.join("svc-control.pem");
+    std::fs::write(
+        &key,
+        service_key
+            .to_pkcs8_der()
+            .expect("encode the service key")
+            .as_bytes(),
+    )
+    .expect("service key file");
+    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600))
+        .expect("owner-only service key");
+    let peers = dir.join("service-peers.json");
+    std::fs::write(
+        &peers,
+        format!(
+            r#"{{"keys":[{}]}}"#,
+            peer_entry(CONTROL_SERVICE_NAME, &public_x(&service_key)),
+        ),
+    )
+    .expect("service peers file");
+    (key, peers)
+}
+
+/// Every client session connected to one database, by the name it announced,
+/// read over a connection to ANOTHER database so the census never counts
+/// itself.
+struct Census {
+    runtime: compio::runtime::Runtime,
+    client: compio_postgres::Client,
+    database: String,
+}
+
+impl Census {
+    fn of(url: &str) -> Self {
+        let mut admin = url::Url::parse(url).expect("database URL");
+        let database = admin.path().trim_start_matches('/').to_owned();
+        admin.set_path("/postgres");
+        let runtime = compio::runtime::Runtime::new().expect("census runtime");
+        let client = runtime.block_on(async {
+            let (client, connection) =
+                compio_postgres::connect(admin.as_str(), compio_postgres::NoTls)
+                    .await
+                    .expect("census connection");
+            compio::runtime::spawn(async move {
+                let _ = connection.run().await;
+            })
+            .detach();
+            client
+        });
+        Self {
+            runtime,
+            client,
+            database,
+        }
+    }
+
+    fn sessions(&self) -> Vec<String> {
+        self.runtime.block_on(async {
+            self.client
+                .query(
+                    "SELECT coalesce(application_name, '') FROM pg_stat_activity \
+                      WHERE datname = $1 AND backend_type = 'client backend'",
+                    &[&self.database],
+                )
+                .await
+                .expect("census query")
+                .into_iter()
+                .map(|row| row.get(0))
+                .collect()
+        })
+    }
+}
+
+/// A serving Control child, killed when dropped.
+struct Serving {
+    child: std::process::Child,
+    port: u16,
+    log: std::path::PathBuf,
+}
+
+impl Serving {
+    fn log(&self) -> String {
+        std::fs::read_to_string(&self.log).unwrap_or_default()
+    }
+}
+
+impl Drop for Serving {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// What one boot held once all its serving threads were up.
+struct Held {
+    /// The most sessions any sample held, request connections aside.
+    most: usize,
+    /// The last sample's sessions, by name.
+    last: std::collections::BTreeMap<String, usize>,
+    /// Every name any sample saw.
+    names: std::collections::BTreeSet<String>,
+}
+
+const CATALOG_SESSIONS: usize = 1;
+const RETENTION_SESSIONS: usize = 1;
+
+/// Boot Control on a fresh clone with `threads` serving threads and the
+/// smallest executors, wait until every serving thread has started, then
+/// sample its sessions over a window.
+fn boot_and_count(threads: usize) -> Held {
+    use zeroship_control::sessions;
+    let database = workflow_postgres::Database::new();
+    let census = Census::of(&database.url());
+    // The control: before Control starts, the census sees nothing, so it does
+    // not count its own connection.
+    assert_eq!(census.sessions(), Vec::<String>::new());
+    let platform = common::PlatformJwks::start();
+    let scratch = tempfile::tempdir().expect("scratch directory");
+    let (key, peers) = service_identity(&scratch.path().join("keys"));
+    let port = free_port();
+    let log = scratch.path().join("control.log");
+    let sink = std::fs::File::create(&log).expect("control log");
+    let serving = Serving {
+        child: Command::new(env!("CARGO_BIN_EXE_zeroship-control"))
+            .env_clear()
+            .env("ZEROSHIP_CONTROL_KEY", STRONG_HEX)
+            .env("ZEROSHIP_PAIRWISE_SALT", STRONG_HEX)
+            .env("ZEROSHIP_CONTROL_MASTER_KEY", STRONG_HEX)
+            .env("ZEROSHIP_CONTROL_DATABASE_URL", database.url())
+            .arg("--no-config")
+            .arg("--auth-platform-issuer")
+            .arg(issuer_of(&platform.jwks_url()))
+            .arg("--service-key-file")
+            .arg(&key)
+            .arg("--service-peers-file")
+            .arg(&peers)
+            .arg("--allow-unsupported-billing")
+            // Each serving thread and each executor lane is an io_uring ring
+            // charged to `ulimit -l`, so the executors take one lane each.
+            .arg("--threads")
+            .arg(threads.to_string())
+            .arg("--catalog-max-connections")
+            .arg(CATALOG_SESSIONS.to_string())
+            .arg("--retention-max-connections")
+            .arg(RETENTION_SESSIONS.to_string())
+            .arg("--port")
+            .arg(port.to_string())
+            .arg("--blob-store")
+            .arg(scratch.path().join("blobs"))
+            .arg("--deploy-tmp-dir")
+            .arg(scratch.path().join("deploy"))
+            .stdout(Stdio::from(sink.try_clone().expect("clone the log")))
+            .stderr(Stdio::from(sink))
+            .spawn()
+            .expect("spawn zeroship-control"),
+        port,
+        log,
+    };
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while get(serving.port, "/readyz").is_none_or(|(status, _)| status != 200) {
+        assert!(
+            Instant::now() < deadline,
+            "control --threads {threads} never answered /readyz with 200. Log:\n{}",
+            serving.log()
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    // Every serving thread has started, so a session any thread opens as it
+    // starts is already open when the census counts.
+    let expected: std::collections::BTreeSet<u32> =
+        (0..u32::try_from(threads).expect("thread count")).collect();
+    while arbiter_ids(&serving.log()) != expected {
+        assert!(
+            Instant::now() < deadline,
+            "control --threads {threads} announced arbiters {:?}. Log:\n{}",
+            arbiter_ids(&serving.log()),
+            serving.log()
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    let mut held = Held {
+        most: 0,
+        last: std::collections::BTreeMap::new(),
+        names: std::collections::BTreeSet::new(),
+    };
+    for _ in 0..20 {
+        let sample = census.sessions();
+        held.most = held
+            .most
+            .max(sample.iter().filter(|name| *name != sessions::REQUEST).count());
+        held.last = std::collections::BTreeMap::new();
+        for name in sample {
+            *held.last.entry(name.clone()).or_default() += 1;
+            held.names.insert(name);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    // A request connection lives for one call. One still open once the calls
+    // that could hold it have finished is a session kept per thread or per
+    // process under the request name, which the bound above does not count.
+    let drain = Instant::now() + Duration::from_secs(30);
+    loop {
+        let open = census
+            .sessions()
+            .into_iter()
+            .filter(|name| name == sessions::REQUEST)
+            .count();
+        if open == 0 {
+            break;
+        }
+        assert!(
+            Instant::now() < drain,
+            "control --threads {threads} still holds {open} request connections after its \
+             boot-time calls finished; a request connection lives only for its call"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    held
+}
+
+/// Control's PostgreSQL sessions do not grow with its serving threads.
+///
+/// It holds one shared session, the catalog's and the retention executor's,
+/// and nothing per thread: at most `1 + K + H` throughout, exactly that once it
+/// has settled, and the same under one serving thread as under four. Request
+/// connections come and go with the calls that open them (a cron's first tick
+/// runs at boot), so they are attributed by name and left out of the bound,
+/// and each boot must drain them to none.
+#[test]
+fn control_sessions_do_not_scale_with_serving_threads() {
+    use zeroship_control::sessions;
+    let bound = 1 + CATALOG_SESSIONS + RETENTION_SESSIONS;
+    let mut settled = Vec::new();
+    for threads in [1, 4] {
+        let held = boot_and_count(threads);
+        assert!(
+            held.most <= bound,
+            "control --threads {threads} held {} sessions besides request connections; \
+             the process holds at most {bound} however many threads serve: {:?}",
+            held.most,
+            held.last
+        );
+        let resident: usize = held
+            .last
+            .iter()
+            .filter(|(name, _)| *name != sessions::REQUEST)
+            .map(|(_, count)| count)
+            .sum();
+        assert_eq!(
+            resident, bound,
+            "control --threads {threads} settled at {resident} sessions: {:?}",
+            held.last
+        );
+        // The census sees Control's sessions, not only a count: each executor's
+        // are there by name, as many as it was given.
+        assert_eq!(held.last.get(sessions::SHARED), Some(&1), "{:?}", held.last);
+        assert_eq!(
+            held.last.get(sessions::CATALOG),
+            Some(&CATALOG_SESSIONS),
+            "{:?}",
+            held.last
+        );
+        assert_eq!(
+            held.last.get(sessions::RETENTION),
+            Some(&RETENTION_SESSIONS),
+            "{:?}",
+            held.last
+        );
+        // Every session any sample saw came from a source that names itself.
+        let sources = [
+            sessions::SHARED,
+            sessions::CATALOG,
+            sessions::RETENTION,
+            sessions::REQUEST,
+        ];
+        assert!(
+            held.names.iter().all(|name| sources.contains(&name.as_str())),
+            "control --threads {threads} held sessions no source announced: {:?}",
+            held.names
+        );
+        settled.push(resident);
+    }
+    assert_eq!(
+        settled[0], settled[1],
+        "control held {} sessions under one serving thread and {} under four",
+        settled[0], settled[1]
+    );
+}

@@ -205,6 +205,7 @@ Every environment name below is `ZEROSHIP_<CANONICAL>` and every overlay path is
 | `control.port` | operational | `ZEROSHIP_CONTROL_PORT` | `control.port` | zeroship-control `--port` | `9090` |
 | `control.provider_config` | operational | `ZEROSHIP_CONTROL_PROVIDER_CONFIG` | `control.provider_config` | zeroship-control `--provider-config` | `{}` |
 | `control.resend_api_key` | secret | `ZEROSHIP_CONTROL_RESEND_API_KEY` | `control.resend_api_key` | zeroship-control `--resend-api-key-file` | - |
+| `control.retention_max_connections` | operational | `ZEROSHIP_CONTROL_RETENTION_MAX_CONNECTIONS` | `control.retention_max_connections` | zeroship-control `--retention-max-connections` | `crate::publication::shared::DEFAULT_RETENTION_MAX_CONNECTIONS.get()` |
 | `control.service_key_file` | operational | `ZEROSHIP_CONTROL_SERVICE_KEY_FILE` | `control.service_key_file` | zeroship-control `--service-key-file` | empty |
 | `control.service_peers_file` | operational | `ZEROSHIP_CONTROL_SERVICE_PEERS_FILE` | `control.service_peers_file` | zeroship-control `--service-peers-file` | empty |
 | `control.smtp_host` | operational | `ZEROSHIP_CONTROL_SMTP_HOST` | `control.smtp_host` | zeroship-control `--smtp-host` | empty |

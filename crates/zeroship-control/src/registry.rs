@@ -10,8 +10,8 @@ use zeroship_core::database_role::DatabaseCapability;
 use zeroship_core::{BindingId, DatabaseId};
 
 use crate::publication::{
-    catalog, Acceptance, AcceptanceResult, Catalog, CatalogError, CatalogOptions, CommandBinding,
-    DeployCommand,
+    catalog, Acceptance, AcceptanceResult, Catalog, CatalogError, CatalogOptions, CatalogRole,
+    CommandBinding, DeployCommand,
 };
 use zeroship_core::types::{
     AppNetPolicy, AppNetPolicyLimits, AppRecord, AppRuntimeLimits, AppVersionInfo,
@@ -149,14 +149,18 @@ fn source_chain(err: &dyn std::error::Error) -> Option<String> {
 /// Application registry backed by PostgreSQL. Stores the DB URL and creates a
 /// fresh connection per query — suitable for the low-traffic control plane.
 /// Deploy, archive and restore run their catalog transactions on the bounded
-/// [`Catalog`] every clone shares.
+/// [`Catalog`] every clone shares, and deployment holds and collection run on
+/// the bounded retention executor beside it.
 ///
-/// `Clone` is cheap (a `String` copy and a catalog handle) so `AppState` can
-/// hold a separate handle alongside the `EnvStore`'s internal one.
+/// `Clone` is cheap (a `String` copy and two executor handles) so `AppState`
+/// can hold a separate handle alongside the `EnvStore`'s internal one.
 #[derive(Clone, Debug)]
 pub struct Registry {
-    db_url: String,
+    /// The database URL offering [`crate::sessions::REQUEST`] as its session
+    /// name, which every [`Self::conn`] connection announces.
+    request_url: String,
     catalog: Catalog,
+    retention: Catalog,
 }
 
 /// Open a new compio-postgres connection and detach its driver task onto the
@@ -180,32 +184,44 @@ impl Registry {
     /// compose step / `deploy/ops/db-migrate.sh`).
     /// `Registry` never creates or alters tables.
     ///
-    /// The shared catalog uses the default session bound; the production
-    /// binary passes its configured bound to [`Self::connect`].
+    /// Both executors use their default session bounds; the production
+    /// binary passes its configured bounds to [`Self::connect`].
     ///
     /// # Errors
-    /// Reports an unreachable database and a catalog that cannot open.
+    /// Reports an unreachable database and an executor that cannot open.
     pub async fn new(db_url: &str) -> Result<Self, String> {
-        Self::connect(db_url, CatalogOptions::default()).await
+        Self::connect(
+            db_url,
+            CatalogOptions::default(),
+            CatalogOptions {
+                max_connections: crate::publication::shared::DEFAULT_RETENTION_MAX_CONNECTIONS,
+            },
+        )
+        .await
     }
 
-    /// Connect as [`Self::new`] does, opening the shared catalog with
-    /// `catalog`'s session bound.
+    /// Connect as [`Self::new`] does, opening the publication catalog with
+    /// `catalog`'s session bound and the retention executor with
+    /// `retention`'s. Opening them is the reachability check; the schema must
+    /// already exist.
     ///
     /// # Errors
-    /// Reports an unreachable database and a catalog that cannot open.
-    pub async fn connect(db_url: &str, catalog: CatalogOptions) -> Result<Self, String> {
-        // Fail fast if the database is unreachable; the schema must already
-        // exist. Dropping `conn` sends Terminate and exits the driver task.
-        let conn = open_conn(db_url).await.map_err(|e| e.to_string())?;
-        drop(conn);
-        let catalog = Catalog::start(db_url, catalog)
+    /// Reports an unreachable database and an executor that cannot open.
+    pub async fn connect(
+        db_url: &str,
+        catalog: CatalogOptions,
+        retention: CatalogOptions,
+    ) -> Result<Self, String> {
+        let catalog = Catalog::start(db_url, CatalogRole::Publication, catalog)
             .await
             .map_err(|error| format!("control catalog: {error}"))?;
-
+        let retention = Catalog::start(db_url, CatalogRole::Retention, retention)
+            .await
+            .map_err(|error| format!("control retention executor: {error}"))?;
         Ok(Self {
-            db_url: db_url.to_string(),
+            request_url: crate::sessions::named(db_url, crate::sessions::REQUEST),
             catalog,
+            retention,
         })
     }
 
@@ -215,16 +231,29 @@ impl Registry {
         &self.catalog
     }
 
+    /// The process's retention executor. Deployment holds and the deployment
+    /// collector run here, never on [`Self::catalog`]'s lanes.
+    #[must_use]
+    pub const fn retention(&self) -> &Catalog {
+        &self.retention
+    }
+
     /// Open a fresh connection. Crate-internal: stores + internal
     /// handlers are the only callers. Integration tests that need
     /// raw DB access go through narrow `__…_for_test` helpers on
     /// the store types (e.g. `EnvStore::__raw_ciphertext_for_test`).
+    ///
+    /// Refused on a catalog lane, whose operations may not wait for a request
+    /// connection (the lock order in [`crate::publication::shared`]).
     pub(crate) async fn conn(&self) -> Result<Client, RegistryError> {
-        open_conn(&self.db_url).await.map_err(RegistryError::from)
-    }
-
-    pub(crate) fn workflow_store_db_url(&self) -> &str {
-        &self.db_url
+        if crate::publication::shared::on_lane() {
+            return Err(RegistryError::Database(
+                "a catalog lane may not open a request connection".into(),
+            ));
+        }
+        open_conn(&self.request_url)
+            .await
+            .map_err(RegistryError::from)
     }
 
     /// Validate that `plan_id` names a real, UNARCHIVED plan in the catalog.
@@ -581,6 +610,10 @@ impl Registry {
         // form of this lock. Holding the exclusive form around the catalog
         // transaction means that once archive returns, no claim can have
         // crossed the marker; work admitted before it may still finish.
+        //
+        // The request connection is taken first and held while this waits
+        // for a catalog lane: the one order the executors admit, since a lane
+        // never waits for a request connection.
         let mut guard = self.conn().await?;
         let guard_tx = guard.transaction().await?;
         guard_tx
@@ -1444,5 +1477,24 @@ mod name_validation_tests {
             validate_app_name(""),
             Err(RegistryError::InvalidInput(_))
         ));
+    }
+}
+
+#[cfg(test)]
+mod session_name_tests {
+    use super::*;
+
+    /// A request connection names its source, so `pg_stat_activity` tells it
+    /// apart from the sessions Control keeps open.
+    #[compio::test]
+    async fn a_request_connection_announces_its_source() {
+        let registry = Registry::new(&crate::test_database::url()).await.unwrap();
+        let conn = registry.conn().await.unwrap();
+        let name: String = conn
+            .query_one("SELECT current_setting('application_name')", &[])
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(name, crate::sessions::REQUEST);
     }
 }

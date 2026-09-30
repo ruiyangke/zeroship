@@ -8,8 +8,9 @@ use super::*;
 use futures::future::join_all;
 use std::{cell::Cell, collections::BTreeSet, num::NonZeroUsize};
 use zeroship_core::workflow_coordination::Revision;
-use zeroship_control::publication::{
-    catalog::APPLICATION_NAME, Acceptance, CatalogError, CatalogOptions,
+use zeroship_control::{
+    publication::{Acceptance, CatalogError, CatalogOptions},
+    sessions::CATALOG,
 };
 
 use super::deployment_commands::{deploy, labelled};
@@ -63,6 +64,9 @@ async fn bounded(fixture: &Fixture, bound: usize) -> (Registry, BTreeSet<i32>) {
         CatalogOptions {
             max_connections: NonZeroUsize::new(bound).unwrap(),
         },
+        CatalogOptions {
+            max_connections: NonZeroUsize::MIN,
+        },
     )
     .await
     .unwrap();
@@ -75,7 +79,7 @@ async fn sessions(fixture: &Fixture) -> BTreeSet<i32> {
         .admin
         .query(
             "SELECT pid FROM pg_stat_activity WHERE application_name = $1",
-            &[&APPLICATION_NAME],
+            &[&CATALOG],
         )
         .await
         .unwrap()
@@ -135,7 +139,7 @@ async fn blocked_by(fixture: &Fixture, holder: i32) -> BTreeSet<i32> {
         .query(
             "SELECT pid FROM pg_stat_activity \
               WHERE application_name = $1 AND $2 = ANY(pg_blocking_pids(pid))",
-            &[&APPLICATION_NAME, &holder],
+            &[&CATALOG, &holder],
         )
         .await
         .unwrap()
@@ -163,7 +167,7 @@ async fn waiting_on(fixture: &Fixture, holder: i32) -> BTreeSet<i32> {
                    FROM chain c, LATERAL unnest(pg_blocking_pids(c.blocker)) AS n(blocker) \
              ) \
              SELECT DISTINCT pid FROM chain WHERE blocker = $2",
-            &[&APPLICATION_NAME, &holder],
+            &[&CATALOG, &holder],
         )
         .await
         .unwrap()
@@ -183,7 +187,7 @@ async fn catalog_state(fixture: &Fixture) -> Vec<String> {
                            coalesce(wait_event,'-'), pg_blocking_pids(pid)::text, \
                            left(regexp_replace(query, '\\s+', ' ', 'g'), 120)) \
                FROM pg_stat_activity WHERE application_name = $1 ORDER BY pid",
-            &[&APPLICATION_NAME],
+            &[&CATALOG],
         )
         .await
         .unwrap()

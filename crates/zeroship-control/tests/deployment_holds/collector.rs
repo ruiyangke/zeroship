@@ -139,16 +139,15 @@ async fn journal_usage(fixture: &Fixture, role: &str) -> bool {
         .get(0)
 }
 
-async fn collector(fixture: &Fixture, blobs: Arc<dyn BlobStore>, batch: i64) -> Collector {
-    Collector::connect(
-        &fixture.control_url,
+fn collector(fixture: &Fixture, blobs: Arc<dyn BlobStore>, batch: i64) -> Collector {
+    Collector::new(
+        fixture.state.registry.retention().clone(),
         blobs,
         DeployRetentionConfig {
             batch_size: batch,
             ..DeployRetentionConfig::default()
         },
     )
-    .await
     .unwrap()
 }
 
@@ -214,7 +213,7 @@ async fn collection_obeys_independent_holds_without_journal_access() {
             .await,
         Err(deployments::Error::PermissionDenied)
     ));
-    let mut scan = collector(&fixture, fixture.state.blob_store.clone(), 128).await;
+    let mut scan = collector(&fixture, fixture.state.blob_store.clone(), 128);
     let first = scan.tick().await.unwrap();
     assert_eq!(first.failed, 0);
     assert_eq!(first.finished, 1);
@@ -353,7 +352,7 @@ async fn collection_rotates_past_failures_and_recovers_manifest_deletion() {
     let second = seed_versions(&fixture, "collector-later").await;
     let faults = FaultStore::new(fixture.state.blob_store.clone());
     faults.fail.store(true, Ordering::SeqCst);
-    let mut scan = collector(&fixture, faults.clone(), 1).await;
+    let mut scan = collector(&fixture, faults.clone(), 1);
     // Visit in actual native-id order. A failed first deletion must not pin
     // the page cursor and prevent the other eligible app from being collected.
     let ids: Vec<String> = fixture
@@ -399,20 +398,19 @@ async fn collection_rotates_past_failures_and_recovers_manifest_deletion() {
         .unwrap();
     // A fresh collector resumes fences, even when a new grace window excludes
     // every ordinarily available deployment.
-    let mut restart = Collector::connect(
-        &fixture.control_url,
+    let mut restart = Collector::new(
+        fixture.state.registry.retention().clone(),
         faults.clone(),
         DeployRetentionConfig {
             grace_window_ms: 3 * 24 * 60 * 60 * 1_000,
             ..DeployRetentionConfig::default()
         },
     )
-    .await
     .unwrap();
     let recovered = restart.tick().await.unwrap();
     assert_eq!(recovered.finished, 1);
     assert_eq!(state(&fixture, &interrupted.old).await, "deleted");
-    let mut next_sweep = collector(&fixture, faults.clone(), 128).await;
+    let mut next_sweep = collector(&fixture, faults.clone(), 128);
     assert_eq!(next_sweep.tick().await.unwrap().finished, 1);
     assert_eq!(state(&fixture, &newcomer.old).await, "deleted");
 
@@ -423,7 +421,7 @@ async fn collection_rotates_past_failures_and_recovers_manifest_deletion() {
          CREATE TRIGGER fail_collector_finish BEFORE UPDATE ON zeroship.app_deploys \
          FOR EACH ROW EXECUTE FUNCTION zeroship.fail_collector_finish();"
     ).await.unwrap();
-    let mut scan = collector(&fixture, faults.clone(), 128).await;
+    let mut scan = collector(&fixture, faults.clone(), 128);
     let failed = scan.tick().await.unwrap();
     assert_eq!(failed.failed, 1);
     assert_eq!(state(&fixture, &lost_finish.old).await, "reclaiming");
@@ -441,7 +439,7 @@ async fn collection_rotates_past_failures_and_recovers_manifest_deletion() {
         .batch_execute("DROP TRIGGER fail_collector_finish ON zeroship.app_deploys")
         .await
         .unwrap();
-    let mut restart = collector(&fixture, faults.clone(), 128).await;
+    let mut restart = collector(&fixture, faults.clone(), 128);
     let finished = restart.tick().await.unwrap();
     assert_eq!(finished.finished, 1);
     assert_eq!(finished.manifests_deleted, 0);
@@ -454,7 +452,7 @@ async fn committed_reclamation_refuses_activation_and_survives_cancellation() {
     let versions = seed_versions(&fixture, "collector-cancel").await;
     let faults = FaultStore::new(fixture.state.blob_store.clone());
     let (entered, release) = faults.gate();
-    let mut scan = collector(&fixture, faults.clone(), 128).await;
+    let mut scan = collector(&fixture, faults.clone(), 128);
     compio::time::timeout(Duration::from_secs(10), async {
         let pending = Box::pin(scan.tick());
         let remaining = match futures::future::select(pending, entered).await {
@@ -481,7 +479,7 @@ async fn committed_reclamation_refuses_activation_and_survives_cancellation() {
     })
     .await
     .expect("cancelled collector fixture stalled");
-    let mut restart = collector(&fixture, faults.clone(), 128).await;
+    let mut restart = collector(&fixture, faults.clone(), 128);
     assert_eq!(restart.tick().await.unwrap().finished, 1);
     assert_eq!(state(&fixture, &versions.old).await, "deleted");
     assert!(matches!(
@@ -537,7 +535,7 @@ async fn activation_holds_app_lock_before_collector_rechecks_current_deployment(
         .query_one("SELECT pg_advisory_lock(73921867)", &[])
         .await
         .unwrap();
-    let mut scan = collector(&fixture, fixture.state.blob_store.clone(), 128).await;
+    let mut scan = collector(&fixture, fixture.state.blob_store.clone(), 128);
     compio::time::timeout(Duration::from_secs(20), async {
         let activation = redeploy_old(&fixture, &versions);
         let observer = async {

@@ -3,102 +3,129 @@
 //! Customer journals never enter Control.
 //!
 //! The summary is here rather than in a module of its own because it answers out
-//! of the same catalog, under the same role check, through the same handle: the
-//! deployment catalog lives in the workflow store database, which this is the
-//! only Control surface holding open.
+//! of the same catalog, under the same role check, through the same handle.
+//!
+//! Every ledger operation runs on Control's retention executor
+//! (`Registry::retention`), which holds a fixed set of sessions for the whole
+//! process, so serving threads open none. A placed hold's first placement check
+//! runs on the calling thread, so a caller it refuses never takes a lane; its
+//! transaction, the checks inside it and the budget that decides whether it
+//! may commit run on the lane that sends COMMIT.
 
 #![expect(
     clippy::future_not_send,
     reason = "ORM and HTTP stay on their compio thread"
 )]
 
-use crate::AppState;
+use crate::{AppState, publication::Catalog};
 use ntex::web::{
     self,
     types::{Json, State},
 };
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
     future::{Future, poll_fn},
     rc::Rc,
-    sync::Arc,
+    sync::{Arc, Weak},
     task::Poll,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use zeroship_core::{
-    schema_name::SchemaName,
     service_assertion::{ServiceIssuer, presented_issuer},
     service_identity::{AuthError, ServiceEndpoint, endpoints},
-    service_peers::{WORKER_SERVICE_NAME, WORKFLOW_SERVICE_NAME, service_issuer},
+    service_peers::{ServiceAuth, WORKER_SERVICE_NAME, WORKFLOW_SERVICE_NAME, service_issuer},
     workflow_coordination::{Failure, FailureCode, VerifyAssignment, WorkerId},
     workflow_deployments::{HoldGeneration, HoldReceipt, HoldRequest, HoldScope, QueueHoldRequest},
 };
-use zeroship_data_orm::{
-    ConnectOptions, binding::DbBinding, encryption::ProjectKeySource, orm::Database,
-};
 use zeroship_workflow::service::{DeployRegistration, DeployRegistrationRequest};
 use zeroship_workflow_client::{self as coordination, ControlCoordinator, Options};
-use zeroship_workflow_manager::deployments::{self, DeploymentHolds, Error as DeploymentError};
+use zeroship_workflow_manager::deployments::{DeploymentHolds, Error as DeploymentError};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_REQUEST_BYTES: usize = 64 * 1024;
 
-/// Runtime-local platform metadata handles. No creator connection is accepted.
+/// The deployment-hold surface every serving thread shares.
+///
+/// It holds no database and no HTTP client: the retention executor owns the
+/// sessions, and each thread that verifies a placement builds its own
+/// coordinator client.
 #[derive(Debug)]
 pub struct DeploymentHoldApi {
-    ledger: DeploymentHolds,
-    coordinator: Option<ControlCoordinator>,
+    executor: Catalog,
+    coordinator: Arc<CoordinatorSource>,
 }
-impl DeploymentHoldApi {
-    /// Bind the Control process's existing database and outbound service signer.
-    /// An unconfigured signer leaves these protected operations unavailable.
-    ///
-    /// # Errors
-    /// Refuses unavailable deployment metadata or invalid coordinator endpoints.
-    pub async fn connect(
-        state: &AppState,
-        coordinator_url: &str,
-        options: Options,
-    ) -> Result<Self, DeploymentError> {
-        let coordinator = if state.service_auth.signing_identity().is_some() {
-            Some(
-                ControlCoordinator::new(coordinator_url, state.service_auth.clone(), options)
-                    .map_err(coordination_error)?,
-            )
-        } else {
-            None
+
+/// What a thread builds its coordinator client from.
+#[derive(Debug)]
+struct CoordinatorSource {
+    url: String,
+    auth: Arc<ServiceAuth>,
+    options: Options,
+}
+
+thread_local! {
+    /// The coordinator clients this thread has built, one per hold API that
+    /// ran on it: serving threads for a placed hold's first check, executor
+    /// threads for the checks inside its transaction. An HTTP client's pooled
+    /// streams belong to the thread that opens them, so each thread keeps its
+    /// own.
+    static COORDINATORS: RefCell<Vec<(Weak<CoordinatorSource>, Rc<ControlCoordinator>)>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+impl CoordinatorSource {
+    /// Build the client once to refuse what every thread would refuse.
+    fn new(url: &str, auth: Arc<ServiceAuth>, options: Options) -> Result<Self, DeploymentError> {
+        let source = Self {
+            url: url.to_owned(),
+            auth,
+            options,
         };
-        let database = Database::connect(
-            DbBinding::platform(
-                "platform",
-                "control-deployments",
-                SchemaName::new("zeroship").map_err(|_| unavailable())?,
-            ),
-            ConnectOptions::new(
-                state.registry.workflow_store_db_url().to_owned(),
-                ProjectKeySource::unavailable(),
-            )
-            .connection_authority(),
-            deployments::collections()?,
-        )
-        .await?;
-        Ok(Self {
-            ledger: DeploymentHolds::new(database)?,
-            coordinator,
-        })
+        source.build().map_err(coordination_error)?;
+        Ok(source)
     }
 
-    /// Compose a verified platform database and Control's coordinator client.
+    fn build(&self) -> Result<ControlCoordinator, coordination::Error> {
+        ControlCoordinator::new(&self.url, self.auth.clone(), self.options.clone())
+    }
+
+    /// This thread's client for `source`, built on first use.
+    fn client(source: &Arc<Self>) -> Result<Rc<ControlCoordinator>, DeploymentError> {
+        COORDINATORS.with_borrow_mut(|built| {
+            built.retain(|(owner, _)| owner.strong_count() > 0);
+            if let Some((_, client)) = built
+                .iter()
+                .find(|(owner, _)| std::ptr::eq(owner.as_ptr(), Arc::as_ptr(source)))
+            {
+                return Ok(Rc::clone(client));
+            }
+            let client = Rc::new(source.build().map_err(coordination_error)?);
+            built.push((Arc::downgrade(source), Rc::clone(&client)));
+            Ok(client)
+        })
+    }
+}
+
+impl DeploymentHoldApi {
+    /// Serve holds on `executor`, verifying placements with the coordinator at
+    /// `coordinator_url` under Control's signer.
+    ///
+    /// The client is built here once to refuse, and again on each thread that
+    /// uses it, so a coordinator the client refuses refuses the boot rather
+    /// than every placed hold.
     ///
     /// # Errors
-    /// Refuses incompatible deployment metadata.
+    /// Refuses a coordinator origin the client refuses and a signer that is not
+    /// Control's.
     pub fn new(
-        database: Database,
-        coordinator: ControlCoordinator,
+        executor: Catalog,
+        coordinator_url: &str,
+        auth: Arc<ServiceAuth>,
+        options: Options,
     ) -> Result<Self, DeploymentError> {
         Ok(Self {
-            ledger: DeploymentHolds::new(database)?,
-            coordinator: Some(coordinator),
+            executor,
+            coordinator: Arc::new(CoordinatorSource::new(coordinator_url, auth, options)?),
         })
     }
 
@@ -140,10 +167,15 @@ impl DeploymentHoldApi {
         &self,
         request: &DeployRegistrationRequest,
     ) -> Result<DeployRegistration, DeploymentError> {
+        let (app, deployment) = (request.app_id.clone(), request.deploy_id.as_str().to_owned());
         compio::time::timeout(REQUEST_TIMEOUT, async {
             let record = self
-                .ledger
-                .manifest(&request.app_id, request.deploy_id.as_str())
+                .executor
+                .run(move |database| async move {
+                    DeploymentHolds::new(database)?
+                        .manifest(&app, &deployment)
+                        .await
+                })
                 .await?;
             crate::publication::VerifiedDeployment::verify(
                 record.manifest_json,
@@ -257,13 +289,18 @@ impl DeploymentHoldApi {
         generation: HoldGeneration,
         acquire: bool,
     ) -> Result<HoldReceipt, DeploymentError> {
-        compio::time::timeout(REQUEST_TIMEOUT, async {
-            if acquire {
-                self.ledger.acquire(scope, deployment, generation).await
-            } else {
-                self.ledger.release(scope, deployment, generation).await
-            }
-        })
+        let (scope, deployment) = (scope.clone(), deployment.to_owned());
+        compio::time::timeout(
+            REQUEST_TIMEOUT,
+            self.executor.run(move |database| async move {
+                let ledger = DeploymentHolds::new(database)?;
+                if acquire {
+                    ledger.acquire(&scope, &deployment, generation).await
+                } else {
+                    ledger.release(&scope, &deployment, generation).await
+                }
+            }),
+        )
         .await
         .map_err(|_| DeploymentError::Timeout)?
     }
@@ -274,7 +311,6 @@ impl DeploymentHoldApi {
         request: &HoldRequest,
         acquire: bool,
     ) -> Result<HoldReceipt, DeploymentError> {
-        let coordinator = self.coordinator.as_ref().ok_or_else(unavailable)?;
         // A placed caller names its placement. Without one there is nothing to
         // verify, and a worker is authorized by verification alone.
         let assignment_revision = request.assignment_revision.ok_or_else(|| {
@@ -285,49 +321,66 @@ impl DeploymentHoldApi {
             worker_id: worker.clone(),
             assignment_revision,
         };
-        let budget = AuthorityBudget::new();
-        let authorize = || async {
-            budget.cap(verify_authority(coordinator, &assignment).await?);
-            Ok(())
-        };
-        budget
-            .run(async {
-                // Authenticate app scope before looking up deployment metadata, then
-                // repeat after lock waits and before committing its generation.
-                authorize().await?;
-                let scope = HoldScope::for_app(request.app_id.clone());
-                if acquire {
-                    self.ledger
-                        .acquire_authorized(
-                            &scope,
-                            &request.deploy_id,
-                            request.generation,
-                            authorize,
-                        )
-                        .await
-                } else {
-                    self.ledger
-                        .release_authorized(
-                            &scope,
-                            &request.deploy_id,
-                            request.generation,
-                            authorize,
-                        )
-                        .await
-                }
-            })
-            .await
+        // The caller's whole wait, queueing for a lane included, counts
+        // against the authority budget.
+        let deadline = Instant::now() + REQUEST_TIMEOUT;
+        // Authenticate app scope on the calling thread, before occupying a
+        // lane or reading deployment metadata, so a caller its placement does
+        // not cover is refused without taking a retention session.
+        let coordinator = CoordinatorSource::client(&self.coordinator)?;
+        let lease = compio::time::timeout(
+            REQUEST_TIMEOUT,
+            verify_authority(&coordinator, &assignment),
+        )
+        .await
+        .map_err(|_| DeploymentError::Timeout)??;
+        let authority = deadline.min(lease);
+        let source = Arc::clone(&self.coordinator);
+        let scope = HoldScope::for_app(request.app_id.clone());
+        let (deployment, generation) = (request.deploy_id.clone(), request.generation);
+        compio::time::timeout(
+            deadline.saturating_duration_since(Instant::now()),
+            self.executor.run(move |database| async move {
+                // The budget runs on the executor thread, which is the thread
+                // that dispatches COMMIT, so its expiry stops COMMIT there.
+                let budget = AuthorityBudget::until(authority);
+                let coordinator = CoordinatorSource::client(&source)?;
+                let ledger = DeploymentHolds::new(database)?;
+                let authorize = || async {
+                    budget.cap(verify_authority(&coordinator, &assignment).await?);
+                    Ok(())
+                };
+                // Re-verify after lock waits and before committing the
+                // generation.
+                budget
+                    .run(async {
+                        if acquire {
+                            ledger
+                                .acquire_authorized(&scope, &deployment, generation, authorize)
+                                .await
+                        } else {
+                            ledger
+                                .release_authorized(&scope, &deployment, generation, authorize)
+                                .await
+                        }
+                    })
+                    .await
+            }),
+        )
+        .await
+        .map_err(|_| DeploymentError::Timeout)?
     }
 }
 
 /// Revalidation can shorten authority while the ledger waits for database I/O.
-/// Expiry cancels work before commit dispatch. Once commit is in flight, this
-/// bounds the caller's wait; a retry recovers its possibly committed receipt.
+/// Expiry cancels work before commit dispatch, so the budget must run on the
+/// thread that dispatches COMMIT. Once commit is in flight, this bounds the
+/// caller's wait; a retry recovers its possibly committed receipt.
 struct AuthorityBudget(Cell<Instant>);
 
 impl AuthorityBudget {
-    fn new() -> Self {
-        Self(Cell::new(Instant::now() + REQUEST_TIMEOUT))
+    const fn until(deadline: Instant) -> Self {
+        Self(Cell::new(deadline))
     }
 
     fn cap(&self, deadline: Instant) {
@@ -429,7 +482,7 @@ pub fn configure(config: &mut web::ServiceConfig) {
 async fn deploy_registration(
     request: web::HttpRequest,
     state: State<Arc<AppState>>,
-    api: State<Rc<DeploymentHoldApi>>,
+    api: State<Arc<DeploymentHoldApi>>,
     body: web::types::Payload,
 ) -> web::HttpResponse {
     match handle_registration(request, state, api, body).await {
@@ -441,7 +494,7 @@ async fn deploy_registration(
 async fn handle_registration(
     request: web::HttpRequest,
     state: State<Arc<AppState>>,
-    api: State<Rc<DeploymentHoldApi>>,
+    api: State<Arc<DeploymentHoldApi>>,
     body: web::types::Payload,
 ) -> Result<DeployRegistration, FailureCode> {
     compio::time::timeout(REQUEST_TIMEOUT, async {
@@ -488,7 +541,7 @@ async fn handle_registration(
 async fn acquire_queue(
     request: web::HttpRequest,
     state: State<Arc<AppState>>,
-    api: State<Rc<DeploymentHoldApi>>,
+    api: State<Arc<DeploymentHoldApi>>,
     body: web::types::Payload,
 ) -> web::HttpResponse {
     respond(
@@ -507,7 +560,7 @@ async fn acquire_queue(
 async fn release_queue(
     request: web::HttpRequest,
     state: State<Arc<AppState>>,
-    api: State<Rc<DeploymentHoldApi>>,
+    api: State<Arc<DeploymentHoldApi>>,
     body: web::types::Payload,
 ) -> web::HttpResponse {
     respond(
@@ -526,7 +579,7 @@ async fn release_queue(
 async fn handle_queue(
     request: web::HttpRequest,
     state: State<Arc<AppState>>,
-    api: State<Rc<DeploymentHoldApi>>,
+    api: State<Arc<DeploymentHoldApi>>,
     body: web::types::Payload,
     endpoint: ServiceEndpoint,
     acquire: bool,
@@ -574,7 +627,7 @@ async fn handle_queue(
 async fn acquire(
     request: web::HttpRequest,
     state: State<Arc<AppState>>,
-    api: State<Rc<DeploymentHoldApi>>,
+    api: State<Arc<DeploymentHoldApi>>,
     body: web::types::Payload,
 ) -> web::HttpResponse {
     respond(
@@ -592,7 +645,7 @@ async fn acquire(
 async fn release(
     request: web::HttpRequest,
     state: State<Arc<AppState>>,
-    api: State<Rc<DeploymentHoldApi>>,
+    api: State<Arc<DeploymentHoldApi>>,
     body: web::types::Payload,
 ) -> web::HttpResponse {
     respond(
@@ -644,7 +697,7 @@ fn hold_caller(issuer: &ServiceIssuer) -> Result<HoldCaller, FailureCode> {
 async fn handle(
     request: web::HttpRequest,
     state: State<Arc<AppState>>,
-    api: State<Rc<DeploymentHoldApi>>,
+    api: State<Arc<DeploymentHoldApi>>,
     body: web::types::Payload,
     endpoint: ServiceEndpoint,
     acquire: bool,
@@ -735,4 +788,72 @@ fn coordination_error(error: coordination::Error) -> DeploymentError {
 }
 fn unavailable() -> DeploymentError {
     DeploymentError::Unavailable("deployment hold authority unavailable".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zeroship_core::{
+        service_assertion::{ServiceSigningKey, ServiceTrustBundle, TransportAssertionVerifier},
+        service_peers::{CONTROL_SERVICE_NAME, ServiceKeyring},
+    };
+
+    const ORIGIN: &str = "http://127.0.0.1:9093";
+
+    fn signer(service: &str) -> Arc<ServiceAuth> {
+        Arc::new(ServiceAuth::new(
+            ServiceKeyring::from_parts(
+                service_issuer(service).unwrap(),
+                ServiceSigningKey::generate(),
+                ServiceTrustBundle::new(),
+            )
+            .unwrap(),
+            Arc::new(TransportAssertionVerifier::new(ServiceTrustBundle::new())),
+        ))
+    }
+
+    /// The hold API's coordinator is judged once, where the process builds it,
+    /// so what every executor thread would refuse refuses the boot instead.
+    #[test]
+    fn the_coordinator_is_refused_where_the_process_builds_it() {
+        assert!(
+            CoordinatorSource::new(ORIGIN, signer(CONTROL_SERVICE_NAME), Options::default())
+                .is_ok()
+        );
+        for (origin, auth) in [
+            (ORIGIN, Arc::new(ServiceAuth::unconfigured())),
+            (ORIGIN, signer(WORKER_SERVICE_NAME)),
+            ("http://coordinator.internal:9093", signer(CONTROL_SERVICE_NAME)),
+            ("not a url", signer(CONTROL_SERVICE_NAME)),
+        ] {
+            assert!(
+                CoordinatorSource::new(origin, auth, Options::default()).is_err(),
+                "{origin}"
+            );
+        }
+    }
+
+    /// Each thread builds one client per hold API and reuses it, so placement
+    /// checks share its pooled streams; another API gets a client of its own.
+    #[test]
+    fn a_thread_reuses_its_client_for_one_api_and_builds_another_for_the_next() {
+        let first = Arc::new(
+            CoordinatorSource::new(ORIGIN, signer(CONTROL_SERVICE_NAME), Options::default())
+                .unwrap(),
+        );
+        let second = Arc::new(
+            CoordinatorSource::new(ORIGIN, signer(CONTROL_SERVICE_NAME), Options::default())
+                .unwrap(),
+        );
+        let client = CoordinatorSource::client(&first).unwrap();
+        assert!(Rc::ptr_eq(&client, &CoordinatorSource::client(&first).unwrap()));
+        assert!(!Rc::ptr_eq(&client, &CoordinatorSource::client(&second).unwrap()));
+        // A dropped API's client leaves the thread with it.
+        drop(first);
+        CoordinatorSource::client(&second).unwrap();
+        COORDINATORS.with_borrow(|built| {
+            assert_eq!(built.len(), 1);
+            assert!(std::ptr::eq(built[0].0.as_ptr(), Arc::as_ptr(&second)));
+        });
+    }
 }

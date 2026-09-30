@@ -12,6 +12,9 @@
 //!   - [`orphaned_app_reaper`] — purges apps left owner-less by the ISS-12
 //!     account-erase reaper (auth), tearing down their DB rows + blobs. Excludes
 //!     `system = true` apps (the platform console). See ISS-12b.
+//!
+//! [`deploy_retention`] is not spawned here: `main` builds its collector from
+//! bounds it validated before serving, then runs it on the same runtime.
 
 pub mod audit_retention;
 pub(crate) mod lock_keys;
@@ -61,13 +64,6 @@ pub fn spawn_all(
             "billing stream transport is not configured; usage metering/enforcement is disabled (no old-model fallback)"
         );
     }
-
-    // Normal deployment retention is platform catalog work.
-    let deploy_retention_state = Arc::clone(&state);
-    compio::runtime::spawn(async move {
-        deploy_retention::run(deploy_retention_state, deploy_retention::DEFAULT_TICK_SECS).await;
-    })
-    .detach();
 
     // Dunning sweep (billing G2) — suspends each `past_due` organization whose
     // dunning window (`max_dunning_days`, default 7) has elapsed; the gateway

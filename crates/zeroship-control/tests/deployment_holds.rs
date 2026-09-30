@@ -23,6 +23,8 @@ mod collector;
 mod publication;
 #[path = "deployment_holds/catalog.rs"]
 mod shared_catalog;
+#[path = "deployment_holds/retention.rs"]
+mod retention_executor;
 
 use ntex::{
     client::Client,
@@ -426,22 +428,24 @@ impl Fixture {
         .await
     }
 
+    /// Control's hold routes over the fixture registry's retention executor,
+    /// composed as the binary composes them: one API every serving thread
+    /// shares.
     async fn control(&self, coordinator_url: String) -> test::TestServer {
         let state = self.state.clone();
-        let url = self.control_url.clone();
+        let api = Arc::new(
+            DeploymentHoldApi::new(
+                state.registry.retention().clone(),
+                &coordinator_url,
+                state.service_auth.clone(),
+                Options::default(),
+            )
+            .unwrap(),
+        );
         test::server(move || {
             let state = state.clone();
-            let url = url.clone();
-            let coordinator_url = coordinator_url.clone();
+            let api = api.clone();
             async move {
-                let coordinator = ControlCoordinator::new(
-                    &coordinator_url,
-                    state.service_auth.clone(),
-                    Options::default(),
-                )
-                .unwrap();
-                let api =
-                    Rc::new(DeploymentHoldApi::new(database(&url).await, coordinator).unwrap());
                 web::App::new()
                     .state(state)
                     .state(api)
@@ -966,13 +970,10 @@ async fn failed_final_placement_authorization_rolls_back_hold_generations() {
     })
     .await;
     let api = DeploymentHoldApi::new(
-        database(&fixture.control_url).await,
-        ControlCoordinator::new(
-            &origin(&server),
-            fixture.state.service_auth.clone(),
-            Options::default(),
-        )
-        .unwrap(),
+        fixture.state.registry.retention().clone(),
+        &origin(&server),
+        fixture.state.service_auth.clone(),
+        Options::default(),
     )
     .unwrap();
     let mut request = HoldRequest {

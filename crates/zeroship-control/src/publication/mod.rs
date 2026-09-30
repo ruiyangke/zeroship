@@ -4,7 +4,8 @@
 //! [`catalog`] commits each app lifecycle change together with its intent in
 //! one ORM transaction on the Control database. [`shared`] runs those
 //! transactions for every request on the process's bounded set of catalog
-//! threads, each holding one session. [`publisher`] later
+//! threads, each holding one session, and runs deployment holds and
+//! collection on a second such executor of their own. [`publisher`] later
 //! delivers pending intents in per-app revision order and records only the
 //! exact receipt the manager returned. The deployment collector treats a
 //! pending activation as a dependency of its bundle.
@@ -23,7 +24,7 @@ pub mod shared;
 use zeroship_data_orm::orm::UtcInstant;
 
 pub use catalog::{CatalogError, Transition};
-pub use shared::{Catalog, CatalogOptions, Closing};
+pub use shared::{Catalog, CatalogOptions, CatalogRole, Closing};
 pub use command::{
     normalize_content_type, Acceptance, AcceptanceResult, CommandBinding, DeployCommand,
     DeploymentRejected, VerifiedDeployment, DEPLOY_OPERATION, ZSHIP_CONTENT_TYPE,

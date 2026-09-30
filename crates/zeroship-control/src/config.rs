@@ -103,6 +103,17 @@ pub struct ControlSettings {
     )]
     pub catalog_max_connections: Operational<usize>,
 
+    /// Retention sessions the whole process may hold at once, each on a
+    /// thread of its own, and so also the deployment-hold and collection
+    /// operations that run at once. Kept apart from the catalog's, because a
+    /// placed hold keeps its session across coordinator calls. Must be
+    /// positive.
+    #[config(
+        name = "control.retention_max_connections",
+        default = crate::publication::shared::DEFAULT_RETENTION_MAX_CONNECTIONS.get()
+    )]
+    pub retention_max_connections: Operational<usize>,
+
     /// Provider used as the usage meter.
     #[config(name = "control.meter_provider", default = "lite".to_owned())]
     pub meter_provider: Operational<String>,

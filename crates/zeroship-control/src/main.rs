@@ -549,6 +549,24 @@ fn main() -> std::io::Result<()> {
         eprintln!("control: refusing to start: control.catalog_max_connections must be positive");
         std::process::exit(2);
     };
+    let Some(retention_max_connections) =
+        std::num::NonZeroUsize::new(*settings.retention_max_connections.get())
+    else {
+        eprintln!(
+            "control: refusing to start: control.retention_max_connections must be positive"
+        );
+        std::process::exit(2);
+    };
+    // A collection bound the collector could not honour would leave it never
+    // running; a configuration check refuses it too.
+    let deploy_retention =
+        match zeroship_control::cron::deploy_retention::DeployRetentionConfig::configured() {
+            Ok(config) => config,
+            Err(error) => {
+                eprintln!("control: refusing to start: {error}");
+                std::process::exit(2);
+            }
+        };
     let stripe_webhook_secret = settings.stripe_webhook_secret.expose_str().to_owned();
     let stripe_secret_key = settings.stripe_secret_key.expose_str().to_owned();
     let stripe_base_url = settings.stripe_base_url.get().clone();
@@ -765,6 +783,10 @@ fn main() -> std::io::Result<()> {
             CheckValue::Count(catalog_max_connections.get()),
         );
         report.field(
+            "retention_max_connections",
+            CheckValue::Count(retention_max_connections.get()),
+        );
+        report.field(
             "service_credentials",
             CheckValue::Plain(credentials.summary().to_string()),
         );
@@ -826,6 +848,9 @@ fn main() -> std::io::Result<()> {
         &db_url,
         zeroship_control::publication::CatalogOptions {
             max_connections: catalog_max_connections,
+        },
+        zeroship_control::publication::CatalogOptions {
+            max_connections: retention_max_connections,
         },
     )
     .await
@@ -901,9 +926,12 @@ fn main() -> std::io::Result<()> {
     // OAuth-grant handlers pipeline onto this handle; anything needing a
     // transaction opens its own owned connection via `registry.conn()`.
     let control_pg: Arc<compio_postgres::Client> = {
-        let (pg_client, pg_conn) = compio_postgres::connect(&db_url, compio_postgres::NoTls)
-            .await
-            .expect("control: control-pg connect");
+        let (pg_client, pg_conn) = compio_postgres::connect(
+            &zeroship_control::sessions::named(&db_url, zeroship_control::sessions::SHARED),
+            compio_postgres::NoTls,
+        )
+        .await
+        .expect("control: control-pg connect");
         compio::runtime::spawn(async move {
             if let Err(e) = pg_conn.run().await {
                 tracing::error!(error = %e, "control/control-pg connection ended");
@@ -1324,6 +1352,43 @@ fn main() -> std::io::Result<()> {
         std::process::exit(1);
     }
 
+    // Deployment holds run on the retention executor, whose sessions are
+    // already open. Their coordinator client is validated here, once, so a
+    // client it would refuse refuses the boot. Every serving thread shares
+    // this one handle, so a serving thread opens no session and starts with
+    // nothing that can fail.
+    let deployment_holds = match zeroship_control::deployment_hold_api::DeploymentHoldApi::new(
+        state.registry.retention().clone(),
+        &workflow_coordinator_url,
+        Arc::clone(&state.service_auth),
+        coordinator_options.clone(),
+    ) {
+        Ok(api) => Arc::new(api),
+        Err(error) => {
+            eprintln!("control: refusing to start: deployment holds: {error}");
+            tracing::error!(%error, "control: refusing to start");
+            std::process::exit(2);
+        }
+    };
+
+    // Normal deployment retention: platform catalog work on the retention
+    // executor, under the bounds checked before the configuration report.
+    match zeroship_control::cron::deploy_retention::Collector::new(
+        state.registry.retention().clone(),
+        state.blob_store.clone(),
+        deploy_retention,
+    ) {
+        Ok(collector) => compio::runtime::spawn(zeroship_control::cron::deploy_retention::run(
+            collector,
+            zeroship_control::cron::deploy_retention::DEFAULT_TICK_SECS,
+        ))
+        .detach(),
+        Err(error) => {
+            eprintln!("control: refusing to start: deployment collection: {error}");
+            std::process::exit(2);
+        }
+    }
+
     // The single-host join-token minter, if this deployment configured one.
     // Election is inside the rotation: every candidate replica asks for the
     // lease and only the holder writes.
@@ -1371,20 +1436,11 @@ fn main() -> std::io::Result<()> {
     let readiness = Arc::new(zeroship_core::readiness::ReadinessGate::with_defaults());
 
     web::server(async move || {
-        let hold_state = state.clone();
-        let coordinator_url = workflow_coordinator_url.clone();
-        let hold_options = coordinator_options.clone();
         web::App::new()
             .state(state.clone())
             .state(state.control_pg.clone())
             .state(readiness.clone())
-            .state_factory(async move || {
-                zeroship_control::deployment_hold_api::DeploymentHoldApi::connect(
-                    &hold_state,
-                    &coordinator_url,
-                    hold_options.clone(),
-                ).await.map(std::rc::Rc::new)
-            })
+            .state(deployment_holds.clone())
             // --- Admin API ---
             .service(
                 web::resource("/api/apps")

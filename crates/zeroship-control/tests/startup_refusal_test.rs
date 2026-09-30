@@ -6,8 +6,9 @@
 //! test would fail differently, on that database, which is what the controls
 //! beside each refusal show.
 
+use std::ffi::OsStr;
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Output};
 
 use ed25519_dalek::pkcs8::spki::der::pem::LineEnding;
@@ -66,7 +67,7 @@ impl Drop for Scratch {
     }
 }
 
-fn run(scratch: &Scratch, env: &[(&str, &Path)], args: &[&str]) -> Output {
+fn run(scratch: &Scratch, env: &[(&str, &OsStr)], args: &[&str]) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_zeroship-control"));
     command
         .env_clear()
@@ -100,13 +101,14 @@ fn unusable_publication_settings_refuse_the_check_and_the_boot() {
     let scratch = Scratch::new("settings");
     let (key, peers) = scratch.service_key();
     let signed = [
-        ("ZEROSHIP_CONTROL_SERVICE_KEY_FILE", key.as_path()),
-        ("ZEROSHIP_CONTROL_SERVICE_PEERS_FILE", peers.as_path()),
+        ("ZEROSHIP_CONTROL_SERVICE_KEY_FILE", key.as_os_str()),
+        ("ZEROSHIP_CONTROL_SERVICE_PEERS_FILE", peers.as_os_str()),
     ];
     for (setting, value) in [
         ("--workflow-coordinator-url", "http://coordinator.internal:9093"),
         ("--workflow-coordinator-url", "https://coordinator.internal/manager"),
         ("--catalog-max-connections", "0"),
+        ("--retention-max-connections", "0"),
     ] {
         let name = setting.trim_start_matches("--").replace('-', "_");
         for check in [true, false] {
@@ -137,12 +139,15 @@ fn unusable_publication_settings_refuse_the_check_and_the_boot() {
             "https://coordinator.internal",
             "--catalog-max-connections",
             "3",
+            "--retention-max-connections",
+            "5",
         ],
     );
     let text = text(&output);
     assert!(output.status.success(), "{text}");
     assert!(text.contains(r#""workflow_coordinator_url":"https://coordinator.internal""#), "{text}");
     assert!(text.contains(r#""catalog_max_connections":3"#), "{text}");
+    assert!(text.contains(r#""retention_max_connections":5"#), "{text}");
     // The plaintext-peer posture is reported EMPTY here, not absent. A field
     // that only appeared once the fence was relaxed could never be read as
     // "the fence is intact".
@@ -211,8 +216,8 @@ fn a_control_without_its_service_key_refuses_to_boot_before_the_database() {
     let output = run(
         &scratch,
         &[
-            ("ZEROSHIP_CONTROL_SERVICE_KEY_FILE", key.as_path()),
-            ("ZEROSHIP_CONTROL_SERVICE_PEERS_FILE", peers.as_path()),
+            ("ZEROSHIP_CONTROL_SERVICE_KEY_FILE", key.as_os_str()),
+            ("ZEROSHIP_CONTROL_SERVICE_PEERS_FILE", peers.as_os_str()),
         ],
         &[],
     );
@@ -220,4 +225,50 @@ fn a_control_without_its_service_key_refuses_to_boot_before_the_database() {
     assert!(!output.status.success(), "{signed}");
     assert!(signed.contains("failed to connect to database"), "{signed}");
     assert!(!signed.contains("service key material rejected"), "{signed}");
+}
+
+/// A deployment-collection bound the collector could not honour refuses the
+/// check and the boot, before the database, rather than leaving collection
+/// never running.
+#[test]
+fn an_unusable_collection_bound_refuses_the_check_and_the_boot() {
+    const BATCH: &str = "CONTROL_DEPLOY_RETENTION_BATCH_SIZE";
+    const GRACE: &str = "CONTROL_DEPLOY_RETENTION_GRACE_WINDOW_MS";
+    let scratch = Scratch::new("collection");
+    let (key, peers) = scratch.service_key();
+    let too_large = (zeroship_data_orm::sql::MAX_ROW_LIMIT + 1).to_string();
+    for (name, value) in [
+        (BATCH, "0"),
+        (BATCH, too_large.as_str()),
+        (BATCH, "many"),
+        (GRACE, "-1"),
+        (GRACE, "9223372036854775807"),
+    ] {
+        let env = [
+            ("ZEROSHIP_CONTROL_SERVICE_KEY_FILE", key.as_os_str()),
+            ("ZEROSHIP_CONTROL_SERVICE_PEERS_FILE", peers.as_os_str()),
+            (name, OsStr::new(value)),
+        ];
+        for check in [true, false] {
+            let args: &[&str] = if check { &["--check-config"] } else { &[] };
+            let output = run(&scratch, &env, args);
+            let text = text(&output);
+            assert_eq!(output.status.code(), Some(2), "{name}={value} {args:?}: {text}");
+            assert!(text.contains(name), "the refusal names the bound: {text}");
+            assert!(!text.contains("failed to connect to database"), "{text}");
+        }
+    }
+
+    // The control: usable bounds pass the check.
+    let output = run(
+        &scratch,
+        &[
+            ("ZEROSHIP_CONTROL_SERVICE_KEY_FILE", key.as_os_str()),
+            ("ZEROSHIP_CONTROL_SERVICE_PEERS_FILE", peers.as_os_str()),
+            (BATCH, OsStr::new("64")),
+            (GRACE, OsStr::new("86400000")),
+        ],
+        &["--check-config"],
+    );
+    assert!(output.status.success(), "{}", text(&output));
 }

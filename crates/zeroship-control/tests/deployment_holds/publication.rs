@@ -12,12 +12,13 @@ use zeroship_bundle::Manifest;
 use zeroship_control::{
     cron::deploy_retention::{Collector, DeployRetentionConfig},
     publication::{
-        catalog::{self, ACKNOWLEDGED, APPLICATION_NAME, PENDING},
+        catalog::{self, ACKNOWLEDGED, PENDING},
         publisher::{
             self, Exchange, Publisher, PublisherConfig, Retry, ScheduleManager, StartError,
         },
-        AcceptanceResult, CatalogError, Transition,
+        AcceptanceResult, CatalogError, CatalogRole, Transition,
     },
+    sessions,
 };
 use zeroship_core::{
     config::PlaintextPeers,
@@ -154,7 +155,7 @@ async fn manager_publisher(
     manager: &test::TestServer,
 ) -> Publisher<ControlCoordinator> {
     Publisher::new(
-        catalog::connect(&fixture.control_url).await.unwrap(),
+        catalog::connect(&fixture.control_url, CatalogRole::Publication).await.unwrap(),
         ControlCoordinator::new(
             &origin(manager),
             fixture.state.service_auth.clone(),
@@ -448,7 +449,7 @@ async fn lost_replies_and_restarts_confirm_only_the_original_receipt() {
         .scripts
         .borrow_mut()
         .push((app.clone(), Script::Block));
-    let database = catalog::connect(&fixture.control_url).await.unwrap();
+    let database = catalog::connect(&fixture.control_url, CatalogRole::Publication).await.unwrap();
     let mut killed = Publisher::new(
         database,
         Manager(script.clone()),
@@ -471,7 +472,7 @@ async fn lost_replies_and_restarts_confirm_only_the_original_receipt() {
         .borrow_mut()
         .push((app.clone(), Script::LoseReply));
     let mut losing = Publisher::new(
-        catalog::connect(&fixture.control_url).await.unwrap(),
+        catalog::connect(&fixture.control_url, CatalogRole::Publication).await.unwrap(),
         Manager(script.clone()),
         PublisherConfig::default(),
     )
@@ -559,7 +560,7 @@ async fn a_blocked_app_does_not_starve_other_apps() {
         .borrow_mut()
         .push((blocked.clone(), Script::Block));
     let mut publisher = Publisher::new(
-        catalog::connect(&fixture.control_url).await.unwrap(),
+        catalog::connect(&fixture.control_url, CatalogRole::Publication).await.unwrap(),
         Manager(script.clone()),
         PublisherConfig {
             attempt_timeout: Duration::from_secs(2),
@@ -760,7 +761,7 @@ async fn a_callback_fault_rolls_back_every_staged_catalog_write() {
     let fixture = Fixture::new().await;
     let actor = fixture.actor().await;
     let app = app(&fixture, "publication-rollback").await;
-    let database = catalog::connect(&fixture.control_url).await.unwrap();
+    let database = catalog::connect(&fixture.control_url, CatalogRole::Publication).await.unwrap();
     let empty = snapshot(&fixture, &app).await;
     let faulted = command(&app, &actor, verified(labelled("faulted")));
     let outcome = catalog::transact(&database, |tx| async move {
@@ -818,8 +819,8 @@ async fn retention(fixture: &Fixture, id: &str) -> String {
 async fn collect_once(
     fixture: &Fixture,
 ) -> zeroship_control::cron::deploy_retention::DeployRetentionStats {
-    Collector::connect(
-        &fixture.control_url,
+    Collector::new(
+        fixture.state.registry.retention().clone(),
         fixture.state.blob_store.clone(),
         DeployRetentionConfig {
             grace_window_ms: 0,
@@ -827,7 +828,6 @@ async fn collect_once(
             attempt_timeout: Duration::from_secs(10),
         },
     )
-    .await
     .unwrap()
     .tick()
     .await
@@ -997,7 +997,7 @@ async fn a_failing_app_backs_off_while_other_apps_publish_every_pass() {
         ..PublisherConfig::default()
     };
     let publisher = Publisher::new(
-        catalog::connect(&fixture.control_url).await.unwrap(),
+        catalog::connect(&fixture.control_url, CatalogRole::Publication).await.unwrap(),
         FlakyManager(flaky.clone()),
         config,
     )
@@ -1075,7 +1075,7 @@ async fn catalog_sessions(fixture: &Fixture) -> BTreeSet<i32> {
         .admin
         .query(
             "SELECT pid FROM pg_stat_activity WHERE application_name = $1",
-            &[&APPLICATION_NAME],
+            &[&sessions::CATALOG],
         )
         .await
         .unwrap()

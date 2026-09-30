@@ -135,14 +135,13 @@ async fn run(cli: Cli) -> Result<zeroship_core::types::AppRecord, DevProvisionEr
         ))
     })?;
 
-    // One catalog session: this tool runs one deploy and exits, so a server's
-    // connection budget should not carry a bound sized for a serving process.
-    let registry = Registry::connect(
-        &cli.db,
-        zeroship_control::publication::CatalogOptions {
-            max_connections: std::num::NonZeroUsize::MIN,
-        },
-    )
+    // One session per executor: this tool runs one deploy and exits, so a
+    // server's connection budget should not carry bounds sized for a serving
+    // process.
+    let one = zeroship_control::publication::CatalogOptions {
+        max_connections: std::num::NonZeroUsize::MIN,
+    };
+    let registry = Registry::connect(&cli.db, one, one)
     .await
     .map_err(|e| err(format!("connect registry: {e}")))?;
     seed_plans(&registry)

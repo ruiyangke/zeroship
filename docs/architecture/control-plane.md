@@ -113,6 +113,47 @@ especially `20260702000200_control_tables.ts`) and applied by
 `zeroship-platform-migrate`; the registry consumes these tables but does not
 create them.
 
+## PostgreSQL sessions
+
+Control's sessions do not scale with `control.threads`. The process opens
+every long-lived session at boot, before it serves, and a serving thread
+opens none of its own. `crates/zeroship-control/src/sessions.rs` names every
+source:
+
+| Source | `application_name` | Sessions | Opened |
+|---|---|---|---|
+| `control_pg` (`AppState.control_pg`), the multiplexed autocommit handle every thread shares | `zeroship-control` | 1 | at boot, kept |
+| The publication catalog (`Registry::catalog`): deploy, archive and restore transactions and the lifecycle publisher | `zeroship-control-catalog` | `control.catalog_max_connections` (K) | at boot, kept |
+| The retention executor (`Registry::retention`): the deployment-hold ledger and the deployment collector | `zeroship-control-retention` | `control.retention_max_connections` (H) | at boot, kept |
+| `Registry::conn`, one per call | `zeroship-control-request` | one per call in flight | per call, closed with it |
+
+So a Control process holds `1 + K + H` sessions at rest, plus one request
+connection for each `Registry::conn` call in flight. Request connections
+nest: a cron that holds its advisory-lock connection opens more under it.
+
+Both executors are `publication::Catalog`: a fixed set of threads, each owning
+one ORM session and running one operation at a time. Serving threads and
+background tasks ship `Send` closures to them, and dropping the caller's future
+cancels the operation; one that is still queued never starts. Holds get their
+own executor because a placed hold keeps its session across the coordinator
+calls that re-verify its placement. A placed hold's first placement check runs
+on the serving thread, so a worker the coordinator refuses never takes a
+retention session. The checks inside its transaction, the authority budget and
+COMMIT run on the retention executor's thread, so an expired budget stops
+COMMIT on the thread that would send it.
+
+The lock order is one-way. A caller may hold a request connection while it
+waits for an executor lane: archive and restore hold the app's lifecycle
+advisory lock on one across their catalog transaction. An operation running on
+a lane may neither open a request connection nor wait for a lane, and
+`Catalog::run`, `Catalog::spawn` and `Registry::conn` refuse a caller on a lane
+thread.
+
+Every source offers its name as `fallback_application_name`. A database URL
+that sets `application_name` itself, or that is a `key=value` connection
+string rather than a URL, keeps the operator's name, and every source then
+announces that one instead.
+
 ## Route and version feeds
 
 `Registry::get_gateway_snapshot()` builds the gateway feed: a
@@ -211,7 +252,9 @@ run at once, and operations beyond it wait for a free thread. Each operation
 keeps its own lock order and single transaction, and a caller that stops
 waiting cancels its transaction as before. Catalog sessions announce
 themselves as `zeroship-control-catalog` in `pg_stat_activity` unless the
-database URL names a session already.
+database URL names a session already. Deployment holds and the collector run
+on a second executor of the same kind; see
+[PostgreSQL sessions](#postgresql-sessions).
 
 The workflow manager learns of an accepted deployment asynchronously.
 `publication::publisher` runs on the shared catalog, pages pending lifecycle

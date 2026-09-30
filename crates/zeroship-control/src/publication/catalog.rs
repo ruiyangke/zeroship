@@ -14,6 +14,7 @@ use super::models::catalog::{
     app_deploy_commands as commands, app_lifecycle_intents as intents,
     apps, database_bindings as bindings, databases,
 };
+use super::shared::CatalogRole;
 use std::{future::Future, num::NonZeroUsize, pin::Pin};
 use zeroship_core::{
     app_id::AppId, schema_name::SchemaName, workflow_coordination::Revision,
@@ -65,6 +66,18 @@ impl From<DbError> for CatalogError {
     }
 }
 
+/// Deployment retention work runs on the retention executor, whose own
+/// failures are that the executor closed, abandoned the operation, or refused
+/// a caller on a lane.
+impl From<CatalogError> for zeroship_workflow_manager::deployments::Error {
+    fn from(error: CatalogError) -> Self {
+        match error {
+            CatalogError::Database(error) => error.into(),
+            other => Self::Unavailable(other.to_string()),
+        }
+    }
+}
+
 /// The lifecycle effect of an archive or restore.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Transition {
@@ -76,14 +89,8 @@ pub enum Transition {
     Published(Revision),
 }
 
-/// The session name catalog connections announce.
-///
-/// It tells them apart from Control's other connections in
-/// `pg_stat_activity`. A name the database URL already sets, or already
-/// offers as a fallback, is left in place.
-pub const APPLICATION_NAME: &str = "zeroship-control-catalog";
-
-/// Open a native ORM database on the Control catalog holding one session.
+/// Open a native ORM database on the Control catalog holding one session,
+/// announcing `role`'s session name.
 ///
 /// The database belongs to the calling compio thread, which admits one
 /// top-level transaction at a time, so a second session would never be in
@@ -92,39 +99,23 @@ pub const APPLICATION_NAME: &str = "zeroship-control-catalog";
 ///
 /// # Errors
 /// Reports invalid model declarations and unreachable storage.
-pub async fn connect(url: &str) -> Result<Database, DbError> {
+pub async fn connect(url: &str, role: CatalogRole) -> Result<Database, DbError> {
     Database::connect(
         DbBinding::platform(
             "platform",
-            "control-catalog",
+            role.label(),
             SchemaName::new("zeroship")
                 .map_err(|_| DbError::config("invalid_catalog_schema", "invalid catalog schema"))?,
         ),
-        ConnectOptions::new(named(url), ProjectKeySource::unavailable())
-            .max_connections(NonZeroUsize::MIN)
-            .connection_authority(),
+        ConnectOptions::new(
+            crate::sessions::named(url, role.application_name()),
+            ProjectKeySource::unavailable(),
+        )
+        .max_connections(NonZeroUsize::MIN)
+        .connection_authority(),
         super::models::collections()?,
     )
     .await
-}
-
-/// `url` offering [`APPLICATION_NAME`] as its session name. Only a URL that
-/// parses and names no session of its own is extended, and the original text
-/// is kept so its encoding reaches the driver unchanged.
-fn named(url: &str) -> String {
-    const KEYS: [&str; 2] = ["application_name", "fallback_application_name"];
-    let Ok(parsed) = url::Url::parse(url) else {
-        return url.to_owned();
-    };
-    if parsed.fragment().is_some() || parsed.query_pairs().any(|(key, _)| KEYS.contains(&&*key)) {
-        return url.to_owned();
-    }
-    let separator = match parsed.query() {
-        None => "?",
-        Some("") => "",
-        Some(_) => "&",
-    };
-    format!("{url}{separator}fallback_application_name={APPLICATION_NAME}")
 }
 
 /// Run `body` in one transaction. A catalog refusal returned by the callback
@@ -777,39 +768,5 @@ const fn changed(count: i64) -> Result<(), CatalogError> {
         Err(CatalogError::Storage(
             "guarded catalog update did not apply",
         ))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{named, APPLICATION_NAME};
-
-    #[test]
-    fn catalog_sessions_offer_their_name_without_displacing_a_configured_one() {
-        let offered = format!("fallback_application_name={APPLICATION_NAME}");
-        for (url, expected) in [
-            (
-                "postgres://control@db:5432/zeroship",
-                format!("postgres://control@db:5432/zeroship?{offered}"),
-            ),
-            (
-                "postgresql://control@db/zeroship?sslmode=require",
-                format!("postgresql://control@db/zeroship?sslmode=require&{offered}"),
-            ),
-            (
-                "postgres://control@db/zeroship?",
-                format!("postgres://control@db/zeroship?{offered}"),
-            ),
-        ] {
-            assert_eq!(named(url), expected, "{url}");
-        }
-        for configured in [
-            "postgres://control@db/zeroship?application_name=operator",
-            "postgres://control@db/zeroship?fallback_application_name=operator",
-            "postgres://control@db/zeroship?sslmode=require&application_name=operator",
-            "not a url",
-        ] {
-            assert_eq!(named(configured), configured);
-        }
     }
 }

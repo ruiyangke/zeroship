@@ -7,16 +7,14 @@
 use crate::publication::{
     catalog::{ACTIVATE, PENDING},
     models::catalog::{app_lifecycle_intents as intents, apps},
+    Catalog,
 };
-use crate::{AppState, config::ControlSettingsConsumer};
+use crate::config::ControlSettingsConsumer;
 use chrono::Utc;
 use std::{future::Future, sync::Arc, time::Duration};
 use zeroship_bundle::BlobStore;
-use zeroship_core::{app_id::AppId, config::DeclaredEnvKey, schema_name::SchemaName};
+use zeroship_core::{app_id::AppId, config::DeclaredEnvKey};
 use zeroship_data_orm::{
-    ConnectOptions,
-    binding::DbBinding,
-    encryption::ProjectKeySource,
     error::DbError,
     orm::{Database, FromRow, UtcInstant},
 };
@@ -26,9 +24,9 @@ pub const DEFAULT_TICK_SECS: u64 = 60 * 60;
 pub const DEFAULT_BATCH_SIZE: i64 = 128;
 pub const DEFAULT_GRACE_WINDOW_MS: i64 = 0;
 pub const DEFAULT_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(10);
-pub const GRACE_WINDOW_ENV: DeclaredEnvKey<String, ControlSettingsConsumer> =
+pub const GRACE_WINDOW_ENV: DeclaredEnvKey<i64, ControlSettingsConsumer> =
     DeclaredEnvKey::platform("CONTROL_DEPLOY_RETENTION_GRACE_WINDOW_MS");
-pub const BATCH_SIZE_ENV: DeclaredEnvKey<String, ControlSettingsConsumer> =
+pub const BATCH_SIZE_ENV: DeclaredEnvKey<i64, ControlSettingsConsumer> =
     DeclaredEnvKey::platform("CONTROL_DEPLOY_RETENTION_BATCH_SIZE");
 
 #[derive(Debug, Clone, Copy)]
@@ -39,19 +37,70 @@ pub struct DeployRetentionConfig {
 }
 impl Default for DeployRetentionConfig {
     fn default() -> Self {
-        let grace = zeroship_core::read_declared_env!(GRACE_WINDOW_ENV, ControlSettingsConsumer)
-            .ok()
-            .flatten();
-        let batch = zeroship_core::read_declared_env!(BATCH_SIZE_ENV, ControlSettingsConsumer)
-            .ok()
-            .flatten();
         Self {
-            grace_window_ms: configured_integer(GRACE_WINDOW_ENV.name(), grace, 0)
-                .unwrap_or(DEFAULT_GRACE_WINDOW_MS),
-            batch_size: configured_integer(BATCH_SIZE_ENV.name(), batch, 1)
-                .unwrap_or(DEFAULT_BATCH_SIZE),
+            grace_window_ms: DEFAULT_GRACE_WINDOW_MS,
+            batch_size: DEFAULT_BATCH_SIZE,
             attempt_timeout: DEFAULT_ATTEMPT_TIMEOUT,
         }
+    }
+}
+
+impl DeployRetentionConfig {
+    /// The defaults, with each bound the operator configured in its place.
+    ///
+    /// A bound that does not parse, or that collection cannot honour, is
+    /// refused rather than replaced: the process refuses to start, instead of
+    /// running without the collection the operator configured.
+    ///
+    /// # Errors
+    /// Names the first configured bound that is unusable.
+    pub fn configured() -> Result<Self, String> {
+        let grace = zeroship_core::read_declared_env!(GRACE_WINDOW_ENV, ControlSettingsConsumer)
+            .map_err(|error| error.to_string())?;
+        let batch = zeroship_core::read_declared_env!(BATCH_SIZE_ENV, ControlSettingsConsumer)
+            .map_err(|error| error.to_string())?;
+        let config = Self {
+            grace_window_ms: grace.unwrap_or(DEFAULT_GRACE_WINDOW_MS),
+            batch_size: batch.unwrap_or(DEFAULT_BATCH_SIZE),
+            ..Self::default()
+        };
+        config.validate()?;
+        Ok(config)
+    }
+
+    /// Check that collection can honour every bound.
+    ///
+    /// # Errors
+    /// Names the first bound it cannot.
+    pub fn validate(&self) -> Result<(), String> {
+        let cutoff = Utc::now()
+            .timestamp_millis()
+            .checked_sub(self.grace_window_ms)
+            .and_then(|millis| UtcInstant::from_unix_millis(millis).ok());
+        if self.grace_window_ms < 0 || cutoff.is_none() {
+            return Err(format!(
+                "{} must be a non-negative number of milliseconds that leaves a cutoff in the \
+                 calendar",
+                GRACE_WINDOW_ENV.name()
+            ));
+        }
+        if self.batch_size <= 0 || self.batch_size > zeroship_data_orm::sql::MAX_ROW_LIMIT {
+            return Err(format!(
+                "{} must be between 1 and {}",
+                BATCH_SIZE_ENV.name(),
+                zeroship_data_orm::sql::MAX_ROW_LIMIT
+            ));
+        }
+        if self.attempt_timeout.is_zero()
+            || std::time::Instant::now()
+                .checked_add(self.attempt_timeout)
+                .is_none()
+        {
+            return Err(
+                "the deployment collection attempt timeout must be positive and in range".into(),
+            );
+        }
+        Ok(())
     }
 }
 
@@ -87,55 +136,31 @@ struct Deployment {
 
 /// A bounded rotating catalog scan. Durable hold state supplies deletion
 /// authority; restarting the scan resumes interrupted reclamation fences.
+///
+/// Its catalog reads and transactions run on the retention executor, one
+/// operation at a time; manifest deletion runs on the caller's thread, between
+/// them, so no lane waits on blob I/O.
 #[derive(Debug)]
 pub struct Collector {
-    database: Database,
+    executor: Catalog,
     blobs: Arc<dyn BlobStore>,
     config: DeployRetentionConfig,
     after: Option<String>,
     upper: Option<String>,
 }
 impl Collector {
-    /// Bind Control's platform database and normal manifest store.
+    /// Collect through Control's retention executor and normal manifest store.
     ///
     /// # Errors
-    /// Rejects invalid bounds, incompatible metadata and unavailable storage.
-    pub async fn connect(
-        url: &str,
+    /// Rejects bounds [`DeployRetentionConfig::validate`] refuses.
+    pub fn new(
+        executor: Catalog,
         blobs: Arc<dyn BlobStore>,
         config: DeployRetentionConfig,
     ) -> Result<Self, Error> {
-        if config.grace_window_ms < 0
-            || config.batch_size <= 0
-            || config.batch_size > zeroship_data_orm::sql::MAX_ROW_LIMIT
-            || config.attempt_timeout.is_zero()
-            || std::time::Instant::now()
-                .checked_add(config.attempt_timeout)
-                .is_none()
-        {
-            return Err(Error::InvalidRequest(
-                "invalid deployment collection bounds".into(),
-            ));
-        }
-        let collections =
-            crate::publication::models::collections().map_err(|_| invalid_storage())?;
-        let database = compio::time::timeout(
-            config.attempt_timeout,
-            Database::connect(
-                DbBinding::platform(
-                    "platform",
-                    "control-deployment-collector",
-                    SchemaName::new("zeroship").map_err(|_| invalid_storage())?,
-                ),
-                ConnectOptions::new(url.to_owned(), ProjectKeySource::unavailable())
-                    .connection_authority(),
-                collections,
-            ),
-        )
-        .await
-        .map_err(|_| Error::Timeout)??;
+        config.validate().map_err(Error::InvalidRequest)?;
         Ok(Self {
-            database,
+            executor,
             blobs,
             config,
             after: None,
@@ -151,20 +176,24 @@ impl Collector {
     /// are reported in the returned statistics and structured logs.
     pub async fn tick(&mut self) -> Result<DeployRetentionStats, Error> {
         if self.upper.is_none() {
-            let newest = compio::time::timeout(self.config.attempt_timeout, async {
-                self.database
-                    .entity::<deploys::Entity>()?
-                    .query()
-                    .filter(deploys::retention_state.ne("deleted")?)
-                    .order_by(deploys::id.desc())
-                    .first::<Candidate>()
-                    .await
-            })
+            let newest = compio::time::timeout(
+                self.config.attempt_timeout,
+                self.executor.run(|database| async move {
+                    let newest = database
+                        .entity::<deploys::Entity>()?
+                        .query()
+                        .filter(deploys::retention_state.ne("deleted")?)
+                        .order_by(deploys::id.desc())
+                        .first::<Candidate>()
+                        .await?;
+                    Ok::<_, Error>(newest.map(|row| row.id))
+                }),
+            )
             .await
             .map_err(|_| Error::Timeout)??;
-            self.upper = newest.map(|row| row.id);
+            self.upper = newest;
         }
-        let Some(upper) = &self.upper else {
+        let Some(upper) = self.upper.clone() else {
             return Ok(DeployRetentionStats::default());
         };
         let cutoff = Utc::now()
@@ -173,27 +202,32 @@ impl Collector {
             .ok_or(())
             .and_then(|millis| UtcInstant::from_unix_millis(millis).map_err(|_| ()))
             .map_err(|()| Error::InvalidRequest("deployment grace is out of range".into()))?;
-        let mut filter = deploys::retention_state.ne("deleted")?.and(
-            deploys::retention_state
-                .ne("available")?
-                .or(deploys::activated_at
-                    .ne(None::<UtcInstant>)?
-                    .and(deploys::activated_at.lte(Some(cutoff))?)),
-        );
-        if let Some(after) = &self.after {
-            filter = filter.and(deploys::id.gt(after.as_str())?);
-        }
-        filter = filter.and(deploys::id.lte(upper.as_str())?);
-        let page = compio::time::timeout(self.config.attempt_timeout, async {
-            self.database
-                .entity::<deploys::Entity>()?
-                .query()
-                .filter(filter)
-                .order_by(deploys::id.asc())
-                .limit(self.config.batch_size)?
-                .all::<Candidate>()
-                .await
-        })
+        let (after, batch_size) = (self.after.clone(), self.config.batch_size);
+        let page = compio::time::timeout(
+            self.config.attempt_timeout,
+            self.executor.run(move |database| async move {
+                let mut filter = deploys::retention_state.ne("deleted")?.and(
+                    deploys::retention_state
+                        .ne("available")?
+                        .or(deploys::activated_at
+                            .ne(None::<UtcInstant>)?
+                            .and(deploys::activated_at.lte(Some(cutoff))?)),
+                );
+                if let Some(after) = &after {
+                    filter = filter.and(deploys::id.gt(after.as_str())?);
+                }
+                filter = filter.and(deploys::id.lte(upper.as_str())?);
+                let page = database
+                    .entity::<deploys::Entity>()?
+                    .query()
+                    .filter(filter)
+                    .order_by(deploys::id.asc())
+                    .limit(batch_size)?
+                    .all::<Candidate>()
+                    .await?;
+                Ok::<_, Error>(page)
+            }),
+        )
         .await
         .map_err(|_| Error::Timeout)??;
         let mut stats = DeployRetentionStats::default();
@@ -230,115 +264,13 @@ impl Collector {
         cutoff: UtcInstant,
     ) -> Result<Option<bool>, Error> {
         let app = AppId::parse(&candidate.app_id).map_err(|_| invalid_storage())?;
-        let hash = transact(&self.database, async |tx| {
-            // Match Registry's apps -> app_deploys lock order. The guarded no-op
-            // set cannot overwrite a concurrently changed counter.
-            let Some(observed) = tx
-                .entity::<apps::Entity>()?
-                .query()
-                .filter(apps::id.eq(app.as_str())?)
-                .first::<CurrentApp>()
-                .await?
-            else {
-                return Ok(None);
-            };
-            if tx
-                .entity::<apps::Entity>()?
-                .update_many(
-                    apps::id
-                        .eq(app.as_str())?
-                        .and(apps::env_version.eq(observed.env_version)?),
-                    apps::env_version.set(observed.env_version)?,
-                )
-                .await?
-                != 1
-            {
-                return Ok(None);
-            }
-            let current = tx
-                .entity::<apps::Entity>()?
-                .query()
-                .filter(apps::id.eq(app.as_str())?)
-                .first::<CurrentApp>()
-                .await?
-                .ok_or_else(invalid_storage)?;
-            if current
-                .deploy_hash
-                .as_deref()
-                .is_some_and(|hash| !zeroship_bundle::validate_hash_format(hash))
-            {
-                return Err(invalid_storage());
-            }
-            let deployment = tx
-                .entity::<deploys::Entity>()?
-                .query()
-                .filter(
-                    deploys::app_id
-                        .eq(app.as_str())?
-                        .and(deploys::id.eq(candidate.id.as_str())?),
-                )
-                .first::<Deployment>()
-                .await?
-                .ok_or_else(invalid_storage)?;
-            if current.deploy_hash.as_deref() == Some(deployment.deploy_hash.as_str()) {
-                return Ok(None);
-            }
-            // An activation the manager has not acknowledged still needs this
-            // bundle: the manager acquires its queue hold only when it accepts
-            // the activation. Deploy and restore insert the intent under this
-            // same app lock, and acknowledging it is the update that removes
-            // this dependency once the queue hold exists.
-            let pending_activation = tx
-                .entity::<intents::Entity>()?
-                .query()
-                .filter(
-                    intents::app_id
-                        .eq(app.as_str())?
-                        .and(intents::deploy_id.eq(Some(candidate.id.as_str()))?)
-                        .and(intents::action.eq(ACTIVATE)?)
-                        .and(intents::state.eq(PENDING)?),
-                )
-                .exists()
-                .await?;
-            match deployment.retention_state.as_str() {
-                "deleted" => return Ok(None),
-                // Activation refuses reclaiming storage, so a pending intent
-                // cannot legitimately name a fenced deployment.
-                "reclaiming" if pending_activation => return Err(invalid_storage()),
-                "available" if pending_activation => return Ok(None),
-                "reclaiming" => {}
-                "available" => {
-                    if deployment.activated_at.is_none_or(|at| at > cutoff) {
-                        return Ok(None);
-                    }
-                    let newest = tx
-                        .entity::<deploys::Entity>()?
-                        .query()
-                        .filter(
-                            deploys::app_id
-                                .eq(app.as_str())?
-                                .and(deploys::activated_at.ne(None::<UtcInstant>)?),
-                        )
-                        .order_by(deploys::activated_at.desc())
-                        .order_by(deploys::created_at.desc())
-                        .order_by(deploys::id.desc())
-                        .first::<Deployment>()
-                        .await?
-                        .ok_or_else(invalid_storage)?;
-                    if newest.id == deployment.id {
-                        return Ok(None);
-                    }
-                }
-                _ => return Err(invalid_storage()),
-            }
-            match deployments::fence_reclamation(&tx, &app, &candidate.id).await {
-                Ok(hash) if hash == deployment.deploy_hash => Ok(Some(hash)),
-                Ok(_) => Err(invalid_storage()),
-                Err(Error::Conflict(_)) => Ok(None),
-                Err(error) => Err(error),
-            }
-        })
-        .await?;
+        let (fenced, deployment) = (app.clone(), candidate.id.clone());
+        let hash = self
+            .executor
+            .run(move |database| async move {
+                fence(&database, &fenced, &deployment, cutoff).await
+            })
+            .await?;
         let Some(hash) = hash else {
             return Ok(None);
         };
@@ -348,40 +280,152 @@ impl Collector {
             .delete_manifest(&app, &hash)
             .await
             .map_err(|error| Error::Unavailable(error.to_string()))?;
-        deployments::finish_reclamation(&self.database, &app, &candidate.id).await?;
+        let deployment = candidate.id.clone();
+        self.executor
+            .run(move |database| async move {
+                deployments::finish_reclamation(&database, &app, &deployment).await
+            })
+            .await?;
         Ok(Some(deleted))
     }
 }
 
-pub async fn run(state: Arc<AppState>, tick_secs: u64) {
-    let config = DeployRetentionConfig::default();
-    let mut collector = None;
-    loop {
-        if collector.is_none() {
-            match Collector::connect(
-                state.registry.workflow_store_db_url(),
-                state.blob_store.clone(),
-                config,
+/// Fence `deployment` for reclamation in one transaction when nothing retains
+/// it any more, returning the hash whose manifest may then be deleted.
+async fn fence(
+    database: &Database,
+    app: &AppId,
+    deployment: &str,
+    cutoff: UtcInstant,
+) -> Result<Option<String>, Error> {
+    transact(database, async |tx| {
+        // Match Registry's apps -> app_deploys lock order. The guarded no-op
+        // set cannot overwrite a concurrently changed counter.
+        let Some(observed) = tx
+            .entity::<apps::Entity>()?
+            .query()
+            .filter(apps::id.eq(app.as_str())?)
+            .first::<CurrentApp>()
+            .await?
+        else {
+            return Ok(None);
+        };
+        if tx
+            .entity::<apps::Entity>()?
+            .update_many(
+                apps::id
+                    .eq(app.as_str())?
+                    .and(apps::env_version.eq(observed.env_version)?),
+                apps::env_version.set(observed.env_version)?,
             )
-            .await
-            {
-                Ok(connected) => collector = Some(connected),
-                Err(error) => tracing::error!(%error, "deployment collector could not connect"),
-            }
+            .await?
+            != 1
+        {
+            return Ok(None);
         }
-        if let Some(collector) = &mut collector {
-            match collector.tick().await {
-                Ok(progress) if progress.candidates != 0 => tracing::info!(
-                    candidates = progress.candidates,
-                    retained = progress.retained,
-                    manifests_deleted = progress.manifests_deleted,
-                    finished = progress.finished,
-                    failed = progress.failed,
-                    "deployment collector visited catalog page"
-                ),
-                Ok(_) => {}
-                Err(error) => tracing::error!(%error, "deployment collection tick failed"),
+        let current = tx
+            .entity::<apps::Entity>()?
+            .query()
+            .filter(apps::id.eq(app.as_str())?)
+            .first::<CurrentApp>()
+            .await?
+            .ok_or_else(invalid_storage)?;
+        if current
+            .deploy_hash
+            .as_deref()
+            .is_some_and(|hash| !zeroship_bundle::validate_hash_format(hash))
+        {
+            return Err(invalid_storage());
+        }
+        let found = tx
+            .entity::<deploys::Entity>()?
+            .query()
+            .filter(
+                deploys::app_id
+                    .eq(app.as_str())?
+                    .and(deploys::id.eq(deployment)?),
+            )
+            .first::<Deployment>()
+            .await?
+            .ok_or_else(invalid_storage)?;
+        if current.deploy_hash.as_deref() == Some(found.deploy_hash.as_str()) {
+            return Ok(None);
+        }
+        // An activation the manager has not acknowledged still needs this
+        // bundle: the manager acquires its queue hold only when it accepts
+        // the activation. Deploy and restore insert the intent under this
+        // same app lock, and acknowledging it is the update that removes
+        // this dependency once the queue hold exists.
+        let pending_activation = tx
+            .entity::<intents::Entity>()?
+            .query()
+            .filter(
+                intents::app_id
+                    .eq(app.as_str())?
+                    .and(intents::deploy_id.eq(Some(deployment))?)
+                    .and(intents::action.eq(ACTIVATE)?)
+                    .and(intents::state.eq(PENDING)?),
+            )
+            .exists()
+            .await?;
+        match found.retention_state.as_str() {
+            "deleted" => return Ok(None),
+            // Activation refuses reclaiming storage, so a pending intent
+            // cannot legitimately name a fenced deployment.
+            "reclaiming" if pending_activation => return Err(invalid_storage()),
+            "available" if pending_activation => return Ok(None),
+            "reclaiming" => {}
+            "available" => {
+                if found.activated_at.is_none_or(|at| at > cutoff) {
+                    return Ok(None);
+                }
+                if newest_activated(&tx, app).await?.id == found.id {
+                    return Ok(None);
+                }
             }
+            _ => return Err(invalid_storage()),
+        }
+        match deployments::fence_reclamation(&tx, app, deployment).await {
+            Ok(hash) if hash == found.deploy_hash => Ok(Some(hash)),
+            Ok(_) => Err(invalid_storage()),
+            Err(Error::Conflict(_)) => Ok(None),
+            Err(error) => Err(error),
+        }
+    })
+    .await
+}
+
+/// The app's most recently activated deployment.
+async fn newest_activated(tx: &Database, app: &AppId) -> Result<Deployment, Error> {
+    tx.entity::<deploys::Entity>()?
+        .query()
+        .filter(
+            deploys::app_id
+                .eq(app.as_str())?
+                .and(deploys::activated_at.ne(None::<UtcInstant>)?),
+        )
+        .order_by(deploys::activated_at.desc())
+        .order_by(deploys::created_at.desc())
+        .order_by(deploys::id.desc())
+        .first::<Deployment>()
+        .await?
+        .ok_or_else(invalid_storage)
+}
+
+/// Visit a page every `tick_secs` for the life of the process.
+pub async fn run(mut collector: Collector, tick_secs: u64) {
+    loop {
+        match collector.tick().await {
+            Ok(progress) if progress.candidates != 0 => tracing::info!(
+                candidates = progress.candidates,
+                retained = progress.retained,
+                manifests_deleted = progress.manifests_deleted,
+                finished = progress.finished,
+                failed = progress.failed,
+                "deployment collector visited catalog page"
+            ),
+            Ok(_) => {}
+            Err(error) => tracing::error!(%error, "deployment collection tick failed"),
         }
         compio::time::sleep(Duration::from_secs(tick_secs)).await;
     }
@@ -420,15 +464,5 @@ where
             Err(original.unwrap_or_else(invalid_storage))
         }
         Err(error) => Err(error.into()),
-    }
-}
-fn configured_integer(name: &str, raw: Option<String>, minimum: i64) -> Option<i64> {
-    let raw = raw?;
-    match raw.parse::<i64>() {
-        Ok(value) if value >= minimum => Some(value),
-        _ => {
-            tracing::warn!(env = name, "ignoring invalid deployment collection bound");
-            None
-        }
     }
 }

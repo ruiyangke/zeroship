@@ -533,6 +533,42 @@ docker compose pull && docker compose up -d
 Rollback is the same edit pointing at the previous sha. This is the payoff for
 tagging per commit instead of relying on `latest`.
 
+## PostgreSQL connections
+
+Size the server's `max_connections` for every service's sessions at once,
+plus PostgreSQL's reserved superuser slots and the one-shot `migrate` job.
+
+**Control does not grow with its threads.** It holds `1 + K + H` sessions
+however many serving threads it runs: one session every thread shares,
+`K = control.catalog_max_connections` catalog sessions and
+`H = control.retention_max_connections` retention sessions for deployment
+holds and collection, all opened at boot. Request connections come on top of
+those, one for each request or cron call in flight, and a cron can hold several
+at once. Raising K or H raises what Control holds by the same amount;
+`control.threads` changes none of it.
+
+**Auth, the gateway and the worker do grow with their threads.** Each serving
+thread of theirs opens its own pool, and `auth.threads`, `gateway.threads` and
+`worker.threads` default to the host's cores. On a larger host, either pin
+their `--threads` or size `max_connections` for that host, times each
+service's replicas.
+
+Every Control session names its source in `pg_stat_activity.application_name`:
+
+```sql
+SELECT application_name, count(*) FROM pg_stat_activity
+ WHERE backend_type = 'client backend' AND application_name LIKE 'zeroship-control%'
+ GROUP BY 1;
+-- zeroship-control             the shared session
+-- zeroship-control-catalog     K
+-- zeroship-control-retention   H
+-- zeroship-control-request     request connections in flight
+```
+
+A database URL that sets `application_name` itself overrides every one of
+these names, because Control offers its names only as
+`fallback_application_name`.
+
 ## Things that will bite you
 
 **The control port exists only in the server override.** The base file has no
