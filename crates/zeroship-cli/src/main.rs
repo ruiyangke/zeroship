@@ -373,12 +373,10 @@ fn cmd_serve(args: &[String]) {
         dev_app_id,
         workflow_config,
         is_archive.then_some(input_path.as_path()),
-        workflow::journal_storage(
-            database.connection().clone(),
-            zeroship_data_orm::encryption::ProjectKeySource::supplied(
-                database.project_keys().clone(),
-            ),
-        ),
+        // The dev database's server, with the journal opened where the
+        // production service opens its own. On `SQLite` that keeps the journal
+        // in its own file beside the session file.
+        zeroship_workflow::service::store::HostStorage::new(database.connection().clone()),
         storage,
         env_vars.clone(),
         plugins.clone(),

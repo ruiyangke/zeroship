@@ -13,7 +13,7 @@ use zeroship_workflow::{
         collection::CollectionOptions,
         maintenance::{MaintenanceOptions, MaintenanceOutcome},
         schema,
-        store::OrmStore,
+        store::{HostStorage, OrmStore},
         AppPolicy, DeployRegistration, HostPolicies, PolicySnapshot, RequestId, TaskAssignment,
         WorkflowService,
     },
@@ -25,15 +25,11 @@ use serde_json::json;
 use std::{cell::Cell, collections::BTreeMap, sync::Arc};
 use zeroship_core::{
     app_id::AppId,
-    schema_name::SchemaName,
     typed_id,
     workflow_coordination::{Revision, WorkerId},
     workflow_jobs::{JobOperation, JobOutcome, JobSpec},
 };
-use zeroship_data_orm::{
-    binding::DbBinding, connection::ConnectionFactory, encryption::ProjectKeySource, orm::Output,
-    value,
-};
+use zeroship_data_orm::{connection::ConnectionFactory, orm::Output, value};
 
 use crate::{deployment_fixture as deployments, service_binding::ServiceFixture};
 
@@ -451,13 +447,7 @@ impl Fixture {
             directory.path().join("creator.sqlite").display()
         ))
         .unwrap();
-        let store = OrmStore::connect(
-            DbBinding::platform("workflow", "fixture", SchemaName::new("workflow").unwrap()),
-            &factory,
-            ProjectKeySource::unavailable(),
-        )
-        .await
-        .unwrap();
+        let store = HostStorage::new(factory).open().await.unwrap();
         schema::initialize_local(&store).await.unwrap();
         Self::build_over(Rc::new(store), directory, policy, leased).await
     }

@@ -193,36 +193,7 @@ fn dev_connection(root: &Path) -> zeroship_data_orm::connection::ConnectionFacto
 }
 
 fn test_storage(root: &Path) -> HostStorage {
-    journal_storage(
-        dev_connection(root),
-        zeroship_data_orm::encryption::ProjectKeySource::unavailable(),
-    )
-}
-
-/// `zeroship serve` opens its journal where the production workflow service
-/// opens its own: in the journal's schema, under the service's tenant rather
-/// than an app's. On `SQLite` the schema names the attached file, so a binding
-/// that disagreed would keep the dev journal somewhere production never looks.
-#[test]
-fn the_local_host_opens_the_journal_where_production_does() {
-    let root = tempfile::tempdir().unwrap();
-    let local = journal_storage(
-        dev_connection(root.path()),
-        zeroship_data_orm::encryption::ProjectKeySource::unavailable(),
-    )
-    .binding;
-    let production = zeroship_workflow::service::store::journal_binding();
-    assert_eq!(
-        local.schema(),
-        production.schema(),
-        "the local journal must live in the production journal's schema"
-    );
-    assert_eq!(
-        local.app_id(),
-        production.app_id(),
-        "the local journal must be opened under the production journal's tenant"
-    );
-    assert_eq!(local, production);
+    HostStorage::new(dev_connection(root))
 }
 
 fn test_objects(root: &Path) -> zeroship_storage::StorageStore {

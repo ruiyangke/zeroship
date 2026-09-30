@@ -3,9 +3,9 @@
 //! THE SOURCE IS THE COMPILED CONTRACT, as in [`crate::docs`]. The expectation
 //! is not a list of setting names kept beside the overlay structs; it is
 //! [`ConfigSpec::toml_path`] on every declaration rustc linked into this
-//! binary. A hand-maintained list is how `workflow.migrate_url` and the
-//! `workflow.capacity_*` family drifted out of [`FileConfig`] in the first
-//! place, so a check restating the names would rot the same way.
+//! binary. A hand-maintained list is how the `workflow.capacity_*` family
+//! drifted out of [`FileConfig`] in the first place, so a check restating the
+//! names would rot the same way.
 //!
 //! WHY A MISSING FIELD IS NOT MERELY UNTIDY. Every section of [`FileConfig`] is
 //! `#[serde(deny_unknown_fields)]`, so the typed overlay does not ignore a key

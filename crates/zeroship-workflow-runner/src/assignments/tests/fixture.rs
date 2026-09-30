@@ -17,9 +17,7 @@ use zeroship_core::{
     workflow_jobs::{Settlement, SettlementReceipt},
     workflow_policy::{AppPolicy, EstablishIngress, PolicyLease, PolicyLeaseRequest},
 };
-use zeroship_data_orm::{
-    binding::DbBinding, connection::ConnectionFactory, encryption::ProjectKeySource,
-};
+use zeroship_data_orm::connection::ConnectionFactory;
 use zeroship_workflow_client::{LeasedJob, Options};
 
 pub(super) struct Fixture {
@@ -703,19 +701,17 @@ impl CreatorFactory for Factory {
 async fn creator(directory: &Path, app: &AppId, policies: Arc<HostPolicies>) -> WorkflowService {
     let directory = directory.join(app.as_str());
     std::fs::create_dir_all(&directory).unwrap();
-    let store = OrmStore::connect(
-        DbBinding::platform(
-            app.as_str(),
-            "assignment-fixture",
-            SchemaName::new(app.as_str()).unwrap(),
-        ),
-        &ConnectionFactory::for_platform_url(&format!(
+    // Each app's journal is its own store over its own directory, as each
+    // placement's host would hold its own; the binding is the one every host
+    // opens the journal on.
+    let store = HostStorage::new(
+        ConnectionFactory::for_platform_url(&format!(
             "sqlite:{}",
             directory.join("orm.sqlite").display()
         ))
         .unwrap(),
-        ProjectKeySource::unavailable(),
     )
+    .open()
     .await
     .unwrap();
     schema::initialize_local(&store).await.unwrap();

@@ -99,6 +99,7 @@ mod fanout;
 mod frontier_models;
 mod graph;
 mod hold_release;
+mod host_storage;
 mod ingress_models;
 mod journal_models;
 mod job_door;

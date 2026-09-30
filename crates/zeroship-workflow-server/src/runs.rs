@@ -13,12 +13,11 @@ use std::{
 
 use futures::{future::LocalBoxFuture, lock::Mutex};
 use zeroship_core::{app_id::AppId, workflow_coordination::Revision};
-use zeroship_data_orm::{connection::ConnectionFactory, encryption::ProjectKeySource};
+use zeroship_data_orm::connection::ConnectionFactory;
 use zeroship_workflow::{
     service::{
-        store::{journal_binding, OrmStore},
-        AppDeployments, AppWorkflows, HostPolicies, IngressEpochs, PolicyBinding, PolicySnapshot,
-        WorkflowService,
+        store::HostStorage, AppDeployments, AppWorkflows, HostPolicies, IngressEpochs,
+        PolicyBinding, PolicySnapshot, WorkflowService,
     },
     WorkflowServiceError,
 };
@@ -61,14 +60,7 @@ impl RunService {
         let factory = ConnectionFactory::for_platform_url(url).map_err(|_| {
             WorkflowServiceError::Unavailable("workflow journal url is unusable".into())
         })?;
-        let store = OrmStore::connect(
-            journal_binding(),
-            &factory,
-            // The journal declares no encrypted column, so there is no project
-            // key to resolve and none to supply.
-            ProjectKeySource::unavailable(),
-        )
-        .await?;
+        let store = HostStorage::new(factory).open().await?;
         let policies = Arc::new(HostPolicies::default());
         let journal = WorkflowService::open(Rc::new(store), policies.clone()).await?;
         Ok(Self {

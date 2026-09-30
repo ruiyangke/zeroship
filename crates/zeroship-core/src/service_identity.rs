@@ -657,7 +657,7 @@ impl ServiceAuthorization {
 /// Return the measured service-to-service machine-identity table.
 #[must_use]
 pub fn service_allowlist() -> &'static [ServiceAuthorization] {
-    static ALLOWLIST: OnceLock<[ServiceAuthorization; 6]> = OnceLock::new();
+    static ALLOWLIST: OnceLock<[ServiceAuthorization; 5]> = OnceLock::new();
 
     ALLOWLIST.get_or_init(|| {
         let principal = |name| {
@@ -692,7 +692,6 @@ pub fn service_allowlist() -> &'static [ServiceAuthorization] {
                     endpoints::CONTROL_ERASURE_PREFLIGHT,
                 ],
             ),
-            ServiceAuthorization::new(principal("svc/migrate-server"), &[]),
             ServiceAuthorization::new(
                 principal("svc/workflow"),
                 &[
