@@ -21,7 +21,36 @@ use zeroship_data_orm::{
     value, OrmContext,
 };
 
-/// Resolved app journal services that a host may pass to its workflow thread.
+/// The schema the workflow journal is installed into and opened on.
+///
+/// `db/migrations-ts/20260919000000_workflow_journal.ts` installs the journal
+/// here. It is the workflow service's own schema rather than a creator's, so
+/// every app a host serves shares one journal, told apart by the `app_id`
+/// columns inside it.
+pub const JOURNAL_SCHEMA: &str = "workflow_manager";
+
+/// The binding every host opens the workflow journal on.
+///
+/// The production service and `zeroship serve` both open the journal through
+/// this, so the two agree on where it lives. It is a platform binding: the
+/// journal is the workflow service's own store, so its tenant names that
+/// service and never an app. On `SQLite` the schema is also the `ATTACH` alias,
+/// which names the file the journal is kept in.
+///
+/// # Panics
+///
+/// Never: [`JOURNAL_SCHEMA`] is a legal schema name.
+#[must_use]
+pub fn journal_binding() -> DbBinding {
+    DbBinding::platform(
+        JOURNAL_SCHEMA,
+        "workflow-journal",
+        SchemaName::new(JOURNAL_SCHEMA).expect("the journal schema is a legal schema name"),
+    )
+}
+
+/// Journal storage a host passes to its workflow thread, bound through
+/// [`journal_binding`].
 #[derive(Clone, Debug)]
 pub struct HostStorage {
     pub connection: ConnectionFactory,

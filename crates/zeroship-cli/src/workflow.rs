@@ -1,9 +1,9 @@
 //! The local workflow host, independent of HTTP request isolates.
 //!
 //! `zeroship serve` composes the native workflow manager over its local
-//! platform metadata file with the ordinary job consumer over the app's own
-//! database and storage. Publishing the app archive registers and activates
-//! its schedules, so creator activation arrives as a delivered job.
+//! platform metadata file with the ordinary job consumer over the workflow
+//! journal and the app's storage. Publishing the app archive registers and
+//! activates its schedules, so creator activation arrives as a delivered job.
 
 #![expect(clippy::future_not_send, reason = "the host owns a compio thread")]
 
@@ -26,8 +26,12 @@ use std::{
 };
 use zeroship_bundle::LoadedWorker;
 use zeroship_core::app_id::AppId;
+use zeroship_data_orm::{connection::ConnectionFactory, encryption::ProjectKeySource};
 use zeroship_runtime::{NativePlugin, RuntimeLimits};
-use zeroship_workflow::service::{store::HostStorage, AppBackend};
+use zeroship_workflow::service::{
+    store::{journal_binding, HostStorage},
+    AppBackend,
+};
 use zeroship_storage::StorageStore;
 use zeroship_workflow_runner::{
     consumer::ConsumerOptions, delivery::DeliveryOptions, PayloadObjects, TaskPayloadLimits,
@@ -133,6 +137,18 @@ impl Default for ManagerConfig {
             closing_backoff_ms: 60_000,
             closing_backoff_max_ms: 3_600_000,
         }
+    }
+}
+
+/// The storage the local host opens its workflow journal on: the dev
+/// database's connection, bound where the production service opens its own
+/// journal. On `SQLite` the journal is kept in its own file beside the session
+/// file `connection` opens.
+pub fn journal_storage(connection: ConnectionFactory, keys: ProjectKeySource) -> HostStorage {
+    HostStorage {
+        connection,
+        keys,
+        binding: journal_binding(),
     }
 }
 
