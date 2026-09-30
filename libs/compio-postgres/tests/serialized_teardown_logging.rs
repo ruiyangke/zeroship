@@ -4,13 +4,11 @@ use compio_postgres::config::{Host, SslMode};
 use compio_postgres::{Config, NoTls, SplitStream};
 use log::{Level, LevelFilter, Log, Metadata, Record};
 use std::io::ErrorKind;
-use std::net::{IpAddr, SocketAddr};
 use std::sync::{Mutex, Once};
 use std::time::Duration;
 
-#[allow(dead_code, clippy::doc_markdown)]
-#[path = "common/env.rs"]
-mod test_env;
+#[allow(dead_code)]
+mod common;
 
 static LOGGER: ShutdownLogger = ShutdownLogger;
 static LOGGER_INIT: Once = Once::new();
@@ -81,31 +79,32 @@ fn install_logger() {
     });
 }
 
-fn configured_address(config: &Config) -> SocketAddr {
+/// The TCP endpoint the test DSN names. It is dialled as given, so a name and
+/// a numeric address both work, as they do for `connect`.
+fn configured_endpoint(config: &Config) -> (String, u16) {
     let host = match config.get_hosts().first() {
-        Some(Host::Tcp(host)) => host,
+        Some(Host::Tcp(host)) => host.clone(),
         #[cfg(unix)]
         Some(Host::Unix(path)) => panic!("test URL selected a Unix socket: {}", path.display()),
         None => panic!("test URL omitted its TCP host"),
     };
-    let ip = host
-        .parse::<IpAddr>()
-        .unwrap_or_else(|error| panic!("test URL host was not a numeric address: {error}"));
     let port = config.get_ports().first().copied().unwrap_or(5432);
-    SocketAddr::new(ip, port)
+    (host, port)
 }
 
 #[allow(clippy::future_not_send)]
 async fn run_serialized_teardown(kind: ErrorKind) {
-    let url = test_env::get(test_env::TestEnvKey::PgTestUrl)
-        .expect("PG_TEST_URL must name the live PostgreSQL 16");
+    // The plaintext DSN: this test hands the driver a raw TCP stream of its
+    // own and speaks no TLS on it.
+    let url = common::plaintext_url();
     let mut config = url
         .parse::<Config>()
-        .unwrap_or_else(|error| panic!("parse PG_TEST_URL: {error}"));
+        .unwrap_or_else(|error| panic!("parse the test DSN: {error}"));
     config.ssl_mode(SslMode::Disable);
-    let stream = compio::net::TcpStream::connect(configured_address(&config))
+    let (host, port) = configured_endpoint(&config);
+    let stream = compio::net::TcpStream::connect((host.as_str(), port))
         .await
-        .unwrap_or_else(|error| panic!("connect to PostgreSQL: {error}"));
+        .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
     let (client, connection) = config
         .connect_raw(
             ShutdownErrorStream {
@@ -115,7 +114,7 @@ async fn run_serialized_teardown(kind: ErrorKind) {
             NoTls,
         )
         .await
-        .unwrap_or_else(|error| panic!("complete PostgreSQL startup: {error}"));
+        .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
 
     drop(client);
     connection

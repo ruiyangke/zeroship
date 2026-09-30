@@ -1,4 +1,5 @@
-//! The sealed test-key enum for this crate's gated tests.
+//! The sealed test-key enum for this crate's gated tests, and the one default
+//! for `PG_TEST_URL`.
 //!
 //! `compio-postgres` is a standalone, publishable driver with NO zeroship
 //! dependency, so it cannot use the typed keys in `zeroship_core::config` that
@@ -24,7 +25,7 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TestEnvKey {
     /// Connection string for the PostgreSQL integration suites. Absent means
-    /// the default DSN in each target, never "do not run".
+    /// [`DEFAULT_TEST_URL`], never "do not run".
     PgTestUrl,
     /// Set on the child in the descriptor-budget probe, which re-executes its
     /// own test binary so the `/proc/self/fd` count is taken in a process that
@@ -60,3 +61,14 @@ impl TestEnvKey {
 pub fn get(key: TestEnvKey) -> Option<String> {
     std::env::var(key.name()).ok()
 }
+
+/// The server used when [`TestEnvKey::PgTestUrl`] is unset: the one
+/// `tests/provision_test_backends.sh` provisions with its default `PG_HOST`,
+/// `PG_PORT`, `PG_USER`, `PG_PASS` and `PG_DB`, so a developer who runs that
+/// script exports nothing.
+///
+/// ONE DEFINITION, beside the key it defaults. The test targets reach it
+/// through `common::test_url` and `common::plaintext_url`, and
+/// `benches/query_live.rs` includes this file, so no target carries a second
+/// spelling of the address.
+pub const DEFAULT_TEST_URL: &str = "postgres://postgres:zeroship@127.0.0.1:5440/zeroship";

@@ -279,20 +279,17 @@ pub fn postgres_unreachable(dsn: &str, error: &(dyn std::error::Error + 'static)
     )
 }
 
-/// The DSN the integration suites use when `PG_TEST_URL` is unset.
+/// `PG_TEST_URL`, or `env::DEFAULT_TEST_URL` when it is unset.
 ///
-/// ONE DEFINITION, because `tests/provision_test_backends.sh` says so in as
-/// many words: it provisions `deploy/compose`'s postgres on 127.0.0.1:5440 and
-/// notes that the defaults line up on purpose, so a developer who runs that
-/// script needs to export nothing. That invariant only holds while the port
-/// appears once per crate; it had drifted into 42 test files.
+/// Every test target that honours `PG_TEST_URL` resolves its server through
+/// [`test_url`] or [`plaintext_url`], both of which read this, so the
+/// coordinates cannot drift apart between targets.
 ///
 /// Absent is NOT "do not run" - see `TestEnvKey::PgTestUrl`. A target that
 /// cannot reach this server must fail, not skip.
 #[cfg(not(feature = "suite-over-tls"))]
 fn plaintext_test_url() -> String {
-    env::get(env::TestEnvKey::PgTestUrl)
-        .unwrap_or_else(|| "postgres://postgres:zeroship@localhost:5440/zeroship".to_string())
+    env::get(env::TestEnvKey::PgTestUrl).unwrap_or_else(|| env::DEFAULT_TEST_URL.to_string())
 }
 
 #[cfg(not(feature = "suite-over-tls"))]

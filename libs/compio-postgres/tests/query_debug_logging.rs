@@ -4,13 +4,12 @@
 //! Its logger enables only this driver's query Debug target, making the branch
 //! choice and the emitted parameter rendering independently observable.
 
-use compio_postgres::{Client, NoTls};
+use compio_postgres::Client;
 use log::{Level, LevelFilter, Log, Metadata, Record};
 use std::sync::{Mutex, Once};
 
-#[allow(dead_code, clippy::doc_markdown)]
-#[path = "common/env.rs"]
-mod test_env;
+#[allow(dead_code)]
+mod common;
 
 const QUERY_LOG_TARGET: &str = "compio_postgres::query";
 
@@ -48,11 +47,10 @@ fn install_query_logger() {
 // `#[compio::test]` runtime on the same thread.
 #[allow(clippy::future_not_send)]
 async fn client() -> Client {
-    let url = test_env::get(test_env::TestEnvKey::PgTestUrl)
-        .expect("PG_TEST_URL must name the PostgreSQL test server");
-    let (client, connection) = compio_postgres::connect(&url, NoTls)
+    let url = common::test_url();
+    let (client, connection) = compio_postgres::connect(&url, common::suite_tls())
         .await
-        .expect("connect to the PostgreSQL test server");
+        .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
     compio::runtime::spawn(async move {
         if let Err(error) = connection.run().await {
             eprintln!("query Debug test connection error: {error}");

@@ -374,8 +374,7 @@ fn assert_single_retirement(pool: &Pool) {
 }
 
 fn live_url() -> String {
-    let url = common::env::get(common::env::TestEnvKey::PgTestUrl)
-        .unwrap_or_else(|| "postgres://postgres:zeroship@127.0.0.1:5455/zeroship".to_string());
+    let url = common::test_url();
     let separator = if url.contains('?') { '&' } else { '?' };
     format!("{url}{separator}sslmode=disable")
 }

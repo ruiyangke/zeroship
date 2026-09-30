@@ -8,9 +8,14 @@
 //! the suite runs at full parallelism against one database.
 //!
 //! Run with:
-//!   docker compose up -d postgres
-//!   PG_TEST_URL='postgres://postgres:zeroship@localhost:5440/zeroship' \
-//!       cargo test -p compio-postgres --test integration
+//!
+//! ```text
+//! tests/provision_test_backends.sh
+//! cargo test -p compio-postgres --test suite -- integration::
+//! ```
+//!
+//! Nothing needs exporting for the provisioned server; `PG_TEST_URL` points
+//! the run at another one (see `common::test_url`).
 
 use compio_postgres::error::SqlState;
 use compio_postgres::types::{IsNull, ToSql, Type, to_sql_checked};
@@ -3575,46 +3580,40 @@ async fn pipelined_failures_inside_transactions_abort_only_later_requests() {
 }
 
 // ---------------------------------------------------------------------------
-// 30. concurrent_large_bidirectional_queries_do_not_deadlock (MUX-DEADLOCK-1)
+// 30. pipelined_large_parameter_queries_round_trip_byte_exact
 //
-// The cap-1-read-channel + blocking-flush deadlock in the multiplexed loop.
-// Many large queries are issued concurrently on ONE
-// `Client`; each sends a large bytea param (a large WRITE that fills the
-// kernel send buffer) and selects back a much larger result the server
-// floods concurrently (filling ITS send buffer once the client stalls
-// reading). The result is fanned out over many rows so each individual
-// DataRow frame stays well under the MAX_MESSAGE_SIZE cap (a single
-// oversize field would be rejected as oversize, masking the deadlock behind an
-// io error; and a single giant frame would not wedge anyway, since the read
-// task drains the socket continuously while assembling one frame).
+// Extended-protocol queries pipelined on ONE `Client` against a real backend,
+// each binding a large bytea parameter and selecting it back on several rows.
+// Every blob must come back byte-for-byte to the query that sent it: nothing
+// lost, truncated, or delivered to another of the pipelined requests.
 //
-// If the main loop does `write_half.flush().await?` SEQUENTIALLY without
-// draining the read channel, this cycle wedges:
-//   flush-blocked (client send buffer full)
-//     -> server recv buffer full -> server send blocked
-//       -> client not reading -> read task's cap-1 send().await blocked
-//         -> main loop never drains the read channel -> flush never resumes.
-// Sequentially the same queries finish.
+// Under `--features suite-over-tls` the same traffic crosses rustls, whose
+// `read_tls` refuses more ciphertext once 64 KiB of decrypted bytes sit
+// unread. The results here are far past that, so a TLS reader that stopped
+// draining between steps fails this test with an I/O error. The contract is
+// stated on `tls_sansio::TlsSession::feed_ciphertext_step`, and `tls_sansio`'s
+// own unit tests prove it without a server.
 //
-// The flush must be interleaved with read-channel draining (a cancel-safe
-// select carrying the owned flush future against the read branch), so reads
-// keep the socket draining while the large write completes -> no deadlock.
-//
-// Wrapped in a timeout so a wedged loop fails fast as a
-// timeout instead of hanging the whole suite; otherwise it completes
-// well under the budget with every blob echoed back byte-for-byte.
+// The multiplexed loop's flush/read deadlock (MUX-DEADLOCK-1) is not this
+// test's claim. Reproducing it against a real server takes enough volume to
+// beat autotuned socket buffers, and that volume made the transfer's duration
+// a measure of machine load;
+// `a_large_request_flushed_during_a_large_response_does_not_deadlock`
+// reproduces it by construction instead.
 // ---------------------------------------------------------------------------
 
 #[compio::test]
-async fn concurrent_large_bidirectional_queries_do_not_deadlock() {
+async fn pipelined_large_parameter_queries_round_trip_byte_exact() {
     use futures_util::future::join_all;
 
-    const BLOB_LEN: usize = 16 * 1024 * 1024; // ~16 MB param per query (< 64 MB cap)
-    const ROWS: i32 = 3; // result ~= 48 MB, fanned over 3 frames of ~16 MB
-    const N: usize = 16; // concurrent in-flight queries on one connection
+    const BLOB_LEN: usize = 1024 * 1024; // each parameter, and each row echoing it
+    const ROWS: i32 = 3;
+    const N: usize = 16; // queries in flight on one connection
+    const WATCHDOG: Duration = Duration::from_secs(20);
 
     let url = require_pg().await;
     let client = connect(&url).await.unwrap();
+    let backend_pid = client.process_id();
 
     // Distinct payloads so a misrouted/corrupted response is caught, not just
     // a hang. Byte i of blob k = (i + k) mod 256.
@@ -3629,9 +3628,8 @@ async fn concurrent_large_bidirectional_queries_do_not_deadlock() {
     let futs = blobs.iter().enumerate().map(|(k, blob)| {
         let client = &client;
         async move {
-            // generate_series echoes the 4 MB param back on every row, so the
-            // server emits ~ROWS x the param size: a large result it floods
-            // while we are still writing other queries' large params.
+            // generate_series echoes the param back on every row, so each
+            // query's result is ROWS times its parameter.
             let rows = client
                 .query(
                     "SELECT $1::bytea AS b FROM generate_series(1, $2::int4)",
@@ -3644,17 +3642,30 @@ async fn concurrent_large_bidirectional_queries_do_not_deadlock() {
         }
     });
 
-    // A deadlock would time out; completion is the pass.
-    let outcome = compio::time::timeout(std::time::Duration::from_secs(20), join_all(futs)).await;
+    let outcome = compio::time::timeout(WATCHDOG, join_all(futs)).await;
 
-    let results = outcome.expect(
-        "concurrent large bidirectional queries DEADLOCKED on one connection \
-         (multiplexed flush did not interleave read-draining) -- timed out",
-    );
+    let results = outcome.unwrap_or_else(|elapsed| {
+        // A run that stops here abandons a response the server is still
+        // sending. Behind a proxy that half-closes - docker's userland proxy,
+        // which publishes the provisioned server, is one - that backend then
+        // blocks in ClientWrite for good, and a backend that never absorbs a
+        // ProcSignalBarrier stalls every later DROP DATABASE on the server.
+        // Terminating it as this panic unwinds keeps the failure from
+        // outliving the test, and keeps a cleanup error from replacing the
+        // verdict below.
+        let _terminate = BoundedSqlCleanup::new(
+            "the abandoned pipelined-transfer backend",
+            url.to_string(),
+            vec![format!("SELECT pg_terminate_backend({backend_pid})")],
+        );
+        panic!(
+            "{N} pipelined large-parameter queries did not complete within \
+             {WATCHDOG:?}: {elapsed:?}"
+        )
+    });
 
-    // Every concurrently-issued query came back, in order, with its own blob
-    // echoed byte-for-byte on every row: no hang, no loss, no misrouting, no
-    // corruption.
+    // Every query came back, in order, with its own blob echoed byte-for-byte
+    // on every row: no loss, no misrouting, no corruption.
     assert_eq!(results.len(), N);
     for (k, echoed) in results {
         assert_eq!(echoed.len(), ROWS as usize, "query {k} wrong row count");
@@ -3663,6 +3674,202 @@ async fn concurrent_large_bidirectional_queries_do_not_deadlock() {
             assert_eq!(row, &blobs[k], "query {k} row {r} corrupted or misrouted");
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// 30b. a_large_request_flushed_during_a_large_response_does_not_deadlock
+//      (MUX-DEADLOCK-1)
+//
+// The multiplexed loop's flush/read deadlock. A loop that awaits a large
+// write's flush without draining the read channel wedges in this cycle:
+//   flush blocked (client send buffer full)
+//     -> server receive buffer full -> server send blocked
+//       -> client not reading -> read task's cap-1 send blocked
+//         -> loop never drains the read channel -> flush never resumes.
+// The flush must be interleaved with read-channel draining, so reads keep
+// the socket draining while the large write completes.
+//
+// Built so that precondition holds by construction rather than by volume. The
+// peer behaves the way a PostgreSQL backend does - it reads one request, then
+// writes that request's whole response with blocking sends and reads nothing
+// until they complete - and every socket buffer on both sides is pinned small.
+// So a response of a few megabytes is certain to fill the client's receive
+// path, and a request of a few megabytes is certain to fill its send path,
+// whatever the kernel's autotuning limits are. A loop that flushes without
+// draining reads wedges every time; a loop that interleaves them finishes a
+// transfer small enough that the watchdog is only ever reached by the wedge.
+// ---------------------------------------------------------------------------
+
+#[compio::test]
+async fn a_large_request_flushed_during_a_large_response_does_not_deadlock() {
+    use std::io::{Read, Write};
+
+    // Requested buffer size for every socket in the exchange. The kernel
+    // doubles it; either way it is far below both payloads.
+    const PINNED_BUFFER: usize = 16 * 1024;
+    const FIELD_LEN: usize = 64 * 1024;
+    const RESPONSE_ROWS: usize = 64; // a 4 MiB response, in 64 KiB DataRows
+    const REQUEST_PADDING: usize = 4 * 1024 * 1024; // a 4 MiB request
+    const WATCHDOG: Duration = Duration::from_secs(20);
+
+    fn frame(tag: u8, body: &[u8]) -> Vec<u8> {
+        let mut frame = vec![tag];
+        frame.extend_from_slice(&u32::try_from(body.len() + 4).unwrap().to_be_bytes());
+        frame.extend_from_slice(body);
+        frame
+    }
+
+    fn read_frame(stream: &mut std::net::TcpStream) -> std::io::Result<(u8, Vec<u8>)> {
+        let mut header = [0u8; 5];
+        stream.read_exact(&mut header)?;
+        let length = u32::from_be_bytes(header[1..].try_into().unwrap()) as usize;
+        let mut body = vec![0u8; length.saturating_sub(4)];
+        stream.read_exact(&mut body)?;
+        Ok((header[0], body))
+    }
+
+    fn refuse(reason: String) -> std::io::Error {
+        std::io::Error::other(reason)
+    }
+
+    let listener = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None)
+        .expect("create the scripted peer's socket");
+    // Set before `listen`, so every accepted socket inherits them.
+    listener
+        .set_recv_buffer_size(PINNED_BUFFER)
+        .expect("pin the peer's receive buffer");
+    listener
+        .set_send_buffer_size(PINNED_BUFFER)
+        .expect("pin the peer's send buffer");
+    listener
+        .bind(&std::net::SocketAddr::from(([127, 0, 0, 1], 0)).into())
+        .expect("bind the scripted peer");
+    listener.listen(1).expect("listen on the scripted peer");
+    // SO_RCVTIMEO bounds `accept` on Linux as well as `read`, so a client
+    // that never dials ends the peer instead of leaking its thread.
+    listener
+        .set_read_timeout(Some(WATCHDOG))
+        .expect("bound the peer's accept");
+    let listener: std::net::TcpListener = listener.into();
+    let addr = listener.local_addr().expect("scripted peer address");
+
+    // Fallible rather than panicking: when the client wedges and fails the
+    // test, its socket closes and this thread's next call errors and returns,
+    // instead of panicking later in a thread nobody joins.
+    let peer = std::thread::spawn(move || -> std::io::Result<()> {
+        let (mut stream, _) = listener.accept()?;
+        // A bound on a single blocked socket call, never reached by a live
+        // exchange.
+        stream.set_read_timeout(Some(WATCHDOG))?;
+        stream.set_write_timeout(Some(WATCHDOG))?;
+
+        let mut length = [0u8; 4];
+        stream.read_exact(&mut length)?;
+        let mut startup = vec![0u8; (u32::from_be_bytes(length) as usize).saturating_sub(4)];
+        stream.read_exact(&mut startup)?;
+        let mut key_data = 7_i32.to_be_bytes().to_vec();
+        key_data.extend_from_slice(&7_i32.to_be_bytes());
+        let mut hello = frame(b'R', &0u32.to_be_bytes());
+        hello.extend_from_slice(&frame(b'K', &key_data));
+        hello.extend_from_slice(&frame(b'Z', b"I"));
+        stream.write_all(&hello)?;
+
+        // Request 1 asks for the large response.
+        let (tag, _) = read_frame(&mut stream)?;
+        if tag != b'Q' {
+            return Err(refuse(format!("the first request has tag {tag}, not Q")));
+        }
+        let mut description = 1_u16.to_be_bytes().to_vec();
+        description.extend_from_slice(b"big\0");
+        description.extend_from_slice(&0_u32.to_be_bytes()); // table oid
+        description.extend_from_slice(&0_i16.to_be_bytes()); // column number
+        description.extend_from_slice(&25_u32.to_be_bytes()); // text
+        description.extend_from_slice(&(-1_i16).to_be_bytes()); // varlena
+        description.extend_from_slice(&(-1_i32).to_be_bytes()); // no typmod
+        description.extend_from_slice(&0_i16.to_be_bytes()); // text format
+        stream.write_all(&frame(b'T', &description))?;
+        let mut row = 1_u16.to_be_bytes().to_vec();
+        row.extend_from_slice(&u32::try_from(FIELD_LEN).unwrap().to_be_bytes());
+        row.resize(row.len() + FIELD_LEN, b'x');
+        let row = frame(b'D', &row);
+        // PostgreSQL's discipline: the whole response goes out before the next
+        // request is read. These writes block until the client reads.
+        for _ in 0..RESPONSE_ROWS {
+            stream.write_all(&row)?;
+        }
+        stream.write_all(&frame(b'C', format!("SELECT {RESPONSE_ROWS}\0").as_bytes()))?;
+        stream.write_all(&frame(b'Z', b"I"))?;
+
+        // Request 2 is the large one the client was flushing meanwhile.
+        let (tag, body) = read_frame(&mut stream)?;
+        if tag != b'Q' {
+            return Err(refuse(format!("the second request has tag {tag}, not Q")));
+        }
+        if body.len() <= REQUEST_PADDING {
+            return Err(refuse(format!(
+                "the second request arrived truncated: {} bytes",
+                body.len()
+            )));
+        }
+        stream.write_all(&frame(b'C', b"SET\0"))?;
+        stream.write_all(&frame(b'Z', b"I"))
+    });
+
+    let client_socket = compio::net::TcpStream::connect_with_options(
+        addr,
+        &compio::net::SocketOpts::new()
+            .recv_buffer_size(PINNED_BUFFER)
+            .send_buffer_size(PINNED_BUFFER),
+    )
+    .await
+    .expect("dial the scripted peer");
+    let config: Config = "user=postgres dbname=postgres sslmode=disable"
+        .parse()
+        .expect("parse the scripted peer's configuration");
+    let (client, connection) = config
+        .connect_raw(client_socket, NoTls)
+        .await
+        .expect("complete startup with the scripted peer");
+    let driver = compio::runtime::spawn(async move { connection.run().await });
+
+    let large_request = format!(
+        "SET application_name = 'x' /* {} */",
+        "y".repeat(REQUEST_PADDING)
+    );
+    // Pipelined: the large request is queued behind the one whose response
+    // the peer floods, so the client flushes it while that response arrives.
+    let exchange = futures_util::future::join(
+        client.simple_query("SELECT big"),
+        client.simple_query(&large_request),
+    );
+    let (flooded, flushed) = compio::time::timeout(WATCHDOG, exchange).await.expect(
+        "a large request flushed during a large response DEADLOCKED the multiplexed \
+         loop: the flush did not interleave read-draining",
+    );
+
+    let rows: Vec<_> = flooded
+        .expect("the flooded query failed")
+        .into_iter()
+        .filter_map(|message| match message {
+            SimpleQueryMessage::Row(row) => Some(row),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(rows.len(), RESPONSE_ROWS, "the flooded response lost rows");
+    for row in &rows {
+        assert_eq!(
+            row.get(0).map(str::len),
+            Some(FIELD_LEN),
+            "a row was truncated"
+        );
+    }
+    flushed.expect("the flushed request failed");
+
+    drop(client);
+    let _ = driver.await;
+    peer.join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+        .expect("the scripted peer failed");
 }
 
 // ---------------------------------------------------------------------------

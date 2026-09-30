@@ -90,10 +90,19 @@ Everything needs a live server; nothing skips. A missing database is a FAILED
 run, not a green one - see the header of `tests/common/mod.rs` for why.
 
 ```bash
-# The ordinary suite.
-PG_TEST_URL=postgres://postgres:zeroship@127.0.0.1:5455/zeroship \
+# The server the suites use by default, from the repository root.
+tests/provision_test_backends.sh
+
+# The ordinary suite. Nothing needs exporting for the provisioned server.
+cargo test -p compio-postgres -- --test-threads=1
+
+# Any other server.
+PG_TEST_URL=postgres://user:password@host:port/dbname \
   cargo test -p compio-postgres -- --test-threads=1
 ```
+
+With `PG_TEST_URL` unset the suites dial `DEFAULT_TEST_URL` in
+`tests/common/env.rs`, the address that script provisions.
 
 `--test-threads=1` is not superstition: several tests measure server-visible
 state (backend counts, replication slots, prepared statements) that concurrent
@@ -110,7 +119,7 @@ cargo test -p compio-postgres --features suite-over-tls -- --test-threads=1
 
 # With the implicit prepared-statement cache on (it is OFF by default, so its
 # eviction and stale-plan retry are otherwise barely exercised).
-PG_TEST_URL=... cargo test -p compio-postgres --features suite-with-statement-cache -- --test-threads=1
+cargo test -p compio-postgres --features suite-with-statement-cache -- --test-threads=1
 
 # The TLS-specific suite: negotiation, verification modes, CRLs, client
 # certificates, channel binding, direct SSL. Not built without the feature.

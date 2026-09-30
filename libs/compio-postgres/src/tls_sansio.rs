@@ -287,10 +287,13 @@ impl TlsSession {
     /// reader in between can cross that line and kill the connection.
     ///
     /// Crossing it kills the connection with `error communicating with the
-    /// server` - this error, surfacing as an I/O failure several layers up - as
-    /// `concurrent_large_bidirectional_queries_do_not_deadlock` exercises by
-    /// streaming a large parameter while the server floods results back. The
-    /// caller loops back to `reader()` between every step.
+    /// server` - this error, surfacing as an I/O failure several layers up.
+    /// The caller loops back to `reader()` between every step.
+    /// `tests::a_plaintext_flood_past_the_unread_limit_arrives_whole` proves
+    /// the contract in memory, and under `suite-over-tls` the live
+    /// `pipelined_large_parameter_queries_round_trip_byte_exact`
+    /// streams large parameters while the server floods results back.
+    ///
     /// Returns whether the peer has sent `close_notify`, which the caller needs
     /// to tell a clean shutdown from a stall: `read_tls` answers `Ok(0)`
     /// unconditionally once that alert has arrived, so "rustls took nothing"
@@ -1792,6 +1795,120 @@ mod tests {
                 None => BufResult(Ok(0), buf),
             }
         }
+    }
+
+    /// The ciphertext a server sends to carry `payload` as application data.
+    fn server_ciphertext(server: &mut rustls::ServerConnection, payload: &[u8]) -> Vec<u8> {
+        let mut wire = Vec::new();
+        let mut queued = 0;
+        while queued < payload.len() {
+            queued += server
+                .writer()
+                .write(&payload[queued..])
+                .expect("queue application data");
+            while server.wants_write() {
+                server.write_tls(&mut wire).expect("server write_tls");
+            }
+        }
+        wire
+    }
+
+    /// rustls refuses more ciphertext once 64 KiB of DECRYPTED bytes sit
+    /// unread - `read_tls` fails with "received plaintext buffer full" - and
+    /// [`TlsSession::feed_ciphertext_step`] hands over one step at a time so
+    /// that its caller can drain in between. A flood several times that size
+    /// must arrive whole: through the session, stepped over ONE slice larger
+    /// than the limit, and through the reader taking it off a socket.
+    ///
+    /// The control shows the limit is in force on these pairs: the same flood
+    /// fed without draining is refused.
+    #[compio::test]
+    async fn a_plaintext_flood_past_the_unread_limit_arrives_whole() {
+        const UNREAD_LIMIT: usize = 64 * 1024;
+        let payload: Vec<u8> = (0..4 * UNREAD_LIMIT)
+            .map(|i| u8::try_from(i % 251).unwrap())
+            .collect();
+
+        let (mut undrained, mut server) = handshaken_pair();
+        let wire = server_ciphertext(&mut server, &payload);
+        assert!(
+            wire.len() > UNREAD_LIMIT,
+            "the flood's ciphertext is only {} bytes",
+            wire.len()
+        );
+        let mut cursor = &wire[..];
+        let refusal = loop {
+            match undrained.read_tls(&mut cursor) {
+                Ok(0) => panic!(
+                    "rustls took the whole flood with nobody reading it, so the limit this \
+                     test is about is not in force"
+                ),
+                Ok(_) => {
+                    undrained
+                        .process_new_packets()
+                        .expect("decrypt a flood record");
+                }
+                Err(error) => break error,
+            }
+        };
+        assert!(
+            refusal.to_string().contains("plaintext buffer full"),
+            "the undrained flood failed for another reason: {refusal}"
+        );
+
+        let (client, mut server) = handshaken_pair();
+        let wire = server_ciphertext(&mut server, &payload);
+        let mut session = TlsSession::new(client);
+        let mut src = &wire[..];
+        let mut delivered = Vec::with_capacity(payload.len());
+        let mut scratch = vec![0u8; 4096];
+        loop {
+            let n = session
+                .read_plaintext(&mut scratch)
+                .expect("drain decrypted bytes");
+            if n > 0 {
+                delivered.extend_from_slice(&scratch[..n]);
+                continue;
+            }
+            if src.is_empty() {
+                break;
+            }
+            let before = src.len();
+            session
+                .feed_ciphertext_step(&mut src)
+                .expect("hand rustls one step of the flood");
+            assert!(
+                src.len() < before,
+                "rustls took nothing with {} flood bytes still to deliver",
+                src.len()
+            );
+        }
+        assert!(
+            delivered == payload,
+            "the session delivered {} of {} flood bytes, or damaged them",
+            delivered.len(),
+            payload.len()
+        );
+
+        let (client, mut server) = handshaken_pair();
+        let wire = server_ciphertext(&mut server, &payload);
+        let chunks = wire.chunks(READ_CHUNK).map(<[u8]>::to_vec).collect();
+        let mut reader = TlsReader::new(ScriptedPeer { chunks }, share(client));
+        let mut delivered = Vec::with_capacity(payload.len());
+        while delivered.len() < payload.len() {
+            let BufResult(read, buf) = reader.read_into(Vec::with_capacity(8192)).await;
+            let n = read.expect("read the flood through the TLS reader");
+            assert!(
+                n > 0,
+                "the reader reported end of stream {} bytes into the flood",
+                delivered.len()
+            );
+            delivered.extend_from_slice(&buf[..n]);
+        }
+        assert!(
+            delivered == payload,
+            "the reader delivered the flood damaged"
+        );
     }
 
     /// Drive a real client/server handshake entirely in memory and return the

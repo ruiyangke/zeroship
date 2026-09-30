@@ -218,17 +218,15 @@ fn build_data_row_body(values: &[Option<Vec<u8>>]) -> DataRowBody {
 /// SERIALIZED loop.
 ///
 /// `Connection::run` chooses its loop by whether the transport splits into
-/// owned halves. A plain socket does, and takes the multiplexed loop; a TLS
-/// stream cannot, because rustls keeps shared session state, so every TLS
-/// connection takes the serialized one. The two loops are not equivalent -
-/// the serialized loop does not read while idle and does not write a second
-/// request before the first is answered - so behaviour proven over plaintext
-/// is not thereby proven over TLS.
+/// owned halves. Both transports this crate ships - a plain socket and the
+/// rustls stream - split, so both take the multiplexed loop; only a custom
+/// `TlsConnect` whose stream refuses to split reaches the serialized one. The
+/// two loops are not equivalent - the serialized loop does not read while idle
+/// and does not write a second request before the first is answered - so
+/// behaviour proven on one is not thereby proven on the other.
 ///
-/// This makes that loop reachable WITHOUT TLS, so the suites that exercise
-/// behaviour can cover it directly rather than inferring. Before this existed
-/// the only way in was a TLS server, which is why the two loops diverged with
-/// nothing going red.
+/// This makes the serialized loop reachable over plaintext, so the suites that
+/// exercise behaviour can cover it directly rather than inferring.
 #[derive(Debug)]
 pub struct SerializedSocket {
     inner: Socket,
@@ -272,11 +270,13 @@ impl SplitStream for SerializedSocket {
 }
 
 /// Connect to `config`'s first TCP endpoint and drive it on the SERIALIZED
-/// loop, the one every TLS connection uses.
+/// loop.
 ///
-/// Plaintext only, deliberately: the point is to exercise that loop without
-/// needing a TLS server, so the transport here is as simple as possible and
-/// the only thing being varied is which loop runs.
+/// Plaintext only, deliberately: the transport here is as simple as possible,
+/// so the only thing being varied is which loop runs.
+///
+/// The host may be a name or a numeric address, as it may for `connect`. The
+/// address the socket reached is what the session records for cancellation.
 pub async fn connect_serialized(
     config: &Config,
 ) -> Result<
@@ -294,9 +294,37 @@ pub async fn connect_serialized(
         }
     };
     let port = config.get_ports().first().copied().unwrap_or(5432);
-    let tcp = compio::net::TcpStream::connect((host.as_str(), port))
+    connect_serialized_via((host.as_str(), port), &host, port, config).await
+}
+
+/// [`connect_serialized`], dialling the addresses given instead of resolving
+/// `config`'s host. The dial tries them in order, and the session records the
+/// one the socket reached.
+#[allow(
+    clippy::future_not_send,
+    reason = "the serialized loop is driven on one compio thread, like `connect_serialized`"
+)]
+async fn connect_serialized_via(
+    addresses: impl compio::net::ToSocketAddrsAsync,
+    hostname: &str,
+    port: u16,
+    config: &Config,
+) -> Result<
+    (
+        Client,
+        Connection<SerializedSocket, NoTlsStream>,
+        std::rc::Rc<std::cell::Cell<bool>>,
+    ),
+    Error,
+> {
+    let tcp = compio::net::TcpStream::connect(addresses)
         .await
-        .map_err(Error::io)?;
+        .map_err(Error::connect)?;
+    // The address this socket actually reached, which is what `connect`
+    // records too: it resolves a name and keeps the address it dialled. A
+    // cancel must reach the same server, and re-resolving the name at cancel
+    // time could pick another of its addresses.
+    let dialled = tcp.peer_addr().map_err(Error::connect)?;
     let split_refused = std::rc::Rc::new(std::cell::Cell::new(false));
     let socket = SerializedSocket {
         inner: Socket::new_tcp(tcp),
@@ -318,14 +346,8 @@ pub async fn connect_serialized(
     // omitted this would make every cancellation fail with "unknown host" and
     // look like a driver defect. Recorded here exactly as `connect` does.
     client.set_socket_config(crate::client::SocketConfig {
-        addr: crate::client::Addr::Tcp {
-            ip: host
-                .parse()
-                .map_err(|_| Error::config("connect_serialized needs a numeric TCP host".into()))?,
-            // `host` parses as an `IpAddr`, which cannot carry a zone.
-            scope_id: 0,
-        },
-        hostname: Some(host.clone()),
+        addr: crate::client::Addr::tcp(dialled),
+        hostname: Some(hostname.to_owned()),
         port,
         connect_timeout: config.get_connect_timeout().copied(),
         tcp_user_timeout: config.get_tcp_user_timeout().copied(),
@@ -344,7 +366,178 @@ pub async fn connect_serialized(
 
 #[cfg(test)]
 mod tests {
-    use super::paired_loopback_port;
+    use super::{connect_serialized, connect_serialized_via, paired_loopback_port};
+    use crate::{Config, NoTls};
+    use std::io::{Read, Write};
+    use std::net::{SocketAddr, TcpListener};
+    use std::time::Duration;
+
+    const PROCESS_ID: i32 = 4_711;
+    const SECRET_KEY: i32 = 1_234_567;
+
+    fn backend_frame(tag: u8, body: &[u8]) -> Vec<u8> {
+        let mut frame = vec![tag];
+        frame.extend_from_slice(&u32::try_from(body.len() + 4).unwrap().to_be_bytes());
+        frame.extend_from_slice(body);
+        frame
+    }
+
+    fn read_length_prefixed(stream: &mut std::net::TcpStream) -> Vec<u8> {
+        let mut length = [0u8; 4];
+        stream
+            .read_exact(&mut length)
+            .expect("read a packet length");
+        let length = u32::from_be_bytes(length) as usize;
+        assert!(
+            (8..=10_000).contains(&length),
+            "implausible packet length {length}"
+        );
+        let mut body = vec![0u8; length - 4];
+        stream.read_exact(&mut body).expect("read a packet body");
+        body
+    }
+
+    /// A scripted server on `listener`: it completes one startup, then
+    /// accepts the cancel on the SAME listener and reports the packet it
+    /// carried.
+    fn scripted_cancel_server(
+        listener: TcpListener,
+    ) -> (
+        std::sync::mpsc::Receiver<Vec<u8>>,
+        std::thread::JoinHandle<()>,
+    ) {
+        let (cancel_seen, cancel_observed) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut session, _) = listener.accept().expect("accept the session");
+            read_length_prefixed(&mut session);
+            let mut key_data = PROCESS_ID.to_be_bytes().to_vec();
+            key_data.extend_from_slice(&SECRET_KEY.to_be_bytes());
+            let mut startup = backend_frame(b'R', &0u32.to_be_bytes());
+            startup.extend_from_slice(&backend_frame(b'K', &key_data));
+            startup.extend_from_slice(&backend_frame(b'Z', b"I"));
+            session.write_all(&startup).expect("complete startup");
+
+            let (mut cancel, _) = listener.accept().expect("accept the cancel");
+            let request = read_length_prefixed(&mut cancel);
+            cancel_seen.send(request).expect("report the cancel");
+            drop(cancel);
+            drop(session);
+        });
+        (cancel_observed, server)
+    }
+
+    /// Cancel through `client` and require the scripted server to receive
+    /// the key it handed out. Nothing else listens on the server's port, so a
+    /// cancel sent to any other address is refused and fails here.
+    #[allow(
+        clippy::future_not_send,
+        reason = "driven by the test's own compio runtime"
+    )]
+    async fn assert_cancel_arrives(
+        client: crate::Client,
+        cancel_observed: &std::sync::mpsc::Receiver<Vec<u8>>,
+    ) {
+        client
+            .cancel_token()
+            .cancel_query(NoTls)
+            .await
+            .expect("deliver the CancelRequest");
+        let request = cancel_observed
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the cancel never reached the scripted server");
+
+        let mut expected = 80_877_102u32.to_be_bytes().to_vec();
+        expected.extend_from_slice(&PROCESS_ID.to_be_bytes());
+        expected.extend_from_slice(&SECRET_KEY.to_be_bytes());
+        assert_eq!(request, expected, "the cancel carried another key");
+    }
+
+    /// A listener on 127.0.0.1:P behind 127.0.0.2:P, which refuses.
+    ///
+    /// 127.0.0.2:P is held by a socket that is bound and never listens, so the
+    /// port stays ours and a dial to it is refused. Linux routes all of
+    /// 127.0.0.0/8 to the loopback, so both addresses exist on every Linux
+    /// host, with no name that has to resolve to two of them.
+    fn listener_behind_a_refusing_address() -> (TcpListener, socket2::Socket, [SocketAddr; 2]) {
+        let mut refusals = Vec::new();
+        for _ in 0..64 {
+            let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind 127.0.0.1");
+            let reached = listener.local_addr().expect("scripted server address");
+            let refusing = SocketAddr::from(([127, 0, 0, 2], reached.port()));
+            let held = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None)
+                .expect("create the refusing socket");
+            match held.bind(&refusing.into()) {
+                Ok(()) => return (listener, held, [refusing, reached]),
+                Err(error) => refusals.push(format!("{refusing}: {error}")),
+            }
+        }
+        panic!("no port was free on both 127.0.0.1 and 127.0.0.2: {refusals:?}");
+    }
+
+    /// A dial that fails over records the address it REACHED, not the first
+    /// one it was given: its cancel must reach the server it is connected to.
+    ///
+    /// The dial is handed [127.0.0.2:P, 127.0.0.1:P]; the first refuses and
+    /// the scripted server listens on the second. A session that recorded the
+    /// first address sends its cancel to 127.0.0.2:P, which refuses it.
+    #[compio::test]
+    async fn a_failed_over_dial_records_the_address_it_reached() {
+        let (listener, _held, [refusing, reached]) = listener_behind_a_refusing_address();
+        assert!(
+            std::net::TcpStream::connect_timeout(&refusing, Duration::from_secs(2)).is_err(),
+            "the first address accepted a connection, so the dial would not fail over"
+        );
+        let (cancel_observed, server) = scripted_cancel_server(listener);
+
+        let config: Config = format!("postgres://u@127.0.0.1:{}/d", reached.port())
+            .parse()
+            .expect("parse the scripted server's DSN");
+        let (client, connection, _) = connect_serialized_via(
+            &[refusing, reached][..],
+            "127.0.0.1",
+            reached.port(),
+            &config,
+        )
+        .await
+        .expect("the dial did not fail over to the listening address");
+        let driver = compio::runtime::spawn(async move { connection.run().await });
+
+        assert_cancel_arrives(client, &cancel_observed).await;
+        let _ = driver.await;
+        server.join().expect("the scripted server panicked");
+    }
+
+    /// A named host is accepted: `connect_serialized` resolves it and its
+    /// session cancels through the address it reached.
+    #[compio::test]
+    async fn a_named_host_connects_and_its_cancel_reaches_it() {
+        use compio::net::ToSocketAddrsAsync;
+
+        let first = ("localhost", 0)
+            .to_socket_addrs_async()
+            .await
+            .expect("resolve localhost")
+            .next()
+            .expect("localhost resolved to no address");
+        let listener = TcpListener::bind(first).expect("bind the address localhost resolves to");
+        let port = listener
+            .local_addr()
+            .expect("scripted server address")
+            .port();
+        let (cancel_observed, server) = scripted_cancel_server(listener);
+
+        let config: Config = format!("postgres://u@localhost:{port}/d")
+            .parse()
+            .expect("parse a named-host DSN");
+        let (client, connection, _) = connect_serialized(&config)
+            .await
+            .expect("connect_serialized refused a named host");
+        let driver = compio::runtime::spawn(async move { connection.run().await });
+
+        assert_cancel_arrives(client, &cancel_observed).await;
+        let _ = driver.await;
+        server.join().expect("the scripted server panicked");
+    }
 
     #[test]
     fn paired_loopback_port_is_bindable_on_both_addresses() {

@@ -42,7 +42,8 @@
 //! measure each in a separate process and leave the comparison to whoever read
 //! the numbers.
 //!
-//! `PG_TEST_URL` selects the server; absent, the default DSN below is used.
+//! `PG_TEST_URL` selects the server; absent, the test suites' default is used
+//! (`DEFAULT_TEST_URL` in `tests/common/env.rs`).
 //! Nothing here creates or drops schemas: the statement `SELECT 1` needs none,
 //! and a benchmark that mutates the database measures the mutation.
 
@@ -52,19 +53,16 @@ use std::time::Duration;
 use compio_postgres::{Client, Config, NoTls};
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
-/// The default when `PG_TEST_URL` is absent, matching the test suites.
-const DEFAULT_URL: &str = "postgres://postgres:zeroship@127.0.0.1:5455/zeroship";
-
-/// The sealed key enum this crate reads the environment through, shared with
-/// the test suites rather than copied.
+/// The sealed key enum this crate reads the environment through, and the
+/// default it falls back to, shared with the test suites rather than copied.
 ///
 /// Keeping this in the test support module gives the benchmark and suites one
-/// typed implementation of their process input.
+/// typed implementation of their process input and one server address.
 #[path = "../tests/common/env.rs"]
 mod env;
 
 fn test_url() -> String {
-    env::get(env::TestEnvKey::PgTestUrl).unwrap_or_else(|| DEFAULT_URL.to_owned())
+    env::get(env::TestEnvKey::PgTestUrl).unwrap_or_else(|| env::DEFAULT_TEST_URL.to_owned())
 }
 
 /// What a case turns on. Each isolates one feature's per-operation cost

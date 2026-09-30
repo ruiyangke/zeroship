@@ -3492,6 +3492,33 @@ const NATIVE_SERDE_JSON_TEXT: &str = r#"{"a":1,"aa":3,"bbb":2,"zz":0}"#;
 #[cfg(feature = "with-serde_json-1")]
 const NATIVE_SERVER_JSONB_TEXT: &str = r#"{"a": 1, "aa": 3, "zz": 0, "bbb": 2}"#;
 
+/// The server's JSONB key order, in `serde_json`'s compact rendering.
+#[cfg(feature = "with-serde_json-1")]
+const NATIVE_SERVER_ORDER_SERDE_TEXT: &str = r#"{"a":1,"aa":3,"zz":0,"bbb":2}"#;
+
+/// Whether `serde_json` keeps object keys in insertion order in THIS build.
+///
+/// It is a property of the build, not of either driver. `serde_json`'s
+/// `preserve_order` feature swaps its sorted map for an insertion-ordered one,
+/// and cargo unifies features across everything it builds together: the
+/// workspace root turns it on, so `cargo test --workspace` compiles this
+/// module with it, while `cargo test -p compio-postgres --features
+/// with-serde_json-1` compiles it without. Both are legitimate builds of this
+/// crate, and the driver's contract - decode through `serde_json`, encode what
+/// `serde_json` serializes - is the same in each, so the expected text is
+/// chosen by asking `serde_json` which build this is.
+#[cfg(feature = "with-serde_json-1")]
+fn serde_json_preserves_insertion_order() -> bool {
+    let unsorted = r#"{"b":0,"a":0}"#;
+    let probe: serde_json::Value = serde_json::from_str(unsorted).expect("parse the order probe");
+    let rendered = serde_json::to_string(&probe).expect("render the order probe");
+    assert!(
+        rendered == unsorted || rendered == r#"{"a":0,"b":0}"#,
+        "serde_json rendered the order probe in neither known order: {rendered}"
+    );
+    rendered == unsorted
+}
+
 #[cfg(feature = "with-serde_json-1")]
 const NATIVE_JSON_DECODE_SQL: &str = r#"WITH fixture(value) AS (
     VALUES ($json${"zz":0,"a":1,"bbb":2,"aa":3}$json$::text)
@@ -3631,7 +3658,10 @@ async fn compio_native_json_observation() -> NativeJsonObservation {
 }
 
 /// Native serde conversion exposes three distinct object-key orders: source
-/// JSON, `serde_json` serialization, and server-canonical JSONB.
+/// JSON, `serde_json` serialization, and server-canonical JSONB. Under
+/// `serde_json`'s `preserve_order` the serialization keeps whichever order the
+/// decode read - see [`serde_json_preserves_insertion_order`] - and the
+/// expectation follows the build rather than assuming one.
 #[cfg(feature = "with-serde_json-1")]
 #[compio::test]
 async fn native_serde_json_codecs_cover_json_and_jsonb_wire_contracts() {
@@ -3639,33 +3669,31 @@ async fn native_serde_json_codecs_cover_json_and_jsonb_wire_contracts() {
     let ours = compio_native_json_observation().await;
     assert_eq!(ours, theirs);
 
+    let serialized = if serde_json_preserves_insertion_order() {
+        [NATIVE_JSON_SOURCE_TEXT, NATIVE_SERVER_ORDER_SERDE_TEXT]
+    } else {
+        [NATIVE_SERDE_JSON_TEXT, NATIVE_SERDE_JSON_TEXT]
+    };
+
     assert_eq!(ours.decoded[0], ours.decoded[1]);
     assert_ne!(NATIVE_JSON_SOURCE_TEXT, NATIVE_SERDE_JSON_TEXT);
     assert_ne!(NATIVE_SERDE_JSON_TEXT, NATIVE_SERVER_JSONB_TEXT);
-    assert_eq!(
-        ours.decoded_serialized,
-        [NATIVE_SERDE_JSON_TEXT, NATIVE_SERDE_JSON_TEXT]
-    );
+    assert_ne!(NATIVE_SERDE_JSON_TEXT, NATIVE_SERVER_ORDER_SERDE_TEXT);
+    assert_eq!(ours.decoded_serialized, serialized);
     assert_eq!(
         ours.server_text,
         [NATIVE_JSON_SOURCE_TEXT, NATIVE_SERVER_JSONB_TEXT]
     );
-    assert_eq!(
-        ours.rebound_text,
-        [NATIVE_SERDE_JSON_TEXT, NATIVE_SERVER_JSONB_TEXT]
-    );
+    assert_eq!(ours.rebound_text, [serialized[0], NATIVE_SERVER_JSONB_TEXT]);
 
     assert_eq!(ours.server_wires[0].0, NATIVE_JSON_SOURCE_TEXT.as_bytes());
     assert_eq!(
         ours.server_wires[1].0,
         expected_jsonb_wire(NATIVE_SERVER_JSONB_TEXT)
     );
-    assert_eq!(ours.outbound_wires[0], NATIVE_SERDE_JSON_TEXT.as_bytes());
-    assert_eq!(
-        ours.outbound_wires[1],
-        expected_jsonb_wire(NATIVE_SERDE_JSON_TEXT)
-    );
-    assert_eq!(ours.rebound_wires[0].0, NATIVE_SERDE_JSON_TEXT.as_bytes());
+    assert_eq!(ours.outbound_wires[0], serialized[0].as_bytes());
+    assert_eq!(ours.outbound_wires[1], expected_jsonb_wire(serialized[1]));
+    assert_eq!(ours.rebound_wires[0].0, serialized[0].as_bytes());
     assert_eq!(
         ours.rebound_wires[1].0,
         expected_jsonb_wire(NATIVE_SERVER_JSONB_TEXT)

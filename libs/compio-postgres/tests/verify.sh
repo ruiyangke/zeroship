@@ -43,7 +43,10 @@ set -uo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 cd "$repo_root"
 
-pg_url="${PG_TEST_URL:-postgres://postgres:zeroship@127.0.0.1:5455/zeroship}"
+# PG_TEST_URL reaches cargo only if the caller exported it; unset, the suites
+# dial DEFAULT_TEST_URL in libs/compio-postgres/tests/common/env.rs, the
+# server tests/provision_test_backends.sh provisions. No default is set here,
+# so this script cannot name a different server from the suites it runs.
 tls_descriptor="libs/compio-postgres/tests/data/live/tls_live.conf"
 failures=0
 
@@ -57,7 +60,7 @@ inventory() {
     # STREAM it into awk. Capturing 1779 lines into a variable and echoing
     # them overflows argv ("Argument list too long"), and the failure lands on
     # the awk, so the count comes back empty and every mode is refused.
-    PG_TEST_URL="$pg_url" cargo test "$@" -- --list 2>&1 | awk '
+    cargo test "$@" -- --list 2>&1 | awk '
         /^ *Running / { bins += 1 }
         /^ *Doc-tests / { bins += 1 }
         /: test$/ { tests += 1 }
@@ -79,7 +82,7 @@ run_mode() {
     log=$(mktemp)
     # Wait for the process to EXIT. Not for its output to go quiet: a single
     # slow test can be silent for minutes.
-    PG_TEST_URL="$pg_url" cargo test "$@" --no-fail-fast -- --test-threads=1 \
+    cargo test "$@" --no-fail-fast -- --test-threads=1 \
         > "$log" 2>&1
     local rc=$?
 
@@ -108,7 +111,7 @@ run_mode() {
 }
 
 echo "compio-postgres verification matrix"
-echo "server: $pg_url"
+echo "server: ${PG_TEST_URL:-PG_TEST_URL unset, so DEFAULT_TEST_URL in tests/common/env.rs}"
 echo
 
 run_mode "default"          -p compio-postgres
@@ -133,7 +136,7 @@ fi
 # usage error rather than a listing. Left to a runbook they would simply rot, so
 # the matrix invokes them under the one argv that reaches them.
 rss_log=$(mktemp)
-PG_TEST_URL="$pg_url" cargo test -p compio-postgres --bench soak \
+cargo test -p compio-postgres --bench soak \
     -- --test-threads=1 > "$rss_log" 2>&1
 rss_rc=$?
 read -r rss_passed rss_failed <<<"$(awk '
