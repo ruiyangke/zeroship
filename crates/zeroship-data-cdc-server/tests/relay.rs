@@ -3,12 +3,16 @@
 #[path = "../../../tests/fixtures/postgres/mod.rs"]
 mod postgres_fixture;
 
+#[path = "../../../tests/fixtures/data/platform.rs"]
+mod platform_fixture;
+
 #[path = "../../../tests/fixtures/data/roles.rs"]
 mod roles;
 
 use compio_postgres::Pool;
 use compio_tls::TlsConnector;
 use compio_ws::{tungstenite::Message, WebSocketStream};
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -22,6 +26,61 @@ impl Drop for Process {
         let _ = self.0.kill();
         let _ = self.0.wait();
     }
+}
+
+/// Start the relay binary under `url`'s login, listening on `port` and
+/// logging into `log`.
+fn start_relay(
+    url: &str,
+    port: u16,
+    cert: &Path,
+    key: &Path,
+    log: &Path,
+    extra: &[&str],
+) -> Process {
+    let log = std::fs::File::create(log).unwrap();
+    Process(
+        Command::new(env!("CARGO_BIN_EXE_zeroship-data-cdc-server"))
+            .args(["--no-config", "--listen", &format!("127.0.0.1:{port}")])
+            .args(extra)
+            .arg("--tls-cert-file")
+            .arg(cert)
+            .arg("--tls-key-file")
+            .arg(key)
+            .env("ZEROSHIP_DATA_CDC_SERVER_DATABASE_URL", url)
+            .stdout(Stdio::from(log.try_clone().unwrap()))
+            .stderr(Stdio::from(log))
+            .spawn()
+            .unwrap(),
+    )
+}
+
+/// Wait until the relay accepts a connection on `port`, failing if it exits.
+async fn until_listening(process: &mut Process, port: u16, log: &Path) {
+    let until = Instant::now() + Duration::from_secs(15);
+    loop {
+        assert!(
+            process.0.try_wait().unwrap().is_none(),
+            "relay exited: {}",
+            std::fs::read_to_string(log).unwrap()
+        );
+        if compio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .is_ok()
+        {
+            return;
+        }
+        assert!(Instant::now() < until, "relay listener timed out");
+        compio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
 }
 
 async fn receive<S: compio::io::AsyncRead + compio::io::AsyncWrite>(
@@ -70,27 +129,26 @@ fn assertion(instance: &str, key: &ServiceSigningKey) -> String {
 
 #[compio::test]
 async fn relay_process_authenticates_workers_and_streams_commits_without_worker_replication() {
+    // The platform schema the corpus builds, and the two logins it creates:
+    // the relay runs as `zeroship_cdc` and the worker as `zeroship_worker`,
+    // each with exactly the reach `db/migrations-ts` grants it.
     let postgres = postgres_fixture::Postgres::start();
-    let admin_url = url::Url::parse(&postgres.url()).unwrap();
-    let admin = Pool::connect(admin_url.as_str(), 2)
+    let platform = platform_fixture::Platform::apply(postgres.url());
+    let db = Pool::connect(&platform.admin_url(), 2)
         .await
         .expect("required PostgreSQL");
-    let suffix = zeroship_core::typed_id::generate("tst");
-    let relay_role = format!("relay_{suffix}");
-    let worker_role = format!("worker_{suffix}");
-    admin.batch_execute(&format!("CREATE ROLE \"{relay_role}\" LOGIN REPLICATION NOSUPERUSER NOBYPASSRLS PASSWORD 'fixture'; CREATE ROLE \"{worker_role}\" LOGIN NOREPLICATION NOSUPERUSER NOBYPASSRLS PASSWORD 'fixture'")).await.unwrap();
-    let db = Pool::connect(admin_url.as_str(), 2).await.unwrap();
     let app = zeroship_core::typed_id::generate(zeroship_core::typed_id::APP_PREFIX);
     let publication = zeroship_core::replication_names::DATASTORE_PUBLICATION;
-    // The app's ONE database. The relay reads these ids back out of Control's
-    // rows to learn which schema this subscriber is entitled to, so the fixture
-    // declares them rather than letting anything derive a schema from the app
-    // id.
+    // The app's ONE database, declared in Control's rows. The relay reads the
+    // ids back out of those rows to learn which schema this subscriber is
+    // entitled to, so nothing here derives a schema from the app id.
+    let database_id = zeroship_core::DatabaseId::mint();
+    let edge = platform_fixture::declare_binding(&db, &app, &database_id, "active").await;
     let binding = zeroship_data_orm::binding::DbBinding::to_database(
         app.as_str(),
         zeroship_data_orm::binding::COLD_START_DEPLOY_TOKEN,
-        zeroship_core::DatabaseId::mint(),
-        zeroship_core::BindingId::mint(),
+        database_id,
+        edge,
         zeroship_core::database_role::DatabaseCapability::ReadWrite,
     )
     .unwrap();
@@ -99,76 +157,33 @@ async fn relay_process_authenticates_workers_and_streams_commits_without_worker_
     let binding_role = binding.session_role().unwrap().to_owned();
     // The capture this subscription starts, named for the pair it captures.
     let slot = zeroship_core::replication_names::relay_slot_name(&app, &database).unwrap();
-    db.batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS zeroship; CREATE TABLE IF NOT EXISTS zeroship.worker_instances (id text PRIMARY KEY, ring_key bytea NOT NULL, public_key bytea NOT NULL, advertise_host inet NOT NULL, advertise_port int NOT NULL, registered_at timestamptz NOT NULL DEFAULT now(), status text NOT NULL CHECK (status IN ('active', 'draining', 'gone'))); GRANT USAGE ON SCHEMA zeroship TO \"{relay_role}\"; GRANT SELECT (id, status, public_key) ON zeroship.worker_instances TO \"{relay_role}\"")).await.unwrap();
-    // Stand-ins for the two Control tables the relay's schema lookup reads
-    // (`db/migrations-ts/20260919000200_database_entities.ts`), carrying only
-    // the columns that lookup names. The relay gets SELECT on exactly those.
-    db.batch_execute(&format!("CREATE TABLE IF NOT EXISTS zeroship.databases (id text PRIMARY KEY, status text NOT NULL); CREATE TABLE IF NOT EXISTS zeroship.database_bindings (id text PRIMARY KEY, app_id text NOT NULL, database_id text NOT NULL, status text NOT NULL, generation bigint NOT NULL DEFAULT 1, observed_generation bigint NOT NULL DEFAULT 1); GRANT SELECT (id, status) ON zeroship.databases TO \"{relay_role}\"; GRANT SELECT (id, app_id, database_id, status, generation, observed_generation) ON zeroship.database_bindings TO \"{relay_role}\"")).await.unwrap();
-    db.execute(
-        "INSERT INTO zeroship.databases (id, status) VALUES ($1, 'active')",
-        &[&database],
-    )
-    .await
-    .unwrap();
-    db.execute(
-        "INSERT INTO zeroship.database_bindings (id, app_id, database_id, status) \
-         VALUES ($1, $2, $3, 'active')",
-        &[
-            &binding.edge().unwrap().binding().as_str().to_owned(),
-            &app,
-            &database,
-        ],
-    )
-    .await
-    .unwrap();
     // The runtime's reach comes from the binding ladder, never from a grant to
-    // the login. A direct grant to `worker_role` is the thing the whole fence
-    // exists to prevent, and it would survive every revoke.
+    // the login. A direct grant to the worker login is the thing the whole
+    // fence exists to prevent, and it would survive every revoke.
     roles::ensure_binding_ladder(&db, &binding).await.unwrap();
-    db.batch_execute(&format!("CREATE TABLE \"{schema}\".orders (id int PRIMARY KEY, secret text); GRANT SELECT, INSERT, UPDATE, DELETE ON \"{schema}\".orders TO \"{}\"; GRANT \"{binding_role}\" TO \"{worker_role}\" WITH INHERIT FALSE; CREATE PUBLICATION \"{publication}\" FOR TABLE \"{schema}\".orders",
+    db.batch_execute(&format!("CREATE TABLE \"{schema}\".orders (id int PRIMARY KEY, secret text); GRANT SELECT, INSERT, UPDATE, DELETE ON \"{schema}\".orders TO \"{}\"; GRANT \"{binding_role}\" TO \"{}\" WITH INHERIT FALSE; CREATE PUBLICATION \"{publication}\" FOR TABLE \"{schema}\".orders",
         zeroship_core::database_derivation::capability_role_name(
             binding.database().unwrap(),
             zeroship_core::database_role::DatabaseCapability::ReadWrite,
         )
         .unwrap(),
+        platform_fixture::WORKER_LOGIN,
     )).await.unwrap();
-    // A minimal stand-in for the real `zeroship.worker_join_signers` table
-    // (`db/migrations-ts/20260914000400_execution_zones_and_join_signers.ts`),
-    // just enough to model the two facts the CDC reader's cascade depends on:
-    // a signer has a status, and an instance names the signer that admitted
-    // it. The relay/worker roles get no grant on it - `auth::public_key`
-    // never reads it, only `zeroship.worker_instances.status`, exactly as the
-    // real migration's design states ("readers keep their single
-    // status='active' predicate and need no join and no new grants").
-    db.batch_execute("CREATE TABLE IF NOT EXISTS zeroship.worker_join_signers (id text PRIMARY KEY, status text NOT NULL CHECK (status IN ('active','revoked'))); ALTER TABLE zeroship.worker_instances ADD COLUMN IF NOT EXISTS join_signer_id text REFERENCES zeroship.worker_join_signers(id)").await.unwrap();
-    let signer_e = zeroship_core::typed_id::new_join_signer_id();
-    let signer_f = zeroship_core::typed_id::new_join_signer_id();
-    for signer in [&signer_e, &signer_f] {
-        db.execute(
-            "INSERT INTO zeroship.worker_join_signers (id, status) VALUES ($1, 'active')",
-            &[signer],
-        )
-        .await
-        .unwrap();
-    }
+    // Two enrolled worker instances, each admitted under a join signer of its
+    // own through the function Control's join handler admits with. The relay
+    // reads only `worker_instances`, so a SIGNER-level purge reaches it through
+    // the instance status the purge sets, never through a join of its own.
     let first_id = zeroship_core::typed_id::generate("wkr");
     let second_id = zeroship_core::typed_id::generate("wkr");
     let first_key = ServiceSigningKey::generate();
     let second_key = ServiceSigningKey::generate();
-    // `first_id` joined under E, `second_id` under F - the PoC's later arm
-    // revokes E alone and requires only `first_id` to be affected.
-    for (id, key, signer) in [
-        (&first_id, &first_key, &signer_e),
-        (&second_id, &second_key, &signer_f),
-    ] {
-        let public = key.verifying_key_bytes().to_vec();
-        db.execute(
-            "INSERT INTO zeroship.worker_instances (id, ring_key, public_key, advertise_host, advertise_port, status, join_signer_id) VALUES ($1, $2, $2, '127.0.0.1'::inet, 8080, 'active', $3)",
-            &[id, &public, signer],
-        )
-        .await
-        .unwrap();
-    }
+    // `first_id` joins under E, `second_id` under F - the later arm purges E
+    // alone and requires only `first_id` to be affected.
+    let signer_e =
+        platform_fixture::enroll_worker(&db, &first_id, &first_key.verifying_key_bytes()).await;
+    let signer_f =
+        platform_fixture::enroll_worker(&db, &second_id, &second_key.verifying_key_bytes()).await;
+    assert_ne!(signer_e, signer_f, "each instance has a signer of its own");
     let temp = tempfile::tempdir().unwrap();
     let certificate = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
     let cert_path = temp.path().join("cert.pem");
@@ -182,50 +197,17 @@ async fn relay_process_authenticates_workers_and_streams_commits_without_worker_
             .with_root_certificates(roots)
             .with_no_client_auth(),
     ));
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
-    let mut relay_url = admin_url.clone();
-    relay_url.set_username(&relay_role).unwrap();
-    relay_url.set_password(Some("fixture")).unwrap();
-    let log = std::fs::File::create(temp.path().join("relay.log")).unwrap();
-    let mut process = Process(
-        Command::new(env!("CARGO_BIN_EXE_zeroship-data-cdc-server"))
-            .args([
-                "--no-config",
-                "--listen",
-                &format!("127.0.0.1:{port}"),
-                "--transaction-changes",
-                "2",
-                "--tls-cert-file",
-            ])
-            .arg(&cert_path)
-            .arg("--tls-key-file")
-            .arg(&key_path)
-            .env("ZEROSHIP_DATA_CDC_SERVER_DATABASE_URL", relay_url.as_str())
-            .stdout(Stdio::from(log.try_clone().unwrap()))
-            .stderr(Stdio::from(log))
-            .spawn()
-            .unwrap(),
+    let port = free_port();
+    let log = temp.path().join("relay.log");
+    let mut process = start_relay(
+        &platform.relay_url(),
+        port,
+        &cert_path,
+        &key_path,
+        &log,
+        &["--transaction-changes", "2"],
     );
-    let until = Instant::now() + Duration::from_secs(15);
-    loop {
-        assert!(
-            process.0.try_wait().unwrap().is_none(),
-            "relay exited: {}",
-            std::fs::read_to_string(temp.path().join("relay.log")).unwrap()
-        );
-        if compio::net::TcpStream::connect(("127.0.0.1", port))
-            .await
-            .is_ok()
-        {
-            break;
-        }
-        assert!(Instant::now() < until, "relay listener timed out");
-        compio::time::sleep(Duration::from_millis(20)).await;
-    }
+    until_listening(&mut process, port, &log).await;
     let endpoint = format!("wss://localhost:{port}{PATH}");
     let connect = || {
         compio_ws::connect_async_tls_with_config(endpoint.as_str(), None, Some(connector.clone()))
@@ -328,10 +310,7 @@ async fn relay_process_authenticates_workers_and_streams_commits_without_worker_
         .unwrap()[0]
         .get(0);
     assert_eq!(slots, 1, "workers must share capture");
-    let mut worker_url = admin_url.clone();
-    worker_url.set_username(&worker_role).unwrap();
-    worker_url.set_password(Some("fixture")).unwrap();
-    let worker = Pool::connect(worker_url.as_str(), 1).await.unwrap();
+    let worker = Pool::connect(&platform.worker_url(), 1).await.unwrap();
     // The login carries nothing of its own: the grant is `WITH INHERIT FALSE`,
     // so it reaches the table only by assuming the binding role, exactly as the
     // data path does with `SET LOCAL ROLE`.
@@ -373,20 +352,15 @@ async fn relay_process_authenticates_workers_and_streams_commits_without_worker_
         zeroship_data_orm::cdc::SubscriptionMessage::Resync
     ));
 
-    // Purge signer E as one transaction, exactly as
-    // `zeroship.purge_worker_join_signer` does in the real migration
-    // (db/migrations-ts/20260914000500_worker_join_bindings.ts): mark the
-    // signer row revoked, then mark every active instance it admitted gone.
-    // Nothing here writes `first_id` by name - the cascade is scoped entirely
-    // through `join_signer_id`, so this is the PoC's proof that a SIGNER-level
-    // operation, not a per-instance one, is what reaches this reader.
-    db.batch_execute(&format!(
-        "BEGIN; UPDATE zeroship.worker_join_signers SET status = 'revoked' WHERE id = '{signer_e}'; \
-         UPDATE zeroship.worker_instances SET status = 'gone' WHERE join_signer_id = '{signer_e}' AND status = 'active'; \
-         COMMIT"
-    ))
-    .await
-    .unwrap();
+    // Purge signer E through the operator's own function
+    // (db/migrations-ts/20260914000500_worker_join_bindings.ts), which marks the
+    // signer revoked and every active instance it admitted gone in one
+    // transaction. Nothing here writes `first_id` by name - the cascade is
+    // scoped entirely through `join_signer_id`, so a SIGNER-level operation,
+    // not a per-instance one, is what reaches this reader.
+    db.execute("SELECT zeroship.purge_worker_join_signer($1)", &[&signer_e])
+        .await
+        .unwrap();
     assert!(
         receive(&mut first).await.is_err(),
         "revoked worker kept its stream"
@@ -426,25 +400,135 @@ async fn relay_process_authenticates_workers_and_streams_commits_without_worker_
     }
     drop(process);
     worker.close().await;
-    db.execute(
-        "DELETE FROM zeroship.worker_instances WHERE id = $1 OR id = $2",
-        &[&first_id, &second_id],
-    )
-    .await
-    .unwrap();
-    db.execute(
-        "DELETE FROM zeroship.worker_join_signers WHERE id = $1 OR id = $2",
-        &[&signer_e, &signer_f],
-    )
-    .await
-    .unwrap();
-    db.batch_execute(&format!("DROP PUBLICATION \"{publication}\"; DROP SCHEMA \"{schema}\" CASCADE; DROP OWNED BY \"{relay_role}\"; DROP OWNED BY \"{worker_role}\"")).await.unwrap();
     db.close().await;
-    admin
-        .batch_execute(&format!(
-            "DROP ROLE \"{relay_role}\"; DROP ROLE \"{worker_role}\""
-        ))
+}
+
+/// **A relay whose login cannot run the binding lookup refuses to boot.**
+///
+/// The relay proves at startup that its login can read both of Control's
+/// projections admission reads. Without the live-binding grant it must exit
+/// before it ever listens and name the table the server refused, rather than
+/// listen and refuse every subscriber - which is what a relay newer than the
+/// applied platform migrations did.
+///
+/// The control differs in the one variable: the same binary, login and
+/// database, with the grant the migrations made restored, listens.
+#[compio::test]
+async fn relay_refuses_to_boot_without_the_live_binding_grant() {
+    use platform_fixture::{grant_relay, relay_columns, revoke_relay};
+    let postgres = postgres_fixture::Postgres::start();
+    let platform = platform_fixture::Platform::apply(postgres.url());
+    let db = Pool::connect(&platform.admin_url(), 2)
         .await
-        .unwrap();
-    admin.close().await;
+        .expect("required PostgreSQL");
+    let mut granted = Vec::new();
+    for table in ["database_bindings", "databases"] {
+        let columns = relay_columns(&db, table).await;
+        assert!(
+            !columns.is_empty(),
+            "the relay's login must hold a grant on zeroship.{table} to lose one"
+        );
+        revoke_relay(&db, table).await;
+        granted.push((table, columns));
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let certificate = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+    let cert = temp.path().join("cert.pem");
+    let key = temp.path().join("key.pem");
+    std::fs::write(&cert, certificate.cert.pem()).unwrap();
+    std::fs::write(&key, certificate.signing_key.serialize_pem()).unwrap();
+
+    let port = free_port();
+    let log = temp.path().join("refused.log");
+    let mut refused = start_relay(&platform.relay_url(), port, &cert, &key, &log, &[]);
+    let until = Instant::now() + Duration::from_mins(1);
+    let status = loop {
+        if let Some(status) = refused.0.try_wait().unwrap() {
+            break status;
+        }
+        assert!(
+            compio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .is_err(),
+            "a relay that cannot run the binding lookup must not listen"
+        );
+        assert!(
+            Instant::now() < until,
+            "the relay neither exited nor listened"
+        );
+        compio::time::sleep(Duration::from_millis(20)).await;
+    };
+    let output = std::fs::read_to_string(&log).unwrap();
+    assert!(
+        !status.success(),
+        "a refused boot exits with failure: {status}\n{output}"
+    );
+    assert!(
+        output.contains("permission denied for table database_bindings"),
+        "the refused boot names the table the server refused:\n{output}"
+    );
+
+    // THE CONTROL: the grant restored, the same boot listens.
+    for (table, columns) in &granted {
+        grant_relay(&db, table, columns).await;
+    }
+    let port = free_port();
+    let log = temp.path().join("admitted.log");
+    let mut admitted = start_relay(&platform.relay_url(), port, &cert, &key, &log, &[]);
+    until_listening(&mut admitted, port, &log).await;
+    drop(admitted);
+    drop(refused);
+    db.close().await;
+}
+
+/// **A malformed database URL is refused without echoing its password.**
+///
+/// The relay's database URL carries its login's password, and the boot error
+/// the relay logs is that error's whole cause chain. A driver that quoted the
+/// offending token in a parse error would write the password into the relay's
+/// log. Each marker is a password the driver refuses to parse, one for a
+/// malformed escape and one for an escaped NUL; the refusal must say what
+/// failed - the control, `invalid connection string` - and never the value.
+///
+/// No server is reached: the URL is refused before any connection is made.
+#[compio::test]
+async fn a_malformed_database_url_is_refused_without_echoing_its_password() {
+    let temp = tempfile::tempdir().unwrap();
+    let certificate = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+    let cert = temp.path().join("cert.pem");
+    let key = temp.path().join("key.pem");
+    std::fs::write(&cert, certificate.cert.pem()).unwrap();
+    std::fs::write(&key, certificate.signing_key.serialize_pem()).unwrap();
+    let secret = "SECRETMARKER";
+    let markers = [format!("hunter2%zz{secret}"), format!("hunter2%00{secret}")];
+    for marker in &markers {
+        let url = format!("postgres://zeroship_cdc:{marker}@127.0.0.1:1/zeroship");
+        let port = free_port();
+        let log = temp.path().join("refused.log");
+        let mut relay = start_relay(&url, port, &cert, &key, &log, &[]);
+        let until = Instant::now() + Duration::from_secs(30);
+        let status = loop {
+            if let Some(status) = relay.0.try_wait().unwrap() {
+                break status;
+            }
+            assert!(
+                Instant::now() < until,
+                "the relay neither exited nor listened"
+            );
+            compio::time::sleep(Duration::from_millis(20)).await;
+        };
+        let output = std::fs::read_to_string(&log).unwrap();
+        assert!(
+            !status.success(),
+            "a malformed database URL fails the boot: {status}\n{output}"
+        );
+        assert!(
+            output.contains("invalid connection string"),
+            "the refusal names what failed:\n{output}"
+        );
+        assert!(
+            !output.contains(secret) && !output.contains("hunter2"),
+            "the relay's log must not carry the password from `{marker}`:\n{output}"
+        );
+    }
 }

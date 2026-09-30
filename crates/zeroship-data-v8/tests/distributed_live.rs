@@ -17,16 +17,18 @@
 //! writer's local fast path is suppressed while the relay client is active,
 //! so C cannot make this test pass without the relay decoding the commit.
 //!
-//! Run with:
+//! The target owns its PostgreSQL container and applies the platform corpus to
+//! it, so it needs the relay binary and the migration host built;
+//! `cargo xtask test data` builds both. Then:
 //!
 //! ```text
-//! docker compose -f deploy/compose/docker-compose.yml up -d postgres
-//! cargo build -p zeroship-data-cdc-server
 //! cargo test -p zeroship-data-v8 \
 //!   --test distributed_live -- --test-threads=1
 //! ```
 
 use std::collections::HashMap;
+#[path = "../../../tests/fixtures/data/platform.rs"]
+mod platform;
 #[path = "../../../tests/fixtures/postgres/mod.rs"]
 mod postgres;
 mod relay_fixture;
@@ -864,6 +866,9 @@ fn db_live_stream_crosses_relay_and_v8_isolates_without_worker_replication() {
     test_tracing::init_test_tracing();
     let postgres = postgres::Postgres::start();
     let url = postgres.url();
+    // The Control schema the relay resolves a subscriber against, with the
+    // logins a deployment gives the relay and the worker.
+    let platform = platform::Platform::apply(url.clone());
     let runtime_app_id = AppId::mint();
     let app_id = runtime_app_id.as_str().to_string();
     // The edge a trusted host would have resolved for this app, composed once
@@ -944,7 +949,9 @@ fn db_live_stream_crosses_relay_and_v8_isolates_without_worker_replication() {
         pool
     });
 
-    let relay = io.block_on(relay_fixture::RelayFixture::start(&pool, &url, &binding));
+    let relay = io.block_on(relay_fixture::RelayFixture::start(
+        &pool, &platform, &binding,
+    ));
     let worker_url = relay.worker_url.clone();
     let (anchor_ready_tx, anchor_ready_rx) = std::sync::mpsc::channel();
     let (close_tx, close_rx) = flume::bounded(1);
@@ -1106,7 +1113,7 @@ fn db_live_stream_crosses_relay_and_v8_isolates_without_worker_replication() {
         Ok::<bool, String>(publication_retained)
     });
 
-    io.block_on(relay.cleanup(&pool));
+    drop(relay);
     drop(pool);
     io.block_on(async {
         let _ = compio_postgres::drain_connections(Duration::from_secs(3)).await;

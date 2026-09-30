@@ -30,6 +30,9 @@ pub fn run(filter: Option<&str>) -> Result<()> {
         cargo().args(["build", "-p", "zeroship-data-cdc-server"]),
         "build the real CDC relay",
     )?;
+    // The relay reads Control's rows under its production login, so its tests
+    // build the platform schema with the canonical migration CLI.
+    crate::migrations::build_host()?;
 
     eprintln!("Building the PostgreSQL image used by native fixtures");
     let _ = crate::postgres_image::build()?;

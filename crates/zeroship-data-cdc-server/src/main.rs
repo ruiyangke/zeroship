@@ -16,6 +16,10 @@ mod transaction;
 #[path = "../../../tests/fixtures/postgres/mod.rs"]
 mod postgres_fixture;
 
+#[cfg(test)]
+#[path = "../../../tests/fixtures/data/platform.rs"]
+mod platform_fixture;
+
 #[compio::main]
 async fn main() {
     let (settings, boot) = bootstrap_or_exit::<CdcServerSettings>(
@@ -41,7 +45,23 @@ async fn main() {
     }
 
     if let Err(error) = server::run(settings).await {
-        tracing::error!(%error, "CDC relay stopped");
+        tracing::error!(error = %cause_chain(&*error), "CDC relay stopped");
         std::process::exit(1);
     }
+}
+
+/// An error and every cause beneath it, on one line.
+///
+/// `compio_postgres::Error` displays only its kind - a refused statement is
+/// `db error` - and carries the server's message as its source, so a log line
+/// that printed the error alone would name no table and no privilege.
+fn cause_chain(error: &(dyn std::error::Error + 'static)) -> String {
+    let mut line = error.to_string();
+    let mut cause = error.source();
+    while let Some(next) = cause {
+        line.push_str(": ");
+        line.push_str(&next.to_string());
+        cause = next.source();
+    }
+    line
 }

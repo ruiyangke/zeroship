@@ -21,5 +21,8 @@ identities; `source.rs` owns slots and replication acknowledgements;
 `transaction.rs` enforces commit buffering; `hub.rs` bounds shared delivery and
 keys subscribers on `(app, database)`.
 
-Run `cargo test -p zeroship-data-cdc-server` with the required PostgreSQL fixture.
+Run `cargo test -p zeroship-data-cdc-server` with the required PostgreSQL fixture
+and a built migration host: the relay's tests apply `db/migrations-ts` to their
+own server and run as `zeroship_cdc`, so they read Control's rows with exactly
+the grants a deployment has. `cargo xtask test data` builds both.
 See `docs/runbooks/cdc-relay.md` for provisioning, TLS and deployment.

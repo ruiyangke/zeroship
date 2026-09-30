@@ -83,13 +83,17 @@ pub(crate) async fn run(settings: CdcServerSettings) -> Result<(), Error> {
     if !locked {
         return Err("another CDC relay owns this database".into());
     }
-    // This login never reads creator tables. Prove registry access at startup.
+    // This login never reads creator tables. Prove at startup that it can read
+    // both of Control's projections admission reads - the worker registry and
+    // the live-binding predicate - so a relay newer than the applied platform
+    // migrations stops here, naming the refused table.
     leader
         .query(
             "SELECT public_key FROM zeroship.worker_instances LIMIT 0",
             &[],
         )
         .await?;
+    source::probe_binding_lookup(&pool).await?;
     pool.query("SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE left(slot_name, length($1)) = $1 AND database = current_database() AND NOT active", &[&source::SLOT_PREFIX]).await?;
     let listener = TcpListener::bind(settings.listen.get()).await?;
     tracing::info!(listen = %settings.listen.get(), "CDC relay listening");

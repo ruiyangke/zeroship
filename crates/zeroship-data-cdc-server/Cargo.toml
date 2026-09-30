@@ -48,6 +48,9 @@ url = { workspace = true }
 # the resolver itself takes an already-parsed value, so the shipped closure does
 # not need a TOML parser.
 toml = { workspace = true }
+# The capture tests read the structured fields of the warning a stopped capture
+# logs, through a `Layer` over the registry.
+tracing-subscriber = { workspace = true }
 
 [lints]
 workspace = true

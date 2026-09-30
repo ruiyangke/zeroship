@@ -9,12 +9,21 @@ SQLite commit hook -------------------------------> ORM broker
 ```
 
 Deploy the relay beside PostgreSQL, reachable by workers over TLS. The relay
-login is `zeroship_cdc`; the platform migration grants replication and read
-access to the enrolled worker identity projection. The worker login is
-`zeroship_worker`, with neither replication nor RLS bypass. Publication
-membership remains owned by the migration service.
+login is `zeroship_cdc`; the platform migrations grant it replication and
+column-scoped reads of two Control projections: the enrolled worker identity it
+authenticates subscribers against, and the live-binding columns it resolves a
+subscriber's database schema from. Beyond those columns it reads no platform
+table, writes no table, column or sequence, and belongs to no role; the relay's
+tests census each of these against the applied migrations. The relay checks both
+reads at startup and exits, naming the refused table, when the applied
+migrations do not grant them. The worker login is `zeroship_worker`, with
+neither replication nor RLS bypass. Publication membership remains owned by the
+migration service.
 
 Set `data_cdc_server.database_url`, `listen`, `tls_cert_file`, and `tls_key_file`.
+The database URL must name Control's database: the relay reads Control's
+worker-registry and binding tables through the same connection it decodes WAL
+from, so it serves the datastore that shares Control's database.
 Set `worker.cdc_relay_url` to the complete `wss` subscription endpoint and
 `worker.cdc_relay_ca_file` when using a private CA. An empty CA path uses host
 trust. Workers authenticate with their enrolled instance keys; the relay checks
@@ -70,7 +79,9 @@ snapshot through `Resync`; delivery is not a durable replay API.
 
 Run `cargo xtask test data`. Each PostgreSQL test owns a
 testcontainer with the required extensions and logical WAL.
-It builds the relay and exercises TypeScript live queries through TLS using a
-worker login without replication privileges. Ordinary tests in
+It builds the relay and the migration host, and exercises TypeScript live queries
+through TLS using a worker login without replication privileges. The relay's own
+tests apply the platform migrations to their container and run the relay as
+`zeroship_cdc`, so a read the migrations do not grant fails there. Ordinary tests in
 `zeroship-data-cdc-server` cover authentication, revocation, commit ordering,
 shared capture, queue overflow, and slot cleanup.

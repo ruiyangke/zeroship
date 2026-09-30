@@ -43,19 +43,55 @@ pub(crate) use zeroship_core::replication_names::SLOT_PREFIX;
 async fn bound_database_schema(pool: &Pool, app: &str, database: &str) -> Result<String, Error> {
     let database = zeroship_core::DatabaseId::parse(database)?;
     let rows = pool
-        .query(
-            &format!(
-                "SELECT b.database_id {} AND b.database_id = $2 LIMIT 1",
-                zeroship_core::live_binding::LIVE_BINDINGS_FROM_WHERE
-            ),
-            &[&app, &database.as_str().to_owned()],
-        )
+        .query(&binding_lookup(), &[&app, &database.as_str().to_owned()])
         .await?;
     if rows.is_empty() {
-        return Err("app holds no live binding to the database the subscribe request named".into());
+        return Err(NoLiveBinding.into());
     }
     Ok(zeroship_core::database_derivation::schema_name(&database))
 }
+
+/// The statement [`bound_database_schema`] runs: `$1` the app, `$2` the
+/// database.
+fn binding_lookup() -> String {
+    format!(
+        "SELECT b.database_id {} AND b.database_id = $2 LIMIT 1",
+        zeroship_core::live_binding::LIVE_BINDINGS_FROM_WHERE
+    )
+}
+
+/// Run the binding lookup for a pair no row can match.
+///
+/// `PostgreSQL` checks a statement's privileges when it starts executing,
+/// whatever rows it would return, so this answers exactly one question: may
+/// this login read every column the lookup names. The relay asks it at boot,
+/// because a login that cannot would otherwise refuse every subscriber while
+/// the process reports itself listening.
+pub(crate) async fn probe_binding_lookup(pool: &Pool) -> Result<(), Error> {
+    pool.query(&binding_lookup(), &[&"", &""])
+        .await
+        .map_err(|error| {
+            format!(
+                "the live-binding lookup is refused: {}",
+                crate::cause_chain(&error)
+            )
+        })?;
+    Ok(())
+}
+
+/// The relay's own refusal: the app holds no live binding to the database the
+/// subscriber named. Distinct from every error the lookup can raise, so a
+/// refused pair is never confused with a statement the server refused.
+#[derive(Debug)]
+pub(crate) struct NoLiveBinding;
+
+impl std::fmt::Display for NoLiveBinding {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("app holds no live binding to the database the subscribe request named")
+    }
+}
+
+impl std::error::Error for NoLiveBinding {}
 
 /// The slot THIS capture owns.
 ///
@@ -95,8 +131,13 @@ pub(crate) async fn run(
         futures::pin_mut!(capture, stop);
         futures::select! { result = capture => result, _ = stop => Ok(()) }
     };
-    if result.is_err() {
-        tracing::warn!(app_id = %key.app, database_id = %key.database, "CDC capture stopped; subscribers must reconnect and resnapshot");
+    if let Err(error) = &result {
+        tracing::warn!(
+            app_id = %key.app,
+            database_id = %key.database,
+            error = %crate::cause_chain(&**error),
+            "CDC capture stopped; subscribers must reconnect and resnapshot"
+        );
     }
     // Only this capture's exact name is ever deleted, and it carries the
     // database as well as the app, so a sibling capture of the same app is out
@@ -271,6 +312,7 @@ async fn capture(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform_fixture::{declare_binding, Platform};
     use std::time::Duration;
 
     async fn event(lease: &crate::hub::Lease) -> Event {
@@ -280,78 +322,167 @@ mod tests {
             .expect("CDC source stopped")
     }
 
-    /// One database per app, derived the way the reconciler derives it.
-    ///
-    /// Keyed on the app id so the fixture and the Control rows it declares
-    /// below cannot drift: both call this.
-    fn test_database(app: &str) -> zeroship_core::DatabaseId {
-        use std::collections::HashMap;
-        use std::sync::{Mutex, OnceLock};
-        static DATABASES: OnceLock<Mutex<HashMap<String, zeroship_core::DatabaseId>>> =
-            OnceLock::new();
-        DATABASES
-            .get_or_init(|| Mutex::new(HashMap::new()))
-            .lock()
-            .expect("database map")
-            .entry(app.to_owned())
-            .or_insert_with(zeroship_core::DatabaseId::mint)
-            .clone()
+    /// The relay's pool, on the login a deployment gives it.
+    async fn relay_pool(platform: &Platform, size: usize) -> Pool {
+        Pool::connect(&platform.relay_url(), size)
+            .await
+            .expect("the relay's login connects")
     }
 
-    fn test_schema(app: &str) -> String {
-        zeroship_core::database_derivation::schema_name(&test_database(app))
+    /// The superuser pool a test declares rows, schemas and writes through.
+    async fn admin_pool(platform: &Platform, size: usize) -> Pool {
+        Pool::connect(&platform.admin_url(), size)
+            .await
+            .expect("required PostgreSQL")
     }
 
-    /// Declare the Control rows the relay reads to resolve a subscriber's
-    /// schema. Without them capture refuses, which is the production behaviour
-    /// for an app whose binding is not live.
-    async fn declare_binding(pool: &Pool, app: &str) {
-        let database = test_database(app);
-        declare_binding_to(pool, app, &database, "active").await;
-    }
-
-    /// One `(app, database)` edge in Control's rows, at the given binding
-    /// status. The database itself is always `active`, so a non-`active`
-    /// status here varies exactly one conjunct of the liveness predicate.
-    async fn declare_binding_to(
+    /// The one value a catalog question answers, asked as `pool`'s login.
+    async fn answer<T: for<'a> compio_postgres::types::FromSql<'a>>(
         pool: &Pool,
+        sql: &str,
+        params: &[&(dyn compio_postgres::types::ToSql + Sync)],
+    ) -> T {
+        pool.query(sql, params)
+            .await
+            .unwrap_or_else(|error| panic!("{sql}: {error}"))
+            .first()
+            .unwrap_or_else(|| panic!("{sql} answered no row"))
+            .try_get(0)
+            .expect("the answer decodes")
+    }
+
+    /// Every column the relay's two lookups read, per `zeroship` table: the
+    /// worker registry read in [`crate::auth::public_key`] and the binding read
+    /// in [`bound_database_schema`]. The platform migrations grant the relay's
+    /// login exactly these; the census and the per-column arm below prove each
+    /// direction.
+    const READS: &[(&str, &[&str])] = &[
+        ("worker_instances", &["id", "status", "public_key"]),
+        (
+            "database_bindings",
+            &[
+                "app_id",
+                "database_id",
+                "status",
+                "generation",
+                "observed_generation",
+            ],
+        ),
+        ("databases", &["id", "status"]),
+    ];
+
+    /// Run, as `relay`, the lookup that reads `zeroship.<table>`, over rows under
+    /// which it answers: `app` holds a live binding to `database`.
+    async fn lookup(
+        relay: &Pool,
+        table: &str,
         app: &str,
         database: &zeroship_core::DatabaseId,
-        status: &str,
-    ) {
-        let database = database.as_str().to_owned();
-        pool.batch_execute(
-            "CREATE SCHEMA IF NOT EXISTS zeroship;
-             CREATE TABLE IF NOT EXISTS zeroship.databases (
-               id text PRIMARY KEY, status text NOT NULL
-             );
-             CREATE TABLE IF NOT EXISTS zeroship.database_bindings (
-               id text PRIMARY KEY, app_id text NOT NULL, database_id text NOT NULL,
-               status text NOT NULL, generation bigint NOT NULL DEFAULT 1,
-               observed_generation bigint NOT NULL DEFAULT 1
-             );",
+    ) -> Result<(), Error> {
+        match table {
+            "worker_instances" => {
+                crate::auth::public_key(relay, &zeroship_core::typed_id::generate("wkr"))
+                    .await
+                    .map(drop)
+            }
+            "database_bindings" | "databases" => {
+                bound_database_schema(relay, app, database.as_str())
+                    .await
+                    .map(drop)
+            }
+            other => panic!("no relay lookup reads zeroship.{other}"),
+        }
+    }
+
+    /// The relay's own refusal, [`NoLiveBinding`], and nothing else: not a
+    /// statement the server refused, and not a request that failed to parse.
+    #[track_caller]
+    fn refused(result: Result<String, Error>, why: &str) {
+        let error = result.expect_err(why);
+        assert!(
+            error.downcast_ref::<NoLiveBinding>().is_some(),
+            "{why}: expected the relay's refusal, got: {}",
+            crate::cause_chain(&*error)
+        );
+    }
+
+    /// A statement the server refused for want of a privilege: `42501`.
+    #[track_caller]
+    fn denied<T: std::fmt::Debug>(result: Result<T, Error>, why: &str) {
+        let error = result.expect_err(why);
+        assert_eq!(
+            error
+                .downcast_ref::<compio_postgres::Error>()
+                .and_then(compio_postgres::Error::code),
+            Some(&compio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE),
+            "{why}: expected 42501, got: {}",
+            crate::cause_chain(&*error)
+        );
+    }
+
+    /// One WARN event this crate emitted, with its fields rendered.
+    #[derive(Debug)]
+    struct Warning {
+        message: String,
+        fields: std::collections::HashMap<String, String>,
+    }
+
+    struct Warnings(std::sync::Arc<std::sync::Mutex<Vec<Warning>>>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Warnings {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            #[derive(Default)]
+            struct Fields(std::collections::HashMap<String, String>);
+            impl tracing::field::Visit for Fields {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    self.0.insert(field.name().to_owned(), format!("{value:?}"));
+                }
+            }
+            let metadata = event.metadata();
+            if *metadata.level() != tracing::Level::WARN
+                || !metadata.target().starts_with("zeroship_data_cdc_server")
+            {
+                return;
+            }
+            let mut fields = Fields::default();
+            event.record(&mut fields);
+            let message = fields.0.remove("message").unwrap_or_default();
+            self.0.lock().expect("the warning buffer").push(Warning {
+                message,
+                fields: fields.0,
+            });
+        }
+    }
+
+    /// The warnings this crate logs while `future` runs on this thread.
+    async fn warnings_during<F: std::future::Future>(future: F) -> (F::Output, Vec<Warning>) {
+        use tracing_subscriber::layer::SubscriberExt;
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let guard = tracing::subscriber::set_default(
+            tracing_subscriber::registry().with(Warnings(captured.clone())),
+        );
+        let output = future.await;
+        drop(guard);
+        let warnings = std::mem::take(&mut *captured.lock().expect("the warning buffer"));
+        (output, warnings)
+    }
+
+    /// How many slots exist under `slot`.
+    async fn slots(admin: &Pool, slot: &str) -> i64 {
+        answer(
+            admin,
+            "SELECT count(*) FROM pg_replication_slots WHERE slot_name = $1",
+            &[&slot],
         )
         .await
-        .expect("declare the control stand-ins");
-        pool.execute(
-            "INSERT INTO zeroship.databases (id, status) VALUES ($1, 'active') \
-             ON CONFLICT (id) DO NOTHING",
-            &[&database],
-        )
-        .await
-        .expect("declare the database");
-        pool.execute(
-            "INSERT INTO zeroship.database_bindings (id, app_id, database_id, status) \
-             VALUES ($1, $2, $3, $4) ON CONFLICT (id) DO NOTHING",
-            &[
-                &zeroship_core::BindingId::mint().as_str().to_owned(),
-                &app.to_owned(),
-                &database,
-                &status.to_owned(),
-            ],
-        )
-        .await
-        .expect("declare the binding");
     }
 
     /// **An app that holds several live bindings resolves the named one.**
@@ -362,6 +493,10 @@ mod tests {
     /// the app alone could only refuse this row set or guess at it, and the
     /// guess is the silent half.
     ///
+    /// The lookup runs as `zeroship_cdc` over the schema the platform corpus
+    /// builds, so what it may read is what `db/migrations-ts` grants that login
+    /// and nothing this test added.
+    ///
     /// Three controls, each differing from the admitted case in one variable:
     /// the app's OTHER live database resolves its own distinct schema (so the
     /// request's database really selects); a database that exists and is
@@ -371,9 +506,9 @@ mod tests {
     #[compio::test]
     async fn a_named_database_resolves_among_an_app_s_several_live_bindings() {
         let postgres = crate::postgres_fixture::Postgres::start();
-        let pool = Pool::connect(&postgres.url(), 2)
-            .await
-            .expect("required PostgreSQL");
+        let platform = Platform::apply(postgres.url());
+        let admin = admin_pool(&platform, 2).await;
+        let relay = relay_pool(&platform, 2).await;
         let app = zeroship_core::typed_id::generate(zeroship_core::typed_id::APP_PREFIX);
         let neighbour = zeroship_core::typed_id::generate(zeroship_core::typed_id::APP_PREFIX);
 
@@ -381,19 +516,19 @@ mod tests {
         let theirs = zeroship_core::DatabaseId::mint();
         let unbound = zeroship_core::DatabaseId::mint();
         let not_yet = zeroship_core::DatabaseId::mint();
-        declare_binding_to(&pool, &app, &mine, "active").await;
-        declare_binding_to(&pool, &app, &theirs, "active").await;
-        declare_binding_to(&pool, &app, &not_yet, "pending").await;
+        declare_binding(&admin, &app, &mine, "active").await;
+        declare_binding(&admin, &app, &theirs, "active").await;
+        declare_binding(&admin, &app, &not_yet, "pending").await;
         // `unbound` is a real, active database - the neighbour's - so the
         // refusal below is about THIS app's binding topology and not about a
         // row that is simply absent.
-        declare_binding_to(&pool, &neighbour, &unbound, "active").await;
+        declare_binding(&admin, &neighbour, &unbound, "active").await;
 
         // PRECONDITION: the app really holds TWO live bindings, compared to
         // each other. Two separately-minted ids that happened to be equal
         // would make the whole arm vacuous.
         assert_ne!(mine, theirs, "the app's two databases must be different");
-        let live: i64 = pool
+        let live: i64 = admin
             .query(
                 &format!(
                     "SELECT count(*) {}",
@@ -410,10 +545,10 @@ mod tests {
             "the arm is about an app that holds MORE THAN ONE live binding"
         );
 
-        let my_schema = bound_database_schema(&pool, &app, mine.as_str())
+        let my_schema = bound_database_schema(&relay, &app, mine.as_str())
             .await
             .expect("a named live binding resolves rather than being refused");
-        let their_schema = bound_database_schema(&pool, &app, theirs.as_str())
+        let their_schema = bound_database_schema(&relay, &app, theirs.as_str())
             .await
             .expect("the app's other live binding resolves too");
         assert_eq!(
@@ -425,20 +560,474 @@ mod tests {
             "the request's database selects which schema is streamed"
         );
 
-        assert!(
-            bound_database_schema(&pool, &app, unbound.as_str())
-                .await
-                .is_err(),
-            "a database this app holds no binding to must be refused"
+        refused(
+            bound_database_schema(&relay, &app, unbound.as_str()).await,
+            "a database this app holds no binding to must be refused",
         );
-        assert!(
-            bound_database_schema(&pool, &app, not_yet.as_str())
-                .await
-                .is_err(),
-            "a binding that is not yet live must be refused"
+        refused(
+            bound_database_schema(&relay, &app, not_yet.as_str()).await,
+            "a binding that is not yet live must be refused",
         );
 
-        pool.close().await;
+        relay.close().await;
+        admin.close().await;
+    }
+
+    /// **The relay's login reads what its lookups name, and nothing else.**
+    ///
+    /// The relay reads two things from Control's rows: an enrolled worker's
+    /// identity ([`crate::auth::public_key`]) and a subscriber's live binding
+    /// ([`bound_database_schema`]). The positive arms are those lookups, run as
+    /// `zeroship_cdc`. The controls are read from the catalog rather than
+    /// listed, so a table, column, sequence or membership added later is
+    /// covered without being named here:
+    ///
+    /// - on each table a lookup reads, the readable columns are the lookup's
+    ///   columns exactly;
+    /// - across every relation outside the system catalogs and extensions,
+    ///   those tables are the only ones readable, and no relation carries any
+    ///   write, table-wide or on a column;
+    /// - no sequence grants the login anything;
+    /// - the login belongs to no role. `zeroship_cdc` is `NOINHERIT`, so a
+    ///   privilege held by a role it belongs to is invisible to every
+    ///   `has_*_privilege` answer above and still reachable with `SET ROLE`.
+    ///
+    /// Each census names one member it must contain, so none of them can pass
+    /// over an empty catalog. A statement past the grant is also sent, so one
+    /// refusal is `PostgreSQL`'s `42501` rather than a catalog function's word.
+    #[compio::test]
+    async fn the_relay_login_reads_what_its_lookups_name_and_nothing_else() {
+        let postgres = crate::postgres_fixture::Postgres::start();
+        let platform = Platform::apply(postgres.url());
+        let admin = admin_pool(&platform, 2).await;
+        let relay = relay_pool(&platform, 2).await;
+        let login: String = answer(&relay, "SELECT current_user::text", &[]).await;
+        assert_eq!(login, crate::platform_fixture::RELAY_LOGIN);
+
+        // THE POSITIVE ARMS, as the relay runs them.
+        let app = zeroship_core::typed_id::generate(zeroship_core::typed_id::APP_PREFIX);
+        let database = zeroship_core::DatabaseId::mint();
+        declare_binding(&admin, &app, &database, "active").await;
+        for (table, _) in READS {
+            lookup(&relay, table, &app, &database)
+                .await
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "the relay's login runs the lookup reading {table}: {}",
+                        crate::cause_chain(&*error)
+                    )
+                });
+        }
+
+        // THE COLUMN CENSUS, per table a lookup reads.
+        for (table, granted) in READS {
+            let relation = format!("zeroship.{table}");
+            let columns: Vec<String> = admin
+                .query(
+                    "SELECT attname::text FROM pg_attribute \
+                     WHERE attrelid = $1::text::regclass AND attnum > 0 AND NOT attisdropped \
+                     ORDER BY attnum",
+                    &[&relation],
+                )
+                .await
+                .expect("read the table's columns")
+                .iter()
+                .map(|row| row.try_get(0).expect("the column name decodes"))
+                .collect();
+            for column in *granted {
+                assert!(
+                    columns.iter().any(|name| name == column),
+                    "{relation}.{column} must exist for the lookup to name it"
+                );
+            }
+            assert!(
+                columns.len() > granted.len(),
+                "{relation} must carry columns beyond the lookup's, or the denied half is vacuous"
+            );
+            for column in &columns {
+                let readable: bool = answer(
+                    &relay,
+                    "SELECT has_column_privilege($1::text, $2::text, 'SELECT')",
+                    &[&relation, column],
+                )
+                .await;
+                assert_eq!(
+                    readable,
+                    granted.contains(&column.as_str()),
+                    "{relation}.{column}: the relay reads the lookup's columns exactly"
+                );
+            }
+        }
+
+        // THE RELATION CENSUS, over every relation outside the system catalogs.
+        // An extension's own relations are left out: the extension grants them
+        // to PUBLIC, and no platform migration authors them.
+        let census: Vec<(String, bool, Vec<String>)> = relay
+            .query(
+                "SELECT n.nspname || '.' || c.relname, \
+                        has_any_column_privilege(c.oid, 'SELECT'), \
+                        ARRAY(SELECT p FROM unnest(ARRAY['SELECT', 'INSERT', 'UPDATE', 'DELETE', \
+                                                         'TRUNCATE', 'REFERENCES', 'TRIGGER']) AS p \
+                               WHERE has_table_privilege(c.oid, p)) \
+                        || ARRAY(SELECT 'column ' || p \
+                                   FROM unnest(ARRAY['INSERT', 'UPDATE', 'REFERENCES']) AS p \
+                                  WHERE has_any_column_privilege(c.oid, p)) \
+                   FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+                  WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f') \
+                    AND n.nspname NOT IN ('pg_catalog', 'information_schema') \
+                    AND left(n.nspname, 3) <> 'pg_' \
+                    AND NOT EXISTS (SELECT 1 FROM pg_depend d \
+                                     WHERE d.classid = 'pg_class'::regclass \
+                                       AND d.objid = c.oid AND d.deptype = 'e') \
+                  ORDER BY (n.nspname || '.' || c.relname) COLLATE \"C\"",
+                &[],
+            )
+            .await
+            .expect("census the platform's relations")
+            .iter()
+            .map(|row| {
+                (
+                    row.try_get(0).expect("the relation decodes"),
+                    row.try_get(1).expect("the read privilege decodes"),
+                    row.try_get(2).expect("the held privileges decode"),
+                )
+            })
+            .collect();
+        assert!(
+            census
+                .iter()
+                .any(|(relation, readable, _)| relation == "zeroship.datastores" && !readable),
+            "the census must reach a Control table no lookup reads, and find it unreadable: \
+             {census:?}"
+        );
+        let readable: Vec<&str> = census
+            .iter()
+            .filter(|(_, readable, _)| *readable)
+            .map(|(relation, _, _)| relation.as_str())
+            .collect();
+        let mut expected: Vec<String> = READS
+            .iter()
+            .map(|(table, _)| format!("zeroship.{table}"))
+            .collect();
+        expected.sort();
+        assert_eq!(
+            readable, expected,
+            "the relay's login reads these tables and no other platform relation"
+        );
+        for (relation, _, held) in &census {
+            assert!(
+                held.is_empty(),
+                "{relation}: the relay's login holds {held:?}; it reads columns and writes nothing"
+            );
+        }
+
+        // THE SEQUENCE CENSUS.
+        let sequences: Vec<(String, Vec<String>)> = relay
+            .query(
+                "SELECT n.nspname || '.' || c.relname, \
+                        ARRAY(SELECT p FROM unnest(ARRAY['USAGE', 'SELECT', 'UPDATE']) AS p \
+                               WHERE has_sequence_privilege(c.oid, p)) \
+                   FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+                  WHERE c.relkind = 'S' \
+                    AND n.nspname NOT IN ('pg_catalog', 'information_schema') \
+                    AND left(n.nspname, 3) <> 'pg_' \
+                    AND NOT EXISTS (SELECT 1 FROM pg_depend d \
+                                     WHERE d.classid = 'pg_class'::regclass \
+                                       AND d.objid = c.oid AND d.deptype = 'e') \
+                  ORDER BY (n.nspname || '.' || c.relname) COLLATE \"C\"",
+                &[],
+            )
+            .await
+            .expect("census the platform's sequences")
+            .iter()
+            .map(|row| {
+                (
+                    row.try_get(0).expect("the sequence decodes"),
+                    row.try_get(1).expect("the held privileges decode"),
+                )
+            })
+            .collect();
+        assert!(
+            sequences
+                .iter()
+                .any(|(sequence, _)| sequence == "zeroship.audit_events_id_seq"),
+            "the census must reach a platform sequence: {sequences:?}"
+        );
+        for (sequence, held) in &sequences {
+            assert!(
+                held.is_empty(),
+                "{sequence}: the relay's login holds {held:?} on a sequence"
+            );
+        }
+
+        denied(
+            relay
+                .query("SELECT capability FROM zeroship.database_bindings", &[])
+                .await
+                .map_err(Error::from),
+            "a column the lookup does not name is refused by PostgreSQL",
+        );
+
+        // THE MEMBERSHIP CENSUS, and its control: a role granted here is seen
+        // by it, is invisible to `has_table_privilege` on this NOINHERIT login,
+        // and is still reachable with `SET ROLE` - which is why it is censused.
+        let memberships = "SELECT count(*) FROM pg_auth_members \
+                           WHERE member = (SELECT oid FROM pg_roles WHERE rolname = current_user)";
+        assert_eq!(
+            answer::<i64>(&relay, memberships, &[]).await,
+            0,
+            "the relay's login belongs to no role"
+        );
+        let probe = zeroship_core::typed_id::generate("tst");
+        admin
+            .batch_execute(&format!(
+                "CREATE ROLE \"{probe}\" NOLOGIN; \
+                 GRANT USAGE ON SCHEMA zeroship TO \"{probe}\"; \
+                 GRANT SELECT ON zeroship.datastores TO \"{probe}\"; \
+                 GRANT \"{probe}\" TO \"{}\"",
+                crate::platform_fixture::RELAY_LOGIN
+            ))
+            .await
+            .expect("grant the relay's login a membership");
+        assert_eq!(
+            answer::<i64>(&relay, memberships, &[]).await,
+            1,
+            "the membership census sees a granted role"
+        );
+        assert!(
+            !answer::<bool>(
+                &relay,
+                "SELECT has_table_privilege('zeroship.datastores', 'SELECT')",
+                &[],
+            )
+            .await,
+            "a NOINHERIT login's memberships are invisible to has_table_privilege"
+        );
+        let session = relay.acquire().await.expect("a relay session");
+        session
+            .batch_execute(&format!("SET ROLE \"{probe}\""))
+            .await
+            .expect("the relay's login may assume a role it belongs to");
+        session
+            .query("SELECT count(*) FROM zeroship.datastores", &[])
+            .await
+            .expect("an assumed role's privileges are the session's");
+        session
+            .batch_execute("RESET ROLE")
+            .await
+            .expect("return the session to the relay's login");
+        drop(session);
+        admin
+            .batch_execute(&format!("DROP OWNED BY \"{probe}\"; DROP ROLE \"{probe}\""))
+            .await
+            .expect("withdraw the membership");
+        assert_eq!(
+            answer::<i64>(&relay, memberships, &[]).await,
+            0,
+            "the withdrawn membership is gone again"
+        );
+
+        relay.close().await;
+        admin.close().await;
+    }
+
+    /// **Every column the relay is granted is one its lookups read.**
+    ///
+    /// The census proves nothing beyond [`READS`] is granted; this proves the
+    /// other direction. For each column in it, the column's grant is withdrawn
+    /// and the lookup that reads its table, run as `zeroship_cdc`, must be
+    /// refused `42501`; then the grant is restored and the same lookup must
+    /// answer. A column the platform grants and no lookup reads is an
+    /// over-grant, and withdrawing it refuses nothing, so this arm names it.
+    #[compio::test]
+    async fn every_column_the_relay_is_granted_is_one_its_lookups_read() {
+        let postgres = crate::postgres_fixture::Postgres::start();
+        let platform = Platform::apply(postgres.url());
+        let admin = admin_pool(&platform, 2).await;
+        let relay = relay_pool(&platform, 2).await;
+        let app = zeroship_core::typed_id::generate(zeroship_core::typed_id::APP_PREFIX);
+        let database = zeroship_core::DatabaseId::mint();
+        declare_binding(&admin, &app, &database, "active").await;
+
+        let mut withdrawn = Vec::new();
+        for (table, columns) in READS {
+            let relation = format!("zeroship.{table}");
+            for column in *columns {
+                assert!(
+                    answer::<bool>(
+                        &admin,
+                        "SELECT has_column_privilege($1::text, $2::text, $3::text, 'SELECT')",
+                        &[&crate::platform_fixture::RELAY_LOGIN, &relation, column],
+                    )
+                    .await,
+                    "{relation}.{column} must be granted before it can be withdrawn"
+                );
+                admin
+                    .batch_execute(&format!(
+                        "REVOKE SELECT (\"{column}\") ON {relation} FROM \"{}\"",
+                        crate::platform_fixture::RELAY_LOGIN
+                    ))
+                    .await
+                    .expect("withdraw one column");
+                denied(
+                    lookup(&relay, table, &app, &database).await,
+                    &format!(
+                        "with {relation}.{column} withdrawn, the lookup reading {table} must be \
+                         refused; a grant no lookup needs is an over-grant"
+                    ),
+                );
+                admin
+                    .batch_execute(&format!(
+                        "GRANT SELECT (\"{column}\") ON {relation} TO \"{}\"",
+                        crate::platform_fixture::RELAY_LOGIN
+                    ))
+                    .await
+                    .expect("restore the column");
+                lookup(&relay, table, &app, &database)
+                    .await
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "with {relation}.{column} restored the lookup answers again: {}",
+                            crate::cause_chain(&*error)
+                        )
+                    });
+                withdrawn.push(format!("{relation}.{column}"));
+            }
+        }
+        assert_eq!(
+            withdrawn.len(),
+            READS
+                .iter()
+                .map(|(_, columns)| columns.len())
+                .sum::<usize>(),
+            "every granted column was withdrawn once: {withdrawn:?}"
+        );
+
+        relay.close().await;
+        admin.close().await;
+    }
+
+    /// **A binding lookup the server refuses stops the capture, says why, and
+    /// leaves nothing behind.**
+    ///
+    /// This is the path production took when the relay's login had no grant on
+    /// the binding rows: every subscribe started a capture whose lookup the
+    /// server refused. Each outcome is one a subscriber or an operator can
+    /// observe: the capture returns; the subscriber's stream ends without ever
+    /// being `Ready`; no slot exists under the capture's name; and the warning
+    /// carries the server's refusal rather than the bare error kind, which
+    /// displays as `db error` and names nothing.
+    ///
+    /// The control differs in the one variable: with the grant restored, the
+    /// same key captures, reaches `Ready` and holds a slot under that name, so
+    /// the slot check is one that can see a slot.
+    #[compio::test]
+    async fn a_refused_binding_lookup_stops_capture_with_its_cause_and_leaves_no_slot() {
+        use crate::platform_fixture::{grant_relay, relay_columns, revoke_relay};
+        let postgres = crate::postgres_fixture::Postgres::start();
+        let platform = Platform::apply(postgres.url());
+        let admin = admin_pool(&platform, 4).await;
+        let relay = relay_pool(&platform, 4).await;
+        let url = platform.relay_url();
+        let app = zeroship_core::typed_id::generate(zeroship_core::typed_id::APP_PREFIX);
+        let database = zeroship_core::DatabaseId::mint();
+        let schema = zeroship_core::database_derivation::schema_name(&database);
+        let publication = zeroship_core::replication_names::DATASTORE_PUBLICATION;
+        admin
+            .batch_execute(&format!(
+                "CREATE SCHEMA \"{schema}\";
+                 CREATE TABLE \"{schema}\".orders (id int PRIMARY KEY);
+                 CREATE PUBLICATION \"{publication}\" FOR TABLES IN SCHEMA \"{schema}\";"
+            ))
+            .await
+            .expect("logical WAL and publication required");
+        declare_binding(&admin, &app, &database, "active").await;
+        let granted = relay_columns(&admin, "database_bindings").await;
+        assert!(
+            !granted.is_empty(),
+            "the relay's login must hold a grant on the binding rows to lose one"
+        );
+        revoke_relay(&admin, "database_bindings").await;
+
+        let hub = Rc::new(Hub::default());
+        let key = StreamKey::new(&app, database.as_str());
+        let slot = slot_name(&key).unwrap();
+        let limits = Limits {
+            max_bytes: 1024 * 1024,
+            max_changes: 100,
+            max_relations: 4,
+        };
+        let (lease, start) = hub.subscribe(&key, 1, 4, 32).unwrap();
+        let ((), warnings) = warnings_during(run(
+            hub.clone(),
+            key.clone(),
+            start.expect("the first subscriber starts the capture"),
+            relay.clone(),
+            url.clone(),
+            limits,
+        ))
+        .await;
+        let ended = compio::time::timeout(Duration::from_secs(10), lease.events.recv_async())
+            .await
+            .expect("the subscriber's stream must end rather than hang");
+        assert!(
+            ended.is_err(),
+            "the subscriber must be disconnected without ever being Ready: {ended:?}"
+        );
+        let stopped: Vec<&Warning> = warnings
+            .iter()
+            .filter(|warning| warning.message.starts_with("CDC capture stopped"))
+            .collect();
+        assert_eq!(
+            stopped.len(),
+            1,
+            "the stopped capture warns once: {warnings:?}"
+        );
+        let cause = stopped[0]
+            .fields
+            .get("error")
+            .expect("the warning carries its cause");
+        assert!(
+            cause.contains("permission denied for table database_bindings"),
+            "the warning must carry the server's refusal, not the bare error kind: {cause}"
+        );
+        assert_eq!(
+            slots(&admin, &slot).await,
+            0,
+            "a refused capture leaves no slot"
+        );
+        drop(lease);
+
+        // THE CONTROL: the same key, the grant restored.
+        grant_relay(&admin, "database_bindings", &granted).await;
+        let (lease, start) = hub.subscribe(&key, 1, 4, 32).unwrap();
+        let task = compio::runtime::spawn(run(
+            hub.clone(),
+            key.clone(),
+            start.expect("the ended stream starts a capture of its own"),
+            relay.clone(),
+            url,
+            limits,
+        ));
+        assert_eq!(event(&lease).await, Event::Ready);
+        assert_eq!(
+            slots(&admin, &slot).await,
+            1,
+            "a capture that resolved holds its slot under that name"
+        );
+        drop(lease);
+        compio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            slots(&admin, &slot).await,
+            0,
+            "the capture reclaims its slot"
+        );
+
+        relay.close().await;
+        admin.close().await;
     }
 
     /// **One app's two databases of ONE datastore capture through two slots.**
@@ -464,8 +1053,10 @@ mod tests {
     #[compio::test]
     async fn one_app_s_two_databases_capture_through_two_slots() {
         let postgres = crate::postgres_fixture::Postgres::start();
-        let url = postgres.url();
-        let pool = Pool::connect(&url, 8).await.expect("required PostgreSQL");
+        let platform = Platform::apply(postgres.url());
+        let pool = admin_pool(&platform, 8).await;
+        let relay = relay_pool(&platform, 8).await;
+        let url = platform.relay_url();
         let app = zeroship_core::typed_id::generate(zeroship_core::typed_id::APP_PREFIX);
         let mine = zeroship_core::DatabaseId::mint();
         let theirs = zeroship_core::DatabaseId::mint();
@@ -482,8 +1073,8 @@ mod tests {
         ))
         .await
         .expect("logical WAL and publication required");
-        declare_binding_to(&pool, &app, &mine, "active").await;
-        declare_binding_to(&pool, &app, &theirs, "active").await;
+        declare_binding(&pool, &app, &mine, "active").await;
+        declare_binding(&pool, &app, &theirs, "active").await;
 
         let hub = Rc::new(Hub::default());
         let my_key = StreamKey::new(&app, mine.as_str());
@@ -499,7 +1090,7 @@ mod tests {
             hub.clone(),
             my_key.clone(),
             my_start.unwrap(),
-            pool.clone(),
+            relay.clone(),
             url.clone(),
             limits,
         ));
@@ -507,7 +1098,7 @@ mod tests {
             hub.clone(),
             their_key.clone(),
             their_start.expect("the app's second database starts a capture of its own"),
-            pool.clone(),
+            relay.clone(),
             url.clone(),
             limits,
         ));
@@ -643,6 +1234,7 @@ mod tests {
         ))
         .await
         .unwrap();
+        relay.close().await;
         pool.close().await;
     }
 
@@ -750,17 +1342,24 @@ mod tests {
     #[compio::test]
     async fn committed_changes_fan_out_without_values_and_rollback_stays_silent() {
         let postgres = crate::postgres_fixture::Postgres::start();
-        let url = postgres.url();
-        let pool = Pool::connect(&url, 4).await.expect("required PostgreSQL");
+        let platform = Platform::apply(postgres.url());
+        let pool = admin_pool(&platform, 4).await;
+        let relay = relay_pool(&platform, 4).await;
+        let url = platform.relay_url();
         let app = zeroship_core::typed_id::generate(zeroship_core::typed_id::APP_PREFIX);
-        let sibling = zeroship_core::typed_id::generate(zeroship_core::typed_id::APP_PREFIX);
+        let database = zeroship_core::DatabaseId::mint();
+        let sibling = zeroship_core::DatabaseId::mint();
+        assert_ne!(
+            database, sibling,
+            "the control: two mints are two databases"
+        );
         let publication = zeroship_core::replication_names::DATASTORE_PUBLICATION;
         // Two DATABASES, one subscriber. The sibling stands in for a co-tenant
         // whose tables are in the same publication, which is the shape the
         // relay-owned per-datastore publication has: membership is not a fence,
         // and the namespace comparison is.
-        let schema = test_schema(&app);
-        let sibling_schema = test_schema(&sibling);
+        let schema = zeroship_core::database_derivation::schema_name(&database);
+        let sibling_schema = zeroship_core::database_derivation::schema_name(&sibling);
         let ddl = format!(
             "CREATE SCHEMA \"{schema}\";
              CREATE SCHEMA \"{sibling_schema}\";
@@ -776,9 +1375,9 @@ mod tests {
         pool.batch_execute(&ddl)
             .await
             .expect("logical WAL and publication required");
-        declare_binding(&pool, &app).await;
+        declare_binding(&pool, &app, &database, "active").await;
         let hub = Rc::new(Hub::default());
-        let stream = StreamKey::new(&app, test_database(&app).as_str());
+        let stream = StreamKey::new(&app, database.as_str());
         let (first, start) = hub.subscribe(&stream, 1, 4, 32).unwrap();
         let (second, duplicate) = hub.subscribe(&stream, 1, 4, 32).unwrap();
         assert!(duplicate.is_none());
@@ -786,7 +1385,7 @@ mod tests {
             hub.clone(),
             stream.clone(),
             start.unwrap(),
-            pool.clone(),
+            relay.clone(),
             url,
             Limits {
                 max_bytes: 1024 * 1024,
@@ -875,6 +1474,7 @@ mod tests {
         ))
         .await
         .unwrap();
+        relay.close().await;
         pool.close().await;
     }
 }

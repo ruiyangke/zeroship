@@ -153,5 +153,10 @@
     "file": "20260919000300_database_placement_keys.ts",
     "name": "database_placement_keys",
     "opCount": 5
+  },
+  {
+    "file": "20260930000100_cdc_relay_live_binding_grants.ts",
+    "name": "cdc_relay_live_binding_grants",
+    "opCount": 2
   }
 ]

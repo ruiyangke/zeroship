@@ -1,5 +1,10 @@
 //! Real relay process and least-privilege worker identity for V8 integration.
+//!
+//! Both processes run under the logins the platform corpus creates: the relay
+//! as `zeroship_cdc` and the worker as `zeroship_worker`, each with exactly the
+//! reach `db/migrations-ts` grants it.
 
+use crate::platform::{self, Platform};
 use compio_postgres::Pool;
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
@@ -12,9 +17,6 @@ use zeroship_data_orm::cdc::relay::RelayConfig;
 pub struct RelayFixture {
     process: Child,
     _files: tempfile::TempDir,
-    relay_role: String,
-    worker_role: String,
-    instance: String,
     pub worker_url: String,
     pub config: RelayConfig,
 }
@@ -27,16 +29,15 @@ impl Drop for RelayFixture {
 }
 
 impl RelayFixture {
-    /// Start the relay and mint the two logins the exercise connects as.
+    /// Start the relay against the platform schema `platform` holds.
     ///
-    /// `binding` is the edge the caller provisioned the cluster for. The worker
-    /// login is admitted to that binding's role and to nothing else, so a
-    /// session that narrows with `SET LOCAL ROLE` reaches exactly the schema
-    /// the ladder granted and the connection itself carries none of it.
-    pub async fn start(admin: &Pool, admin_url: &str, binding: &DbBinding) -> Self {
-        let suffix = zeroship_core::typed_id::generate("tst");
-        let relay_role = format!("relay_{suffix}");
-        let worker_role = format!("worker_{suffix}");
+    /// `binding` is the edge the caller provisioned the cluster for. It is
+    /// declared in Control's rows under its own ids, which is what the relay
+    /// resolves a subscriber's schema from, and the worker login is admitted
+    /// to that binding's role and to nothing else, so a session that narrows
+    /// with `SET LOCAL ROLE` reaches exactly the schema the ladder granted and
+    /// the connection itself carries none of it.
+    pub async fn start(admin: &Pool, platform: &Platform, binding: &DbBinding) -> Self {
         let instance = zeroship_core::typed_id::generate("wkr");
         let key = ServiceSigningKey::generate();
         let binding_role = binding
@@ -46,64 +47,25 @@ impl RelayFixture {
         // `zeroship_migrate_server::datastore::cluster::grant_binding` spells
         // the worker edge. A fixture that added `SET TRUE` would provision an
         // option the reconciler never emits.
-        admin.batch_execute(&format!(
-            "CREATE ROLE \"{relay_role}\" LOGIN REPLICATION NOSUPERUSER NOCREATEROLE NOCREATEDB NOINHERIT NOBYPASSRLS PASSWORD 'fixture';
-             CREATE ROLE \"{worker_role}\" LOGIN NOREPLICATION NOSUPERUSER NOCREATEROLE NOCREATEDB NOINHERIT NOBYPASSRLS PASSWORD 'fixture';
-             GRANT \"{binding_role}\" TO \"{worker_role}\" WITH INHERIT FALSE;
-             CREATE SCHEMA IF NOT EXISTS zeroship;
-             CREATE TABLE IF NOT EXISTS zeroship.worker_instances (
-               id text PRIMARY KEY, ring_key bytea NOT NULL, public_key bytea NOT NULL,
-               advertise_host inet NOT NULL, advertise_port int NOT NULL,
-               registered_at timestamptz NOT NULL DEFAULT now(), status text NOT NULL
-             );
-             GRANT USAGE ON SCHEMA zeroship TO \"{relay_role}\";
-             GRANT SELECT (id, status, public_key) ON zeroship.worker_instances TO \"{relay_role}\";"
-        )).await.unwrap();
-        admin.execute(
-            "INSERT INTO zeroship.worker_instances (id, ring_key, public_key, advertise_host, advertise_port, status) VALUES ($1, $2, $2, '127.0.0.1'::inet, 8080, 'active')",
-            &[&instance, &key.verifying_key_bytes().to_vec()],
-        ).await.unwrap();
-        // Stand-ins for the two Control tables the relay reads to learn which
-        // schema a subscriber is entitled to. The relay composes no schema from
-        // the app id, so without these rows its capture refuses rather than
-        // streaming a namespace it guessed.
+        admin
+            .batch_execute(&format!(
+                "GRANT \"{binding_role}\" TO \"{}\" WITH INHERIT FALSE",
+                platform::WORKER_LOGIN
+            ))
+            .await
+            .unwrap();
+        platform::enroll_worker(admin, &instance, &key.verifying_key_bytes()).await;
         let edge = binding
             .edge()
             .expect("the fixture binding addresses a database");
-        let database = edge.database().as_str().to_owned();
-        admin.batch_execute(&format!(
-            "CREATE TABLE IF NOT EXISTS zeroship.databases (
-               id text PRIMARY KEY, status text NOT NULL
-             );
-             CREATE TABLE IF NOT EXISTS zeroship.database_bindings (
-               id text PRIMARY KEY, app_id text NOT NULL, database_id text NOT NULL,
-               status text NOT NULL, generation bigint NOT NULL DEFAULT 1,
-               observed_generation bigint NOT NULL DEFAULT 1
-             );
-             GRANT SELECT (id, status) ON zeroship.databases TO \"{relay_role}\";
-             GRANT SELECT (id, app_id, database_id, status, generation, observed_generation)
-               ON zeroship.database_bindings TO \"{relay_role}\";"
-        )).await.unwrap();
-        admin
-            .execute(
-                "INSERT INTO zeroship.databases (id, status) VALUES ($1, 'active') \
-                 ON CONFLICT (id) DO NOTHING",
-                &[&database],
-            )
-            .await
-            .unwrap();
-        admin
-            .execute(
-                "INSERT INTO zeroship.database_bindings (id, app_id, database_id, status) \
-                 VALUES ($1, $2, $3, 'active') ON CONFLICT (id) DO NOTHING",
-                &[
-                    &edge.binding().as_str().to_owned(),
-                    &binding.app_id().to_owned(),
-                    &database,
-                ],
-            )
-            .await
-            .unwrap();
+        platform::declare_edge(
+            admin,
+            binding.app_id(),
+            edge.database(),
+            edge.binding(),
+            "active",
+        )
+        .await;
         let files = tempfile::tempdir().unwrap();
         let certificate = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
         let cert = files.path().join("cert.pem");
@@ -115,11 +77,7 @@ impl RelayFixture {
             .local_addr()
             .unwrap()
             .port();
-        let mut relay_url = url::Url::parse(admin_url).unwrap();
-        relay_url.set_username(&relay_role).unwrap();
-        relay_url.set_password(Some("fixture")).unwrap();
-        let mut worker_url = relay_url.clone();
-        worker_url.set_username(&worker_role).unwrap();
+        let relay_url = platform.relay_url();
         let binary = std::env::current_exe()
             .unwrap()
             .parent()
@@ -140,7 +98,7 @@ impl RelayFixture {
             .arg(&cert)
             .arg("--tls-key-file")
             .arg(&private)
-            .env("ZEROSHIP_DATA_CDC_SERVER_DATABASE_URL", relay_url.as_str())
+            .env("ZEROSHIP_DATA_CDC_SERVER_DATABASE_URL", &relay_url)
             .stdout(Stdio::from(log.try_clone().unwrap()))
             .stderr(Stdio::from(log))
             .spawn()
@@ -166,10 +124,7 @@ impl RelayFixture {
         let mut fixture = Self {
             process,
             _files: files,
-            relay_role,
-            worker_role,
-            instance,
-            worker_url: worker_url.into(),
+            worker_url: platform.worker_url(),
             config,
         };
         let deadline = Instant::now() + Duration::from_secs(15);
@@ -189,24 +144,5 @@ impl RelayFixture {
             compio::time::sleep(Duration::from_millis(20)).await;
         }
         fixture
-    }
-
-    pub async fn cleanup(mut self, admin: &Pool) {
-        self.process.kill().unwrap();
-        self.process.wait().unwrap();
-        admin
-            .execute(
-                "DELETE FROM zeroship.worker_instances WHERE id = $1",
-                &[&self.instance],
-            )
-            .await
-            .unwrap();
-        admin
-            .batch_execute(&format!(
-                "DROP OWNED BY \"{}\", \"{}\"; DROP ROLE \"{}\", \"{}\"",
-                self.relay_role, self.worker_role, self.relay_role, self.worker_role,
-            ))
-            .await
-            .unwrap();
     }
 }
