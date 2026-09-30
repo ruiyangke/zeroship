@@ -50,10 +50,7 @@ pub(super) async fn mid_propagation(store: Rc<OrmStore>) {
         .await
         .len();
     let _receipt = continuing
-        .finish(
-            &scope,
-            execution(json!([{"kind":"ContinueAsNew"}])),
-        )
+        .finish(&scope, execution(json!([{"kind":"ContinueAsNew"}])))
         .await
         .unwrap();
     assert_eq!(
@@ -81,10 +78,7 @@ pub(super) async fn mid_propagation(store: Rc<OrmStore>) {
     // A child created mid-propagation belongs to its cancelled creator's own
     // obligation, which fences it before any page reaches it.
     let _receipt = creating
-        .finish(
-            &scope,
-            cascade::child_call("grandchild"),
-        )
+        .finish(&scope, cascade::child_call("grandchild"))
         .await
         .unwrap();
     assert_eq!(
@@ -103,17 +97,60 @@ pub(super) async fn mid_propagation(store: Rc<OrmStore>) {
     .await;
     assert_eq!(grandchild.len(), 1);
     let grandchild = grandchild[0].text("id").unwrap();
-    assert_eq!(
-        rows(
-            &service,
-            "propagations",
-            json!({"app_id":app.as_str(), "finished":0})
-        )
+    let obligations = rows(
+        &service,
+        "propagations",
+        json!({"app_id":app.as_str(), "finished":0}),
+    )
+    .await;
+    let mut sources: Vec<_> = obligations
+        .iter()
+        .map(|row| row.text("run_id").unwrap())
+        .collect();
+    sources.sort();
+    let mut cascading = vec![
+        parent.clone(),
+        creating.assignment().invocation.run_id.clone(),
+    ];
+    cascading.sort();
+    assert_eq!(sources, cascading);
+    // The fence acts where a frontier is delivered, not where a child is
+    // created: the grandchild waits queued on its first Advance. That is the
+    // one frontier no one has been handed, beside each obligation's first page.
+    let advance = frontier_job(&scope, &grandchild).await;
+    assert!(matches!(
+        &advance.operation,
+        JobOperation::Advance { generation: 0, revision, .. } if revision.get() == 1
+    ));
+    let (advances, propagations): (Vec<_>, Vec<_>) = undelivered(&scope)
         .await
-        .len(),
-        2
-    );
-    assert!(scope.pending_jobs(None, 1).await.unwrap().is_empty());
+        .into_iter()
+        .partition(|job| matches!(job.operation, JobOperation::Advance { .. }));
+    assert_eq!(advances, std::slice::from_ref(&advance));
+    let mut first_pages: Vec<_> = propagations
+        .iter()
+        .map(|job| match &job.operation {
+            JobOperation::Propagate {
+                propagation_id,
+                revision,
+            } => (propagation_id.as_str().to_owned(), revision.get()),
+            other => panic!("only frontiers and pages are left undelivered, got {other:?}"),
+        })
+        .collect();
+    first_pages.sort();
+    let mut opened: Vec<_> = obligations
+        .iter()
+        .map(|row| (row.text("id").unwrap(), 1))
+        .collect();
+    opened.sort();
+    assert_eq!(first_pages, opened);
+    // Delivering it settles the grandchild as cancelled instead of handing
+    // anyone a task.
+    let JobAcceptance::Settled(receipt) = scope.accept_job(&JobGrant::new(&advance)).await.unwrap()
+    else {
+        panic!("a fenced child settles on delivery without executing")
+    };
+    assert_eq!(receipt.outcome, JobOutcome::Completed {});
     assert_eq!(
         scope.status(&grandchild).await.unwrap().state,
         RunState::Cancelled
@@ -155,24 +192,20 @@ pub(super) async fn mid_propagation(store: Rc<OrmStore>) {
         objects.exists(&app, &staged.id),
         "the late result has to exist for its discard to mean anything"
     );
-    let receipt = service
-        .complete(
-            &worker.identity(),
-            &running.assignment().id,
-            &running.assignment().token,
+    let receipt = running
+        .finish(
+            &scope,
             execution(json!([{"kind":"RunCompleted","outputRef":late}])),
         )
         .await
         .unwrap();
-    assert_eq!(receipt.state, RunState::Cancelled);
-    assert_eq!(
-        scope
-            .status(&running.assignment().invocation.run_id)
-            .await
-            .unwrap()
-            .output,
-        None
-    );
+    assert_eq!(receipt.outcome, JobOutcome::Completed {});
+    let status = scope
+        .status(&running.assignment().invocation.run_id)
+        .await
+        .unwrap();
+    assert_eq!(status.state, RunState::Cancelled);
+    assert_eq!(status.output, None);
     assert!(matches!(
         scope
             .read_output(&running.assignment().invocation.run_id, objects.open())
@@ -295,4 +328,26 @@ pub(super) async fn delivered_renewal(store: Rc<OrmStore>) {
             .unwrap(),
         "cancel"
     );
+}
+
+/// Committed intents that were neither published nor settled, in journal id
+/// order: the work no one has been handed yet.
+///
+/// A job the door claims is published, and a job a case settles through a
+/// fixture grant carries a receipt, so neither is listed here.
+async fn undelivered(scope: &AppWorkflows) -> Vec<JobSpec> {
+    let mut after = None;
+    let mut undelivered = Vec::new();
+    loop {
+        let page = scope.pending_jobs(after.as_ref(), 100).await.unwrap();
+        let Some(last) = page.last() else {
+            return undelivered;
+        };
+        after = Some(last.id.clone());
+        for job in page {
+            if scope.job_receipt(&job).await.unwrap().is_none() {
+                undelivered.push(job);
+            }
+        }
+    }
 }
