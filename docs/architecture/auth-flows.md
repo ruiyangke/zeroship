@@ -686,8 +686,8 @@ delegated-user or resource-scope check that endpoint owns.
 
 The rows, by principal:
 
-- `svc/control` reaches the workflow assignment-verify, management, schedule and journal-ensure
-  endpoints and the worker log read.
+- `svc/control` reaches the workflow assignment-verify, management and schedule endpoints and the
+  worker log read.
 - `svc/auth` reaches the gateway's back-channel logout endpoint and Control's erasure preflight. It
   holds no shared key: that single call is on an assertion precisely so the process rendering the
   login form does not also hold the route table, the version feed and both reconcile triggers.
@@ -701,8 +701,7 @@ The rows, by principal:
 - `svc/gateway` reaches Control's route feed and the worker's dispatch endpoint.
 - `svc/worker` reaches Control's version, app, environment, data-key and binding reads, Control's
   direct deployment-hold pair, its own retire and renew, the workflow register, assignment, renew,
-  release, job and run endpoints, the policy lease, CDC subscribe, and journal ensure.
-- `svc/migrate-server` mints but reaches nothing.
+  release, job, run and task endpoints, the policy lease, and CDC subscribe.
 
 The route declaration and the authorization are one statement on both ends: `configure` in
 `crates/zeroship-worker/src/handler.rs` registers the dispatch route from the endpoint's own path
@@ -947,8 +946,8 @@ inbound.
 **Workflow run management through Control.** `WORKFLOW_MANAGE` and `WORKFLOW_MANAGEMENT_STATUS` are
 served by the workflow server and granted to `svc/control`, and the corresponding
 `ControlCoordinator` methods in `crates/zeroship-workflow-client/src/control.rs` have no caller
-under `crates/zeroship-control/`. Control's live workflow calls are journal ensure, the schedule
-trio, and assignment verification.
+under `crates/zeroship-control/`. Control's live workflow calls are the schedule trio and
+assignment verification.
 
 **Policy conditions and deny effects.** `Condition::IpRange` and `Condition::TimeWindow` and
 `Effect::Deny` in `crates/zeroship-authz/` are constructed only in tests: the one production

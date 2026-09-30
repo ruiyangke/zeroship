@@ -59,10 +59,9 @@ const CATALOG: &[ServiceEndpoint] = &[
 ];
 
 /// The principals the table grants to, which must each own exactly one row.
-const PRINCIPALS: [&str; 6] = [
+const PRINCIPALS: [&str; 5] = [
     "svc/control",
     "svc/auth",
-    "svc/migrate-server",
     "svc/gateway",
     "svc/worker",
     "svc/workflow",
@@ -463,7 +462,6 @@ fn measured_allowlist_is_encoded_and_enforced_row_by_row() {
         ],
         all,
     );
-    assert_allowlist_row("svc/migrate-server", &[], all);
     assert_allowlist_row(
         "svc/workflow",
         &[

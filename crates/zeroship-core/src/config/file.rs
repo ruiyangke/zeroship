@@ -365,9 +365,6 @@ pub struct WorkflowSection {
     pub service_key_file: Option<PathBuf>,
     /// Control origin for deployment queue retention.
     pub control_url: Option<String>,
-    /// Migration-service origin used to install and upgrade app journals; empty
-    /// disables the journal endpoint.
-    pub migrate_url: Option<String>,
     /// HTTP worker threads.
     pub http_threads: Option<usize>,
     /// Maximum connections per HTTP thread.

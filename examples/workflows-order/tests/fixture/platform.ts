@@ -247,15 +247,13 @@ export class Platform {
       ZEROSHIP_WORKFLOW_DATABASE_URL: `postgres://zeroship_workflow:zeroship_workflow@${authority}`,
       ZEROSHIP_WORKFLOW_CONTROL_URL: control.url,
       ZEROSHIP_WORKFLOW_SERVICE_KEY_FILE: keys.workflow, ZEROSHIP_WORKFLOW_SERVICE_PEERS_FILE: peers,
-      // The manager sends the journal bundle here when a host reports a refusal.
-      ZEROSHIP_WORKFLOW_MIGRATE_URL: migrationServer.url,
     });
     await this.waitFor("workflow manager", () => this.httpReady(`${manager.url}/readyz`));
     await service("worker", "zeroship-worker", worker, ["--port", `${worker.number}`, "--threads", "1", "--control-url", control.url, "--blob-store", blobs, "--poll-interval", "1"], {
       ZEROSHIP_WORKER_DATABASE_URL: `postgres://zeroship_worker:zeroship_worker@${authority}`,
       ZEROSHIP_WORKER_JOIN_TOKEN_FILE: joinToken, ZEROSHIP_WORKER_SERVICE_PEERS_FILE: peers,
       ZEROSHIP_WORKER_CDC_RELAY_URL: `wss://localhost:${relay.number}/internal/v1/cdc/subscribe`, ZEROSHIP_WORKER_CDC_RELAY_CA_FILE: cert,
-      // A workflow host keeps creator journals in the app database and stages
+      // A workflow host reaches the journal through the manager and stages
       // payloads in the app object store, so the worker needs both.
       ZEROSHIP_WORKER_WORKFLOW_MANAGER_URL: manager.url,
       ZEROSHIP_WORKER_WORKFLOW_CAPACITY: "8", ZEROSHIP_WORKER_WORKFLOW_SLOTS: "2",
@@ -285,14 +283,10 @@ export class Platform {
     const { id } = await created.json();
     assert.equal(typeof id, "string", "Created app must have an id");
     parseTypedId(id, "app");
-    // THERE IS NO PROVISIONING CALL HERE ANY MORE, and its absence is the
-    // change rather than a gap. The journal used to be installed through a
-    // creator-authorized endpoint on the migration service, which is why this
-    // fixture drove that endpoint's authorization. The migration service no
-    // longer knows what a workflow is: the manager holds the journal artifacts
-    // and sends them as a schema bundle, and the trigger is the WORKER, whose
-    // host asks for a repair when it finds no journal it will use. So the app
-    // below gets its journal by running, which is the path production takes.
+    // The app needs no journal of its own: the platform migrations applied
+    // above install the journal into the workflow service's schema, where
+    // every app's runs are kept.
+    //
     // Workflow rollout and plan capabilities are operator-owned. A plan carries
     // the policy the manager grants an app's host under, and Control's startup
     // seeding leaves that column null, which refuses every policy lease. This is
@@ -334,7 +328,7 @@ export class Platform {
     // published its backend, which is later than the gateway route table.
     //
     // An accepted start proves only the ACCEPTANCE half of that chain: a
-    // request isolate writing to the creator journal. DELIVERY - the manager
+    // request isolate writing to the workflow journal. DELIVERY - the manager
     // handing the job back to a worker consumer - is a separate chain that
     // becomes ready later, so a gate that stopped at an accepted start let the
     // first timed assertion in the suite measure cold delivery.
