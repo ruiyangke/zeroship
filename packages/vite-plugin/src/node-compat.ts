@@ -261,8 +261,8 @@ export function nodeCompatPlugin(): Plugin {
     enforce: "pre" as const,
 
     async resolveId(id: string) {
-      // Apply for the dev "zeroship" environment AND the production SSR
-      // build (which doesn't have a named environment). Skip the client
+      // Apply to server code: the "zeroship" environment in dev and in
+      // `vite build`, and the dev archive's `ssr` build. Skip the client
       // environment so a bundle that incidentally references `node:`
       // doesn't get polyfilled into the browser asset.
       const envName = (this as any).environment?.name;
@@ -313,8 +313,10 @@ export function nodeCompatPlugin(): Plugin {
  * effect: bare-global and explicit-import paths land on the *same*
  * class — no more duplicate `Buffer`/`process` impls.
  *
- * Gated to the SSR/zeroship environments so the browser bundle stays
- * Node-free.
+ * Dev only, and gated to the zeroship environment so the browser bundle
+ * stays Node-free. A built worker needs no injection: the runtime installs
+ * these globals on every isolate, and an injected `process` import would
+ * also shield `process.env.NODE_ENV` from the build's static replacement.
  */
 export function nodeInjectPlugin(): Plugin {
   // Normalize ESM/CJS export shape — the namespace import has the
@@ -327,6 +329,7 @@ export function nodeInjectPlugin(): Plugin {
 
   return {
     name: "zeroship:node-inject",
+    apply: "serve",
     transform(code: string, id: string): any {
       // Skip the client bundle — Buffer/process don't belong in the
       // browser asset.

@@ -1,5 +1,5 @@
 // Type shim for the `virtual:zeroship/client-manifest` virtual module
-// the vite-plugin exposes to the SSR build. Import for side effects
+// the vite-plugin exposes to the worker build. Import for side effects
 // (e.g. via tsconfig "types" or a triple-slash reference) so user
 // TypeScript code can `import` the module without "Cannot find module"
 // errors.

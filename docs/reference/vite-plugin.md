@@ -273,6 +273,27 @@ satisfy [the deploy contract](zeroship-standard.md):
   modules take precedence over keys you declared by hand. A callable or array
   `default.rpc` is rejected.
 
+## Building the app
+
+`vite build` builds the app through Vite's app builder, which `zeroship()`
+opts the build into. It builds the client environment, then the worker in the
+`zeroship` environment, then packs the `.zship`.
+
+- The worker is compiled from your Vite config. Your plugins, your top-level
+  `define` and your `resolve.alias` apply to server code, as they do in
+  `pnpm dev`. A plugin that must stay off server code, such as one that writes
+  files from `writeBundle`, scopes itself with Vite's `applyToEnvironment`.
+- The plugin owns the worker's shape: one minified ES module,
+  `server/index.js` under `build.dist`, with no public files and no build
+  manifest. `process.env.NODE_ENV` is replaced with `"production"` whatever
+  the shell sets; every other `process.env` reference stays live for the
+  runtime to answer.
+- A tool that calls `vite.build()` with the app's config, such as a test
+  harness or a deploy script, is refused before the client writes anything:
+  `vite.build()` builds a single environment, so it would pack no worker.
+  Call `createBuilder(config, null)` and then `buildApp()` instead, which is
+  what `vite build` does. `vite build --watch` is refused too.
+
 ## See also
 
 - [`vite-environment-api.md`](vite-environment-api.md)

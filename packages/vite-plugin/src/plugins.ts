@@ -14,7 +14,7 @@ import {
   type ProjectConfigInput,
 } from "./project-config/index.js";
 import { devServerPlugin } from "./dev-server.js";
-import { buildPlugin } from "./build.js";
+import { buildPlugins } from "./build.js";
 import { nodeCompatPlugin, nodeInjectPlugin } from "./node-compat.js";
 import { zeroshipModulePlugin } from "./zeroship-module.js";
 
@@ -49,6 +49,6 @@ export function zeroshipPlugins(
     zeroshipModulePlugin(),
     transformPlugin(state),
     ...devServerPlugin({ ...options, processEnv }, state, project),
-    buildPlugin(state, project, options.app),
+    ...buildPlugins(state, project, options.app),
   ];
 }

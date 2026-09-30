@@ -26,7 +26,7 @@ dist/
 └── app.zship               (the deploy artifact)
 ```
 
-`"build": { "mode": "static" }` in `zeroship.jsonc` skips the SSR sub-build entirely and injects a virtual stub Rollup input that gets deleted in `generateBundle`, so no `_empty-<hash>.js` placeholder ships in the artifact.
+`"build": { "mode": "static" }` in `zeroship.jsonc` builds no worker and injects a virtual stub Rollup input that gets deleted in `generateBundle`, so no `_empty-<hash>.js` placeholder ships in the artifact.
 
 ## Inspect the manifest
 
@@ -75,7 +75,7 @@ not silently rewritten — only a lone trailing slash is normalized.
 | `content/about.html` | About — served at `/about` |
 | `content/docs/intro.html` | Doc page — served at `/docs/intro` |
 | `vite.config.ts` | `ssgContentPlugin` copies `content/**` into `dist/`; `zeroship()` packs the result |
-| `zeroship.jsonc` | `"build": { "mode": "static" }` - the SSR sub-build is skipped and no worker is emitted; also the deploy target and paths |
+| `zeroship.jsonc` | `"build": { "mode": "static" }` - no worker is built or emitted; also the deploy target and paths |
 
 ## Deploy
 

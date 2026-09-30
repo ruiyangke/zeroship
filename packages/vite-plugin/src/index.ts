@@ -11,7 +11,9 @@
  *   2. environment: registers zeroship DevEnvironment with Vite
  *   3. dev-server: spawns the dev runtime, exposes HTTP module fetch +
  *      HMR poll endpoints, and proxies runtime-bound requests
- *   4. build: bundles server code for production via esbuild
+ *   4. build: builds the client and then the worker (the `zeroship`
+ *      environment) through Vite's app builder, from the app's own config,
+ *      and packs the .zship
  */
 
 /// <reference path="./client-manifest.d.ts" />

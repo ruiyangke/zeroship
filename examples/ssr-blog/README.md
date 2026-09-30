@@ -56,7 +56,7 @@ The `/[...rest]` catch-all has no `static` action — a URL-namespace resource w
 The SSR bundle reads hashed asset filenames from the Vite client manifest. Two pieces wire this up:
 
 1. `vite.config.ts` enables `build.manifest: true`, so Vite writes `dist/.vite/manifest.json`.
-2. `src/server.ts` does `import clientManifest from "virtual:zeroship/client-manifest";` — a virtual module the `@zeroship/vite-plugin` exposes during the SSR build. It inlines `dist/.vite/manifest.json` (read off disk after the client build's `writeBundle` finishes) into the SSR bundle as a `Record<string, ManifestChunk>`.
+2. `src/server.ts` does `import clientManifest from "virtual:zeroship/client-manifest";` — a virtual module the `@zeroship/vite-plugin` exposes during the worker build. It inlines `dist/.vite/manifest.json` (read off disk after the client build finishes) into the worker as a `Record<string, ManifestChunk>`.
 
 Then `clientScriptTag(ENTRY_SRC)` looks up `entry.file` and emits `<script type="module" src="/<hash>.js">`. CSS imports come through `entry.css`.
 
@@ -64,7 +64,7 @@ Type declarations: a triple-slash `<reference types="@zeroship/vite-plugin/types
 
 ## Notes on the build output
 
-`worker.modules` lists exactly `index.js` — the SSR sub-build runs with `publicDir: false`, so any `public/*` files stay on the client build's side.
+`worker.modules` lists exactly `index.js` — the worker build copies no public directory, so any `public/*` files stay on the client build's side.
 
 ## Files
 

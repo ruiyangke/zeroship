@@ -1,4 +1,7 @@
-//! Build the Vite entry and exercise its emitted modules through native dispatch.
+//! Build the fixture app the way `vite build` does and exercise the worker it
+//! packs through native dispatch. The app loads one import through a Vite
+//! plugin of its own, so the worker exists only if the app's plugins apply to
+//! server code.
 
 use std::time::Duration;
 
@@ -46,7 +49,7 @@ fn build_modules() -> Vec<ModuleEntry> {
         String::from_utf8_lossy(&built.stderr)
     );
     let entries: Vec<Value> = serde_json::from_slice(&built.stdout)
-        .expect("Vite fixture must return its emitted module graph");
+        .expect("Vite fixture must return its packed worker modules");
     assert!(!entries.is_empty(), "Vite must build executable modules");
     entries
         .into_iter()
@@ -134,6 +137,10 @@ async fn vite_artifact_retains_procedure_metadata_and_native_module_identity() {
     assert_eq!(
         rpc(&runtime, "inspect", Value::Null).await,
         json!({"loaded": 0, "invoked": 0, "loaderKind": ""}),
+    );
+    assert_eq!(
+        rpc(&runtime, "greeting", Value::Null).await,
+        json!("hello from an app plugin"),
     );
     assert_eq!(
         rpc(&runtime, "eager", json!(3)).await,

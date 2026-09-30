@@ -65,4 +65,4 @@ zeroship deploy ./dist/app.zship --app=<app-id> --control=<url> --token=<token>
 
 ## Notes on the build output
 
-`worker.modules` lists exactly `index.js` — no `favicon.ico` or other `public/` files. The vite-plugin's SSR sub-build runs with `publicDir: false`; the client build keeps `publicDir`, so `public/*` ends up in `dist/<root>/` and gets cataloged in `assets`.
+`worker.modules` lists exactly `index.js` — no `favicon.ico` or other `public/` files. The vite-plugin's worker build copies no public directory; the client build keeps `publicDir`, so `public/*` ends up in `dist/<root>/` and gets cataloged in `assets`.

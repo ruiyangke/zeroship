@@ -6,7 +6,7 @@
 // Approach: a tiny `ssgContentPlugin` walks `content/` and copies every
 // `*.html` file into `dist/`. The `@zeroship/vite-plugin` runs in
 // `mode: "static"`, which:
-//   - skips the SSR sub-build entirely;
+//   - builds no worker;
 //   - injects a virtual stub `rollupOptions.input` so Vite still has an
 //     entry to chew on (otherwise it errors out with "no input");
 //   - deletes the stub chunk in `generateBundle` so no `_empty-<hash>.js`
@@ -38,8 +38,9 @@ function ssgContentPlugin(): Plugin {
   return {
     name: "ssg:copy-content",
     apply: "build",
-    // Run BEFORE zeroship's closeBundle so the copied content is on
-    // disk by the time the .zship emitter walks dist/.
+    // The copy runs when the client build closes, and zeroship packs the
+    // .zship only after that build has finished, so the copied content is on
+    // disk by the time the emitter walks dist/.
     enforce: "pre",
     configResolved(config) {
       root = config.root;
@@ -67,8 +68,8 @@ function ssgContentPlugin(): Plugin {
 export default defineConfig({
   plugins: [
     ssgContentPlugin(),
-    // `build.mode: "static"` in zeroship.jsonc tells the plugin to skip the
-    // SSR sub-build and inject the no-op stub input so Vite does not error on
+    // `build.mode: "static"` in zeroship.jsonc tells the plugin to build no
+    // worker and inject the no-op stub input so Vite does not error on
     // an empty build. The emitter then walks dist/ (after content copy) and
     // packs the HTML files as assets. It lives in that file rather than here
     // because the shape of the deploy is a fact more than one tool needs.

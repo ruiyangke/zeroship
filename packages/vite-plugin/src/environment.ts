@@ -12,6 +12,12 @@ import {
   VITE_RUNTIME_MODULE_ID,
 } from "./constants.js";
 
+/**
+ * The Vite environment server code runs in: the dev server's ModuleRunner
+ * environment, and the environment `vite build` builds the worker in.
+ */
+export const ZEROSHIP_ENVIRONMENT = "zeroship";
+
 const NODEISH_IMPORT_RE = /^(crypto|buffer|path|util|events|stream|os|url|http|https|fs|assert|process|async_hooks|timers|string_decoder|querystring|punycode|net|tls|dns|zlib|worker_threads|diagnostics_channel|perf_hooks|module)(\/.+)?$/;
 
 // ── DevEnvironment ─────────────────────────────────────────────────────────

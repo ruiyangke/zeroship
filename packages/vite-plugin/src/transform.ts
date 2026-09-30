@@ -1,6 +1,7 @@
 import type { Plugin } from "vite";
 import { relative, extname } from "node:path";
 import MagicString from "magic-string";
+import { ZEROSHIP_ENVIRONMENT } from "./environment.js";
 
 /**
  * Source modules whose named exports the transform recognizes as RPC
@@ -1202,6 +1203,10 @@ export function transformPlugin(state: TransformState): Plugin {
   return {
     name: "zeroship:transform",
     enforce: "pre" as const,
+    // One instance across the app builder's environments, so the procedures
+    // the client and worker builds discover land in the one `state` the
+    // build plugin packs.
+    sharedDuringBuild: true,
 
     configResolved(resolvedConfig: any) {
       root = resolvedConfig.root;
@@ -1213,13 +1218,11 @@ export function transformPlugin(state: TransformState): Plugin {
       },
       handler(this: any, code: string, id: string) {
         // Server environment detection:
-        //  - dev: `this.environment.name === "zeroship"` (dev-server creates it)
-        //  - prod build: Vite's `ssr: entry` build runs in environment `ssr`
-        //    (rolldown sets `this.environment.name === "ssr"`). We treat both
-        //    as the server side.
-        //  - prod client build: environment name is `"client"`.
+        //  - dev and `vite build`: the `zeroship` environment
+        //  - the dev archive: its build runs in Vite's `ssr` environment
+        //  - the client: environment name is `"client"`.
         const envName = this.environment?.name;
-        const isServerEnv = envName === "zeroship" || envName === "ssr";
+        const isServerEnv = envName === ZEROSHIP_ENVIRONMENT || envName === "ssr";
 
         // Each transform replaces this module's whole procedure contribution.
         // This also clears a previous contribution when HMR removes the

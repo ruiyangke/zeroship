@@ -3,23 +3,18 @@
  * `default = { fetch?, rpc? }` plus RPC procedures) MUST build
  * to a valid `.zship`.
  *
- * Root cause (pre-fix): in `"full"` mode the SSR sub-build is triggered
- * from the client environment's `writeBundle` hook. With zero client JS
- * inputs (no `index.html`, no `rollupOptions.input`) Vite/rolldown emits
- * no output bundle, so `writeBundle` NEVER fires — the SSR build is
- * skipped and `dist/` is never created. `closeBundle` still runs and
- * calls `emitZship`, which throws `zship: dist dir not found`.
+ * A client with no input emits no output bundle. The worker must be built
+ * and packed anyway, so it cannot hang off any hook of the client's output.
  *
- * This test runs a REAL `vite build` with the full `zeroship()` plugin
- * chain, given an empty process environment so nothing in the shell reaches
- * it, on a server-only fixture and asserts:
+ * This test runs a REAL `vite build` - the app builder the CLI creates -
+ * with the full `zeroship()` plugin chain, given an empty process
+ * environment so nothing in the shell reaches it, on a server-only fixture
+ * and asserts:
  *   - the build succeeds
  *   - `dist/app.zship` exists
  *   - the manifest has a `worker` with an `index.js` entry (the RPC
  *     dispatcher), and
  *   - the auto-derived RPC procedure resources are present.
- *
- * Pre-fix this test FAILS at `vite build` with the dist-dir error.
  */
 
 import { test, describe } from "node:test";
@@ -29,43 +24,15 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { randomUUID } from "node:crypto";
-import { zstdDecompressSync } from "node:zlib";
-import { build as viteBuild } from "vite";
+import { createBuilder, type InlineConfig } from "vite";
 
 import { zeroshipPlugins } from "../src/plugins.js";
+import { readZship } from "./helpers/zship-archive.js";
 
-// ── Minimal USTAR reader (manifest.json is the first entry) ────────────────
-
-function readZship(archive: Buffer): {
-  manifest: Record<string, unknown>;
-  entries: Set<string>;
-  bodies: Map<string, Buffer>;
-} {
-  const tar = zstdDecompressSync(archive);
-  let offset = 0;
-  let manifest: Record<string, unknown> | undefined;
-  const entries = new Set<string>();
-  const bodies = new Map<string, Buffer>();
-  while (offset + 512 <= tar.length) {
-    const header = tar.subarray(offset, offset + 512);
-    if (header.every((b) => b === 0)) break;
-    const name = header.subarray(0, 100).toString("utf8").replace(/\0.*$/, "");
-    const sizeOctal = header
-      .subarray(124, 136)
-      .toString("utf8")
-      .replace(/\0.*$/, "")
-      .trim();
-    const size = parseInt(sizeOctal, 8) || 0;
-    const body = tar.subarray(offset + 512, offset + 512 + size);
-    entries.add(name);
-    bodies.set(name, body);
-    if (name === "manifest.json") {
-      manifest = JSON.parse(body.toString("utf8"));
-    }
-    offset += 512 + Math.ceil(size / 512) * 512;
-  }
-  if (manifest == null) throw new Error("manifest.json not found in archive");
-  return { manifest, entries, bodies };
+/** Build the way `vite build` does. */
+async function viteBuild(config: InlineConfig): Promise<void> {
+  const builder = await createBuilder(config, null);
+  await builder.buildApp();
 }
 
 // A pure-backend app: `default = { fetch }`, NO `index.html`, NO client

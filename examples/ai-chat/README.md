@@ -79,9 +79,8 @@ work without modification:
   against any class implementing the spec ReadableStream surface;
   no reach into private fields.
 
-- **`process.env` preservation in SSR builds** —
-  `target: "webworker"` makes Rolldown statically rewrite
-  `process.env` to `{}`. The vite-plugin now adds
-  `define: { "process.env": "process.env" }` to keep the references
-  intact so the OpenAI provider reads `OPENAI_API_KEY` at runtime
-  from the env the runtime injects.
+- **`process.env` preservation in the worker build** —
+  the worker build would statically rewrite `process.env` to `{}`.
+  The vite-plugin defines `"process.env": "process.env"` for the worker
+  to keep the references intact, so the OpenAI provider reads
+  `OPENAI_API_KEY` at runtime from the env the runtime injects.

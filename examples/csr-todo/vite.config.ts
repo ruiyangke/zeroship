@@ -1,11 +1,11 @@
 // CSR demo — single React SPA + one RPC endpoint, bundled by `@zeroship/vite-plugin`.
 //
-// The plugin handles both halves:
-//   * Client build: `vite build` walks `index.html`, emits hashed JS/CSS chunks to dist/.
-//   * Server build: kicked off automatically from `writeBundle` for any `src/server.ts`
-//     it finds — bundles "use server" exports into dist/server/index.js.
+// `vite build` builds both halves, then the plugin packs them:
+//   * Client: walks `index.html`, emits hashed JS/CSS chunks to dist/.
+//   * Worker: the plugin's `zeroship` environment bundles the "use server"
+//     exports of the `src/server.ts` it finds into dist/server/index.js.
 //
-// After both builds finish, `closeBundle` packs everything into `dist/app.zship`.
+// After both builds finish, the plugin packs everything into `dist/app.zship`.
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import { zeroship } from "@zeroship/vite-plugin";

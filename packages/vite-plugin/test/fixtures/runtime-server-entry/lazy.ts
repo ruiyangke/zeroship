@@ -1,3 +1,4 @@
+"use server";
 import { env, currentRequestId } from "zeroship";
 import { query, stream } from "@zeroship/rpc/server";
 import { state, input } from "./state";

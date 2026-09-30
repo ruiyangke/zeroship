@@ -45,7 +45,7 @@ export {
 
 // `__makeServerProcedure` metadata adapter.
 //
-// The vite-plugin's SSR build wraps each user procedure with
+// The vite-plugin's worker build wraps each user procedure with
 // `__makeServerProcedure(impl, meta)` so it can copy `id`, `kind`, and
 // `wire` metadata onto the original export before synthetic-entry
 // binding.

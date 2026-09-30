@@ -4,9 +4,9 @@
 //
 // The build pipeline:
 //
-//   src/server/index.ts  ──► vite build --ssr ──► dist/server/index.js
-//   src/client/main.tsx  ──► vite build       ──► dist/<assets...>
-//                                                 dist/index.html
+//   src/client/main.tsx  ──► client environment   ──► dist/<assets...>
+//                                                      dist/index.html
+//   src/server.ts        ──► zeroship environment ──► dist/server/index.js
 //
 // We then walk `dist/`, content-hash every file, emit a manifest, and pack
 // it into a tar.zst archive at `dist/app.zship`. The wire format is schema v2.
@@ -451,7 +451,7 @@ export async function emitZship(
   // 6. Build manifest.worker.
   let worker: WorkerCode | null = null;
   if (workerFiles.length > 0) {
-    // Pick the entry. By convention Vite's SSR build emits `index.js` in
+    // Pick the entry. The worker build emits `index.js` in
     // `dist/server/`. If the user customizes the entry filename, we still
     // pick it deterministically by checking for the conventional names
     // first, then falling back to the alphabetically-first .js file.
@@ -726,7 +726,7 @@ async function hasMigrationSources(root: string, migrationsDir: string): Promise
 // ── Manifest helpers ────────────────────────────────────────────────────────
 
 function pickWorkerEntry(workerFiles: CollectedFile[]): string {
-  // Prefer conventional names emitted by Vite SSR builds.
+  // Prefer the conventional names a server build emits.
   const candidates = ["index.js", "index.mjs", "main.js", "main.mjs", "server.js"];
   // Strip the server-dir prefix so specifiers are relative to the worker bundle.
   const specifiers = workerFiles.map((f) => {

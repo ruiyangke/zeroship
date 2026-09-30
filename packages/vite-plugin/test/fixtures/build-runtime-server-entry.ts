@@ -1,49 +1,69 @@
-import assert from "node:assert/strict";
-import { fileURLToPath } from "node:url";
-import { resolve } from "node:path";
-import { build, type InlineConfig } from "vite";
-import { buildSsrInlineConfig } from "../../src/build.js";
-import { zeroshipModulePlugin } from "../../src/zeroship-module.js";
-import { rpcRegistryPlugin, type ServerBinding, SERVER_ENTRY_VIRTUAL_ID } from "../../src/rpc-registry.js";
+// Build the fixture app in `runtime-server-entry/` the way `vite build` does
+// and print the worker modules it packed, entry first, for
+// `crates/zeroship-runtime/tests/vite_server_entry.rs` to load into a runtime.
+//
+// The app loads `hello.greeting` through a plugin of its own, so the worker
+// only builds when the app's plugins apply to server code. The app is copied
+// to a temporary root, because the build writes its `dist` there.
 
-const root = fileURLToPath(new URL("./runtime-server-entry/", import.meta.url));
-const procedures: ServerBinding[] = [
-  { wireId: "eager", sourceFile: "./eager.ts", exportName: "eager", kind: "query" },
-  { wireId: "__proto__", sourceFile: "./lazy.ts", exportName: "lazy", kind: "query", lazy: true },
-  { wireId: "tokens", sourceFile: "./lazy.ts", exportName: "tokens", kind: "stream", lazy: true },
-];
-const bindings = new Map(procedures.map(binding => [
-  binding.wireId, { ...binding, sourceFile: resolve(root, binding.sourceFile) },
-]));
-const config = buildSsrInlineConfig({
-  root,
-  ssrEntry: SERVER_ENTRY_VIRTUAL_ID,
-  outDir: resolve(root, "dist"),
-  ssrPlugins: [zeroshipModulePlugin(), rpcRegistryPlugin({
-    userEntryRel: resolve(root, "user.ts"),
-    getBindings: () => bindings,
-  })],
-}) as InlineConfig;
-const artifact = await build({
-  ...config,
+import assert from "node:assert/strict";
+import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { createBuilder } from "vite";
+import { readZship, workerModules } from "../helpers/zship-archive.js";
+
+const source = fileURLToPath(new URL("./runtime-server-entry/", import.meta.url));
+const plugins = fileURLToPath(new URL("../../src/plugins.ts", import.meta.url));
+const sdk = (path: string) => fileURLToPath(new URL(`../../../${path}`, import.meta.url));
+
+const root = await mkdtemp(join(tmpdir(), "zs-runtime-server-entry-"));
+try {
+  await cp(source, root, { recursive: true });
+  await writeFile(join(root, "vite.config.mjs"), `import { zeroshipPlugins } from ${JSON.stringify(plugins)};
+
+function greeting() {
+  return {
+    name: "fixture:greeting",
+    transform(code, id) {
+      if (!id.endsWith(".greeting")) return null;
+      return { code: "export default " + JSON.stringify(code.trim()) + ";", map: null, moduleType: "js" };
+    },
+  };
+}
+
+export default {
   logLevel: "silent",
   resolve: {
     alias: {
-      "@zeroship/rpc/server": fileURLToPath(new URL("../../../rpc/src/server.ts", import.meta.url)),
+      "@zeroship/rpc/server": ${JSON.stringify(sdk("rpc/src/server.ts"))},
+      "@zeroship/rpc/client": ${JSON.stringify(sdk("rpc/src/index.ts"))},
+      "@zeroship/server": ${JSON.stringify(sdk("server/src/index.ts"))},
     },
   },
-  build: {
-    ...config.build,
-    write: false,
-  },
-});
-assert.ok(!Array.isArray(artifact) && "output" in artifact, "Vite must return its server artifact");
-const chunks = artifact.output.filter(output => output.type === "chunk");
-const entry = chunks.find(chunk => chunk.isEntry);
-assert.ok(entry, "Vite must emit an entry chunk");
-assert.ok(chunks.some(chunk => chunk.dynamicImports.length > 0), "fixture must exercise an emitted lazy chunk: " + JSON.stringify(chunks.map(chunk => ({ file: chunk.fileName, imports: chunk.dynamicImports, modules: chunk.moduleIds }))));
-assert.ok(chunks.some(chunk => chunk.imports.includes("zeroship")), "artifact must import the native module");
-process.stdout.write(JSON.stringify(
-  [entry, ...chunks.filter(chunk => chunk !== entry)]
-    .map(chunk => ({ specifier: chunk.fileName, source: chunk.code })),
-));
+  plugins: [
+    greeting(),
+    ...zeroshipPlugins({ config: (c) => ({ build: { ...c.build, serverEntry: "user.ts" } }) }, {}),
+  ],
+};
+`);
+  // stdout carries the module graph; the build's own log goes to stderr.
+  console.log = console.error;
+  const builder = await createBuilder({
+    root,
+    configFile: join(root, "vite.config.mjs"),
+    configLoader: "native",
+    logLevel: "silent",
+  }, null);
+  await builder.buildApp();
+
+  const { entry, modules } = workerModules(readZship(await readFile(join(root, "dist", "app.zship"))));
+  assert.ok(modules.has(entry), "the packed worker must contain its entry");
+  process.stdout.write(JSON.stringify(
+    [entry, ...[...modules.keys()].filter(path => path !== entry)]
+      .map(path => ({ specifier: path, source: modules.get(path)!.toString("utf8") })),
+  ));
+} finally {
+  await rm(root, { recursive: true, force: true });
+}
