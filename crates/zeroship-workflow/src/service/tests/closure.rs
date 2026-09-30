@@ -102,7 +102,7 @@ async fn drained(scope: &super::super::AppWorkflows, value: i64) -> bool {
 #[compio::test]
 async fn sqlite_closed_epoch_fences_acceptance_under_a_still_valid_lease() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("zs-workflow.sqlite");
+    let path = journal_file(dir.path());
     schema::initialize_sqlite(&path).unwrap();
     Box::pin(fenced_acceptance(Rc::new(sqlite_store(&path).await))).await;
 }
@@ -186,7 +186,7 @@ async fn blocked_by(admin: &compio_postgres::Client, blocker: i32) -> i32 {
         loop {
             let row = admin
                 .query_one(
-                    "SELECT min(pid) FROM pg_stat_activity WHERE usename='customer_worker' \
+                    "SELECT min(pid) FROM pg_stat_activity WHERE usename='zeroship_workflow' \
                      AND wait_event_type='Lock' AND $1=ANY(pg_blocking_pids(pid))",
                     &[&blocker],
                 )
@@ -212,12 +212,7 @@ async fn postgres_acceptance_and_closure_serialize_on_the_app_state_row() {
         registered_service(Rc::new(fixture.store.clone())).await;
     let closer = WorkflowService::open(
         Rc::new(
-            orm_store(
-                &fixture
-                    .admin_url
-                    .replacen("postgres@", "customer_worker@", 1),
-                fixture.store.binding.schema().clone(),
-            )
+            orm_store(&fixture.journal_url)
             .await,
         ),
         service.policies.clone(),
@@ -232,7 +227,7 @@ async fn postgres_acceptance_and_closure_serialize_on_the_app_state_row() {
         .get(0);
     admin
         .batch_execute(&format!(
-            "CREATE FUNCTION customer.gate_closure() RETURNS trigger LANGUAGE plpgsql AS \
+            "CREATE FUNCTION workflow_manager.gate_closure() RETURNS trigger LANGUAGE plpgsql AS \
              $$ BEGIN PERFORM pg_advisory_xact_lock({GATE}); RETURN NEW; END $$;"
         ))
         .await
@@ -242,8 +237,8 @@ async fn postgres_acceptance_and_closure_serialize_on_the_app_state_row() {
     // waits on the gate, and Close waits behind it.
     admin
         .batch_execute(
-            "CREATE TRIGGER gate_acceptance BEFORE INSERT ON customer.__zeroship_workflow_requests \
-             FOR EACH ROW EXECUTE FUNCTION customer.gate_closure();",
+            "CREATE TRIGGER gate_acceptance BEFORE INSERT ON workflow_manager.__zeroship_workflow_requests \
+             FOR EACH ROW EXECUTE FUNCTION workflow_manager.gate_closure();",
         )
         .await
         .unwrap();
@@ -284,7 +279,7 @@ async fn postgres_acceptance_and_closure_serialize_on_the_app_state_row() {
     );
     admin
         .batch_execute(
-            "DROP TRIGGER gate_acceptance ON customer.__zeroship_workflow_requests;",
+            "DROP TRIGGER gate_acceptance ON workflow_manager.__zeroship_workflow_requests;",
         )
         .await
         .unwrap();
@@ -294,8 +289,8 @@ async fn postgres_acceptance_and_closure_serialize_on_the_app_state_row() {
     install(&service, &app, 1, AppPolicy::default(), Some(2));
     admin
         .batch_execute(
-            "CREATE TRIGGER gate_receipt BEFORE INSERT ON customer.__zeroship_workflow_job_receipts \
-             FOR EACH ROW EXECUTE FUNCTION customer.gate_closure();",
+            "CREATE TRIGGER gate_receipt BEFORE INSERT ON workflow_manager.__zeroship_workflow_job_receipts \
+             FOR EACH ROW EXECUTE FUNCTION workflow_manager.gate_closure();",
         )
         .await
         .unwrap();
@@ -326,8 +321,8 @@ async fn postgres_acceptance_and_closure_serialize_on_the_app_state_row() {
     assert_eq!(closed(&service, &app).await, 2);
     admin
         .batch_execute(
-            "DROP TRIGGER gate_receipt ON customer.__zeroship_workflow_job_receipts; \
-             DROP FUNCTION customer.gate_closure();",
+            "DROP TRIGGER gate_receipt ON workflow_manager.__zeroship_workflow_job_receipts; \
+             DROP FUNCTION workflow_manager.gate_closure();",
         )
         .await
         .unwrap();
@@ -336,7 +331,7 @@ async fn postgres_acceptance_and_closure_serialize_on_the_app_state_row() {
 #[compio::test]
 async fn sqlite_closure_reports_each_closed_drain_predicate() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("zs-workflow.sqlite");
+    let path = journal_file(dir.path());
     schema::initialize_sqlite(&path).unwrap();
     Box::pin(drain_predicates(Rc::new(sqlite_store(&path).await))).await;
 }
@@ -443,7 +438,7 @@ async fn drain_predicates(store: Rc<OrmStore>) {
 #[compio::test]
 async fn sqlite_closure_runs_under_archived_policy_and_replays_its_receipt() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("zs-workflow.sqlite");
+    let path = journal_file(dir.path());
     schema::initialize_sqlite(&path).unwrap();
     Box::pin(archived_and_replayed(Rc::new(sqlite_store(&path).await))).await;
 }
@@ -688,7 +683,7 @@ async fn restart_path(fixture: &Fenced, epoch: i64) {
 
 async fn sqlite_fenced_app() -> (tempfile::TempDir, Fenced) {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("zs-workflow.sqlite");
+    let path = journal_file(dir.path());
     schema::initialize_sqlite(&path).unwrap();
     let fixture = fenced_app(Rc::new(sqlite_store(&path).await)).await;
     (dir, fixture)

@@ -34,8 +34,9 @@ const bytewiseColumns = {
   tasks: ["job_id"],
 };
 
-// The customer owns the journal. Provisioning supplies its resolved schema;
-// both database adapters use the canonical definition and reserved table names.
+// The workflow service owns the journal. On PostgreSQL `namespace` is a
+// placeholder the platform migration binds to the service's schema; both
+// database adapters use the canonical definition and reserved table names.
 export function workflowSchema(namespace) {
   const identifiers = new Set();
   const columnsInSchema = new Set();

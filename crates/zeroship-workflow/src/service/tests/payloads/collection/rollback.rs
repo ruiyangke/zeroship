@@ -17,8 +17,8 @@ impl Fault {
                 }).await.unwrap();
             }
             Self::Postgres(client) => client.batch_execute(if enabled {
-                "CREATE FUNCTION customer.fail_collection() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected collection receipt failure'; END $$; CREATE TRIGGER fail_collection BEFORE UPDATE OF outcome ON customer.__zeroship_workflow_job_receipts FOR EACH ROW EXECUTE FUNCTION customer.fail_collection();"
-            } else { "DROP TRIGGER fail_collection ON customer.__zeroship_workflow_job_receipts; DROP FUNCTION customer.fail_collection();" }).await.unwrap(),
+                "CREATE FUNCTION workflow_manager.fail_collection() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected collection receipt failure'; END $$; CREATE TRIGGER fail_collection BEFORE UPDATE OF outcome ON workflow_manager.__zeroship_workflow_job_receipts FOR EACH ROW EXECUTE FUNCTION workflow_manager.fail_collection();"
+            } else { "DROP TRIGGER fail_collection ON workflow_manager.__zeroship_workflow_job_receipts; DROP FUNCTION workflow_manager.fail_collection();" }).await.unwrap(),
         }
     }
     async fn confirmation(&self, enabled: bool) {
@@ -33,8 +33,8 @@ impl Fault {
                 }).await.unwrap();
             }
             Self::Postgres(client) => client.batch_execute(if enabled {
-                "CREATE FUNCTION customer.fail_collection_confirmation() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.state='deleted' THEN RAISE EXCEPTION 'injected collection confirmation failure'; END IF; RETURN NEW; END $$; CREATE TRIGGER fail_collection_confirmation BEFORE UPDATE OF state ON customer.__zeroship_workflow_payloads FOR EACH ROW EXECUTE FUNCTION customer.fail_collection_confirmation();"
-            } else { "DROP TRIGGER fail_collection_confirmation ON customer.__zeroship_workflow_payloads; DROP FUNCTION customer.fail_collection_confirmation();" }).await.unwrap(),
+                "CREATE FUNCTION workflow_manager.fail_collection_confirmation() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.state='deleted' THEN RAISE EXCEPTION 'injected collection confirmation failure'; END IF; RETURN NEW; END $$; CREATE TRIGGER fail_collection_confirmation BEFORE UPDATE OF state ON workflow_manager.__zeroship_workflow_payloads FOR EACH ROW EXECUTE FUNCTION workflow_manager.fail_collection_confirmation();"
+            } else { "DROP TRIGGER fail_collection_confirmation ON workflow_manager.__zeroship_workflow_payloads; DROP FUNCTION workflow_manager.fail_collection_confirmation();" }).await.unwrap(),
         }
     }
 }
@@ -42,7 +42,7 @@ impl Fault {
 #[compio::test]
 async fn sqlite_collect_receipt_failure_rolls_back_scan_only() {
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("zs-workflow.sqlite");
+    let path = journal_file(directory.path());
     let store = Rc::new(sqlite_store(&path).await);
     Box::pin(rollback(store, Fault::Sqlite(path))).await;
 }
@@ -60,7 +60,7 @@ async fn postgres_collect_receipt_failure_rolls_back_scan_only() {
 #[compio::test]
 async fn sqlite_collect_confirmation_failure_leaves_recoverable_delete() {
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("zs-workflow.sqlite");
+    let path = journal_file(directory.path());
     let store = Rc::new(sqlite_store(&path).await);
     Box::pin(uncertain_delete(store, Some(Fault::Sqlite(path)))).await;
 }

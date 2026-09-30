@@ -905,18 +905,6 @@ async fn deploy_service(
     .await
 }
 
-async fn schema_exists(conn: &compio_postgres::Client, app_id: &AppId) -> bool {
-    let schema = app_id.as_str();
-    let rows = conn
-        .query(
-            "SELECT 1 FROM information_schema.schemata WHERE schema_name = $1",
-            &[&schema],
-        )
-        .await
-        .expect("schema probe");
-    !rows.is_empty()
-}
-
 #[compio::test]
 async fn deploy_rejects_legacy_migration_approval_query() {
     let db_url = db_url();
@@ -970,8 +958,15 @@ async fn deploy_rejects_legacy_migration_approval_query() {
     common::drain_pg().await;
 }
 
+/// A bundle that still carries `manifest.migrations` is refused, and nothing it
+/// carries - its migration document included - is written.
+///
+/// The refusal is decided on the manifest, which is the bundle's first entry, so
+/// it lands before any blob is written. A refusal moved behind the blob writes
+/// would still answer 400 and leave the migration document stored, which is the
+/// regression the blob assertion is here for.
 #[compio::test]
-async fn deploy_rejects_legacy_manifest_migrations_and_runs_no_migration() {
+async fn deploy_rejects_legacy_manifest_migrations_and_writes_no_blob() {
     let db_url = db_url();
     let fx = build_test_state(&db_url, "legacy-manifest").await;
     let app = deploy_service(fx.state.clone()).await;
@@ -1013,9 +1008,37 @@ async fn deploy_rejects_legacy_manifest_migrations_and_runs_no_migration() {
                 && detail.contains("migration service")),
         "legacy manifest error should point to the migration service: {json}"
     );
+    // On the blob directory, not the store root: the store creates `blobs/`
+    // and `manifests/` when it is constructed, so the root is never empty.
+    let blobs = fx.blob_root.join("blobs");
     assert!(
-        !schema_exists(&fx.state.control_pg, &app_id).await,
-        "deploy must not create/apply the per-app schema from a legacy migration-bearing bundle"
+        dir_is_empty(&blobs),
+        "a refused migration-bearing bundle must write no blob, its migration document included"
+    );
+
+    // THE CONTROL. `dir_is_empty` also answers true for a directory that does
+    // not exist, so the assertion above would hold for a probe aimed anywhere.
+    // The same worker module without `manifest.migrations` deploys to the same
+    // app, and the same probe must then see what it wrote: the refusal is the
+    // key's, and the probe reaches the store the handler writes.
+    let req = test::TestRequest::post()
+        .uri(&format!("/api/apps/{}/deploy", app_id.as_str()))
+        .header("authorization", pat.bearer())
+        .header("content-type", "application/x-zship")
+        .header("idempotency-key", DeployCommandId::mint().as_str())
+        .set_payload(worker_only_zship())
+        .to_request();
+    // Status only: a retained `WebResponse` keeps the app state - and its
+    // Postgres client - alive past the teardown at the end of this test.
+    let status = test::call_service(&app, req).await.status();
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the same worker module without manifest.migrations must deploy"
+    );
+    assert!(
+        !dir_is_empty(&blobs),
+        "a deploy that succeeded must have written its blobs where the probe looks"
     );
 
     let _ = fx.state.registry.archive_app(&app_id).await;

@@ -49,7 +49,7 @@ impl WorkflowService {
     pub async fn verify(&self) -> Result<(), WorkflowServiceError> {
         self.store.verify().await
     }
-    /// Open an already provisioned customer journal with trusted host policy.
+    /// Open an already provisioned journal with trusted host policy.
     ///
     /// # Errors
     /// Refuses unavailable or incompatible journal storage.
@@ -98,7 +98,7 @@ impl WorkflowService {
         })
     }
 
-    /// Open a creator journal transaction bound to the captured policy.
+    /// Open a journal transaction bound to the captured policy.
     ///
     /// # Errors
     /// Reports a withdrawn policy capture and journal storage failures.

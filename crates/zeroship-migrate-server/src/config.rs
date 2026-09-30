@@ -138,7 +138,8 @@ pub struct MigrateServerSettings {
     #[config(name = "migrate_server.database_url")]
     pub database_url: Secret<String>,
 
-    /// Privileged `PostgreSQL` DSN used to provision/apply per-app migrations.
+    /// Privileged `PostgreSQL` DSN of the cluster this service reconciles: it
+    /// provisions the databases declared there and applies their migrations.
     #[config(name = "migrate_server.provision_database_url")]
     pub provision_database_url: Secret<String>,
 

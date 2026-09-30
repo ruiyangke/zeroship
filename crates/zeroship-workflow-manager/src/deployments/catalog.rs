@@ -1,4 +1,4 @@
-//! Registration in the normal deployment catalog, independent of a customer journal.
+//! Registration in the normal deployment catalog, independent of the workflow journal.
 
 use super::Error;
 use super::{DeploymentHolds, deploys, invalid_storage};

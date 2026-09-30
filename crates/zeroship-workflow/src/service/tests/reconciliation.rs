@@ -664,8 +664,8 @@ impl ReceiptFault {
                 .unwrap();
             }
             Self::Postgres(client) => client.batch_execute(if enabled {
-                "CREATE FUNCTION customer.fail_reconciliation() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected receipt failure'; END $$; CREATE TRIGGER fail_reconciliation BEFORE UPDATE OF outcome ON customer.__zeroship_workflow_job_receipts FOR EACH ROW EXECUTE FUNCTION customer.fail_reconciliation();"
-            } else { "DROP TRIGGER fail_reconciliation ON customer.__zeroship_workflow_job_receipts; DROP FUNCTION customer.fail_reconciliation();" }).await.unwrap(),
+                "CREATE FUNCTION workflow_manager.fail_reconciliation() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected receipt failure'; END $$; CREATE TRIGGER fail_reconciliation BEFORE UPDATE OF outcome ON workflow_manager.__zeroship_workflow_job_receipts FOR EACH ROW EXECUTE FUNCTION workflow_manager.fail_reconciliation();"
+            } else { "DROP TRIGGER fail_reconciliation ON workflow_manager.__zeroship_workflow_job_receipts; DROP FUNCTION workflow_manager.fail_reconciliation();" }).await.unwrap(),
         }
     }
 }
@@ -673,7 +673,7 @@ impl ReceiptFault {
 #[compio::test]
 async fn sqlite_reconciliation_receipt_failure_does_not_advance_the_scan() {
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("zs-workflow.sqlite");
+    let path = journal_file(directory.path());
     let store = Rc::new(sqlite_store(&path).await);
     Box::pin(receipt_rollback(store, ReceiptFault::Sqlite(path))).await;
 }

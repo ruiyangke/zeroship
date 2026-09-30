@@ -226,10 +226,10 @@ pub fn from_uuid_string(prefix: &str, uuid_str: &str) -> Result<String, String> 
 pub const USER_PREFIX: &str = "usr";
 /// App entity typed-id prefix. There is no `new_app_id` free function beside
 /// the other `new_*_id` minters: an app id's ONLY minter is
-/// [`crate::app_id::AppId::mint`], because the value seeds the per-app schema
-/// name, both role names, the publication digest and the encryption salt, and a
-/// `String` returned from here would reach all of them with no type saying
-/// which of those it was.
+/// [`crate::app_id::AppId::mint`], because the value seeds the routing key and
+/// the lifecycle lock seed `zeroship_core::app_derivation` derives from it, and
+/// a `String` returned from here would reach both with no type saying which of
+/// those it was.
 pub const APP_PREFIX: &str = "app";
 
 /// Immutable normal app deployment identity.

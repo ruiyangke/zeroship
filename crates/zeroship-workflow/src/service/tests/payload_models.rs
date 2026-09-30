@@ -21,7 +21,7 @@ impl PayloadOpener for Descriptor<'_> {
 #[compio::test]
 async fn sqlite_payload_quota_uses_exact_scoped_aggregates() {
     let directory = tempfile::tempdir().unwrap();
-    let store = sqlite_store(&directory.path().join("zs-workflow.sqlite")).await;
+    let store = sqlite_store(&journal_file(directory.path())).await;
     quota_contract(Rc::new(store)).await;
 }
 

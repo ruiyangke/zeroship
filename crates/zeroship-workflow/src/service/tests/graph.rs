@@ -14,7 +14,7 @@ use zeroship_data_orm::{
 #[compio::test]
 async fn sqlite_child_graph_rejects_ancestors_and_current_generation_cycles() {
     let directory = tempfile::tempdir().unwrap();
-    let store = sqlite_store(&directory.path().join("zs-workflow.sqlite")).await;
+    let store = sqlite_store(&journal_file(directory.path())).await;
     dependency_contract(Rc::new(store)).await;
 }
 
@@ -27,7 +27,7 @@ async fn postgres_child_graph_rejects_ancestors_and_current_generation_cycles() 
 #[compio::test]
 async fn sqlite_completion_wakes_current_parents_across_wait_pages() {
     let directory = tempfile::tempdir().unwrap();
-    let store = sqlite_store(&directory.path().join("zs-workflow.sqlite")).await;
+    let store = sqlite_store(&journal_file(directory.path())).await;
     wake_contract(Rc::new(store)).await;
 }
 
@@ -40,7 +40,7 @@ async fn postgres_completion_wakes_current_parents_across_wait_pages() {
 #[compio::test]
 async fn sqlite_restart_inspects_terminal_descendants_and_rejects_corrupt_ancestry() {
     let directory = tempfile::tempdir().unwrap();
-    let store = sqlite_store(&directory.path().join("zs-workflow.sqlite")).await;
+    let store = sqlite_store(&journal_file(directory.path())).await;
     restart_contract(Rc::new(store)).await;
 }
 
@@ -53,7 +53,7 @@ async fn postgres_restart_inspects_terminal_descendants_and_rejects_corrupt_ance
 #[compio::test]
 async fn sqlite_a_parent_at_the_child_depth_ceiling_starts_no_further_child() {
     let directory = tempfile::tempdir().unwrap();
-    let store = sqlite_store(&directory.path().join("zs-workflow.sqlite")).await;
+    let store = sqlite_store(&journal_file(directory.path())).await;
     Box::pin(depth_contract(Rc::new(store))).await;
 }
 

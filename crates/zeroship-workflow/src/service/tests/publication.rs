@@ -29,10 +29,10 @@ impl FaultDb {
                  BEGIN SELECT RAISE(ABORT, 'injected publication failure'); END;"
             )).await,
             Self::Postgres(connection) => connection.batch_execute(&format!(
-                "CREATE FUNCTION customer.fail_publication() RETURNS trigger LANGUAGE plpgsql AS \
+                "CREATE FUNCTION workflow_manager.fail_publication() RETURNS trigger LANGUAGE plpgsql AS \
                  $$ BEGIN RAISE EXCEPTION 'injected publication failure'; END $$; \
-                 CREATE TRIGGER fail_publication BEFORE {event} ON customer.__zeroship_workflow_job_publications \
-                 FOR EACH ROW EXECUTE FUNCTION customer.fail_publication();"
+                 CREATE TRIGGER fail_publication BEFORE {event} ON workflow_manager.__zeroship_workflow_job_publications \
+                 FOR EACH ROW EXECUTE FUNCTION workflow_manager.fail_publication();"
             )).await.unwrap(),
         }
     }
@@ -40,8 +40,8 @@ impl FaultDb {
         match self {
             Self::Sqlite(connection) => sqlite_ddl(connection, "DROP TRIGGER fail_publication".into()).await,
             Self::Postgres(connection) => connection.batch_execute(
-                "DROP TRIGGER fail_publication ON customer.__zeroship_workflow_job_publications; \
-                 DROP FUNCTION customer.fail_publication();"
+                "DROP TRIGGER fail_publication ON workflow_manager.__zeroship_workflow_job_publications; \
+                 DROP FUNCTION workflow_manager.fail_publication();"
             ).await.unwrap(),
         }
     }
@@ -61,7 +61,7 @@ macro_rules! case {
         #[compio::test]
         async fn $sqlite() {
             let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("zs-workflow.sqlite");
+            let path = journal_file(dir.path());
             let store = sqlite_store(&path).await;
             $contract(
                 Rc::new(store),
@@ -116,7 +116,7 @@ case!(
 
 /// A publishable job's id is the one its own content derives, so an intent
 /// whose specification moved off that key is refused, and an intent wearing an
-/// operation no creator journal publishes derives no key at all.
+/// operation no journal publishes derives no key at all.
 async fn derived_keys(store: Rc<OrmStore>, _: &FaultDb) {
     let (service, app, _, _platform) = registered_service(store).await;
     let scope = service.fixture_app(app.clone());

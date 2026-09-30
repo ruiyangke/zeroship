@@ -1,4 +1,4 @@
-//! Customer-journal intents for the platform's deployment retention protocol.
+//! Journal intents for the platform's deployment retention protocol.
 
 #![expect(
     clippy::future_not_send,
@@ -211,8 +211,8 @@ impl WorkflowService {
         .await
     }
 
-    /// Close admission and record release only when the customer journal has no
-    /// retained execution or scheduling references. Terminal history still pins code.
+    /// Close admission and record release only when the journal has no retained
+    /// execution or scheduling references. Terminal history still pins code.
     ///
     /// # Errors
     /// Refuses foreign scopes, retained dependencies, inconsistent hold state,
@@ -280,7 +280,7 @@ impl WorkflowService {
     }
 
     /// Retry durable acquisition or release after disconnection, lost replies or
-    /// host restart. Platform I/O never holds a customer journal transaction open.
+    /// host restart. Platform I/O never holds a journal transaction open.
     ///
     /// # Errors
     /// Refuses foreign scopes, invalid intents, stale acknowledgements, and

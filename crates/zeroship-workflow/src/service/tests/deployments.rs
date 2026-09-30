@@ -72,7 +72,7 @@ async fn a_host_with_no_artifact_store_keeps_its_holds_and_refuses_a_read() {
 #[compio::test]
 async fn sqlite_deployments_survive_redeploy_restart_corruption_and_repair() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("zs-workflow.sqlite");
+    let path = journal_file(dir.path());
     schema::initialize_sqlite(&path).unwrap();
     deployment_contract(Rc::new(sqlite_store(&path).await), Deployments::new().await).await;
 }
@@ -87,7 +87,7 @@ async fn postgres_deployments_survive_redeploy_restart_corruption_and_repair() {
 async fn normal_app_deployments_load_from_s3() {
     let fixture = s3_fixture::S3Server::start();
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("zs-workflow.sqlite");
+    let path = journal_file(dir.path());
     schema::initialize_sqlite(&path).unwrap();
     deployment_contract(
         Rc::new(sqlite_store(&path).await),
@@ -380,7 +380,7 @@ async fn an_app_binding_refuses_an_app_it_was_not_assigned() {
 #[compio::test]
 async fn a_parked_deployment_refuses_the_settlement_of_work_it_already_ran() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("zs-workflow.sqlite");
+    let path = journal_file(dir.path());
     schema::initialize_sqlite(&path).unwrap();
     let store = Rc::new(sqlite_store(&path).await);
     let deployments = Deployments::new().await;

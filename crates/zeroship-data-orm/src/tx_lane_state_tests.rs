@@ -196,7 +196,7 @@ fn clear_pending_emits_on_empty_is_idempotent() {
 // Every slot below must be PER-APP, not a single per-OS-thread cell shared by all
 // co-resident apps: a shared cell lets app B observe and drain app A's parked
 // transaction client (running B's SQL inside A's transaction, snapshot, and
-// per-app role), corrupt A's savepoint bookkeeping, and drain A's pre-commit
+// binding role), corrupt A's savepoint bookkeeping, and drain A's pre-commit
 // broker queue. These tests pin the per-app ownership contract.
 
 fn run_async<F: std::future::Future>(f: F) -> F::Output {

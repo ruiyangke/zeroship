@@ -20,7 +20,7 @@ async fn sqlite_restart_copies_complete_scoped_prefix_and_rolls_back_failed_page
     let store = sqlite_store(&directory.path().join("workflow.sqlite")).await;
     contract(
         Rc::new(store),
-        Fault::Sqlite(directory.path().join("zs-workflow.sqlite")),
+        Fault::Sqlite(journal_file(directory.path())),
     )
     .await;
 }
@@ -54,11 +54,11 @@ impl Fault {
             Self::Postgres(url) => connect(url)
                 .await
                 .batch_execute(&format!(
-                    "CREATE FUNCTION customer.restart_copy_fault() RETURNS trigger LANGUAGE plpgsql AS $$
+                    "CREATE FUNCTION workflow_manager.restart_copy_fault() RETURNS trigger LANGUAGE plpgsql AS $$
                      BEGIN IF NEW.generation=2 AND NEW.slot='step' AND NEW.ordinal={last_retained}
                      THEN RAISE EXCEPTION 'restart copy fault'; END IF; RETURN NEW; END $$;
-                     CREATE TRIGGER restart_copy_fault BEFORE INSERT ON customer.__zeroship_workflow_payload_refs
-                     FOR EACH ROW EXECUTE FUNCTION customer.restart_copy_fault();"
+                     CREATE TRIGGER restart_copy_fault BEFORE INSERT ON workflow_manager.__zeroship_workflow_payload_refs
+                     FOR EACH ROW EXECUTE FUNCTION workflow_manager.restart_copy_fault();"
                 ))
                 .await
                 .unwrap(),
@@ -73,8 +73,8 @@ impl Fault {
             Self::Postgres(url) => connect(url)
                 .await
                 .batch_execute(
-                    "DROP TRIGGER restart_copy_fault ON customer.__zeroship_workflow_payload_refs;
-                     DROP FUNCTION customer.restart_copy_fault();",
+                    "DROP TRIGGER restart_copy_fault ON workflow_manager.__zeroship_workflow_payload_refs;
+                     DROP FUNCTION workflow_manager.restart_copy_fault();",
                 )
                 .await
                 .unwrap(),

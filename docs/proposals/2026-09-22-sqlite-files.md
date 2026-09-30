@@ -140,18 +140,12 @@ That pin is the whole reason a creator's own tables are not in WAL on the dev ti
 (`crates/zeroship-data-orm/src/tests/sqlite/transactions.rs`) records the pair as it stands:
 an attached app file answers `delete` and `main` answers `wal`.
 
-**And it puts two hosts in disagreement about one file.** `initialize_sqlite` in
-`crates/zeroship-workflow/src/service/schema.rs` opens the app file and runs
-
-```rust
-conn.pragma_update(None, "journal_mode", "WAL")
-```
-
-on it, while the migration engine pins the same file to DELETE and refuses to run otherwise.
-`journal_mode = WAL` is persistent, so the two hosts are writing opposite settings to one file,
-and which one a later open finds depends on which ran last. Neither is wrong on its own terms.
-The conflict exists because the migration engine needs a mode the runtime does not, and it needs
-it only because the journal is in a second file.
+**The workflow journal is not a party to that pin.** `initialize_sqlite` in
+`crates/zeroship-workflow/src/service/schema.rs` sets `journal_mode = WAL` on the file it installs
+into, and that file is the workflow journal's own: `journal_binding()` in
+`crates/zeroship-workflow/src/service/store.rs` keeps the journal in a file apart from every
+database's. The migration engine's DELETE pin and the workflow journal's WAL never meet on one
+file.
 
 **So: fold it in.** A database's journal describes that database. With the journal inside the file
 it describes, a migration is one transaction against one database, the super-journal requirement

@@ -39,7 +39,7 @@ fn seed(scope: usize, generation: i64) -> Vec<u8> {
 #[compio::test]
 async fn sqlite_model_journal_reads_preserve_scope_and_complete_history() {
     let directory = tempfile::tempdir().unwrap();
-    let store = sqlite_store(&directory.path().join("zs-workflow.sqlite")).await;
+    let store = sqlite_store(&journal_file(directory.path())).await;
     read_contract(Rc::new(store)).await;
 }
 
@@ -314,7 +314,7 @@ async fn read_contract(store: Rc<OrmStore>) {
 #[compio::test]
 async fn sqlite_model_replayed_failure_carries_only_the_bridge_keys() {
     let directory = tempfile::tempdir().unwrap();
-    let store = sqlite_store(&directory.path().join("zs-workflow.sqlite")).await;
+    let store = sqlite_store(&journal_file(directory.path())).await;
     replayed_error_contract(Rc::new(store)).await;
 }
 

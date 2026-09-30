@@ -1361,10 +1361,10 @@ fn recovery(manager: &NativeManager) -> zeroship_workflow_manager::recovery::Rec
     .unwrap()
 }
 
-/// Close delivered to a creator journal fences ingress under a still-valid
+/// Close delivered to a journal fences ingress under a still-valid
 /// epoch, and a propagation page claimed after closing began commits intents
 /// after that fence. Its dispatch ticket above the closing watermark keeps the
-/// manager's responsibility open over separate creator and manager databases.
+/// manager's responsibility open over separate journal and manager databases.
 #[compio::test]
 async fn closing_watermark_keeps_late_delivered_intents_across_separate_databases() {
     use zeroship_workflow_manager::recovery::{DutyKind, ScopeState};
@@ -1442,7 +1442,7 @@ async fn closing_watermark_keeps_late_delivered_intents_across_separate_database
     assert_eq!(
         kept.state,
         ScopeState::Open,
-        "retired while the creator journal holds {} unconfirmed intents",
+        "retired while the journal holds {} unconfirmed intents",
         late.len()
     );
     assert!(recovery
@@ -1763,7 +1763,7 @@ async fn retention_release_duty_dispatches_to_the_creator_hold_release() {
     assert_eq!(creator.job, job);
     assert_eq!(creator.outcome, JobOutcome::Completed {});
     assert_eq!(acknowledged.outcome, JobOutcome::Completed {});
-    // The hold release is the sweep that ran: the creator journal gave the
+    // The hold release is the sweep that ran: the journal gave the
     // deployment back, so the platform collector's fence now commits.
     fixture
         .deployments

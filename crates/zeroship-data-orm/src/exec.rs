@@ -929,7 +929,7 @@ mod tests {
             backend
                 .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias))
                 .await
-                .expect("ensure app schema");
+                .expect("attach the binding");
             backend
                 .execute_fixture(
                     &format!(
@@ -1138,7 +1138,7 @@ mod tests {
             backend
                 .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias))
                 .await
-                .expect("ensure app schema");
+                .expect("attach the binding");
             backend
                 .execute_fixture(
                     &format!(
@@ -1258,7 +1258,7 @@ mod tests {
     // `env.db.*` call lands on the same thread-local context. `run_sql`
     // / `exec_sqlite_values` must route B onto B's OWN autocommit path —
     // never onto A's pinned transaction connection (A's snapshot, A's
-    // open tx, and — on Postgres — A's per-app role).
+    // open tx, and — on Postgres — A's binding role).
 
     #[test]
     fn sec1_app_b_query_must_not_route_through_app_a_parked_tx() {
@@ -1351,7 +1351,7 @@ mod tests {
             backend
                 .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias))
                 .await
-                .expect("ensure app schema");
+                .expect("attach the binding");
             backend
                 .execute_fixture(
                     &format!(
@@ -1510,7 +1510,7 @@ mod tests {
     // future mid-statement (after `SET LOCAL ROLE` + timeouts are
     // applied, before any reset/commit). Pre-fix (session-level `SET
     // ROLE` + a separate `RESET` that the cancellation skips), the next
-    // checkout inherited the app role + `statement_timeout`. Post-fix
+    // checkout inherited the binding role + `statement_timeout`. Post-fix
     // (SET LOCAL inside an explicit transaction), the rollback-on-drop
     // reverts both, so the next checkout sees the clean login role and
     // default timeout.
@@ -1555,7 +1555,7 @@ mod tests {
             let role_ident = crate::sql::mapping::quote_ident(&role);
 
             // Discover the login role so we can (a) GRANT it membership
-            // in the app role (required for SET LOCAL ROLE) and (b)
+            // in the binding role (required for SET LOCAL ROLE) and (b)
             // assert the connection returns to it after cancellation.
             let login_user = {
                 let c = pool.acquire().await.expect("checkout for setup");
@@ -1566,7 +1566,7 @@ mod tests {
                 rows[0].get::<_, &str>("u").to_string()
             };
 
-            // Provision the per-app role directly (NOLOGIN) and grant the
+            // Provision the binding role directly (NOLOGIN) and grant the
             // login user membership so `SET LOCAL ROLE` succeeds.
             {
                 let c = pool.acquire().await.expect("checkout for role setup");
@@ -1575,7 +1575,7 @@ mod tests {
                     .await;
                 c.simple_query(&format!("CREATE ROLE {role_ident} NOLOGIN"))
                     .await
-                    .expect("create app role");
+                    .expect("create binding role");
                 c.simple_query(&format!(
                     "GRANT {role_ident} TO {}",
                     crate::sql::mapping::quote_ident(&login_user)
@@ -1624,7 +1624,7 @@ mod tests {
 
             assert_eq!(
                 user_after, login_user,
-                "cancelled autocommit query must NOT leave the per-app role on the pooled \
+                "cancelled autocommit query must NOT leave the binding role on the pooled \
                  connection (saw {user_after}, want login role {login_user})",
             );
             assert_eq!(

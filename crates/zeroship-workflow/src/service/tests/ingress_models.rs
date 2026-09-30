@@ -11,7 +11,7 @@ use zeroship_data_orm::{
 #[compio::test]
 async fn sqlite_signal_revocation_preserves_foreign_and_other_target_authority() {
     let directory = tempfile::tempdir().unwrap();
-    let store = sqlite_store(&directory.path().join("zs-workflow.sqlite")).await;
+    let store = sqlite_store(&journal_file(directory.path())).await;
     revocation_contract(Rc::new(store)).await;
 }
 
@@ -200,10 +200,6 @@ async fn revocation_contract(store: Rc<OrmStore>) {
 #[compio::test]
 async fn postgres_concurrent_app_revocations_each_advance_the_signal_epoch() {
     let fixture = PostgresFixture::start().await;
-    let worker_url = fixture
-        .admin_url
-        .replacen("postgres@", "customer_worker@", 1);
-    let schema = || crate::service::store::SchemaName::new("customer").unwrap();
     let policies = Arc::new(HostPolicies::default());
     let authority = Arc::new(
         SignalAuthority::new(
@@ -215,8 +211,8 @@ async fn postgres_concurrent_app_revocations_each_advance_the_signal_epoch() {
     let mut hosts = Vec::new();
     for store in [
         fixture.store.clone(),
-        orm_store(&worker_url, schema()).await,
-        orm_store(&worker_url, schema()).await,
+        orm_store(&fixture.journal_url).await,
+        orm_store(&fixture.journal_url).await,
     ] {
         hosts.push(
             WorkflowService::open(Rc::new(store), policies.clone())
@@ -274,7 +270,7 @@ async fn postgres_concurrent_app_revocations_each_advance_the_signal_epoch() {
             let waiting: i64 = observer
                 .query_one(
                     "SELECT count(*) FROM pg_stat_activity \
-                     WHERE usename='customer_worker' AND wait_event_type='Lock'",
+                     WHERE usename='zeroship_workflow' AND wait_event_type='Lock'",
                     &[],
                 )
                 .await

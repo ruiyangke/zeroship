@@ -13,8 +13,8 @@ impl Database {
                 compio::runtime::spawn_blocking(move || rusqlite::Connection::open(path).unwrap().execute_batch(&sql).unwrap()).await.unwrap();
             }
             Self::Postgres(client) => client.batch_execute(&if enabled {
-                format!("CREATE FUNCTION customer.fail_fanout() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected fanout failure'; END $$; CREATE TRIGGER fail_fanout BEFORE INSERT ON customer.__zeroship_workflow_{table} FOR EACH ROW EXECUTE FUNCTION customer.fail_fanout();")
-            } else { format!("DROP TRIGGER fail_fanout ON customer.__zeroship_workflow_{table}; DROP FUNCTION customer.fail_fanout();") }).await.unwrap(),
+                format!("CREATE FUNCTION workflow_manager.fail_fanout() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected fanout failure'; END $$; CREATE TRIGGER fail_fanout BEFORE INSERT ON workflow_manager.__zeroship_workflow_{table} FOR EACH ROW EXECUTE FUNCTION workflow_manager.fail_fanout();")
+            } else { format!("DROP TRIGGER fail_fanout ON workflow_manager.__zeroship_workflow_{table}; DROP FUNCTION workflow_manager.fail_fanout();") }).await.unwrap(),
         }
     }
 }
@@ -22,7 +22,7 @@ impl Database {
 #[compio::test]
 async fn sqlite_fanout_final_page_or_successor_failure_rolls_back_signals() {
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("zs-workflow.sqlite");
+    let path = journal_file(directory.path());
     let store = Rc::new(sqlite_store(&path).await);
     Box::pin(rollback(store, Database::Sqlite(path))).await;
 }

@@ -1,6 +1,6 @@
 #![expect(
     clippy::future_not_send,
-    reason = "continuation tests own compio-local creator journals"
+    reason = "continuation tests own compio-local journals"
 )]
 
 use super::*;

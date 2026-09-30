@@ -7,10 +7,12 @@
 # untrusted creator draft against it via `admit`: the draft may only
 # TIGHTEN (a looser grant than this ceiling permits is rejected, not clamped).
 #
-# The grants are authored at `scope = "all"` because the per-app SCHEMA pin is the
-# guard's job (`GuardConfig::confined(app_schema)` derives the `schema.cross_schema`
-# confinement from the app id); this ceiling governs the table-SHAPE injection +
-# the creation/destructive posture a confined app gets.
+# The grants are authored at `scope = "all"` because pinning them to one schema is
+# the managed server's job: `bind_confined_charter_to_schema`
+# (`crates/zeroship-migrate-server/src/policy.rs`) rebinds the schema-scoped ones to
+# the exact schema of the database an apply writes, and refuses one it does not
+# know how to confine. This ceiling governs the table-SHAPE injection + the
+# creation/destructive posture a confined app gets.
 #
 # THIS FILE IS HALF A DOCUMENT. It holds the grants only. The mandatory
 # system-table `[[inject]]` rule - the seven system columns + three system indexes

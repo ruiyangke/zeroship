@@ -25,9 +25,9 @@ impl Database {
             }
             Self::Postgres(client) => client
                 .batch_execute(&if enabled {
-                    format!("CREATE FUNCTION customer.fail_propagation() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected propagation failure'; END $$; CREATE TRIGGER fail_propagation BEFORE INSERT ON customer.__zeroship_workflow_{table} FOR EACH ROW EXECUTE FUNCTION customer.fail_propagation();")
+                    format!("CREATE FUNCTION workflow_manager.fail_propagation() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected propagation failure'; END $$; CREATE TRIGGER fail_propagation BEFORE INSERT ON workflow_manager.__zeroship_workflow_{table} FOR EACH ROW EXECUTE FUNCTION workflow_manager.fail_propagation();")
                 } else {
-                    format!("DROP TRIGGER fail_propagation ON customer.__zeroship_workflow_{table}; DROP FUNCTION customer.fail_propagation();")
+                    format!("DROP TRIGGER fail_propagation ON workflow_manager.__zeroship_workflow_{table}; DROP FUNCTION workflow_manager.fail_propagation();")
                 })
                 .await
                 .unwrap(),
@@ -38,7 +38,7 @@ impl Database {
 #[compio::test]
 async fn sqlite_failed_propagation_page_rolls_back_cursor_effects_and_receipt() {
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("zs-workflow.sqlite");
+    let path = journal_file(directory.path());
     let store = Rc::new(sqlite_store(&path).await);
     Box::pin(rollback(store, Database::Sqlite(path))).await;
 }

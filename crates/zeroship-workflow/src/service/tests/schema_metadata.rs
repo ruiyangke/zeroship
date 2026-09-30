@@ -9,7 +9,7 @@ use zeroship_data_orm::{
 #[compio::test]
 async fn sqlite_model_metadata_matches_the_migrated_journal() {
     let directory = tempfile::tempdir().unwrap();
-    let store = sqlite_store(&directory.path().join("zs-workflow.sqlite")).await;
+    let store = sqlite_store(&journal_file(directory.path())).await;
     assert_metadata(&store).await;
 }
 
@@ -22,7 +22,7 @@ async fn postgres_model_metadata_matches_the_migrated_journal() {
 #[compio::test]
 async fn sqlite_journal_ids_and_scoped_unique_keys_bound_writes() {
     let directory = tempfile::tempdir().unwrap();
-    let store = sqlite_store(&directory.path().join("zs-workflow.sqlite")).await;
+    let store = sqlite_store(&journal_file(directory.path())).await;
     assert_scoped_writes(store).await;
 }
 

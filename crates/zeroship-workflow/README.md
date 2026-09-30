@@ -43,7 +43,7 @@ worker opens its creator database for `env.db`; Control and the other platform
 services open the platform database. Authenticated service contracts carry
 cross-boundary requests without sharing database credentials.
 `AppWorkflows::management_job` accepts manager-delivered lifecycle commands
-with explicit per-run revisions and durable customer-journal receipts. Lifecycle
+with explicit per-run revisions and durable journal receipts. Lifecycle
 state, publication intents, command history, the applied revision and the job
 receipt commit together. Started restarts use retained journal code; Latest
 restarts verify and retain the exact deployment named by the command. Neither
@@ -158,18 +158,18 @@ release assignments or discharge manager recovery responsibility.
 Production enrollment, trusted creator resource providers, remaining delivered
 operation handlers and production worker composition remain required before
 replacing the production runner. The local CLI host already runs the consumer.
-`zeroship-worker::workflow_creator::WorkflowCreatorFactory` assembles the creator
-ORM journal, payload storage, retained app artifacts and V8 executor from an
-injected `WorkflowResourceProvider`. It verifies app and schema identity before
-opening the journal, and never provisions it. The task payload handle and V8
-backend derive from the same registered app. Runtime metadata can refresh env,
-limits, network rules and ordinary native peers, but the loader retains the
-original workflow backend and the factory pins the physical creator schema.
+`zeroship-worker::workflow_creator::WorkflowCreatorFactory` assembles payload
+storage, retained app artifacts, a `RemoteBackend` and the V8 executor from an
+injected `WorkflowResourceProvider`. It holds no journal: its `Journal` type is
+`()`, and every journal fact crosses to the workflow service. The task payload
+handle and V8 backend derive from the same assigned app. Runtime metadata can
+refresh env, limits, network rules and ordinary native peers, but the loader
+retains the original workflow backend.
 The provider must resolve independently authorized deployment-host resources;
 manager placement IDs and revisions only select those resources and their
 retention client. Production resource provisioning and installation remain open.
 `service::reconciliation` persists a selected publication or deployment-hold page
-and its progress in the creator job receipt. It reserves each item before I/O,
+and its progress in the journal's job receipt. It reserves each item before I/O,
 so retries reach later items even when an earlier request stalls. Confirmation
 checks the exact manager receipt under the original delivery and policy bounds.
 Hold recovery rereads the existing durable intent and validates the matching
@@ -186,7 +186,7 @@ app code and examines no other app or database.
 platform ORM database. Holds survive
 reconnection, and generation checks reject stale releases. The collector helpers
 run inside a host-owned transaction that also fences routing and other deployment
-consumers. `service::WorkflowService` records customer-side acquisition and release
+consumers. `service::WorkflowService` records the journal's acquisition and release
 intents and reconciles them through `DeploymentHoldClient`. A release closes
 deployment admission under the app lock and checks retained journal dependencies
 before contacting the platform. Lost responses and host cancellation leave
@@ -206,7 +206,7 @@ preserving effect origins and compensation metadata. Each table has an `id`
 primary key; app-scoped domain keys use unique indexes and scoped foreign keys.
 The engine keeps the ORM transaction callback alive until settlement; abandoning
 an operation rolls it back. Database-clock reads use a separate connection to the
-same customer database, so checking a lease cannot wait for the journal's own
+same journal database, so checking a lease cannot wait for the journal's own
 pool lease. These clock queries read no journal state.
 Descriptor installation and collection operations use the ORM's transparent
 schema access, including the declared workflow tables. The native journal tests
@@ -244,7 +244,7 @@ let app = service.register_app(&binding).await?;
 
 App handles and queued backend calls retain that exact binding. Replacing or
 revoking it invalidates old handles; neither a delayed refresh response nor
-customer journal rows can restore their authority. Source revision and content
+journal rows can restore their authority. Source revision and content
 high water survive replacement. Configuration and leased snapshots use distinct
 binding modes; changing modes requires explicit replacement. A refresh can extend
 new operations, while each operation keeps its original deadline. Shortening a
@@ -298,11 +298,11 @@ production composition and the remaining platform retention cutover.
 
 `activate_deploy` accepts an immutable deployment registration. It acquires or
 reconciles a durable hold, verifies the app-scoped manifest and its referenced
-modules and descriptor, then selects the deployment under the customer app lock.
+modules and descriptor, then selects the deployment under the journal's app lock.
 Failed preparation preserves the previous selection. The host serializes
 deployment selection updates. Once a manager activation selects a revision,
 direct local activation cannot replace it. Local registration still validates
-schedule declarations, but the creator journal owns no calendar or due cursor.
+schedule declarations, but the journal owns no calendar or due cursor.
 `retain_deploy` verifies repaired artifacts without changing which deployment
 new runs select. Publication
 and repair use the normal app deployment store.

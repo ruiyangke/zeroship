@@ -1,4 +1,4 @@
-#![expect(clippy::future_not_send, reason = "creator journal cases use compio")]
+#![expect(clippy::future_not_send, reason = "journal cases use compio")]
 
 //! `StepConfig.retries` as the journal enforces it.
 //!

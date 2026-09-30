@@ -26,7 +26,7 @@ Native platform services call `ConnectOptions::connection_authority` with a URL
 that authenticates as their provisioned service role. This preserves the login
 role while keeping the ORM's transaction-local resource limits. The option does
 not accept a role name or grant privileges, and worker connections retain the
-default per-app role narrowing.
+default narrowing to each binding's own role.
 SQLite requires filesystem storage. Memory selectors and URI options are
 rejected; tests create and own their temporary database files explicitly.
 

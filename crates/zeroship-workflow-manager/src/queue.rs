@@ -1040,7 +1040,7 @@ fn live(job: &Job, now: i64) -> Result<(), Error> {
 }
 
 /// Renewal is the manager's only evidence that a delivery began executing: a
-/// claim the creator journal defers never reaches this path, so its attempt
+/// claim the journal defers never reaches this path, so its attempt
 /// stays uncounted and capacity pressure cannot exhaust a job's budget. The
 /// first renewal of an attempt counts it; later renewals of the same attempt
 /// extend only the lease.

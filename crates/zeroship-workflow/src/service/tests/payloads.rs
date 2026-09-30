@@ -21,7 +21,7 @@ fn reference(value: &[u8]) -> WorkflowOutputRef {
 #[compio::test]
 async fn sqlite_payload_ownership_and_retention() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("zs-workflow.sqlite");
+    let path = journal_file(dir.path());
     schema::initialize_sqlite(&path).unwrap();
     payload_contract(Rc::new(sqlite_store(&path).await), Objects::new()).await;
 }
@@ -35,7 +35,7 @@ async fn postgres_payload_ownership_and_retention() {
 #[compio::test]
 async fn sqlite_siblings_started_from_one_object_each_own_it() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("zs-workflow.sqlite");
+    let path = journal_file(dir.path());
     schema::initialize_sqlite(&path).unwrap();
     shared_child_input(Rc::new(sqlite_store(&path).await)).await;
 }
@@ -160,7 +160,7 @@ async fn delayed_payload_write(operation: &str) {
         .await
         .unwrap();
     let admin = connect(&fixture.admin_url).await;
-    admin.batch_execute(&format!("CREATE SEQUENCE customer.delayed_payload_writes; GRANT USAGE ON SEQUENCE customer.delayed_payload_writes TO app_customer_role; CREATE FUNCTION customer.delay_payload_write() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM nextval('customer.delayed_payload_writes'); PERFORM pg_sleep(0.5); RETURN NEW; END $$; CREATE TRIGGER delay_payload_write BEFORE {operation} ON customer.__zeroship_workflow_payloads FOR EACH ROW EXECUTE FUNCTION customer.delay_payload_write();")).await.unwrap();
+    admin.batch_execute(&format!("CREATE SEQUENCE workflow_manager.delayed_payload_writes; GRANT USAGE ON SEQUENCE workflow_manager.delayed_payload_writes TO zeroship_workflow; CREATE FUNCTION workflow_manager.delay_payload_write() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM nextval('workflow_manager.delayed_payload_writes'); PERFORM pg_sleep(0.5); RETURN NEW; END $$; CREATE TRIGGER delay_payload_write BEFORE {operation} ON workflow_manager.__zeroship_workflow_payloads FOR EACH ROW EXECUTE FUNCTION workflow_manager.delay_payload_write();")).await.unwrap();
     let worker = WorkerIdentity::new("payload-worker".into()).unwrap();
     let task = service.poll(&worker).await.unwrap().unwrap();
     let result = service
@@ -178,7 +178,7 @@ async fn delayed_payload_write(operation: &str) {
         "{result:?}"
     );
     assert!(admin
-        .query_one("SELECT is_called FROM customer.delayed_payload_writes", &[])
+        .query_one("SELECT is_called FROM workflow_manager.delayed_payload_writes", &[])
         .await
         .unwrap()
         .get::<_, bool>(0));
@@ -199,7 +199,7 @@ async fn delayed_payload_write(operation: &str) {
         assert_eq!(rows[0].text("state").unwrap(), "uploading");
     }
     tx.commit().await.unwrap();
-    admin.batch_execute("DROP TRIGGER delay_payload_write ON customer.__zeroship_workflow_payloads; UPDATE customer.__zeroship_workflow_payloads SET expires_at=0;").await.unwrap();
+    admin.batch_execute("DROP TRIGGER delay_payload_write ON workflow_manager.__zeroship_workflow_payloads; UPDATE workflow_manager.__zeroship_workflow_payloads SET expires_at=0;").await.unwrap();
     assert_eq!(
         service.collect_payloads(1, &objects).await.unwrap(),
         usize::from(operation == "UPDATE")
@@ -733,7 +733,7 @@ async fn continuation_and_child(
 #[compio::test]
 async fn deletion_failure_recovers_without_reopening_payload_authority() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("zs-workflow.sqlite");
+    let path = journal_file(dir.path());
     schema::initialize_sqlite(&path).unwrap();
     let store: Rc<OrmStore> = Rc::new(sqlite_store(&path).await);
     let (service, app, _, _deployments) = registered_service(store.clone()).await;
@@ -809,12 +809,7 @@ async fn postgres_collection_rechecks_references_after_waiting_for_completion() 
     let objects = Objects::new();
     let collector = WorkflowService::open(
         Rc::new(
-            orm_store(
-                &fixture
-                    .admin_url
-                    .replacen("postgres@", "customer_worker@", 1),
-                fixture.store.binding.schema().clone(),
-            )
+            orm_store(&fixture.journal_url)
             .await,
         ),
         service.policies.clone(),
@@ -842,7 +837,7 @@ async fn postgres_collection_rechecks_references_after_waiting_for_completion() 
         .await
         .unwrap();
     let admin = connect(&fixture.admin_url).await;
-    admin.batch_execute("CREATE FUNCTION customer.gate_payload_promotion() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.slot='output' THEN PERFORM pg_advisory_xact_lock(73921862); END IF; RETURN NEW; END $$; CREATE TRIGGER gate_payload_promotion BEFORE INSERT ON customer.__zeroship_workflow_payload_refs FOR EACH ROW EXECUTE FUNCTION customer.gate_payload_promotion();").await.unwrap();
+    admin.batch_execute("CREATE FUNCTION workflow_manager.gate_payload_promotion() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.slot='output' THEN PERFORM pg_advisory_xact_lock(73921862); END IF; RETURN NEW; END $$; CREATE TRIGGER gate_payload_promotion BEFORE INSERT ON workflow_manager.__zeroship_workflow_payload_refs FOR EACH ROW EXECUTE FUNCTION workflow_manager.gate_payload_promotion();").await.unwrap();
     let blocker_pid: i32 = admin
         .query_one("SELECT pg_backend_pid()", &[])
         .await
@@ -865,7 +860,7 @@ async fn postgres_collection_rechecks_references_after_waiting_for_completion() 
     });
     let completion_pid = compio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let row = admin.query_one("SELECT min(pid) FROM pg_stat_activity WHERE usename='customer_worker' AND wait_event_type='Lock' AND position('__zeroship_workflow_payload_refs' in query) > 0 AND $1=ANY(pg_blocking_pids(pid))", &[&blocker_pid]).await.unwrap();
+            let row = admin.query_one("SELECT min(pid) FROM pg_stat_activity WHERE usename='zeroship_workflow' AND wait_event_type='Lock' AND position('__zeroship_workflow_payload_refs' in query) > 0 AND $1=ANY(pg_blocking_pids(pid))", &[&blocker_pid]).await.unwrap();
             if let Some(pid) = row.get::<_, Option<i32>>(0) { break pid; }
             compio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -876,7 +871,7 @@ async fn postgres_collection_rechecks_references_after_waiting_for_completion() 
         compio::time::timeout(
             Duration::from_secs(10),
             admin.execute(
-                "UPDATE customer.__zeroship_workflow_payloads SET expires_at=0 WHERE app_id=$1 AND id=$2 AND state='staged'",
+                "UPDATE workflow_manager.__zeroship_workflow_payloads SET expires_at=0 WHERE app_id=$1 AND id=$2 AND state='staged'",
                 &[&app.as_str(), &staged.id],
             ),
         )
@@ -891,7 +886,7 @@ async fn postgres_collection_rechecks_references_after_waiting_for_completion() 
     };
     compio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let row = admin.query_one("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE usename='customer_worker' AND wait_event_type='Lock' AND position('__zeroship_workflow_app_state' in query) > 0 AND $1=ANY(pg_blocking_pids(pid)))", &[&completion_pid]).await.unwrap();
+            let row = admin.query_one("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE usename='zeroship_workflow' AND wait_event_type='Lock' AND position('__zeroship_workflow_app_state' in query) > 0 AND $1=ANY(pg_blocking_pids(pid)))", &[&completion_pid]).await.unwrap();
             if row.get::<_, bool>(0) { break; }
             compio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -920,7 +915,7 @@ async fn postgres_collection_rechecks_references_after_waiting_for_completion() 
 #[compio::test]
 async fn sqlite_a_run_input_answers_to_the_input_bound() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("zs-workflow.sqlite");
+    let path = journal_file(dir.path());
     schema::initialize_sqlite(&path).unwrap();
     input_bound(Rc::new(sqlite_store(&path).await)).await;
 }
@@ -1027,7 +1022,7 @@ async fn input_bound(store: Rc<OrmStore>) {
 #[compio::test]
 async fn sqlite_a_child_input_answers_to_the_input_bound() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("zs-workflow.sqlite");
+    let path = journal_file(dir.path());
     schema::initialize_sqlite(&path).unwrap();
     child_input_bound(Rc::new(sqlite_store(&path).await)).await;
 }
@@ -1156,7 +1151,7 @@ async fn child_input_bound(store: Rc<OrmStore>) {
 #[compio::test]
 async fn a_confirm_that_lost_its_reservation_is_refused() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("zs-workflow.sqlite");
+    let path = journal_file(dir.path());
     schema::initialize_sqlite(&path).unwrap();
     let store = Rc::new(sqlite_store(&path).await);
     let (service, app, _, _deployments) = registered_service(store).await;

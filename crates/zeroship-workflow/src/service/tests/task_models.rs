@@ -20,7 +20,7 @@ const REPLAY_INPUT: &str = r#"{"order": "checkout"}"#;
 #[compio::test]
 async fn sqlite_replay_input_keeps_claim_credentials_in_the_host() {
     let directory = tempfile::tempdir().unwrap();
-    let store = sqlite_store(&directory.path().join("zs-workflow.sqlite")).await;
+    let store = sqlite_store(&journal_file(directory.path())).await;
     claim_credentials(Rc::new(store)).await;
 }
 
@@ -180,7 +180,7 @@ fn replay_input_excludes(
 #[compio::test]
 async fn sqlite_recovery_refuses_a_foreign_task_reference() {
     let directory = tempfile::tempdir().unwrap();
-    let store = sqlite_store(&directory.path().join("zs-workflow.sqlite")).await;
+    let store = sqlite_store(&journal_file(directory.path())).await;
     foreign_reference(Rc::new(store)).await;
 }
 
@@ -269,7 +269,7 @@ async fn foreign_reference(store: Rc<OrmStore>) {
 #[compio::test]
 async fn sqlite_a_run_holding_a_dispatch_is_not_assigned_another() {
     let directory = tempfile::tempdir().unwrap();
-    let store = sqlite_store(&directory.path().join("zs-workflow.sqlite")).await;
+    let store = sqlite_store(&journal_file(directory.path())).await;
     single_assignment(Rc::new(store)).await;
 }
 

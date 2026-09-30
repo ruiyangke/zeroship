@@ -1,4 +1,4 @@
-//! Stable creator-owned child identity across physical generations.
+//! Stable journal-owned child identity across physical generations.
 //!
 //! Callers hold the app lock and commit membership changes with the originating
 //! lifecycle transition and publication. These helpers never open a transaction.

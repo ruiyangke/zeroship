@@ -10,10 +10,13 @@ zeroship_data_orm::orm::schema! {
     }
 }
 
+/// Installing, reinstalling and refusing a journal leave every other table in
+/// its file as it was, including a table an ORM context beside the journal
+/// writes.
 #[compio::test]
-async fn workflow_tables_share_the_app_database_without_changing_business_data() {
+async fn journal_installation_leaves_other_tables_in_its_file_unchanged() {
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("zs-workflow.sqlite");
+    let path = journal_file(directory.path());
     let connection = rusqlite::Connection::open(&path).unwrap();
     connection.execute_batch("CREATE TABLE orders (id TEXT PRIMARY KEY, body TEXT NOT NULL); INSERT INTO orders VALUES ('order', 'customer data'); CREATE VIEW visible_orders AS SELECT * FROM orders;").unwrap();
     schema::initialize_sqlite(&path).unwrap();
@@ -113,7 +116,7 @@ async fn conflicting_journal_metadata_cannot_replace_the_app_descriptor() {
         schema::{CollectionSchema, ColumnSchema, LogicalType, Schema},
     };
     let directory = tempfile::tempdir().unwrap();
-    let store = sqlite_store(&directory.path().join("zs-workflow.sqlite")).await;
+    let store = sqlite_store(&journal_file(directory.path())).await;
     let table = "__zeroship_workflow_schema_version";
     let mut id = ColumnSchema::new(LogicalType::Text);
     id.primary_key = true;
@@ -146,7 +149,7 @@ async fn conflicting_journal_metadata_cannot_replace_the_app_descriptor() {
 #[test]
 fn reinitializing_a_current_journal_preserves_its_rows() {
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("zs-workflow.sqlite");
+    let path = journal_file(directory.path());
     schema::initialize_sqlite(&path).unwrap();
     let connection = rusqlite::Connection::open(&path).unwrap();
     connection
@@ -184,7 +187,7 @@ fn reinitializing_a_current_journal_preserves_its_rows() {
 #[test]
 fn a_journal_ahead_of_this_build_is_refused_without_being_touched() {
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("zs-workflow.sqlite");
+    let path = journal_file(directory.path());
     schema::initialize_sqlite(&path).unwrap();
     let connection = rusqlite::Connection::open(&path).unwrap();
     let ahead = i64::from(zeroship_workflow_schema::VERSION) + 1;
@@ -215,7 +218,7 @@ fn a_journal_ahead_of_this_build_is_refused_without_being_touched() {
 #[test]
 fn partial_workflow_schema_is_refused_in_a_shared_database() {
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("zs-workflow.sqlite");
+    let path = journal_file(directory.path());
     let connection = rusqlite::Connection::open(&path).unwrap();
     connection.execute_batch("CREATE TABLE orders (id TEXT); CREATE TABLE __zeroship_workflow_partial (value TEXT); INSERT INTO __zeroship_workflow_partial VALUES ('preserve');").unwrap();
     assert!(schema::initialize_sqlite(&path).is_err());
@@ -236,7 +239,13 @@ fn partial_workflow_schema_is_refused_in_a_shared_database() {
 /// installer and in the host that reads it.
 #[test]
 fn the_leaf_substitution_agrees_with_the_orm_quoting_rule() {
-    for name in ["customer", "a\"b", "a\"; DROP SCHEMA public; --"] {
+    // Hostile names beside the journal's own: the rule is about quoting, so it is
+    // held over names a schema could be given rather than the one it is.
+    for name in [
+        crate::service::store::JOURNAL_SCHEMA,
+        "a\"b",
+        "a\"; DROP SCHEMA public; --",
+    ] {
         let bound = zeroship_workflow_schema::postgres_sql(name);
         let through_orm = zeroship_workflow_schema::POSTGRES_TEMPLATE.replace(
             zeroship_workflow_schema::SCHEMA_PLACEHOLDER,

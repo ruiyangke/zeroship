@@ -1,4 +1,4 @@
-//! Creator-owned bounded materialization of an already accepted topic broadcast.
+//! Journal-owned bounded materialization of an already accepted topic broadcast.
 
 #![expect(
     clippy::future_not_send,

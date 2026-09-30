@@ -464,7 +464,7 @@ async fn run_apply(
     // Pre-launch: stored seals don't matter - this seal is minted+verified in-process
     // for tamper-detection. This sealed policy drives managed shape/lower; the
     // rendered-DDL guard is the fixed schema-bound no-inject confined charter.
-    let sealed_policy = policy_config.seal_effective_for_app(apply_policy.clone())?;
+    let sealed_policy = policy_config.seal_effective(apply_policy.clone())?;
     tracing::debug!(
         database_id = database_id.as_str(),
         schema = %schema.as_str(),

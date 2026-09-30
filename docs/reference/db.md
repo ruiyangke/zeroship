@@ -1470,11 +1470,11 @@ fails with `MASK_POLICY_IMMUTABLE`, and an unmask issued before startup finishes
 fails with `database_startup_pending`. See
 [`defineMaskPolicy()`](#definemaskpolicy).
 
-## Per-app isolation
+## Isolation
 
-Every app has its own database schema, addressed by the platform on its behalf.
-The app's identity is fixed by the platform and cannot be read or overridden by
-user code. `env.db` is frozen.
+Each database an app uses is its own database schema, addressed by the platform
+on the app's behalf through the app's binding to it. The app's identity is fixed
+by the platform and cannot be read or overridden by user code. `env.db` is frozen.
 
 ## Optimistic concurrency and soft delete
 

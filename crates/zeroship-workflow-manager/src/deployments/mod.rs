@@ -1,8 +1,8 @@
 //! Platform metadata retaining normal app deployments for customer workers.
 //!
-//! The host supplies an authorized platform database and holder scope. Customer
-//! journals and payloads are never read here. Hold generations survive placement
-//! expiry and fence retries from an earlier acquisition.
+//! The host supplies an authorized platform database and holder scope. The
+//! workflow journal and payloads are never read here. Hold generations survive
+//! placement expiry and fence retries from an earlier acquisition.
 
 #![expect(
     clippy::future_not_send,

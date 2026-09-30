@@ -18,9 +18,10 @@
 //!
 //! The composed engine [`EffectivePolicy`] drives table-shape injection
 //! (`resolve_create_table_policy`) and escalation-reject. The rendered-DDL guard uses
-//! a separate authored confined charter with the same grants and exact app-schema
-//! binding, but no inject rule: lower enforces the managed shape, while the guard
-//! remains the confinement and dangerous-operation belt around the rendered plan.
+//! a separate authored confined charter with the same grants and the same binding to
+//! the exact database schema, but no inject rule: lower enforces the managed shape,
+//! while the guard remains the confinement and dangerous-operation belt around the
+//! rendered plan.
 
 use std::collections::BTreeMap;
 
@@ -91,7 +92,7 @@ impl ManagedPolicyConfig {
         // on a malformed embedded/operator ceiling rather than per-request).
         catalog
             .default_ceiling()
-            .effective_for_app_schema("__zeroship_policy_validation__")?;
+            .effective_for_schema("__zeroship_policy_validation__")?;
         Ok(Self { catalog, mac_key })
     }
 
@@ -140,13 +141,14 @@ impl ManagedPolicyConfig {
         draft: Option<&ParsedDraft>,
     ) -> Result<EffectivePolicy, ManagedPolicyError> {
         let ceiling = self.catalog.resolve(tier);
-        let app_base = ceiling.effective_for_app_schema(schema)?;
+        let schema_base = ceiling.effective_for_schema(schema)?;
         let policy = match draft {
             // Admit the untrusted creator draft only after the operator charter has
-            // been bound to this app's exact schema. Any grant outside it is rejected.
-            Some(draft) => admit(&app_base, &draft.doc, &builtin_registry())
+            // been bound to this database's exact schema. Any grant outside it is
+            // rejected.
+            Some(draft) => admit(&schema_base, &draft.doc, &builtin_registry())
                 .map_err(ManagedPolicyError::Compose)?,
-            None => app_base,
+            None => schema_base,
         };
         Ok(EffectivePolicy::new(
             ceiling.id.clone(),
@@ -176,10 +178,10 @@ impl ManagedPolicyConfig {
             .map(|draft| self.parse_draft(draft))
             .transpose()?;
         let effective = self.compose_effective_for_schema(schema, tier, parsed_draft.as_ref())?;
-        self.seal_effective_for_app(effective)
+        self.seal_effective(effective)
     }
 
-    pub(crate) fn seal_effective_for_app(
+    pub(crate) fn seal_effective(
         &self,
         effective: EffectivePolicy,
     ) -> Result<SealedManagedPolicy, ManagedPolicyError> {
@@ -214,9 +216,11 @@ fn mint_nonce() -> [u8; 16] {
     *Uuid::now_v7().as_bytes()
 }
 
-/// The effective managed policy for one app: the composed engine PDP policy (the
-/// source for injection + escalation-reject) plus the ceiling identity and its
-/// derived managed posture for approval decisions and audit records.
+/// The effective managed policy for one database schema.
+///
+/// The composed engine PDP policy (the source for injection + escalation-reject)
+/// plus the ceiling identity and its derived managed posture for approval
+/// decisions and audit records.
 #[derive(Debug, Clone)]
 pub struct EffectivePolicy {
     pub ceiling_id: String,
@@ -240,14 +244,13 @@ impl EffectivePolicy {
         }
     }
 
-    /// The effective `safety.require_approval` obligation level for this app's schema —
-    /// the SEALED approval obligation (`never`/`on_destructive`/`always`) the engine
-    /// only DECLARES. Resolved at the object the app owns (`app_schema`); the host
-    /// enforces it as the state machine. Replaces the deleted `require_approval`
-    /// overlay bool.
+    /// The effective `safety.require_approval` obligation level for a database's
+    /// schema — the SEALED approval obligation (`never`/`on_destructive`/`always`)
+    /// the engine only DECLARES. Resolved at the schema the apply writes
+    /// (`schema`); the host enforces it as the state machine.
     #[must_use]
-    pub fn approval_level(&self, app_schema: &str) -> ApprovalLevel {
-        require_approval_level(&self.policy, &schema_object(app_schema))
+    pub fn approval_level(&self, schema: &str) -> ApprovalLevel {
+        require_approval_level(&self.policy, &schema_object(schema))
     }
 }
 
@@ -360,7 +363,7 @@ pub struct ManagedCeiling {
     pub ceiling_version: u64,
     root: RootCharter,
     toml: String,
-    bind_app_schema: bool,
+    binds_schema: bool,
 }
 
 impl ManagedCeiling {
@@ -379,7 +382,7 @@ impl ManagedCeiling {
             ceiling_version,
             root,
             toml: toml.to_string(),
-            bind_app_schema: false,
+            binds_schema: false,
         })
     }
 
@@ -391,7 +394,7 @@ impl ManagedCeiling {
             ceiling_version,
             CONFINED_CEILING_TOML,
         )?;
-        ceiling.bind_app_schema = true;
+        ceiling.binds_schema = true;
         Ok(ceiling)
     }
 
@@ -418,8 +421,8 @@ impl ManagedCeiling {
         effective_policy_from_charter_toml(&self.toml).map_err(ManagedPolicyError::CeilingCompose)
     }
 
-    fn effective_for_app_schema(&self, schema: &str) -> Result<PdpPolicy, ManagedPolicyError> {
-        if !self.bind_app_schema {
+    fn effective_for_schema(&self, schema: &str) -> Result<PdpPolicy, ManagedPolicyError> {
+        if !self.binds_schema {
             return self.effective();
         }
         let charter = bind_confined_charter_to_schema(&self.toml, schema)
@@ -429,7 +432,7 @@ impl ManagedCeiling {
 }
 
 /// Compose the fixed no-inject guard charter after binding its schema authority to
-/// one exact app schema. Managed shape injection remains on the separate composed
+/// one exact database schema. Managed shape injection remains on the separate composed
 /// ceiling/draft policy used by [`EffectivePolicy`] and `IrAuthor` lowering.
 pub(crate) fn confined_guard_policy_for_schema(
     schema: &str,
@@ -448,7 +451,7 @@ fn schema_scope_value(schema: &str) -> toml::Value {
     toml::Value::Table(scope)
 }
 
-/// Bind the reusable confined charter to one exact app schema. Validate the expected
+/// Bind the reusable confined charter to one exact database schema. Validate the expected
 /// template shape so a later policy edit fails closed instead of changing authority.
 fn bind_confined_charter_to_schema(source: &str, schema: &str) -> Result<String, String> {
     let mut doc: toml::Value = toml::from_str(source)
@@ -476,7 +479,7 @@ fn bind_confined_charter_to_schema(source: &str, schema: &str) -> Result<String,
                     || rule.get("scope").and_then(toml::Value::as_str) != Some("all")
                 {
                     return Err(format!(
-                        "confined charter {key} must remain true at scope=all before app binding"
+                        "confined charter {key} must remain true at scope=all before schema binding"
                     ));
                 }
                 rule.insert("scope".to_string(), schema_scope_value(schema));
@@ -505,7 +508,7 @@ fn bind_confined_charter_to_schema(source: &str, schema: &str) -> Result<String,
             other if other.starts_with("schema.") => {
                 return Err(format!(
                     "confined charter grant {index} carries schema-scoped key {other}, which \
-                     app binding does not know how to confine; bind it explicitly or remove it"
+                     schema binding does not know how to confine; bind it explicitly or remove it"
                 ));
             }
             // Non-schema keys (`safety.*`, `runtime.*`, `code.*`) are not schema-scoped,
@@ -515,12 +518,12 @@ fn bind_confined_charter_to_schema(source: &str, schema: &str) -> Result<String,
     }
     if create_table_rules != 1 || rename_rules != 1 {
         return Err(format!(
-            "confined charter app binding requires one create-table and one rename grant; \
+            "confined charter schema binding requires one create-table and one rename grant; \
              found {create_table_rules} and {rename_rules}"
         ));
     }
 
-    toml::to_string(&doc).map_err(|error| format!("serialize app-bound charter: {error}"))
+    toml::to_string(&doc).map_err(|error| format!("serialize schema-bound charter: {error}"))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -539,9 +542,9 @@ pub struct ParsedDraft {
 }
 
 /// Parse a creator draft TOML body (filename already validated) into a [`ParsedDraft`].
-/// Shared by the ingress (`ManagedPolicyConfig::parse_draft`) and the stored-policy
-/// re-hydration (`AppPolicyRecord::parsed_policy_draft`). The whole body is a PDP
-/// document — the engine `deny_unknown_fields` loader validates it directly.
+/// The ingress (`ManagedPolicyConfig::parse_draft`) calls it with the draft an apply
+/// request carries. The whole body is a PDP document — the engine
+/// `deny_unknown_fields` loader validates it directly.
 pub fn parse_draft_body(body: &str, filename: &str) -> Result<ParsedDraft, ManagedPolicyError> {
     let doc = PolicyDoc::parse_toml(body, &builtin_registry(), LoadContext::NonRootLayer).map_err(
         |source| ManagedPolicyError::MalformedDraft {
@@ -639,7 +642,7 @@ mod tests {
 
     /// A config whose "probe" tier carries an arbitrary ceiling TOML, so a test can
     /// compose against a charter shape our own `policies/*.toml` do not use. The
-    /// ceiling is built with `from_toml`, so `bind_app_schema` is false and the
+    /// ceiling is built with `from_toml`, so `binds_schema` is false and the
     /// template validation in `bind_confined_charter_to_schema` does not apply.
     fn config_with_probe_ceiling(toml: &str) -> ManagedPolicyConfig {
         let ceiling = ManagedCeiling::from_toml("probe", Some("probe".into()), 1, toml)
@@ -773,32 +776,31 @@ scope = {{ include = ["{schema}"], exclude = ["{schema}.secret"] }}
             effective.approval_level(&schema),
             ApprovalLevel::Never
         );
-        let app_schema = schema;
         let guard = zeroship_migrate::guard::GuardConfig::from_policy(
             effective.policy.clone(),
             zeroship_migrate_postgres::DIALECT,
-            &app_schema,
+            &schema,
         );
-        assert!(guard.permits_schema(&app_schema));
+        assert!(guard.permits_schema(&schema));
         assert_ne!(
             guard.effective().grants(
                 &key(KEY_SCHEMA_CROSS_SCHEMA),
-                &ObjectName::schema(app_schema.as_bytes().to_vec())
+                &ObjectName::schema(schema.as_bytes().to_vec())
             ),
             Some(KnobValue::Bool(true)),
             "the confined host must not synthesize a foreign-schema grant for its own target"
         );
         assert_eq!(
             guard.schema_scope(),
-            Some(zeroship_migrate::SchemaScope::Single(app_schema)),
-            "the effective policy must retain the exact app-schema boundary"
+            Some(zeroship_migrate::SchemaScope::Single(schema)),
+            "the effective policy must retain the exact database-schema boundary"
         );
     }
 
-    /// App binding must refuse a schema-scoped grant it cannot confine.
+    /// Schema binding must refuse a schema-scoped grant it cannot confine.
     ///
     /// `bind_confined_charter_to_schema` rewrites `schema.create_table` and
-    /// `schema.rename` from `scope = "all"` to this app's schema. Global keys such
+    /// `schema.rename` from `scope = "all"` to the bound schema. Global keys such
     /// as `safety.*` and `runtime.*` can pass through unchanged. An unhandled
     /// schema-scoped key must be refused so its grant cannot retain `scope = "all"`.
     ///
@@ -806,8 +808,8 @@ scope = {{ include = ["{schema}"], exclude = ["{schema}.secret"] }}
     /// than an invented key - a made-up key would prove the arm fires without proving
     /// it fires on anything that can actually appear.
     #[test]
-    fn app_binding_refuses_a_schema_key_it_cannot_confine() {
-        let app_schema = fresh_schema();
+    fn schema_binding_refuses_a_schema_key_it_cannot_confine() {
+        let schema = fresh_schema();
         let charter = format!(
             "{CONFINED_GUARD_CHARTER_TOML}\n\
              [[grant]]\n\
@@ -816,7 +818,7 @@ scope = {{ include = ["{schema}"], exclude = ["{schema}.secret"] }}
              scope = \"all\"\n"
         );
 
-        let err = bind_confined_charter_to_schema(&charter, &app_schema)
+        let err = bind_confined_charter_to_schema(&charter, &schema)
             .expect_err("an unbindable schema-scoped grant must fail closed");
         assert!(
             err.contains(KEY_SCHEMA_CREATE_SCHEMA),
@@ -826,7 +828,7 @@ scope = {{ include = ["{schema}"], exclude = ["{schema}.secret"] }}
         // POSITIVE CONTROL. The assertion above is satisfied by a function that
         // rejects every charter, including the real one. The unmodified guard charter
         // must still bind.
-        bind_confined_charter_to_schema(CONFINED_GUARD_CHARTER_TOML, &app_schema)
+        bind_confined_charter_to_schema(CONFINED_GUARD_CHARTER_TOML, &schema)
             .expect("the shipped guard charter must still bind");
     }
 
@@ -834,16 +836,16 @@ scope = {{ include = ["{schema}"], exclude = ["{schema}.secret"] }}
     /// aligned with the physical schema name after policy normalization.
     #[test]
     fn confined_guard_preserves_schema_bound_grants_without_inject() {
-        let app_schema = fresh_schema();
-        let guard_policy = confined_guard_policy_for_schema(&app_schema)
+        let schema = fresh_schema();
+        let guard_policy = confined_guard_policy_for_schema(&schema)
             .expect("fixed no-inject guard charter composes");
-        let lower_charter = bind_confined_charter_to_schema(CONFINED_CEILING_TOML, &app_schema)
+        let lower_charter = bind_confined_charter_to_schema(CONFINED_CEILING_TOML, &schema)
             .expect("fixed confined ceiling binds");
         let lower_policy = effective_policy_from_charter_toml(&lower_charter)
             .expect("fixed confined ceiling composes");
 
-        let owned_schema = ObjectName::schema(app_schema.as_bytes().to_vec());
-        let owned_table = ObjectName::table(app_schema.as_bytes().to_vec(), b"widgets".to_vec());
+        let owned_schema = ObjectName::schema(schema.as_bytes().to_vec());
+        let owned_table = ObjectName::table(schema.as_bytes().to_vec(), b"widgets".to_vec());
         let foreign_table = ObjectName::table(b"other_app".to_vec(), b"widgets".to_vec());
         let objects = [&owned_schema, &owned_table, &foreign_table];
         // `runtime.lock_timeout_ms` / `runtime.statement_timeout_ms` are deliberately
@@ -879,12 +881,12 @@ scope = {{ include = ["{schema}"], exclude = ["{schema}.secret"] }}
         let guard = zeroship_migrate::guard::GuardConfig::from_policy(
             guard_policy,
             zeroship_migrate_postgres::DIALECT,
-            &app_schema,
+            &schema,
         );
         assert_eq!(
             guard.schema_scope(),
-            Some(zeroship_migrate::SchemaScope::Single(app_schema)),
-            "guard must remain confined to the exact app schema"
+            Some(zeroship_migrate::SchemaScope::Single(schema)),
+            "guard must remain confined to the exact database schema"
         );
     }
 
@@ -979,7 +981,7 @@ scope = "all"
     }
 
     #[test]
-    fn draft_cannot_escape_the_app_schema_boundary() {
+    fn draft_cannot_escape_the_database_schema_boundary() {
         let cfg = config();
         let schema = fresh_schema();
         let draft = cfg
@@ -997,7 +999,7 @@ scope = "all"
 
         let err = cfg
             .compose_effective_for_schema(&schema, None, Some(&draft))
-            .expect_err("authority outside the app schema must be rejected");
+            .expect_err("authority outside the database schema must be rejected");
         assert!(matches!(err, ManagedPolicyError::Compose(_)));
         assert!(err.is_creator_fault());
     }
@@ -1052,10 +1054,10 @@ scope = "all"
     ///
     /// The admission check proves a draft within a charter by sampling ONE object per
     /// charter-partitioned region, and the sampled witness of a glob is built from its
-    /// literal prefix. Our confined ceiling binds `schema.create_table` to the app
+    /// literal prefix. Our confined ceiling binds `schema.create_table` to the database
     /// schema EXACTLY (`bind_confined_charter_to_schema` rewrites the scope in place),
-    /// so `<app_schema>*` has the app schema itself as its prefix witness while also
-    /// covering `<app_schema>_evil`, which the ceiling does not grant.
+    /// so `<schema>*` has the schema itself as its prefix witness while also
+    /// covering `<schema>_evil`, which the ceiling does not grant.
     ///
     /// This test is a CANARY: it fails if a future pin move, or an edit to the
     /// confined charter that introduces a glob or a second layer, makes the
@@ -1067,7 +1069,7 @@ scope = "all"
     #[test]
     fn draft_glob_scope_anchored_on_the_granted_schema_is_still_rejected() {
         let cfg = config();
-        let app_schema = fresh_schema();
+        let schema = fresh_schema();
         // The glob's literal prefix IS the granted schema; the glob also covers
         // sibling schemas the ceiling never granted.
         let draft_toml = format!(
@@ -1076,7 +1078,7 @@ scope = "all"
 [[grant]]
 key = "schema.create_table"
 value = true
-scope = {{ include = ["{app_schema}*"] }}
+scope = {{ include = ["{schema}*"] }}
 "#
         );
         let draft = cfg
@@ -1087,8 +1089,8 @@ scope = {{ include = ["{app_schema}*"] }}
             .expect("glob-scoped draft parses before admission");
 
         let err = cfg
-            .compose_effective_for_schema(&app_schema, None, Some(&draft))
-            .expect_err("a glob reaching beyond the bound app schema must be rejected");
+            .compose_effective_for_schema(&schema, None, Some(&draft))
+            .expect_err("a glob reaching beyond the bound schema must be rejected");
         assert!(matches!(err, ManagedPolicyError::Compose(_)));
         assert!(err.is_creator_fault());
     }

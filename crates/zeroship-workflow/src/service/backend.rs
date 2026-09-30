@@ -26,7 +26,7 @@ type Request = Box<dyn FnOnce(AppWorkflows) -> LocalBoxFuture<'static, ()> + Sen
 /// the host misses. The hint carries no customer data and grants no authority.
 pub type CommitHint = Arc<dyn Fn() + Send + Sync>;
 
-/// A thread-safe client. The customer database remains on the engine's thread.
+/// A thread-safe client. The journal database remains on the engine's thread.
 #[derive(Clone)]
 pub struct AppBackend {
     app: AppId,

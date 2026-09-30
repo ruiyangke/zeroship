@@ -7,7 +7,7 @@ use std::{task::Poll, time::Duration};
 #[compio::test]
 async fn sqlite_independent_orm_hosts_serialize_admission_and_claims() {
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("zs-workflow.sqlite");
+    let path = journal_file(directory.path());
     let first = sqlite_store(&path).await;
     let second = sqlite_store(&path).await;
     independent_hosts(first, second).await;
@@ -16,12 +16,7 @@ async fn sqlite_independent_orm_hosts_serialize_admission_and_claims() {
 #[compio::test]
 async fn postgres_independent_orm_hosts_serialize_admission_and_claims() {
     let fixture = PostgresFixture::start().await;
-    let second = orm_store(
-        &fixture
-            .admin_url
-            .replacen("postgres@", "customer_worker@", 1),
-        super::super::store::SchemaName::new("customer").unwrap(),
-    )
+    let second = orm_store(&fixture.journal_url)
     .await;
     independent_hosts(fixture.store.clone(), second).await;
 }
@@ -60,7 +55,7 @@ async fn independent_hosts(first: OrmStore, second: OrmStore) {
 #[compio::test]
 async fn native_client_crosses_runtime_threads_without_losing_app_scope() {
     let directory = tempfile::tempdir().unwrap();
-    let store = Rc::new(sqlite_store(&directory.path().join("zs-workflow.sqlite")).await);
+    let store = Rc::new(sqlite_store(&journal_file(directory.path())).await);
     let (service, app, other, _deployments) = registered_service(store).await;
     let objects = Objects::new();
     let client = service
@@ -110,7 +105,7 @@ async fn native_client_crosses_runtime_threads_without_losing_app_scope() {
 async fn mutating_backend_calls_hint_the_host_and_reads_do_not() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let directory = tempfile::tempdir().unwrap();
-    let store = Rc::new(sqlite_store(&directory.path().join("zs-workflow.sqlite")).await);
+    let store = Rc::new(sqlite_store(&journal_file(directory.path())).await);
     let (service, app, _, _deployments) = registered_service(store).await;
     let hints = Arc::new(AtomicUsize::new(0));
     let observed = hints.clone();
@@ -177,7 +172,7 @@ async fn mutating_backend_calls_hint_the_host_and_reads_do_not() {
 #[compio::test]
 async fn cancelled_queued_requests_do_not_mutate_and_overload_is_bounded() {
     let directory = tempfile::tempdir().unwrap();
-    let store = Rc::new(sqlite_store(&directory.path().join("zs-workflow.sqlite")).await);
+    let store = Rc::new(sqlite_store(&journal_file(directory.path())).await);
     let (service, app, _, _deployments) = registered_service(store.clone()).await;
     let objects = Objects::new();
     let client = service
@@ -236,7 +231,7 @@ async fn cancelling_a_database_wait_rolls_back_before_the_next_request() {
     blocker.batch_execute("BEGIN").await.unwrap();
     blocker
         .query_one(
-            "SELECT app_id FROM customer.__zeroship_workflow_app_state WHERE app_id=$1 FOR UPDATE",
+            "SELECT app_id FROM workflow_manager.__zeroship_workflow_app_state WHERE app_id=$1 FOR UPDATE",
             &[&app.as_str()],
         )
         .await
@@ -248,7 +243,7 @@ async fn cancelling_a_database_wait_rolls_back_before_the_next_request() {
     let observer = connect(&fixture.admin_url).await;
     compio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let waiting: bool = observer.query_one("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE usename='customer_worker' AND wait_event_type='Lock')", &[]).await.unwrap().get(0);
+            let waiting: bool = observer.query_one("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE usename='zeroship_workflow' AND wait_event_type='Lock')", &[]).await.unwrap().get(0);
             if waiting { break; }
             compio::time::sleep(Duration::from_millis(1)).await;
         }
@@ -263,7 +258,7 @@ async fn cancelling_a_database_wait_rolls_back_before_the_next_request() {
     .unwrap()
     .unwrap();
     let rows = observer
-        .query("SELECT id FROM customer.__zeroship_workflow_runs", &[])
+        .query("SELECT id FROM workflow_manager.__zeroship_workflow_runs", &[])
         .await
         .unwrap();
     assert_eq!(rows.len(), 1);
@@ -273,7 +268,7 @@ async fn cancelling_a_database_wait_rolls_back_before_the_next_request() {
 #[compio::test]
 async fn sqlite_journal_transaction_lifetime_rejects_abandoned_and_escaped_work() {
     let directory = tempfile::tempdir().unwrap();
-    let store = sqlite_store(&directory.path().join("zs-workflow.sqlite")).await;
+    let store = sqlite_store(&journal_file(directory.path())).await;
     transaction_lifetime(&store).await;
 }
 

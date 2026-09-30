@@ -25,7 +25,7 @@ fn err_chain(e: &dyn std::error::Error) -> String {
 }
 
 #[test]
-fn per_app_role_created_at_provision() {
+fn binding_role_created_at_provision() {
     Host::test(|host| {
         host.run(async {
             let (_postgres, url) = require_pg(host).await;
@@ -38,7 +38,7 @@ fn per_app_role_created_at_provision() {
             // First provision creates the role.
             let first = crate::tests::fixtures::roles::ensure_binding_ladder(&pool, &crate::tests::fixtures::harness_binding(app))
                 .await
-                .expect("provision per-app role");
+                .expect("provision binding role");
             assert!(first.created_role, "first provision must create the role");
 
             // The role now exists in pg_roles.
@@ -55,7 +55,7 @@ fn per_app_role_created_at_provision() {
             // harmlessly).
             let second = crate::tests::fixtures::roles::ensure_binding_ladder(&pool, &crate::tests::fixtures::harness_binding(app))
                 .await
-                .expect("re-provision per-app role");
+                .expect("re-provision binding role");
             assert!(
                 !second.created_role,
                 "second provision must NOT re-create the role"
@@ -73,7 +73,7 @@ fn per_app_role_created_at_provision() {
 }
 
 #[test]
-fn per_app_role_has_no_replication_attr() {
+fn binding_role_has_no_replication_attr() {
     Host::test(|host| {
         host.run(async {
             let (_postgres, url) = require_pg(host).await;
@@ -97,7 +97,7 @@ fn per_app_role_has_no_replication_attr() {
             let is_repl: bool = rows[0].get("rolreplication");
             assert!(
                 !is_repl,
-                "per-app role MUST NOT have the REPLICATION attribute (§17.5 \
+                "binding role MUST NOT have the REPLICATION attribute (§17.5 \
          slot-ownership-stays-platform)"
             );
 
@@ -113,7 +113,7 @@ fn per_app_role_has_no_replication_attr() {
 }
 
 #[test]
-fn per_app_role_grant_scoped_to_schema() {
+fn binding_role_grant_scoped_to_schema() {
     Host::test(|host| {
         host.run(async {
             let (_postgres, url) = require_pg(host).await;
@@ -126,7 +126,7 @@ fn per_app_role_grant_scoped_to_schema() {
                 .await
                 .unwrap();
 
-            // Create a table in the app schema (as superuser), insert a row.
+            // Create a table in the binding's schema (as superuser), insert a row.
             pool.execute(
                 &format!(r#"CREATE TABLE "{alias}".widgets (id SERIAL PRIMARY KEY, name TEXT)"#),
                 &[],
@@ -141,7 +141,7 @@ fn per_app_role_grant_scoped_to_schema() {
             .unwrap();
             fixtures::grant_all_runtime_table_columns(&pool, &crate::tests::fixtures::harness_binding(app), "widgets").await;
 
-            // SET ROLE to the per-app role and CRUD its own schema — must work.
+            // SET ROLE to the binding role and CRUD its own schema — must work.
             pool.execute(&format!(r#"SET ROLE "{role}""#), &[])
                 .await
                 .unwrap();
@@ -150,7 +150,7 @@ fn per_app_role_grant_scoped_to_schema() {
                 .await;
             assert!(
                 sel.is_ok(),
-                "per-app role must SELECT its own schema: {sel:?}"
+                "binding role must SELECT its own schema: {sel:?}"
             );
             let ins = pool
                 .execute(
@@ -160,7 +160,7 @@ fn per_app_role_grant_scoped_to_schema() {
                 .await;
             assert!(
                 ins.is_ok(),
-                "per-app role must INSERT its own schema: {ins:?}"
+                "binding role must INSERT its own schema: {ins:?}"
             );
             pool.execute("RESET ROLE", &[]).await.unwrap();
 
@@ -176,7 +176,7 @@ fn per_app_role_grant_scoped_to_schema() {
 }
 
 #[test]
-fn per_app_role_cannot_read_sibling_schema_or_touch_slots() {
+fn binding_role_cannot_read_sibling_schema_or_touch_slots() {
     Host::test(|host| {
         host.run(async {
             let (_postgres, url) = require_pg(host).await;
@@ -220,7 +220,7 @@ fn per_app_role_cannot_read_sibling_schema_or_touch_slots() {
                 .await;
             assert!(
                 cross.is_err(),
-                "per-app role A must NOT read sibling schema B; got Ok"
+                "binding role A must NOT read sibling schema B; got Ok"
             );
             let cross_err = err_chain(&cross.unwrap_err());
             assert!(
@@ -237,7 +237,7 @@ fn per_app_role_cannot_read_sibling_schema_or_touch_slots() {
         .await;
             assert!(
                 slot_create.is_err(),
-                "per-app role must NOT create a replication slot directly"
+                "binding role must NOT create a replication slot directly"
             );
             let slot_err = err_chain(&slot_create.unwrap_err());
             assert!(
@@ -253,7 +253,7 @@ fn per_app_role_cannot_read_sibling_schema_or_touch_slots() {
                 .await;
             assert!(
                 slot_drop.is_err(),
-                "per-app role must NOT drop a replication slot"
+                "binding role must NOT drop a replication slot"
             );
 
             pool.execute("RESET ROLE", &[]).await.unwrap();
@@ -273,7 +273,7 @@ fn per_app_role_cannot_read_sibling_schema_or_touch_slots() {
 }
 
 #[test]
-fn client_sql_runs_under_per_app_role() {
+fn client_sql_runs_under_binding_role() {
     Host::test(|host| {
         host.run(async {
             // Proves the `SET LOCAL ROLE` shape `exec_begin`
@@ -302,7 +302,7 @@ fn client_sql_runs_under_per_app_role() {
                 .expect("integration app id must produce valid SET LOCAL ROLE SQL");
             client.execute(&set_sql, &[]).await.unwrap();
 
-            // current_user inside the tx must be the per-app role.
+            // current_user inside the tx must be the binding role.
             let who = client
                 .query_text_params("SELECT current_user AS u", &[])
                 .await
@@ -310,7 +310,7 @@ fn client_sql_runs_under_per_app_role() {
             let current: String = who[0].get("u");
             assert_eq!(
                 current, role,
-                "client SQL inside the tx must run under the per-app role"
+                "client SQL inside the tx must run under the binding role"
             );
 
             // COMMIT reverts SET LOCAL — current_user is back to the login role.
@@ -338,11 +338,11 @@ fn client_sql_runs_under_per_app_role() {
 }
 
 #[test]
-fn exec_autocommit_query_runs_under_per_app_role() {
+fn exec_autocommit_query_runs_under_binding_role() {
     Host::test(|host| {
         host.run(async {
             // I2 regression: the shared autocommit exec path must switch to the
-            // per-app role before running the statement, not just explicit/auto tx.
+            // binding role before running the statement, not just explicit/auto tx.
             let (_postgres, url) = require_pg(host).await;
             let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
             let app = crate::tests::fixtures::test_app_id!();
@@ -370,7 +370,7 @@ fn exec_autocommit_query_runs_under_per_app_role() {
                 .expect("current_user string");
             assert_eq!(
                 current, role,
-                "autocommit exec query must run under the per-app role",
+                "autocommit exec query must run under the binding role",
             );
 
             let who = pool
@@ -395,7 +395,7 @@ fn exec_autocommit_query_runs_under_per_app_role() {
 }
 
 #[test]
-fn vector_search_runs_under_per_app_role_via_rls() {
+fn vector_search_runs_under_binding_role_via_rls() {
     Host::test(|host| {
         host.run(async {
             use zeroship_data_orm::backend::VectorMetric;
@@ -508,7 +508,7 @@ fn vector_search_runs_under_per_app_role_via_rls() {
 }
 
 #[test]
-fn spatial_near_runs_under_per_app_role_via_rls() {
+fn spatial_near_runs_under_binding_role_via_rls() {
     Host::test(|host| {
         host.run(async {
             use zeroship_data_orm::backend::GeoPoint;

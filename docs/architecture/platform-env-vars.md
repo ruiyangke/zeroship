@@ -427,7 +427,8 @@ container under the same name:
 | `ZEROSHIP_CONTROL_STRIPE_WEBHOOK_SECRET` |
 
 The provisioning DSN is the one that must be privileged: the migration service
-uses it to create each deployed app's schema and role. Because it is privileged,
+reconciles the cluster's databases through it, each database's schema and roles
+with them, and applies their migrations. Because it is privileged,
 its default is a mounted secret file rather than a literal DSN; setting the
 variable to a literal DSN still works.
 

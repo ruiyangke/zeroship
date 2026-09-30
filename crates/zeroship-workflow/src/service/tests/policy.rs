@@ -225,14 +225,14 @@ fn host_policy_revisions_reject_conflicting_limits_and_accept_authorized_refresh
 }
 
 #[compio::test]
-async fn policy_revocation_while_waiting_for_customer_lock_prevents_admission() {
+async fn policy_revocation_while_waiting_for_the_app_lock_prevents_admission() {
     let fixture = PostgresFixture::start().await;
     let (service, app, _, _deployments) = registered_service(Rc::new(fixture.store.clone())).await;
     let blocker = connect(&fixture.admin_url).await;
     blocker.batch_execute("BEGIN").await.unwrap();
     blocker
         .query_one(
-            "SELECT app_id FROM customer.__zeroship_workflow_app_state WHERE app_id=$1 FOR UPDATE",
+            "SELECT app_id FROM workflow_manager.__zeroship_workflow_app_state WHERE app_id=$1 FOR UPDATE",
             &[&app.as_str()],
         )
         .await
@@ -246,11 +246,11 @@ async fn policy_revocation_while_waiting_for_customer_lock_prevents_admission() 
     let observer = connect(&fixture.admin_url).await;
     compio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let waiting: bool = observer.query_one("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE usename='customer_worker' AND wait_event_type='Lock' AND position('__zeroship_workflow_app_state' in query) > 0)", &[]).await.unwrap().get(0);
+            let waiting: bool = observer.query_one("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE usename='zeroship_workflow' AND wait_event_type='Lock' AND position('__zeroship_workflow_app_state' in query) > 0)", &[]).await.unwrap().get(0);
             if waiting { break; }
             compio::time::sleep(Duration::from_millis(10)).await;
         }
-    }).await.expect("start reached the customer app lock");
+    }).await.expect("start reached the journal's app lock");
     service
         .policies
         .fixture_install(
@@ -266,7 +266,7 @@ async fn policy_revocation_while_waiting_for_customer_lock_prevents_admission() 
     ));
     let runs: i64 = observer
         .query_one(
-            "SELECT count(*) FROM customer.__zeroship_workflow_runs",
+            "SELECT count(*) FROM workflow_manager.__zeroship_workflow_runs",
             &[],
         )
         .await
@@ -278,7 +278,7 @@ async fn policy_revocation_while_waiting_for_customer_lock_prevents_admission() 
 #[compio::test]
 async fn sqlite_host_policy_expiry_preserves_history_and_stops_new_execution() {
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("zs-workflow.sqlite");
+    let path = journal_file(directory.path());
     schema::initialize_sqlite(&path).unwrap();
     host_policy_contract(Rc::new(sqlite_store(&path).await)).await;
 }
@@ -296,7 +296,22 @@ async fn postgres_host_policy_needs_no_platform_database() {
         .await
         .unwrap()
         .is_empty());
-    assert!(admin.query("SELECT column_name FROM information_schema.columns WHERE table_schema='customer' AND column_name IN ('policy','platform_app_id','deploy_revision')", &[]).await.unwrap().is_empty());
+    let journal_columns = "SELECT column_name FROM information_schema.columns \
+                           WHERE table_schema='workflow_manager' AND column_name = ANY($1)";
+    // THE CONTROL: the same query finds a column the journal does declare, so the
+    // empty answer below is about the names and not a schema the query misses.
+    let declared: &[&str] = &["app_id"];
+    assert!(!admin
+        .query(journal_columns, &[&declared])
+        .await
+        .unwrap()
+        .is_empty());
+    let policy_columns: &[&str] = &["policy", "platform_app_id", "deploy_revision"];
+    assert!(admin
+        .query(journal_columns, &[&policy_columns])
+        .await
+        .unwrap()
+        .is_empty());
 }
 
 #[expect(
@@ -546,7 +561,7 @@ async fn retired_app_handles(store: Rc<OrmStore>) {
 #[compio::test]
 async fn metadata_lease_bounds_grants_and_duplicate_delivery_keeps_its_deadline() {
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("zs-workflow.sqlite");
+    let path = journal_file(directory.path());
     schema::initialize_sqlite(&path).unwrap();
     let (service, app, _, _deployments) =
         registered_service(Rc::new(sqlite_store(&path).await)).await;
@@ -582,40 +597,35 @@ async fn metadata_lease_bounds_grants_and_duplicate_delivery_keeps_its_deadline(
     ));
 }
 
+/// A journal is its database's, and never an app's. Every host opens the journal
+/// on the one binding, so a second journal is a second database: the same app
+/// registered in both gets runs neither can see from the other, and a login the
+/// second journal has not been granted to cannot open it.
 #[compio::test]
-async fn customer_schema_binding_is_explicit_and_independent_of_app_identity() {
+async fn journal_is_scoped_to_its_database_and_independent_of_app_identity() {
     let fixture = PostgresFixture::start().await;
     let (first, app, _, deployments) = registered_service(Rc::new(fixture.store.clone())).await;
     let admin = connect(&fixture.admin_url).await;
-    let other = super::super::store::SchemaName::new("customer-other").unwrap();
-    admin.batch_execute("CREATE SCHEMA \"customer-other\" AUTHORIZATION customer_migrator; CREATE ROLE other_customer_worker LOGIN; CREATE ROLE \"app_customer-other_role\" NOLOGIN; GRANT \"app_customer-other_role\" TO other_customer_worker; SET ROLE customer_migrator;").await.unwrap();
     admin
-        .batch_execute(&schema::postgres_sql(&other))
+        .batch_execute("CREATE DATABASE other_journal")
         .await
         .unwrap();
-    admin.batch_execute("RESET ROLE; GRANT USAGE ON SCHEMA \"customer-other\" TO \"app_customer-other_role\"; GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA \"customer-other\" TO \"app_customer-other_role\";").await.unwrap();
-    let wrong = Rc::new(
-        orm_store(
-            &fixture.admin_url.replace("postgres@", "customer_worker@"),
-            other.clone(),
-        )
-        .await,
-    );
+    let on_other = |url: &str| format!("{}/other_journal", url.rsplit_once('/').unwrap().0);
+    let other_admin = connect(&on_other(&fixture.admin_url)).await;
+    let other_url = on_other(&fixture.journal_url);
+    install_journal(&other_admin).await;
+    // THE REFUSAL, one variable from the success below: the journal is installed
+    // and its login exists, and only the grant is missing.
+    let ungranted = Rc::new(orm_store(&other_url).await);
     assert!(
-        WorkflowService::open(wrong, Arc::new(HostPolicies::default()))
+        WorkflowService::open(ungranted, Arc::new(HostPolicies::default()))
             .await
-            .is_err()
+            .is_err(),
+        "a login the journal is not granted to must not open it"
     );
+    grant_journal(&other_admin).await;
     let second = WorkflowService::open(
-        Rc::new(
-            orm_store(
-                &fixture
-                    .admin_url
-                    .replace("postgres@", "other_customer_worker@"),
-                other,
-            )
-            .await,
-        ),
+        Rc::new(orm_store(&other_url).await),
         Arc::new(HostPolicies::default()),
     )
     .await
@@ -658,19 +668,29 @@ async fn customer_schema_binding_is_explicit_and_independent_of_app_identity() {
         second.status(&a.id).await,
         Err(WorkflowServiceError::NotFound(_))
     ));
-    for invalid in ["", "customer.other", "customer\"; SELECT 'untrusted'"] {
+    for invalid in ["", "journal.other", "journal\"; SELECT 'untrusted'"] {
         assert!(super::super::store::SchemaName::new(invalid).is_err());
     }
-    let names = admin.query("SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname IN ('customer','customer-other')", &[]).await.unwrap();
-    assert!(!names.is_empty());
-    for row in names {
-        let name: &str = row.get(0);
-        assert!(
-            name.starts_with("__zeroship_workflow_"),
-            "unreserved journal relation {name}"
-        );
+    for client in [&admin, &other_admin] {
+        let names = client
+            .query(
+                "SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace \
+                 WHERE n.nspname = $1",
+                &[&super::super::store::JOURNAL_SCHEMA],
+            )
+            .await
+            .unwrap();
+        assert!(!names.is_empty());
+        for row in names {
+            let name: &str = row.get(0);
+            assert!(
+                name.starts_with("__zeroship_workflow_"),
+                "unreserved journal relation {name}"
+            );
+        }
     }
 }
+
 
 #[derive(Clone, Copy, Debug)]
 enum IngressOperation {
@@ -1006,10 +1026,10 @@ impl IngressBarrier {
         let blocker = connect(url).await;
         blocker
             .batch_execute(
-                "CREATE FUNCTION customer.ingress_barrier() RETURNS trigger LANGUAGE plpgsql AS $$
+                "CREATE FUNCTION workflow_manager.ingress_barrier() RETURNS trigger LANGUAGE plpgsql AS $$
              BEGIN PERFORM pg_advisory_xact_lock(73921864); RETURN NEW; END $$;
-             CREATE TRIGGER ingress_barrier BEFORE INSERT ON customer.__zeroship_workflow_requests
-             FOR EACH ROW EXECUTE FUNCTION customer.ingress_barrier();",
+             CREATE TRIGGER ingress_barrier BEFORE INSERT ON workflow_manager.__zeroship_workflow_requests
+             FOR EACH ROW EXECUTE FUNCTION workflow_manager.ingress_barrier();",
             )
             .await
             .unwrap();
@@ -1033,7 +1053,7 @@ impl IngressBarrier {
         compio::time::timeout(Duration::from_secs(10), async {
             loop {
                 let waiting = self.observer.query(
-                    "SELECT pid FROM pg_stat_activity WHERE usename='customer_worker' AND wait_event_type='Lock' AND $1=ANY(pg_blocking_pids(pid))",
+                    "SELECT pid FROM pg_stat_activity WHERE usename='zeroship_workflow' AND wait_event_type='Lock' AND $1=ANY(pg_blocking_pids(pid))",
                     &[&self.blocker_pid],
                 ).await.unwrap();
                 if let Some(worker) = waiting.first() {
@@ -1071,8 +1091,8 @@ impl IngressBarrier {
     async fn remove(&self) {
         self.blocker
             .batch_execute(
-                "DROP TRIGGER ingress_barrier ON customer.__zeroship_workflow_requests;
-             DROP FUNCTION customer.ingress_barrier();",
+                "DROP TRIGGER ingress_barrier ON workflow_manager.__zeroship_workflow_requests;
+             DROP FUNCTION workflow_manager.ingress_barrier();",
             )
             .await
             .unwrap();

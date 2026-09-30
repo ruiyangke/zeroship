@@ -28,7 +28,7 @@ pub(super) const fn admit(policy: &AppPolicy) -> Result<(), WorkflowServiceError
 
 /// Establishes the manager's ingress epoch for one app's policy binding.
 ///
-/// The creator journal refuses an acceptance whose captured epoch it closed.
+/// The journal refuses an acceptance whose captured epoch it closed.
 /// The host then obtains an open epoch above the refused one from the manager,
 /// which commits recovery responsibility before replying, and installs it into
 /// the app's binding before returning, so a retried acceptance captures it.
@@ -574,7 +574,7 @@ impl PolicyRefresh {
 /// A captured binding/epoch and original deadline. Newer refreshes may authorize
 /// new operations, but can never extend or resurrect this authority.
 /// `ingress_epoch` is the manager responsibility captured with the policy; the
-/// creator journal, not this capture, decides whether it is still open.
+/// journal, not this capture, decides whether it is still open.
 #[derive(Clone)]
 pub struct PolicyAuthority {
     binding: PolicyBinding,
