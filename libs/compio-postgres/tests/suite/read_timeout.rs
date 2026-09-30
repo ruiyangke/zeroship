@@ -306,8 +306,10 @@ fn read_timeout_is_opt_in_connection_policy() {
     // THE CONTROL FIRST. `is_err()` alone was the whole assertion here until
     // 2026-08-23, and it is satisfied by any regression that stops this DSN
     // parsing for any reason - the key under test need not be involved. So:
-    // the same string WITHOUT the key must parse, and the rejection must name
-    // the key.
+    // the same string WITHOUT the key must parse, and the rejection must be
+    // the refusal of an unknown option. It does not name the key: this driver
+    // never echoes connection-string text, because a refusal is logged and can
+    // carry a password.
     "host=localhost"
         .parse::<Config>()
         .expect("the control DSN must parse, or the rejection below proves nothing");
@@ -316,7 +318,7 @@ fn read_timeout_is_opt_in_connection_policy() {
         .expect_err("programmatic read policy became a libpq-looking DSN parameter");
     let cause = common::error_chain(&rejected);
     assert!(
-        cause.contains("unknown option") && cause.contains("read_timeout"),
+        cause.contains("unknown option") && !cause.contains("read_timeout"),
         "the DSN parser rejected the string for the wrong reason: {cause}"
     );
 }

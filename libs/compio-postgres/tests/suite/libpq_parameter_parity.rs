@@ -36,9 +36,9 @@ enum Verdict {
     /// silent-misclassification this whole test exists to prevent.
     ///
     /// The evidence that it is implemented is that the failure is about
-    /// RESOLVING the value: an unrecognised key reports `unknown option
-    /// <key>` and could not mention the value, whereas a key we act on
-    /// reports that it could not find `<value>`.
+    /// RESOLVING the value: a key we act on is refused by name for what it
+    /// could not find, whereas an unrecognised key is refused as an unknown
+    /// option. Neither refusal quotes the value.
     Resolved,
 }
 
@@ -199,13 +199,15 @@ fn every_libpq_parameter_is_implemented_or_refused_by_name() {
             (Refused, Ok(_)) => wrong.push(format!(
                 "{key}: accepted but unimplemented, so it is silently ignored"
             )),
-            // Naming the VALUE is what separates "we tried to resolve it" from
-            // "we do not know this key": an unknown-option error cannot
-            // mention a value it never looked at.
-            (Resolved, Err(error)) if a_cause_names(&error, value) => {}
+            // A refusal that names the key and is not the refusal of an unknown
+            // option is what separates "we tried to resolve it" from "we do
+            // not know this key". The value is no evidence either way: no
+            // refusal quotes connection-string text.
+            (Resolved, Err(error))
+                if a_cause_names(&error, key) && !a_cause_names(&error, "unknown option") => {}
             (Resolved, Err(error)) => wrong.push(format!(
-                "{key}: expected a failure to RESOLVE {value}, but no cause \
-                 names it, so this looks like the key being rejected ({error})"
+                "{key}: expected a failure to RESOLVE {value}, but the refusal \
+                 does not name the key, or refuses it as unknown ({error})"
             )),
             (Resolved, Ok(_)) => wrong.push(format!(
                 "{key}: resolved {value} against external state this test did \
@@ -217,6 +219,31 @@ fn every_libpq_parameter_is_implemented_or_refused_by_name() {
     assert!(
         wrong.is_empty(),
         "libpq parameter parity:\n  {}",
+        wrong.join("\n  ")
+    );
+}
+
+/// Every libpq parameter is a name this driver knows, implemented or refused.
+///
+/// An unknown key is never quoted; its refusal names at most the known option
+/// nearest it. So each parameter above, written in the wrong case, must be
+/// answered with its own name, or a typo of it would get no help or the wrong
+/// name.
+#[test]
+fn every_libpq_parameter_is_suggested_for_its_own_typo() {
+    let mut wrong = Vec::new();
+    for (key, value, _) in LIBPQ_PARAMETERS {
+        let shouted = key.to_ascii_uppercase();
+        let suggestion = format!("unknown option; did you mean `{key}`?");
+        match format!("host=h {shouted}={value}").parse::<Config>() {
+            Err(error) if a_cause_names(&error, &suggestion) => {}
+            Err(error) => wrong.push(format!("{shouted}: {error:?}")),
+            Ok(_) => wrong.push(format!("{shouted}: parsed")),
+        }
+    }
+    assert!(
+        !LIBPQ_PARAMETERS.is_empty() && wrong.is_empty(),
+        "not answered with their own names:\n  {}",
         wrong.join("\n  ")
     );
 }

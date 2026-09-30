@@ -340,6 +340,18 @@ pub enum AuthMethod {
 }
 
 impl AuthMethod {
+    /// Every method, in the order a `require_auth` refusal lists them. Parsing
+    /// reads this list too, so the refusal cannot list a spelling the parser
+    /// refuses or leave out one it accepts.
+    const ALL: [Self; 6] = [
+        Self::Password,
+        Self::Md5,
+        Self::ScramSha256,
+        Self::Gss,
+        Self::Sspi,
+        Self::None,
+    ];
+
     /// Returns this method's PostgreSQL connection-string spelling.
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -353,15 +365,9 @@ impl AuthMethod {
     }
 
     fn parse(value: &str) -> Option<Self> {
-        match value {
-            "password" => Some(Self::Password),
-            "md5" => Some(Self::Md5),
-            "gss" => Some(Self::Gss),
-            "sspi" => Some(Self::Sspi),
-            "scram-sha-256" => Some(Self::ScramSha256),
-            "none" => Some(Self::None),
-            _ => None,
-        }
+        Self::ALL
+            .into_iter()
+            .find(|method| method.as_str() == value)
     }
 }
 
@@ -432,32 +438,16 @@ impl RequireAuth {
 
             match expected_negated {
                 None => expected_negated = Some(negated),
-                Some(false) if negated => {
-                    return Err(InvalidRequireAuth(format!(
-                        "negative method {part:?} cannot be mixed with non-negative methods"
-                    )));
-                }
-                Some(true) if !negated => {
-                    return Err(InvalidRequireAuth(format!(
-                        "method {part:?} cannot be mixed with negative methods"
-                    )));
-                }
+                Some(expected) if expected != negated => return Err(InvalidRequireAuth::Mixed),
                 Some(_) => {}
             }
 
-            let method = AuthMethod::parse(method_name).ok_or_else(|| {
-                InvalidRequireAuth(format!("unknown authentication method {method_name:?}"))
-            })?;
+            let method = AuthMethod::parse(method_name).ok_or(InvalidRequireAuth::Unknown)?;
             if !negated && matches!(method, AuthMethod::Gss | AuthMethod::Sspi) {
-                return Err(InvalidRequireAuth(format!(
-                    "authentication method {method_name:?} cannot be required because it is not \
-                     supported by this driver"
-                )));
+                return Err(InvalidRequireAuth::Unsupported(method));
             }
             if methods.contains(&method) {
-                return Err(InvalidRequireAuth(format!(
-                    "method {part:?} is specified more than once"
-                )));
+                return Err(InvalidRequireAuth::Repeated { method, negated });
             }
             methods.push(method);
         }
@@ -1013,7 +1003,7 @@ impl Config {
 
         let Some(path) = self.service_file.clone() else {
             return Err(Error::config(Box::new(
-                crate::service::ServiceError::NoServiceFile { service },
+                crate::service::ServiceError::NoServiceFile,
             )));
         };
 
@@ -2301,10 +2291,13 @@ impl Config {
                 };
                 self.replication = mode;
             }
+            // Refused by this driver's own copy of the name, never by `key`
+            // (see `UnknownOption`).
             key => {
-                return Err(Error::config_parse(Box::new(UnknownOption(
-                    key.to_string(),
-                ))));
+                if let Some(&name) = UNSUPPORTED_OPTION_NAMES.iter().find(|name| **name == key) {
+                    return Err(Error::config_parse(Box::new(UnsupportedOption(name))));
+                }
+                return Err(Error::config_parse(Box::new(UnknownOption::new(key))));
             }
         }
 
@@ -2507,16 +2500,247 @@ impl fmt::Debug for Config {
     }
 }
 
+/// Every option this driver acts on, by the name a connection string gives it,
+/// except the keepalive options ([`KEEPALIVE_OPTION_NAMES`]).
+///
+/// With [`UNSUPPORTED_OPTION_NAMES`] these are the only option names a refusal
+/// prints: never the key a connection string held (see [`UnknownOption`]).
+/// `known_option_names_are_the_ones_param_answers_to` holds these lists to
+/// [`Config::param`].
+const OPTION_NAMES: &[&str] = &[
+    "user",
+    "password",
+    "dbname",
+    "options",
+    "fallback_application_name",
+    "client_encoding",
+    "application_name",
+    "statement_cache_capacity",
+    "max_message_size",
+    "gssencmode",
+    "gssdelegation",
+    "sslcompression",
+    "requiressl",
+    "sslmode",
+    "sslnegotiation",
+    "sslrootcert",
+    "sslcert",
+    "sslkey",
+    "passfile",
+    "service",
+    "servicefile",
+    "sslkeylogfile",
+    "sslcertmode",
+    "sslpassword",
+    "sslcrl",
+    "sslcrldir",
+    "min_protocol_version",
+    "max_protocol_version",
+    "ssl_min_protocol_version",
+    "ssl_max_protocol_version",
+    "sslsni",
+    "requirepeer",
+    "host",
+    "hostaddr",
+    "port",
+    "connect_timeout",
+    "tcp_user_timeout",
+    "target_session_attrs",
+    "channel_binding",
+    "require_auth",
+    "load_balance_hosts",
+    "replication",
+];
+
+/// The TCP keepalive options, which [`Config::param`] answers to only where
+/// the socket layer has them.
+#[cfg(not(target_arch = "wasm32"))]
+const KEEPALIVE_OPTION_NAMES: &[&str] = &[
+    "keepalives",
+    "keepalives_idle",
+    "keepalives_interval",
+    "keepalives_count",
+];
+#[cfg(target_arch = "wasm32")]
+const KEEPALIVE_OPTION_NAMES: &[&str] = &[];
+
+/// libpq options this driver knows and refuses by name, because each asks for
+/// a feature it does not implement.
+const UNSUPPORTED_OPTION_NAMES: &[&str] = &[
+    "gsslib",
+    "krbsrvname",
+    "oauth_client_id",
+    "oauth_client_secret",
+    "oauth_issuer",
+    "oauth_scope",
+    "scram_client_key",
+    "scram_server_key",
+];
+
+/// Every option name this driver knows, in the order a tie between two
+/// suggestions is settled.
+fn known_option_names() -> impl Iterator<Item = &'static str> {
+    OPTION_NAMES
+        .iter()
+        .chain(KEEPALIVE_OPTION_NAMES)
+        .chain(UNSUPPORTED_OPTION_NAMES)
+        .copied()
+}
+
+/// This driver's own copy of `key`, when `key` names an option it knows.
+///
+/// A refusal prints the copy rather than `key`. The two are spelled alike,
+/// but only the copy is text this driver wrote.
+fn known_option_name(key: &str) -> Option<&'static str> {
+    known_option_names().find(|name| *name == key)
+}
+
+/// How far a key may be from an option name for [`UnknownOption`] to suggest
+/// the name: two edits, which covers a swapped pair of letters, a letter
+/// dropped, doubled or mistyped, and any two of those.
+const SUGGESTION_DISTANCE: usize = 2;
+
+/// The known option name nearest `key`, when one lies within
+/// [`SUGGESTION_DISTANCE`] of it after ASCII case is folded and `-` is read as
+/// `_`. The name listed first wins a tie.
+///
+/// Only a key of ASCII letters, digits, `_` and `-` is measured. One holding
+/// anything else is not a typo of an option name but other text read as a
+/// key, such as a URL or the rest of a value after an unencoded `&`, and the
+/// fixed refusal, which names those causes, fits it better than a name it
+/// happens to be near.
+fn nearest_option_name(key: &str) -> Option<&'static str> {
+    if !key
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return None;
+    }
+    let key: Vec<char> = key
+        .chars()
+        .map(|c| {
+            if c == '-' {
+                '_'
+            } else {
+                c.to_ascii_lowercase()
+            }
+        })
+        .collect();
+    known_option_names()
+        // A length gap alone costs one edit per character, so this skips the
+        // table without changing the answer, and keeps a key as long as a
+        // whole URL from being measured against every name.
+        .filter(|name| name.len().abs_diff(key.len()) <= SUGGESTION_DISTANCE)
+        .map(|name| {
+            let spelled: Vec<char> = name.chars().collect();
+            (edit_distance(&key, &spelled), name)
+        })
+        .filter(|&(distance, _)| distance <= SUGGESTION_DISTANCE)
+        .min_by_key(|&(distance, _)| distance)
+        .map(|(_, name)| name)
+}
+
+/// The optimal-string-alignment distance between `a` and `b`: how many
+/// insertions, deletions, substitutions and swaps of two adjacent characters
+/// turn one into the other, when no stretch is edited twice.
+fn edit_distance(a: &[char], b: &[char]) -> usize {
+    // `rows[i][j]` is the distance between the first `i` characters of `a`
+    // and the first `j` characters of `b`.
+    let mut rows = vec![vec![0; b.len() + 1]; a.len() + 1];
+    for (i, row) in rows.iter_mut().enumerate() {
+        row[0] = i;
+    }
+    for (j, cell) in rows[0].iter_mut().enumerate() {
+        *cell = j;
+    }
+    for i in 1..=a.len() {
+        for j in 1..=b.len() {
+            let substitution = rows[i - 1][j - 1] + usize::from(a[i - 1] != b[j - 1]);
+            let mut distance = substitution.min(rows[i - 1][j] + 1).min(rows[i][j - 1] + 1);
+            if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
+                distance = distance.min(rows[i - 2][j - 2] + 1);
+            }
+            rows[i][j] = distance;
+        }
+    }
+    rows[a.len()][b.len()]
+}
+
+/// A key no option answers to.
+///
+/// Its refusal never prints the key, because a key a connection string yields
+/// is not always one the caller wrote, and the text read as one can be the
+/// password. A `password` value holding an unquoted space or an unencoded `&`
+/// ends there, and the rest of it is read on as keys and values; a URL whose
+/// scheme is not recognised goes whole to the keyword parser, which reads it up
+/// to its first `=` as one key; and a URL userinfo password holding an
+/// unencoded `/` is never read as userinfo at all, so its text can reach the
+/// query. No test of a key's shape or position separates those from a typo.
+///
+/// So the refusal names at most the known option nearest the key
+/// ([`nearest_option_name`]). That keeps the help a typo needs, and whatever
+/// the key was, what is printed is this driver's own list.
 #[derive(Debug)]
-struct UnknownOption(String);
+struct UnknownOption {
+    suggestion: Option<&'static str>,
+}
+
+impl UnknownOption {
+    fn new(key: &str) -> Self {
+        Self {
+            suggestion: nearest_option_name(key),
+        }
+    }
+}
 
 impl fmt::Display for UnknownOption {
     fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(fmt, "unknown option `{}`", self.0)
+        match self.suggestion {
+            Some(name) => write!(fmt, "unknown option; did you mean `{name}`?"),
+            None => fmt.write_str(
+                "unknown option, not quoted because connection-string text can hold a \
+                 password; a URL whose scheme is not `postgres://` or `postgresql://`, or a \
+                 value holding an unquoted space or an unencoded `&`, is read as an option",
+            ),
+        }
     }
 }
 
 impl error::Error for UnknownOption {}
+
+/// The part of a URL a refusal is about, named without its contents. A query
+/// parameter is named only when its key is an option this driver knows, and
+/// then by this driver's copy of the name ([`known_option_name`]).
+///
+/// A value, not a string, so the success path builds no label: one is only
+/// written when a refusal is.
+#[derive(Clone, Copy)]
+enum Component<'k> {
+    User,
+    Password,
+    Host,
+    Port,
+    Database,
+    ParameterName,
+    Parameter(&'k str),
+}
+
+impl fmt::Display for Component<'_> {
+    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::User => fmt.write_str("the user"),
+            Self::Password => fmt.write_str("the password"),
+            Self::Host => fmt.write_str("the host"),
+            Self::Port => fmt.write_str("the port"),
+            Self::Database => fmt.write_str("the database name"),
+            Self::ParameterName => fmt.write_str("a URI query parameter name"),
+            Self::Parameter(key) => match known_option_name(key) {
+                Some(name) => write!(fmt, "the URI query parameter `{name}`"),
+                None => fmt.write_str("a URI query parameter"),
+            },
+        }
+    }
+}
 
 #[derive(Debug)]
 struct InvalidValue(&'static str);
@@ -2697,8 +2921,8 @@ fn parse_ssl_protocol_version(
     if value.eq_ignore_ascii_case("TLSv1") || value.eq_ignore_ascii_case("TLSv1.1") {
         return Err(Error::config_parse(
             format!(
-                "option `{parameter}` requests {value}, but rustls cannot negotiate TLS 1.0 or \
-                 TLS 1.1; use TLSv1.2 or TLSv1.3"
+                "option `{parameter}` requests TLS 1.0 or TLS 1.1, which rustls cannot \
+                 negotiate; use TLSv1.2 or TLSv1.3"
             )
             .into(),
         ));
@@ -2715,12 +2939,51 @@ fn parse_protocol_version(parameter: &'static str, value: &str) -> Result<Protoc
     }
 }
 
+/// Why a `require_auth` value was refused.
+///
+/// No variant holds text: each names what was wrong in this driver's own
+/// words and [`AuthMethod::as_str`] spellings, so the value itself, which can be
+/// the rest of a password, is never printed.
 #[derive(Debug)]
-struct InvalidRequireAuth(String);
+enum InvalidRequireAuth {
+    /// An element that is not a method name, `!` and a method name, or at all.
+    Unknown,
+    /// Negated and non-negated methods in one list.
+    Mixed,
+    /// A method only a negated list may name.
+    Unsupported(AuthMethod),
+    /// A method the list names twice.
+    Repeated { method: AuthMethod, negated: bool },
+}
 
 impl fmt::Display for InvalidRequireAuth {
     fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(fmt, "invalid value for option `require_auth`: {}", self.0)
+        fmt.write_str("invalid value for option `require_auth`: ")?;
+        match self {
+            Self::Unknown => {
+                fmt.write_str("expected a comma-separated list of: ")?;
+                for (index, method) in AuthMethod::ALL.into_iter().enumerate() {
+                    if index != 0 {
+                        fmt.write_str(", ")?;
+                    }
+                    fmt.write_str(method.as_str())?;
+                }
+                fmt.write_str(" (each may be prefixed with `!`)")
+            }
+            Self::Mixed => fmt.write_str("negated and non-negated methods cannot be mixed"),
+            Self::Unsupported(method) => write!(
+                fmt,
+                "authentication method {:?} cannot be required because it is not supported by \
+                 this driver",
+                method.as_str()
+            ),
+            Self::Repeated { method, negated } => write!(
+                fmt,
+                "method \"{}{}\" is specified more than once",
+                if *negated { "!" } else { "" },
+                method.as_str()
+            ),
+        }
     }
 }
 
@@ -2799,11 +3062,11 @@ impl<'a> Parser<'a> {
     fn eat(&mut self, target: char) -> Result<(), Error> {
         match self.it.next() {
             Some((_, c)) if c == target => Ok(()),
-            Some((i, c)) => {
-                let m =
-                    format!("unexpected character at byte {i}: expected `{target}` but got `{c}`");
-                Err(Error::config_parse(m.into()))
-            }
+            // Neither the character nor its offset: both can fall inside a
+            // value, as the next word of a password with an unquoted space.
+            Some(_) => Err(Error::config_parse(
+                format!("unexpected character: expected `{target}`").into(),
+            )),
             None => Err(Error::config_parse("unexpected EOF".into())),
         }
     }
@@ -2905,14 +3168,17 @@ impl<'a> Parser<'a> {
             // config.rs:963 is otherwise identical), so this is a libpq
             // divergence inherited from upstream rather than one introduced
             // here. libpq rejects the empty option name.
+            //
+            // Whitespace was skipped and `keyword` takes every character but
+            // whitespace and `=`, so what stands here is always a `=`. The
+            // refusal carries no byte offset: after a password holding an
+            // unquoted space, as in `password=hunter2 =x`, the offset measures
+            // the password.
             None => {
                 return match self.it.peek() {
                     None => Ok(None),
-                    Some(&(i, c)) => Err(Error::config_parse(
-                        format!(
-                            "unexpected character at byte {i}: expected a keyword but got `{c}`"
-                        )
-                        .into(),
+                    Some(_) => Err(Error::config_parse(
+                        "unexpected `=`: expected a keyword before it".into(),
                     )),
                 };
             }
@@ -3077,13 +3343,13 @@ impl<'a> UrlParser<'a> {
             .next()
             .expect("str::splitn yields a user field even for empty credentials");
         if !user.is_empty() {
-            let user = Self::decode(user)?;
+            let user = Self::decode(user, Component::User)?;
             self.config.user(user);
             self.explicit.push("user".to_owned());
         }
 
         if let Some(password) = it.next().filter(|password| !password.is_empty()) {
-            let password = Self::validated_percent_decode(password)?;
+            let password = Self::validated_percent_decode(password, Component::Password)?;
             self.config.password(password);
             self.explicit.push("password".to_owned());
         }
@@ -3174,7 +3440,7 @@ impl<'a> UrlParser<'a> {
         let ports = ports.join(",");
         if !ports.is_empty() {
             self.parameters
-                .insert("port", Self::decode(&ports)?.into_owned());
+                .insert("port", Self::decode(&ports, Component::Port)?.into_owned());
             self.explicit.push("port".to_owned());
         }
 
@@ -3193,7 +3459,8 @@ impl<'a> UrlParser<'a> {
         };
 
         if !dbname.is_empty() {
-            self.config.dbname(Self::decode(dbname)?);
+            self.config
+                .dbname(Self::decode(dbname, Component::Database)?);
             self.explicit.push("dbname".to_owned());
         }
 
@@ -3208,7 +3475,7 @@ impl<'a> UrlParser<'a> {
 
         while !self.s.is_empty() {
             let key = match self.take_until(&['=']) {
-                Some(key) => Self::decode(key)?,
+                Some(key) => Self::decode(key, Component::ParameterName)?,
                 None => return Err(Error::config_parse("unterminated parameter".into())),
             };
             self.eat_byte();
@@ -3223,7 +3490,11 @@ impl<'a> UrlParser<'a> {
 
             if value.contains('=') {
                 return Err(Error::config_parse(
-                    format!("extra key/value separator `=` in URI query parameter: `{key}`").into(),
+                    format!(
+                        "extra key/value separator `=` in {}",
+                        Component::Parameter(&key)
+                    )
+                    .into(),
                 ));
             }
 
@@ -3243,7 +3514,7 @@ impl<'a> UrlParser<'a> {
                 self.host_params(value)?;
                 self.explicit.push("host".to_owned());
             } else {
-                let value = Self::decode(value)?.into_owned();
+                let value = Self::decode(value, Component::Parameter(&key))?.into_owned();
                 if key == "ssl" && value == "true" {
                     self.parameters.insert("sslmode", "require");
                     self.explicit.push("sslmode".to_owned());
@@ -3267,7 +3538,7 @@ impl<'a> UrlParser<'a> {
     /// A wholly empty decoded option means no host list. A comma still creates
     /// positional empty slots, just as the keyword parser does.
     fn host_params(&mut self, s: &str) -> Result<(), Error> {
-        let decoded = Self::validated_percent_decode(s)?;
+        let decoded = Self::validated_percent_decode(s, Component::Host)?;
         if decoded.is_empty() {
             return Ok(());
         }
@@ -3292,7 +3563,11 @@ impl<'a> UrlParser<'a> {
             return Ok(());
         }
 
-        let decoded = str::from_utf8(decoded).map_err(|e| Error::config_parse(Box::new(e)))?;
+        let decoded = str::from_utf8(decoded).map_err(|_| {
+            Error::config_parse(
+                format!("invalid UTF-8 in {} (percent-decoded)", Component::Host).into(),
+            )
+        })?;
         self.config.host(decoded);
         Ok(())
     }
@@ -3309,12 +3584,17 @@ impl<'a> UrlParser<'a> {
     /// exist`, which names the symptom and not the cause. libpq refuses an
     /// interior raw space in the user, host, database and a query value alike,
     /// and accepts `%20` in each.
-    fn trim_raw_boundary_spaces(s: &str) -> Result<&str, Error> {
+    ///
+    /// A refusal from these decoding helpers names the component, `field`,
+    /// never its contents (see [`Component`]). libpq quotes the raw component,
+    /// but a component can be the password, and a refusal reaches whatever logs
+    /// it and every caller that walks this error's source chain.
+    fn trim_raw_boundary_spaces<'s>(s: &'s str, field: Component<'_>) -> Result<&'s str, Error> {
         let trimmed = s.trim_matches(' ');
         if trimmed.contains(' ') {
             return Err(Error::config_parse(
                 format!(
-                    "unexpected spaces found in \"{s}\", use percent-encoded \
+                    "unexpected spaces found in {field}, use percent-encoded \
                      spaces (%20) instead"
                 )
                 .into(),
@@ -3323,8 +3603,8 @@ impl<'a> UrlParser<'a> {
         Ok(trimmed)
     }
 
-    /// Refuse a malformed percent escape, as libpq does
-    /// (`invalid percent-encoded token: "%zz"`).
+    /// Refuse a malformed percent escape, as libpq does, naming `field` where
+    /// libpq quotes the component (see [`Self::trim_raw_boundary_spaces`]).
     ///
     /// `percent_encoding::percent_decode` NEVER FAILS: a `%` not followed by
     /// two hex digits is copied through verbatim. So `?password=se%cret`
@@ -3333,7 +3613,7 @@ impl<'a> UrlParser<'a> {
     /// without encoding the `%` -- became a host name containing a percent
     /// sign. Silently using a different credential than the one written is the
     /// failure worth refusing.
-    fn validate_percent_escapes(s: &str) -> Result<(), Error> {
+    fn validate_percent_escapes(s: &str, field: Component<'_>) -> Result<(), Error> {
         let bytes = s.as_bytes();
         let mut i = 0;
         while i < bytes.len() {
@@ -3344,7 +3624,7 @@ impl<'a> UrlParser<'a> {
             let escape = bytes.get(i + 1..i + 3);
             if !escape.is_some_and(|pair| pair.iter().all(u8::is_ascii_hexdigit)) {
                 return Err(Error::config_parse(
-                    format!("invalid percent-encoded token: \"{s}\"").into(),
+                    format!("invalid percent-encoded token in {field}").into(),
                 ));
             }
             i += 3;
@@ -3361,27 +3641,36 @@ impl<'a> UrlParser<'a> {
     /// `decode_utf8`. A rule copied at the three call sites would have to be
     /// edited at all three by hand - miss one and that component silently
     /// accepts what the others refuse.
-    fn validated_percent_decode(s: &str) -> Result<Cow<'_, [u8]>, Error> {
-        let encoded = s;
-        let s = Self::trim_raw_boundary_spaces(s)?;
-        Self::validate_percent_escapes(s)?;
+    fn validated_percent_decode<'s>(
+        s: &'s str,
+        field: Component<'_>,
+    ) -> Result<Cow<'s, [u8]>, Error> {
+        let s = Self::trim_raw_boundary_spaces(s, field)?;
+        Self::validate_percent_escapes(s, field)?;
         let decoded = Cow::from(percent_encoding::percent_decode(s.as_bytes()));
         if decoded.contains(&0) {
             return Err(Error::config_parse(
-                format!("forbidden value %00 in percent-encoded value: \"{encoded}\"").into(),
+                format!("forbidden value %00 in {field} (percent-encoded)").into(),
             ));
         }
         Ok(decoded)
     }
 
-    fn decode(s: &str) -> Result<Cow<'_, str>, Error> {
-        match Self::validated_percent_decode(s)? {
+    /// Decode a component that must be UTF-8.
+    ///
+    /// A refusal names `field` and carries no cause: `FromUtf8Error` keeps the
+    /// bytes it could not decode and prints them in its Debug form, and those
+    /// bytes can be the password.
+    fn decode<'s>(s: &'s str, field: Component<'_>) -> Result<Cow<'s, str>, Error> {
+        let invalid =
+            || Error::config_parse(format!("invalid UTF-8 in {field} (percent-decoded)").into());
+        match Self::validated_percent_decode(s, field)? {
             Cow::Borrowed(bytes) => std::str::from_utf8(bytes)
                 .map(Cow::Borrowed)
-                .map_err(|e| Error::config_parse(e.into())),
+                .map_err(|_| invalid()),
             Cow::Owned(bytes) => String::from_utf8(bytes)
                 .map(Cow::Owned)
-                .map_err(|e| Error::config_parse(e.into())),
+                .map_err(|_| invalid()),
         }
     }
 }
@@ -4283,19 +4572,19 @@ mod tests {
             );
         }
 
+        /// Refused as any unknown key is: never quoted, and answered with the
+        /// nearest known name, which here is the typo's intended one.
         #[test]
-        fn an_unknown_key_in_a_service_is_rejected_by_name() {
+        fn an_unknown_key_in_a_service_is_refused_with_the_nearest_name() {
             let mut config = Config::new();
             let error = config
-                .fill_unset(vec![("notakey".to_owned(), "1".to_owned())], &[])
+                .fill_unset(vec![("hots".to_owned(), "1".to_owned())], &[])
                 .expect_err("an unknown parameter is not silently ignored");
-            let names_the_key = std::iter::successors(std::error::Error::source(&error), |error| {
-                std::error::Error::source(*error)
-            })
-            .any(|cause| cause.to_string().contains("notakey"));
-            assert!(
-                names_the_key,
-                "the error does not name the offending key: {error:?}"
+            let cause = std::error::Error::source(&error).map(ToString::to_string);
+            assert_eq!(
+                cause.as_deref(),
+                Some("unknown option; did you mean `host`?"),
+                "{error:?}"
             );
         }
 
@@ -4307,7 +4596,7 @@ mod tests {
 
     use crate::config::{
         AuthMethod, AuthMethods, ReplicationMode, RequireAuth, SslCertMode, SslMode,
-        SslNegotiation, SslProtocolVersion, SslRootCert, TargetSessionAttrs,
+        SslNegotiation, SslProtocolVersion, SslRootCert, TargetSessionAttrs, UnknownOption,
     };
     use crate::{Config, config::Host};
 
@@ -5019,19 +5308,23 @@ mod tests {
         );
         assert!(NonZeroUsize::new(0).is_none());
 
-        for dsn in [
-            "host=h statement_cache_execution_threshold=5",
-            "postgresql://h/db?statement_cache_execution_threshold=5",
+        // Refused as a key no option answers to, which a refusal does not
+        // quote. The control is that the same string without it parses.
+        for (dsn, without) in [
+            ("host=h statement_cache_execution_threshold=5", "host=h"),
+            (
+                "postgresql://h/db?statement_cache_execution_threshold=5",
+                "postgresql://h/db",
+            ),
         ] {
+            without.parse::<Config>().expect("the control parses");
             let error = dsn
                 .parse::<Config>()
                 .expect_err("the builder-only threshold parsed from a connection string");
-            let cause = std::error::Error::source(&error)
-                .map(ToString::to_string)
-                .unwrap_or_default();
             assert!(
-                cause.contains("statement_cache_execution_threshold"),
-                "{dsn}: rejection did not identify the unsupported key: {cause:?}"
+                std::error::Error::source(&error)
+                    .is_some_and(<dyn std::error::Error>::is::<UnknownOption>),
+                "{dsn}: not refused as an unknown option: {error:?}"
             );
         }
     }
@@ -5223,6 +5516,366 @@ mod dsn_parse_tests {
                 "the NUL refusal did not identify the bad encoding in {dsn:?}: {chain}"
             );
         }
+    }
+
+    /// Every secret the refusal tests below build is made of these fragments,
+    /// and no refusal may contain any of them. The leading `Z` catches a
+    /// refusal that quoted a single character of the input rather than a whole
+    /// value.
+    const SECRET: &str = "Zhunter2secret";
+    const SECRET_FRAGMENTS: [&str; 4] = ["Z", "hunter", "Hunter", "secret"];
+
+    const UNKNOWN_NOT_QUOTED: &str = "unknown option, not quoted because connection-string \
+                                      text can hold a password; a URL whose scheme is not \
+                                      `postgres://` or `postgresql://`, or a value holding \
+                                      an unquoted space or an unencoded `&`, is read as an \
+                                      option";
+    const QUERY_BAD_ESCAPE: &str = "invalid percent-encoded token in a URI query parameter";
+    const QUERY_EXTRA_SEPARATOR: &str = "extra key/value separator `=` in a URI query parameter";
+    const REQUIRE_AUTH_LIST: &str = "invalid value for option `require_auth`: expected a \
+                                     comma-separated list of: password, md5, scram-sha-256, \
+                                     gss, sspi, none (each may be prefixed with `!`)";
+
+    /// Refuse each malformed string and judge its refusal: no link of its
+    /// source chain, and not its Debug form, may contain a secret fragment or
+    /// the bytes of [`SECRET`], and its cause must say exactly what the case
+    /// pairs it with. Exactly, so a refusal that says nothing cannot pass, and
+    /// neither can one label in place of another it is a prefix of.
+    ///
+    /// Every case runs before any is judged, so one verdict lists them all.
+    fn assert_refusals<D: AsRef<str>>(cases: &[(D, &str)]) {
+        let bytes = format!("{:?}", SECRET.as_bytes());
+        let bytes = bytes.trim_end_matches(']');
+        let mut failed = Vec::new();
+        for (dsn, says) in cases {
+            let dsn = dsn.as_ref();
+            let error = dsn
+                .parse::<Config>()
+                .expect_err("a malformed connection string must be refused");
+            let rendered = std::iter::successors(
+                Some(&error as &(dyn std::error::Error + 'static)),
+                |error| error.source(),
+            )
+            .map(ToString::to_string)
+            .chain(std::iter::once(format!("{error:?}")))
+            .collect::<Vec<_>>()
+            .join(" | ");
+            let cause = std::error::Error::source(&error).map(ToString::to_string);
+            if let Some(fragment) = SECRET_FRAGMENTS
+                .into_iter()
+                .chain([bytes])
+                .find(|fragment| rendered.contains(fragment))
+            {
+                failed.push(format!("{dsn:?} quotes {fragment:?}: {rendered}"));
+            } else if cause.as_deref() != Some(*says) {
+                failed.push(format!("{dsn:?} does not say exactly {says:?}: {rendered}"));
+            }
+        }
+        assert!(failed.is_empty(), "{failed:#?}");
+    }
+
+    /// Each malformed string below holds a secret, spelled as [`SECRET`] or
+    /// built from [`SECRET_FRAGMENTS`], paired with the whole of what its
+    /// refusal's cause says. They are every way this driver has found for a
+    /// password's text to reach a refusal: as the password itself, as a key
+    /// its unquoted space or unencoded `&` makes of the rest of it, however far
+    /// on, through a URL that is not read as one, and as the value of a known
+    /// option.
+    const SECRET_BEARING_REFUSALS: &[(&str, &str)] = &[
+        // The password itself, malformed.
+        (
+            "postgres://user:Zhunter2secret%zz@host/db",
+            "invalid percent-encoded token in the password",
+        ),
+        (
+            "postgres://user:Zhunter2secret%00@host/db",
+            "forbidden value %00 in the password (percent-encoded)",
+        ),
+        (
+            "postgres://user:Zhunter2secret tail@host/db",
+            "unexpected spaces found in the password, use percent-encoded spaces (%20) instead",
+        ),
+        (
+            "postgres://host/db?password=Zhunter2secret%zz",
+            "invalid percent-encoded token in the URI query parameter `password`",
+        ),
+        (
+            "postgres://host/db?password=Zhunter2secret%00",
+            "forbidden value %00 in the URI query parameter `password` (percent-encoded)",
+        ),
+        (
+            "postgres://host/db?password=Zhunter2secret tail",
+            "unexpected spaces found in the URI query parameter `password`, use \
+             percent-encoded spaces (%20) instead",
+        ),
+        (
+            "postgres://host/db?password=Zhunter2secret%ff",
+            "invalid UTF-8 in the URI query parameter `password` (percent-decoded)",
+        ),
+        // Not the next word of a password with an unquoted space, nor the
+        // offset of a `=` after it, which would measure the password.
+        (
+            "host=h password=x word Zhunter2secret",
+            "unexpected character: expected `=`",
+        ),
+        (
+            "host=h password=hunter2 =x",
+            "unexpected `=`: expected a keyword before it",
+        ),
+        // A scheme the URL parser does not recognise hands the whole string to
+        // the keyword parser, which reads it up to the first `=` as a key.
+        (
+            " postgres://user:Zhunter2secret@host/db?sslmode=require",
+            UNKNOWN_NOT_QUOTED,
+        ),
+        (
+            "POSTGRES://user:Zhunter2secret@host/db?sslmode=require",
+            UNKNOWN_NOT_QUOTED,
+        ),
+        (
+            "postgresql+asyncpg://user:Zhunter2secret@host/db?ssl=true",
+            UNKNOWN_NOT_QUOTED,
+        ),
+        // An unquoted space or an unencoded `&` in a password makes a key, or a
+        // query parameter's label, of the rest of it: whatever its shape,
+        // however many breaks on, and in either format.
+        ("host=h password=x Zhunter2secret=y", UNKNOWN_NOT_QUOTED),
+        (
+            "postgres://host/db?password=x&Zhunter2secret&sslmode=require",
+            UNKNOWN_NOT_QUOTED,
+        ),
+        (
+            "postgres://host/db?password=x&Zhunter2secret&application_name=%zz",
+            QUERY_BAD_ESCAPE,
+        ),
+        (
+            "postgres://host/db?password=x&Zhunter2secret&application_name=a=b",
+            QUERY_EXTRA_SEPARATOR,
+        ),
+        ("host=h password=hunter2 secret=x", UNKNOWN_NOT_QUOTED),
+        ("host=h sslpassword=hunter2 secret=x", UNKNOWN_NOT_QUOTED),
+        ("host=h password='hunter'secret=x", UNKNOWN_NOT_QUOTED),
+        (
+            "postgres://host/db?password=hunter&secret=x",
+            UNKNOWN_NOT_QUOTED,
+        ),
+        (
+            "postgres://host/db?sslpassword=hunter&secret=x",
+            UNKNOWN_NOT_QUOTED,
+        ),
+        (
+            "postgres://host/db?password=hunter&secret=a=b",
+            QUERY_EXTRA_SEPARATOR,
+        ),
+        (
+            "postgres://host/db?password=hunter&secret=%zz",
+            QUERY_BAD_ESCAPE,
+        ),
+        (
+            "postgres://host/db?sslpassword=hunter&secret=%ff",
+            "invalid UTF-8 in a URI query parameter (percent-decoded)",
+        ),
+        ("host=h password=x host=y secret=z", UNKNOWN_NOT_QUOTED),
+        ("host=h password=x host=y hunter2=z", UNKNOWN_NOT_QUOTED),
+        ("host=h password=x host=y Hunter=z", UNKNOWN_NOT_QUOTED),
+        (
+            "postgres://host/db?password=x&application_name=y&secret=z",
+            UNKNOWN_NOT_QUOTED,
+        ),
+        (
+            "postgres://host/db?password=x&application_name=y&Hunter=%zz",
+            QUERY_BAD_ESCAPE,
+        ),
+        // A userinfo password holding an unencoded `/` is never read as
+        // userinfo: the `@` scan stops at the path, and the password's text
+        // after its `?` is read as the query.
+        (
+            "postgres://user:5432/db?secret=x@host/db",
+            UNKNOWN_NOT_QUOTED,
+        ),
+        (
+            "postgres://user:5432/db?secret=%zz@host/db",
+            QUERY_BAD_ESCAPE,
+        ),
+        // The rest of a password as the value of a known option.
+        (
+            "host=h password=hunter require_auth=secretword",
+            REQUIRE_AUTH_LIST,
+        ),
+        (
+            "postgres://host/db?password=hunter&require_auth=secretword",
+            REQUIRE_AUTH_LIST,
+        ),
+        (
+            "host=h require_auth='password,!Zhunter2secret'",
+            "invalid value for option `require_auth`: negated and non-negated methods cannot \
+             be mixed",
+        ),
+        (
+            "host=h ssl_min_protocol_version=tLsV1",
+            "option `ssl_min_protocol_version` requests TLS 1.0 or TLS 1.1, which rustls cannot \
+             negotiate; use TLSv1.2 or TLSv1.3",
+        ),
+        (
+            "host=h password=hunter service=secret",
+            "definition of the service named by `service` not found: no service file is named \
+             by `servicefile`",
+        ),
+        (
+            "host=h service=hunter servicefile=/nonexistent/Zhunter2secret",
+            "could not read the service file named by `servicefile`",
+        ),
+    ];
+
+    /// The passwords of the refusals above, written well: each string parses
+    /// and carries exactly this password.
+    const WELL_FORMED_PASSWORDS: &[(&str, &str)] = &[
+        ("postgres://user:Zhunter2secret@host/db", SECRET),
+        ("postgres://host/db?password=Zhunter2secret", SECRET),
+        ("host=h password='x Zhunter2secret'", "x Zhunter2secret"),
+        ("host=h password='hunter2 secret=x'", "hunter2 secret=x"),
+        (r"host=h password=\'hunter\'secret=x", "'hunter'secret=x"),
+        (
+            "postgres://host/db?password=hunter%26secret%3Dx",
+            "hunter&secret=x",
+        ),
+        ("host=h password='x host=y secret=z'", "x host=y secret=z"),
+        (
+            "postgres://user:5432%2Fdb%3Fsecret%3Dx@host/db",
+            "5432/db?secret=x",
+        ),
+        (
+            "host=h password='hunter require_auth=secretword'",
+            "hunter require_auth=secretword",
+        ),
+    ];
+
+    /// No refusal quotes a secret: not its Display, not any link of its source
+    /// chain, not its Debug form. A connection string carries the password, and
+    /// a refusal reaches whatever logs it and every caller that walks the chain.
+    /// A refusal names known option names and accepted values, and nothing the
+    /// connection string held.
+    #[test]
+    fn no_refusal_quotes_a_secret() {
+        assert!(
+            SECRET_BEARING_REFUSALS
+                .iter()
+                .any(|(dsn, _)| dsn.contains(SECRET)),
+            "no case spells the secret whose bytes the scan looks for"
+        );
+        assert_refusals(SECRET_BEARING_REFUSALS);
+
+        // The service's value again, from a file this test writes, so the
+        // refusal about its contents is reached.
+        let undefined_service = service_file_with_user();
+        let malformed_service = tempfile::NamedTempFile::new().expect("create service file");
+        std::fs::write(malformed_service.path(), "[secret]\nnot a pair\n")
+            .expect("write service file");
+        let path = |file: &tempfile::NamedTempFile| {
+            file.path()
+                .to_str()
+                .expect("a UTF-8 temporary path")
+                .to_owned()
+        };
+        assert_refusals(&[
+            (
+                format!(
+                    "host=h service=secret servicefile={}",
+                    path(&undefined_service)
+                ),
+                "definition of the service named by `service` not found in the service file \
+                 named by `servicefile`",
+            ),
+            (
+                format!(
+                    "host=h service=secret servicefile={}",
+                    path(&malformed_service)
+                ),
+                "syntax error in the service file named by `servicefile`, line 2",
+            ),
+        ]);
+
+        // THE CONTROLS. Well formed, the same passwords parse and are carried,
+        // so each refusal above is its malformation alone.
+        for (dsn, password) in WELL_FORMED_PASSWORDS {
+            let config = dsn.parse::<Config>().unwrap();
+            assert_eq!(config.get_password(), Some(password.as_bytes()), "{dsn}");
+        }
+        let config = "host=h sslpassword='hunter2 secret=x'"
+            .parse::<Config>()
+            .unwrap();
+        assert_eq!(config.get_ssl_password(), Some(&b"hunter2 secret=x"[..]));
+    }
+
+    /// An unknown key is answered with the known option nearest it, so a typo
+    /// still gets its help: a swapped pair of letters, a `-` for a `_`, the
+    /// wrong case. The suggestion prints only the known name, so it names no
+    /// more of the key than that the key was close to it.
+    #[test]
+    fn an_unknown_key_is_answered_with_the_nearest_known_name() {
+        assert_refusals(&[
+            (
+                "host=h sslmdoe=require",
+                "unknown option; did you mean `sslmode`?",
+            ),
+            (
+                "host=h connect-timeout=5",
+                "unknown option; did you mean `connect_timeout`?",
+            ),
+            ("Host=h", "unknown option; did you mean `host`?"),
+            (
+                "postgres://h/db?sslmdoe=require",
+                "unknown option; did you mean `sslmode`?",
+            ),
+            // Two edits away is still suggested; a libpq option this driver
+            // refuses is suggested like any other.
+            (
+                "host=h sslmo=require",
+                "unknown option; did you mean `sslmode`?",
+            ),
+            (
+                "host=h krbsrvnam=x",
+                "unknown option; did you mean `krbsrvname`?",
+            ),
+            // THE CONTROLS. Three edits away, and far off, nothing is.
+            ("host=h sslm=require", UNKNOWN_NOT_QUOTED),
+            ("host=h no_such_option=y", UNKNOWN_NOT_QUOTED),
+            ("postgres://h/db?no_such_option=y", UNKNOWN_NOT_QUOTED),
+        ]);
+    }
+
+    /// The lists a refusal names options from are the options
+    /// [`Config::param`] answers to: each implemented name is taken, each
+    /// unsupported one is refused by name, and none is refused as unknown.
+    #[test]
+    fn known_option_names_are_the_ones_param_answers_to() {
+        let refused_as = |name: &str| {
+            Config::new().param(name, "").err().map(|error| {
+                let cause = std::error::Error::source(&error).expect("a cause");
+                (cause.is::<UnknownOption>(), cause.is::<UnsupportedOption>())
+            })
+        };
+        let implemented: Vec<&str> = OPTION_NAMES
+            .iter()
+            .chain(KEEPALIVE_OPTION_NAMES)
+            .copied()
+            .collect();
+        assert!(!implemented.is_empty() && !UNSUPPORTED_OPTION_NAMES.is_empty());
+        for name in implemented {
+            assert!(
+                !matches!(refused_as(name), Some((true, _) | (_, true))),
+                "{name} is listed as implemented, but param does not implement it"
+            );
+        }
+        for name in UNSUPPORTED_OPTION_NAMES {
+            assert_eq!(
+                refused_as(name),
+                Some((false, true)),
+                "{name} is listed as unsupported, but param does not refuse it by name"
+            );
+        }
+        // THE CONTROL: a name on neither list is refused as unknown.
+        assert_eq!(refused_as("no_such_option"), Some((true, false)));
     }
 
     #[test]
@@ -5549,14 +6202,14 @@ mod dsn_parse_tests {
         let error = "host=h unknown_connection_option=bad sslmode=disable"
             .parse::<Config>()
             .expect_err("an unknown name must still be refused");
-        let named = std::iter::successors(std::error::Error::source(&error), |cause| {
-            std::error::Error::source(*cause)
-        })
-        .any(|cause| cause.to_string().contains("unknown_connection_option"));
         assert!(
-            named,
-            "the refusal did not name the unknown parameter: {error:?}"
+            std::error::Error::source(&error)
+                .is_some_and(<dyn std::error::Error>::is::<UnknownOption>),
+            "the refusal is not the unknown parameter's: {error:?}"
         );
+        "host=h sslmode=disable"
+            .parse::<Config>()
+            .expect("the control, without the unknown name, parses");
     }
 
     /// A keyword/value string that cannot be parsed must be REFUSED, not

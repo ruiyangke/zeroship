@@ -21,42 +21,46 @@
 //! * A service may supply the password.
 
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// Why a service could not be turned into connection parameters.
+///
+/// It names the service and its file by the options that give them,
+/// `service` and `servicefile`, and never by their values. Both values are
+/// connection-string text, and a refusal never prints connection-string text:
+/// a `password` value holding an unquoted space or an unencoded `&` is read on
+/// as further keys and values, so a value here can be the rest of a password.
+/// libpq quotes both.
 #[derive(Debug)]
 pub(crate) enum ServiceError {
-    /// No service file exists in any of the searched locations.
-    NoServiceFile { service: String },
+    /// A service is named, but no service file is.
+    NoServiceFile,
     /// The file exists but defines no section with this name.
-    Undefined { service: String, path: PathBuf },
-    /// A line inside the selected section is not `key=value`.
-    Syntax { path: PathBuf, line: usize },
+    Undefined,
+    /// A line inside the selected section is not `key=value`. The line number
+    /// is counted, not read from the connection string.
+    Syntax { line: usize },
     /// The file could not be read.
-    Unreadable { path: PathBuf },
+    Unreadable,
 }
 
 impl fmt::Display for ServiceError {
     fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NoServiceFile { service } => write!(
-                fmt,
-                "definition of service `{service}` not found: no service file"
+            Self::NoServiceFile => fmt.write_str(
+                "definition of the service named by `service` not found: no service file is \
+                 named by `servicefile`",
             ),
-            Self::Undefined { service, path } => write!(
-                fmt,
-                "definition of service `{service}` not found in {}",
-                path.display()
+            Self::Undefined => fmt.write_str(
+                "definition of the service named by `service` not found in the service file \
+                 named by `servicefile`",
             ),
-            Self::Syntax { path, line } => {
-                write!(
-                    fmt,
-                    "syntax error in service file {}, line {line}",
-                    path.display()
-                )
-            }
-            Self::Unreadable { path } => {
-                write!(fmt, "could not read service file {}", path.display())
+            Self::Syntax { line } => write!(
+                fmt,
+                "syntax error in the service file named by `servicefile`, line {line}"
+            ),
+            Self::Unreadable => {
+                fmt.write_str("could not read the service file named by `servicefile`")
             }
         }
     }
@@ -85,7 +89,6 @@ impl std::error::Error for ServiceError {}
 fn section_of(
     contents: &str,
     service: &str,
-    path: &Path,
 ) -> Result<Option<Vec<(String, String)>>, ServiceError> {
     let mut in_section = false;
     let mut pairs = Vec::new();
@@ -119,18 +122,12 @@ fn section_of(
         }
 
         let Some((key, value)) = line.split_once('=') else {
-            return Err(ServiceError::Syntax {
-                path: path.to_path_buf(),
-                line: index + 1,
-            });
+            return Err(ServiceError::Syntax { line: index + 1 });
         };
         // libpq refuses `host =x`. Accepting it would take a file psql
         // rejects, so the same service works here and fails there.
         if key.trim_end() != key {
-            return Err(ServiceError::Syntax {
-                path: path.to_path_buf(),
-                line: index + 1,
-            });
+            return Err(ServiceError::Syntax { line: index + 1 });
         }
         pairs.push((key.to_owned(), value.to_owned()));
     }
@@ -148,17 +145,9 @@ pub(crate) fn parameters(
     service: &str,
     path: &Path,
 ) -> Result<Vec<(String, String)>, ServiceError> {
-    let contents = std::fs::read_to_string(path).map_err(|_| ServiceError::Unreadable {
-        path: path.to_path_buf(),
-    })?;
+    let contents = std::fs::read_to_string(path).map_err(|_| ServiceError::Unreadable)?;
 
-    match section_of(&contents, service, path)? {
-        Some(pairs) => Ok(pairs),
-        None => Err(ServiceError::Undefined {
-            service: service.to_owned(),
-            path: path.to_path_buf(),
-        }),
-    }
+    section_of(&contents, service)?.ok_or(ServiceError::Undefined)
 }
 
 #[cfg(test)]
@@ -166,7 +155,7 @@ mod tests {
     use super::*;
 
     fn parse(contents: &str, service: &str) -> Result<Option<Vec<(String, String)>>, ServiceError> {
-        section_of(contents, service, Path::new("/test/pg_service.conf"))
+        section_of(contents, service)
     }
 
     fn pairs(contents: &str, service: &str) -> Vec<(String, String)> {
@@ -239,7 +228,7 @@ mod tests {
         let error = parse("[prod]\nhost =db.example\n", "prod")
             .expect_err("libpq rejects a space before the equals");
         match error {
-            ServiceError::Syntax { line, .. } => assert_eq!(line, 2),
+            ServiceError::Syntax { line } => assert_eq!(line, 2),
             other => panic!("expected a syntax error, got {other:?}"),
         }
     }
@@ -334,7 +323,7 @@ mod tests {
         let error = parse("[prod]\nhost=db.example\nnonsense\n", "prod")
             .expect_err("a bare word is not a parameter");
         match error {
-            ServiceError::Syntax { line, .. } => assert_eq!(line, 3),
+            ServiceError::Syntax { line } => assert_eq!(line, 3),
             other => panic!("expected a syntax error, got {other:?}"),
         }
     }

@@ -135,6 +135,18 @@ async fn a_service_written_in_libpq_s_awkward_forms_still_connects() {
     std::fs::remove_file(&path).ok();
 }
 
+/// Every link of the refusal's source chain and its Debug form, joined: the
+/// whole of what a caller logging the refusal could print.
+fn rendered(error: &compio_postgres::Error) -> String {
+    std::iter::successors(Some(error as &(dyn std::error::Error + 'static)), |error| {
+        error.source()
+    })
+    .map(ToString::to_string)
+    .chain(std::iter::once(format!("{error:?}")))
+    .collect::<Vec<_>>()
+    .join(" | ")
+}
+
 /// A service the file does not define is an error, not a silent fallback.
 #[test]
 fn an_undefined_service_is_an_error() {
@@ -146,9 +158,10 @@ fn an_undefined_service_is_an_error() {
 
     std::fs::remove_file(&path).ok();
     let error = result.expect_err("a service that is not defined must not resolve");
+    let text = rendered(&error);
     assert!(
-        format!("{:?}", std::error::Error::source(&error)).contains(SERVICE),
-        "the error does not name the service that was not found: {error:?}"
+        text.contains("not found in the service file") && !text.contains(SERVICE),
+        "the error does not say the service was not found, or names it: {text}"
     );
 }
 
@@ -160,39 +173,47 @@ fn naming_a_service_without_a_file_is_an_error() {
     let error = format!("service={SERVICE}")
         .parse::<Config>()
         .expect_err("a service with nowhere to read it from must not resolve");
+    let text = rendered(&error);
     assert!(
-        format!("{:?}", std::error::Error::source(&error)).contains(SERVICE),
-        "the error does not name the service: {error:?}"
+        text.contains("no service file") && !text.contains(SERVICE),
+        "the error does not say no service file was named, or names the service: {text}"
     );
 }
 
-/// Every `ServiceError` renders a message that names what went wrong.
+/// Every `ServiceError` renders a message that names its cause, and none
+/// names the service or its file by value.
 ///
-/// The two tests above already reach two of these variants, but they assert on
-/// `format!("{:?}", source)` - the DEBUG rendering - and `.contains(SERVICE)`
-/// passes there because the service name is a struct FIELD. The `Display` impl
-/// (`service.rs:42-64`) had therefore never run, in any of its four arms.
-///
-/// That impl is the whole user-facing surface for a misconfigured service
+/// That message is the whole user-facing surface for a misconfigured service
 /// file. This driver deliberately does not search `$PGSERVICEFILE`,
 /// `~/.pg_service.conf` or `$PGSYSCONFDIR`, so when a service will not resolve
 /// the message is the only thing telling the caller which of the four reasons
 /// applies - missing file, missing section, bad syntax, or unreadable path.
+///
+/// libpq quotes the service name and the file's path; this driver never
+/// echoes connection-string text, because a refusal is logged and can carry a
+/// password. So each message names the options instead, `service` and
+/// `servicefile`, and each is checked across the whole source chain and the
+/// Debug form, where a struct field holding the name would show.
 #[test]
 fn every_service_error_renders_a_message_naming_its_cause() {
-    fn rendered(error: &compio_postgres::Error) -> String {
-        let source = std::error::Error::source(error).expect("a ServiceError source");
-        format!("{source}")
+    fn assert_names_only_its_cause(error: &compio_postgres::Error, cause: &str, path: &Path) {
+        let text = rendered(error);
+        let path = path.to_str().expect("a UTF-8 temp path");
+        assert!(
+            text.contains(cause) && !text.contains(SERVICE) && !text.contains(path),
+            "expected {cause:?}, and neither the service nor its path: {text}"
+        );
     }
 
     // No service file at all.
     let error = format!("service={SERVICE}")
         .parse::<Config>()
         .expect_err("a service with nowhere to read it from must not resolve");
-    let text = rendered(&error);
-    assert!(
-        text.contains(SERVICE) && text.contains("no service file"),
-        "the no-file arm did not name its cause: {text}"
+    assert_names_only_its_cause(
+        &error,
+        "definition of the service named by `service` not found: no service file is named by \
+         `servicefile`",
+        &service_file_path("display_no_file"),
     );
 
     // The file exists but does not define the section.
@@ -200,10 +221,11 @@ fn every_service_error_renders_a_message_naming_its_cause() {
     std::fs::write(&path, "[some_other_service]\nhost=127.0.0.1\n").expect("write service file");
     let result = config_for_service(&path);
     std::fs::remove_file(&path).ok();
-    let text = rendered(&result.expect_err("an undefined service must not resolve"));
-    assert!(
-        text.contains(SERVICE) && text.contains("not found in"),
-        "the undefined arm did not name its cause: {text}"
+    assert_names_only_its_cause(
+        &result.expect_err("an undefined service must not resolve"),
+        "definition of the service named by `service` not found in the service file named by \
+         `servicefile`",
+        &path,
     );
 
     // A line that is neither a section header nor a key=value pair.
@@ -212,10 +234,10 @@ fn every_service_error_renders_a_message_naming_its_cause() {
         .expect("write service file");
     let result = config_for_service(&path);
     std::fs::remove_file(&path).ok();
-    let text = rendered(&result.expect_err("a malformed service file must not resolve"));
-    assert!(
-        text.contains("syntax error in service file") && text.contains("line 2"),
-        "the syntax arm did not name the offending line: {text}"
+    assert_names_only_its_cause(
+        &result.expect_err("a malformed service file must not resolve"),
+        "syntax error in the service file named by `servicefile`, line 2",
+        &path,
     );
 
     // A path that cannot be read as a file. A directory is the portable way to
@@ -224,9 +246,9 @@ fn every_service_error_renders_a_message_naming_its_cause() {
     std::fs::create_dir_all(&directory).expect("create the directory standing in for a file");
     let result = config_for_service(&directory);
     std::fs::remove_dir_all(&directory).ok();
-    let text = rendered(&result.expect_err("an unreadable service file must not resolve"));
-    assert!(
-        text.contains("could not read service file"),
-        "the unreadable arm did not name its cause: {text}"
+    assert_names_only_its_cause(
+        &result.expect_err("an unreadable service file must not resolve"),
+        "could not read the service file named by `servicefile`",
+        &directory,
     );
 }

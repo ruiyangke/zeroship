@@ -191,15 +191,27 @@ fn empty_query_and_trailing_ampersand_match_libpq() {
 //   ?...&&application_name=x  -> missing key/value separator "=" ... : ""
 //   ?...&=x&application_name=y-> invalid URI query parameter: ""
 //
-// We reject all four too, with different (worse) messages: the `&`-spanning
-// ones surface as `unknown option \`a&application_name\`` because our key scan
-// is not bounded by `&`. The outcome is right, so this is not a defect.
+// We reject all four too, with different messages. Our key scan is not bounded
+// by `&`, so the `&`-spanning keys (`a&application_name`, `&application_name`)
+// and the empty key reach the option table whole, and are refused as an
+// unknown option without the key. libpq quotes the segment; this driver never
+// echoes connection-string text, because a refusal is logged and can carry a
+// password: after a `password` value, the text before that `&` is the rest of
+// the password.
 #[test]
 fn query_parameter_without_separator_is_rejected_like_libpq() {
     assert!(err("postgres://h/db?application_name").contains("unterminated parameter"));
-    assert!(err("postgres://h/db?a&application_name=x").contains("unknown option"));
-    assert!(err("postgres://h/db?&application_name=x").contains("unknown option"));
-    assert!(err("postgres://h/db?=x").contains("unknown option"));
+    for url in [
+        "postgres://h/db?a&application_name=x",
+        "postgres://h/db?&application_name=x",
+        "postgres://h/db?=x",
+    ] {
+        let refusal = err(url);
+        assert!(
+            refusal.contains("unknown option, not quoted") && !refusal.contains("application_name"),
+            "{url}: {refusal}"
+        );
+    }
 }
 
 // The dbname keeps encoded and literal slashes; the path is one dbname.
@@ -271,11 +283,20 @@ fn scheme_is_case_sensitive_like_libpq() {
 //   ?sslmode=              -> invalid sslmode value: ""
 //   ?target_session_attrs= -> invalid target_session_attrs value: ""
 //   ?nosuchoption=1        -> invalid URI query parameter: "nosuchoption"
+//
+// The unknown key is rejected too, but not quoted. libpq quotes the unknown
+// key; this driver never echoes connection-string text, because a refusal is
+// logged and can carry a password. It names at most the known option nearest
+// the key, and `nosuchoption` is near none.
 #[test]
 fn empty_enum_values_and_unknown_keys_are_rejected_like_libpq() {
     assert!(err("postgres://h/db?sslmode=").contains("sslmode"));
     assert!(err("postgres://h/db?target_session_attrs=").contains("target_session_attrs"));
-    assert!(err("postgres://h/db?nosuchoption=1").contains("nosuchoption"));
+    let unknown = err("postgres://h/db?nosuchoption=1");
+    assert!(
+        unknown.contains("unknown option") && !unknown.contains("nosuchoption"),
+        "{unknown}"
+    );
 }
 
 // ---------------------------------------------------------------------------
