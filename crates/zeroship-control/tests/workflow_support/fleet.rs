@@ -59,11 +59,9 @@ pub fn worker_dispatch_authorization() -> String {
 fn binaries() -> &'static BTreeMap<String, PathBuf> {
     static BINARIES: OnceLock<BTreeMap<String, PathBuf>> = OnceLock::new();
     BINARIES.get_or_init(|| {
-        let output = Command::new("cargo")
-            .args([
-                "build",
-                "--locked",
-                "--message-format=json",
+        workflow_postgres::build(
+            "workflow services",
+            &[
                 "--bins",
                 "-p",
                 "zeroship-control",
@@ -75,29 +73,8 @@ fn binaries() -> &'static BTreeMap<String, PathBuf> {
                 "zeroship-data-cdc-server",
                 "-p",
                 "zeroship-workflow-server",
-            ])
-            .current_dir(workflow_postgres::root())
-            .output()
-            .expect("build workflow services");
-        if !output.status.success() {
-            let logs = workflow_postgres::root().join("target/workflow-tests");
-            fs::create_dir_all(&logs).unwrap();
-            let path = logs.join(format!("build-{}.log", Uuid::new_v4()));
-            let mut contents = output.stderr.clone();
-            contents.extend_from_slice(&output.stdout);
-            fs::write(&path, contents).unwrap();
-            panic!("workflow service build failed; see {}", path.display());
-        }
-        String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .filter_map(|line| {
-                let value: Value = serde_json::from_str(line).ok()?;
-                Some((
-                    value["target"]["name"].as_str()?.to_owned(),
-                    PathBuf::from(value["executable"].as_str()?),
-                ))
-            })
-            .collect()
+            ],
+        )
     })
 }
 

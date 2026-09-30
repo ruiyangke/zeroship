@@ -9,6 +9,9 @@ mod workflow;
 #[path = "../../tests/fixtures/postgres/image.rs"]
 mod postgres_image;
 
+#[path = "../../tests/fixtures/nested_cargo.rs"]
+mod nested_cargo;
+
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::process::{Command, ExitCode};
@@ -203,9 +206,11 @@ fn root() -> PathBuf {
 ///
 /// Runs from [`root`] so cargo reads the workspace's `.cargo/config.toml`,
 /// which is where the spawned tests' stack floor comes from. See
-/// [`the_workspace_config_raises_the_thread_stack_floor`].
+/// [`the_workspace_config_raises_the_thread_stack_floor`]. xtask itself runs
+/// under `cargo run`, so the command leaves out the variables describing the
+/// xtask package; [`nested_cargo`] says why.
 fn cargo() -> Command {
-    let mut command = Command::new(env!("CARGO"));
+    let mut command = nested_cargo::cargo();
     command.current_dir(root());
     command
 }
@@ -362,7 +367,51 @@ fn cancelled() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::root;
+    use super::{cargo, root};
+
+    /// The cargo xtask spawns leaves out the variables cargo gave the running
+    /// binary about its own package, and keeps the rest of the environment.
+    ///
+    /// `cargo test` gives this test binary the xtask package's variables, the
+    /// same ones `cargo run` gives xtask. The three names asserted as removed
+    /// are ones cargo sets for every binary it runs, and a name is removed only
+    /// if it is present, so an environment without them fails here rather than
+    /// passing over nothing. `CARGO` is the control: cargo sets it beside
+    /// them, it shares their prefix, and the spawned cargo keeps it.
+    #[test]
+    fn a_spawned_cargo_leaves_out_the_package_variables_and_keeps_the_rest() {
+        let command = cargo();
+        let changed: Vec<(String, bool)> = command
+            .get_envs()
+            .map(|(name, value)| (name.to_string_lossy().into_owned(), value.is_some()))
+            .collect();
+        assert!(
+            changed.iter().all(|(_, set)| !set),
+            "the spawned cargo only removes variables, never sets one: {changed:?}"
+        );
+        let removed: std::collections::BTreeSet<&str> =
+            changed.iter().map(|(name, _)| name.as_str()).collect();
+        for name in ["CARGO_MANIFEST_DIR", "CARGO_PKG_NAME", "CARGO_PKG_VERSION"] {
+            assert!(
+                removed.contains(name),
+                "{name} describes the running package and must not reach the spawned \
+                 cargo; removed: {removed:?}"
+            );
+        }
+        for name in &removed {
+            assert!(
+                *name == "OUT_DIR"
+                    || ["CARGO_PKG_", "CARGO_MANIFEST_", "CARGO_BIN_EXE_"]
+                        .iter()
+                        .any(|prefix| name.starts_with(prefix)),
+                "{name} describes no package and must reach the spawned cargo"
+            );
+        }
+        assert!(
+            !removed.contains("CARGO"),
+            "CARGO names the cargo binary, not a package, and must be kept"
+        );
+    }
 
     /// The floor is asserted where it is SET rather than where one caller
     /// passes it on, so it covers every cargo invocation: a bare `cargo test`
