@@ -41,12 +41,11 @@ use zeroship_data_orm::error::DbError;
 /// Wire code for "this session cannot open another app's transaction
 /// connection right now".
 ///
-/// A code of its own, not another `transaction_connection_busy`, because the
-/// remedies are opposite and only one of them is the creator's to act on:
-/// `transaction_connection_busy` means *this* app already has a transaction
-/// open and the creator must finish it, while this one means the dev process is
-/// hosting more apps than it has transaction connections for and the creator's
-/// own code is blameless. Defect L22b is exactly what happens when one code
+/// A code of its own because the remedy is not the creator's: the dev process
+/// is hosting more apps than it has transaction connections for, and the
+/// creator's code is blameless. `transaction_connection_busy` is the opposite
+/// case - two calls overlapping inside one of the creator's own transactions,
+/// which only the creator can fix. Defect L22b is what happens when one code
 /// covers both.
 pub(crate) const TX_LANES_EXHAUSTED: &str = "transaction_lanes_exhausted";
 
@@ -473,7 +472,7 @@ impl TxLaneSlot {
 /// life, which is unbounded per-tenant resource growth on a shared process. An
 /// idle lane is evicted to make room; only when every lane is mid-transaction
 /// does a new app get [`TX_LANES_EXHAUSTED`] - a refusal with a code of its own
-/// so it is never confused with an app's own overlapping transaction.
+/// so it is never confused with overlapping calls inside one transaction.
 ///
 /// The cap is set against the vector this backend actually runs in: SQLite is
 /// the dev tier, the worker refuses to boot on a SQLite DSN, and `zeroship
@@ -599,36 +598,25 @@ impl SqliteSession {
     /// Reserve `app_id`'s transaction connection for one explicit creator
     /// transaction, opening that connection if the app has none yet.
     ///
-    /// Refuses with a typed error while **that app's** lease is live. "Live" is
-    /// decided by whether the previous `Weak` still upgrades, so a lease
-    /// dropped without settling frees the lane immediately rather than after a
-    /// queue round trip.
+    /// "Live" is decided by whether the previous `Weak` still upgrades, so a
+    /// lease dropped without settling frees the lane immediately rather than
+    /// after a queue round trip.
     ///
-    /// ## Policy chosen here
+    /// ## A second reservation is an admission defect, not a creator's
     ///
-    /// Two questions the design did not settle. Both are answered by the code
-    /// below, so they are stated here rather than discovered - the Postgres
-    /// half writes its equivalents into
-    /// `zeroship_data_orm::backend::postgres::PostgresBackend`'s
-    /// `fixture_session`, and these are this half's.
+    /// No creator path reserves a database's connection while it is live.
+    /// Transaction admission (`crate::transaction::TxAdmission`) queues a
+    /// second top-level transaction for the same route behind the first before
+    /// anything reserves, and `Database::independent` refuses on this backend
+    /// because it cannot hold a second lane. So a reservation that finds the
+    /// lease live refuses with an internal error naming the database, rather
+    /// than with a code a creator would be told to act on.
     ///
-    /// 1. **Exhaustion: refuse immediately, do not queue.** A second
-    ///    `db.transaction()` *for the same app* gets
-    ///    `transaction_connection_busy` at once rather than waiting for the
-    ///    lane. Conservative because a refusal is decided from state the caller
-    ///    can see and needs no deadline to be safe; the Postgres half queues on
-    ///    the pool's `acquire_timeout` instead, so the two arms differ in what a
-    ///    creator observes under contention. When SC-1's deadline lands, whether
-    ///    this becomes a bounded wait is that decision's to make.
-    /// 2. **Scope of the admission key: `(session, app_id)`.** SC-1 keys a
-    ///    transaction slot on `(runtime_instance_id, app_id)` and this is the
-    ///    same key, because a session is one runtime instance's SQLite
-    ///    resources. It was `(runtime_instance_id, session)` until the
-    ///    transaction connection became per app - one shared connection meant
-    ///    app B's `db.transaction()` was refused while app A held one, which is
-    ///    defect L22b.
-    ///
-    /// Both are visible to creators.
+    /// The admission key is `(session, app_id)`, the same key SC-1 gives a
+    /// transaction slot, because a session is one runtime instance's SQLite
+    /// resources. One shared connection per session meant app B's
+    /// `db.transaction()` was refused while app A held one, which is defect
+    /// L22b.
     pub(crate) async fn reserve_transaction(
         self: &Rc<Self>,
         app_id: &str,
@@ -642,15 +630,11 @@ impl SqliteSession {
         let lease = {
             let mut lanes = self.tx_lanes.borrow_mut();
             if lanes.get(app_id).is_some_and(TxLaneSlot::is_live) {
-                return Err(DbError::validation_hinted(
-                    "transaction_connection_busy",
-                    format!(
-                        "db: database '{app_id}' already holds an open transaction on its \
-                         SQLite transaction connection; one explicit transaction at a time"
-                    ),
-                    "Commit or roll back the open db.transaction(...) before starting another \
-                     one on this database.",
-                ));
+                return Err(DbError::internal(format!(
+                    "db: database '{app_id}' was reserved for a second transaction while its \
+                     SQLite transaction connection was still leased; transaction admission \
+                     must queue the second one first"
+                )));
             }
             // Drop slots whose lease is gone before minting a new id, so a
             // process that cycles through app ids does not accumulate them.

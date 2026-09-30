@@ -25,7 +25,7 @@ use crate::v8_bridge::runtime_state;
 use crate::v8_classes::db::cached_collection;
 use zeroship_data_orm::binding::DbBinding;
 use zeroship_data_orm::error::{DbError, IsolationLevel};
-use zeroship_data_orm::transaction::scope::TransactionScope;
+use zeroship_data_orm::transaction::scope::{OperationClaim, TransactionScope};
 
 pub struct TransactionView {
     binding: DbBinding,
@@ -222,13 +222,25 @@ struct TxFinalizer {
     /// on this route's lane, so neither a co-resident app nor the same app on
     /// another database can settle it.
     route: zeroship_data_orm::binding::DbRoute,
+    /// A nested transaction's hold on the frame it was issued from; `None` for
+    /// a top-level one. A nested transaction is an operation of its parent
+    /// callback, so it keeps that frame from its issue until its settle has
+    /// finished.
+    ///
+    /// While the SAVEPOINT is in flight the hold is what refuses a sibling
+    /// call. Once the child frame is open the frame stack refuses parent-frame
+    /// calls on its own, and the hold is what the PARENT's settlement sees: a
+    /// callback that returns while a nested transaction it started is still
+    /// open has unfinished work, which is rolled back rather than committed.
+    parent_claim: Option<OperationClaim>,
     /// One-shot guard. Set the first time either handler fires.
     settled: Cell<bool>,
 }
 /// `env.db.transaction(asyncFn, opts?)` → `Promise<R>`.
 ///
-/// Synchronously mints the outer promise + decides BEGIN-vs-SAVEPOINT,
-/// then spawns the begin/savepoint op. Returns the outer promise; the
+/// Synchronously mints the outer promise + decides BEGIN-vs-SAVEPOINT (a
+/// SAVEPOINT also claims its parent callback's frame), then spawns the
+/// begin/savepoint op. Returns the outer promise; the
 /// creator callback runs once the begin op completes (see the module
 /// comment for the full 8-step flow). `asyncFn` is validated to be a
 /// function here; `opts.isolationLevel` is resolved by the caller
@@ -276,12 +288,18 @@ pub fn transaction_dispatch<'s>(
     let parent_scope =
         crate::tx_scope::current_tx_scope(scope).filter(|parent| parent.route() == &route);
     let nested = parent_scope.is_some();
-    if let Some(parent) = &parent_scope {
-        if let Err(error) = parent.check() {
+    // A nested call is issued HERE, like any other call its parent callback
+    // makes, so it claims the parent's frame here and is refused while another
+    // of the parent's calls is outstanding - rather than racing it to the
+    // connection when both first run.
+    let parent_claim = match parent_scope.as_ref().map(TransactionScope::claim_operation) {
+        None => None,
+        Some(Ok(claim)) => Some(claim),
+        Some(Err(error)) => {
             reject_outer_now(scope, &outer_global, error);
             return outer_promise;
         }
-    }
+    };
 
     // The savepoint-depth cap is NOT re-checked here. `FrameStack::open_child`
     // refuses the (MAX+1)-th simultaneous frame before any `SAVEPOINT` reaches
@@ -373,6 +391,7 @@ pub fn transaction_dispatch<'s>(
                     request_id,
                     frame,
                     route: route.clone(),
+                    parent_claim,
                     settled: Cell::new(false),
                 };
                 OpResult::JsValue {
@@ -406,8 +425,9 @@ pub fn transaction_dispatch<'s>(
 
     outer_promise
 }
-/// Reject an outer resolver synchronously (used for the pre-flight
-/// `savepoint_depth_exceeded` refusal, before any SQL runs).
+/// Reject an outer resolver synchronously, for a nested call refused where it
+/// is issued - its parent scope has settled, or its parent frame is busy -
+/// before anything is queued.
 fn reject_outer_now(
     scope: &mut v8::PinScope<'_, '_>,
     outer: &v8::Global<v8::PromiseResolver>,
@@ -638,14 +658,21 @@ fn settle_after_body(
         request_id,
         frame,
         route,
+        parent_claim,
         ..
     } = *finalizer;
 
     let success = body_ok.is_some();
     let body = if success { body_ok } else { body_err };
+    // Called HERE, in the handler, because this is the moment the callback
+    // settled: the settle samples the frame's outstanding calls now, before the
+    // pump can run one of them to completion and make unfinished work look
+    // finished.
+    let settle = exec_settle(&route, success, frame);
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        let settle_result = exec_settle(&route, success, frame).await;
+        let settle_result = settle.await;
+        drop(parent_claim);
         let value = build_settle_resolve_value(settle_result, success, body);
         OpResult::JsValue {
             resolver: outer,
@@ -671,6 +698,7 @@ fn settle_failed_before_body(
         request_id,
         frame,
         route,
+        parent_claim,
         ..
     } = finalizer;
     let err_global = {
@@ -679,8 +707,11 @@ fn settle_failed_before_body(
         let exc = op_err.to_exception(scope);
         v8::Global::new(scope, exc)
     };
+    // Sampled now, as in `settle_after_body`.
+    let settle = exec_settle(&route, false, frame);
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        let settle_result = exec_settle(&route, false, frame).await;
+        let settle_result = settle.await;
+        drop(parent_claim);
         OpResult::JsValue {
             resolver: outer,
             value: build_settle_resolve_value(settle_result, false, Some(err_global)),

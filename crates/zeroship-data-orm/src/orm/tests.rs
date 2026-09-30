@@ -31,6 +31,7 @@ mod lifecycle;
 mod native_arrays;
 mod nested_temporal;
 mod nested_values;
+mod overlapping_operations;
 mod protected_projections;
 mod protected_updates;
 mod read_only_binding;

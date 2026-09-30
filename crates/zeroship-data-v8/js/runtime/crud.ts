@@ -7,6 +7,7 @@ import {
 import { mapOptimisticConcurrencyError } from "./errors";
 import { trackCollectionAccess } from "./live";
 import { IdLoader } from "./loader";
+import { inTransactionCallback } from "./tx-state";
 import type { NativeCollection } from "../../../../packages/db/src/native";
 import { Query } from "./query";
 import type { NormalizedSchema } from "../../../../packages/db/src/schema";
@@ -210,7 +211,8 @@ export function getCollection<
     opts.actor === undefined &&
     opts.unmaskReason === undefined &&
     opts.with === undefined &&
-    opts[TRANSACTION_READ] !== true
+    opts[TRANSACTION_READ] !== true &&
+    !inTransactionCallback()
   ) {
     return self._run(() => self._loadById(idOrFilter));
   }

@@ -1176,9 +1176,8 @@ impl crate::backend::Backend for SqliteBackend {
         true
     }
 
-    /// The actor reserves one transaction connection per app, and refuses a
-    /// second explicit transaction for that app with
-    /// `transaction_connection_busy`.
+    /// The actor reserves one transaction connection per app, so a second lane
+    /// for the same app has nowhere to run.
     fn admits_concurrent_transactions(&self) -> bool {
         false
     }

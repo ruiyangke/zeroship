@@ -631,20 +631,25 @@ export const txPlainWrite = mutation(
   { id: "todos.txPlainWrite" },
 );
 
-/** Do writes on PARALLEL BRANCHES inside one transaction callback still
- *  belong to that transaction?
+/** Two writes on PARALLEL BRANCHES of one transaction callback: do both still
+ *  belong to that transaction, and is their overlap refused the same way on
+ *  both backends?
  *
  *  Every other tx probe awaits its writes in a straight line, so all of them
  *  would still pass if the platform decided "in a transaction" from ambient
- *  state. This one branches: `Promise.all` inside the callback creates two
- *  continuations that fork off the callback frame, and the routing decision is
- *  now taken per dispatch from the async context (`crates/plugin-db/src/
- *  tx_route.rs`). If a branch did NOT inherit the callback's scope it would be
- *  routed to the pool, autocommit on its own, and SURVIVE the abort below.
+ *  state. This one branches: `Promise.all` inside the callback issues both
+ *  writes before either settles, from two continuations that fork off the
+ *  callback frame. The routing decision is taken per dispatch from the async
+ *  context (`crates/zeroship-data-orm/src/tx_route.rs`), and so is the claim
+ *  on the transaction's one connection: the second write is issued while the
+ *  first is outstanding, so it is refused where it is issued, however quickly
+ *  the first would have finished.
  *
- *  Contract: the callback throws, so `countAfter == 0` -- both branch writes
- *  are rolled back with everything else. `countAfter == 2` means the branches
- *  escaped the transaction; `1` means only one did. */
+ *  Contract: `TRANSACTION_CONNECTION_BUSY` carrying its hint, and
+ *  `countAfter == 0` -- the refusal rejects the callback and the first write
+ *  rolls back with it. A branch that escaped the transaction would not be
+ *  refused: it would autocommit on its own, the callback would reach
+ *  `PROBE_BRANCH_ABORT`, and its row would survive. */
 export const txBranchWrites = mutation(
   async ({ userId, tag }: TxInput) => {
     const uid = userIdFromWire(userId);
@@ -663,7 +668,12 @@ export const txBranchWrites = mutation(
       });
     });
     const after = await db.todos.count({ userId: uid, title });
-    return { error: errShape(r.error), countAfter: after.data ?? null };
+    const hint = (r.error as { hint?: unknown } | null)?.hint;
+    return {
+      error: errShape(r.error),
+      hint: typeof hint === "string" ? hint : null,
+      countAfter: after.data ?? null,
+    };
   },
   { id: "todos.txBranchWrites" },
 );

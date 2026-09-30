@@ -74,7 +74,8 @@ async fn direct_backend_handles_have_stable_distinct_connection_identities() {
         first.sql_registration().clone(),
         first.connection_identity(),
         None,
-    );
+    )
+    .expect("a capture outside a callback takes no claim");
     assert!(matches!(
         captured.bind(second),
         Err(DbError::Configuration {
@@ -162,7 +163,8 @@ async fn a_captured_route_refuses_a_replacement_connection_with_the_same_sql_bun
         first.sql_registration().clone(),
         first.identity(),
         None,
-    );
+    )
+    .expect("a capture outside a callback takes no claim");
     let replacement = second
         .connect(ProjectKeySource::unavailable())
         .await

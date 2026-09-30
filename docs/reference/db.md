@@ -1229,15 +1229,30 @@ const { data, error } = await db.transaction(async (tx) => {
 - The transaction is rolled back automatically when the callback throws;
   resolving commits. There is no `tx.commit()`.
 - A transaction owns exactly **one** connection, so its operations cannot
-  overlap: `await` each call inside the callback before starting the next.
-  `Promise.all([tx.a.insert(...), tx.b.insert(...)])` runs them concurrently
-  on that one connection and the losing branch is refused with
-  `TRANSACTION_CONNECTION_BUSY`.
-- Everything a callback starts must also **finish** inside it. A promise the
-  callback never awaits keeps running after the transaction settles, and the
-  database calls it then makes belong to a transaction that no longer exists;
-  they are refused with `TRANSACTION_SCOPE_EXPIRED` rather than being committed
-  on their own.
+  overlap: `await` each call inside the callback before starting the next. A
+  call made while another call in the same callback is still outstanding is
+  refused with `TRANSACTION_CONNECTION_BUSY`, so in
+  `Promise.all([tx.a.insert(...), tx.b.insert(...)])` the second insert fails
+  and the first runs. Every call inside a callback is issued when it is made,
+  and the refusal is decided then, not when the call reaches the database, so
+  both tiers answer the same way however quickly the first call finishes. A
+  nested `db.transaction()` is such a call: it counts as one call of the
+  callback that started it until it settles, and the calls inside it belong to
+  it. `Promise.all([db.transaction(f), tx.a.insert(...)])` refuses the insert
+  with `TRANSACTION_CONNECTION_BUSY`, and the other way round refuses the
+  nested transaction with `transaction_connection_busy`.
+- Everything a callback starts must also **finish** inside it. A call that is
+  still running when the callback returns is waited for, and then the
+  transaction - or, for a nested callback, its savepoint - is rolled back and
+  fails with `transaction_work_unfinished` instead of committing work the
+  callback never waited for. A nested `db.transaction()` left running is such
+  a call. If the callback threw, the running call is waited for and the
+  rollback reports the callback's own error. A promise the callback never
+  awaits keeps running after the callback returns, and no database call it
+  makes is committed. The transaction starts to settle a few microtasks after
+  the callback returns: a call made before that counts as still running when
+  the callback returned, and a call made after it is refused with
+  `TRANSACTION_SCOPE_EXPIRED`.
 - Which transaction an operation belongs to is decided by where the call was
   made, not by what happens to be open at the time. A plain `db.<table>.*`
   call is its own unit of work even while another request holds a transaction
@@ -1386,7 +1401,8 @@ convenience; the code is the contract, and `isOptimisticLockError(e)` matches on
 | `INVALID_MASK_POLICY_SHAPE` | The `defineMaskPolicy()` declaration is malformed. |
 | `DATABASE_STARTUP_PENDING` | An unmask ran before startup finished (platform spelling `database_startup_pending`). |
 | `TRANSACTION_SCOPE_EXPIRED` | A database call outlived its transaction (see [Transactions](#transactions)). |
-| `TRANSACTION_CONNECTION_BUSY` | Two transaction operations overlapped on one connection, or a second transaction was started where only one is allowed. |
+| `TRANSACTION_WORK_UNFINISHED` | A transaction callback returned while a call it started was still running; the transaction, or the nested transaction's savepoint, was rolled back (see [Transactions](#transactions)). |
+| `TRANSACTION_CONNECTION_BUSY` | A call inside a transaction callback was made while another of its calls was still outstanding (see [Transactions](#transactions)). |
 | `INVALID_K`, `VECTOR_EXTENSION_MISSING`, `POSTGIS_EXTENSION_MISSING`, `VECTOR_DIMENSION_MISMATCH`, `VECTOR_UNSUPPORTED_METRIC` | Vector / geo paths — see [Vector / Geo: Error codes](#error-codes). |
 
 A platform release can add codes; branch on the code you expect, compared
@@ -1401,7 +1417,7 @@ The spelling depends on where the error was raised. This is a real trap:
 | Raised by | Spelling | Examples |
 | --- | --- | --- |
 | a collection operation — `insert`, `find`, `update`, and the same calls inside a transaction | SCREAMING_SNAKE | `UNIQUE_VIOLATION`, `FOREIGN_KEY_VIOLATION`, `TRANSACTION_CONNECTION_BUSY`, `SERIALIZATION_FAILURE` |
-| the transaction's own lifecycle — begin, isolation level, savepoint/nesting | raw lowercase | `unsupported_isolation_level`, `nested_isolation_level`, `transaction_lanes_exhausted`, `transaction_connection_busy`, `transaction_scope_expired` |
+| the transaction's own lifecycle — begin, isolation level, savepoint/nesting | raw lowercase | `unsupported_isolation_level`, `nested_isolation_level`, `transaction_lanes_exhausted`, `transaction_connection_busy`, `transaction_scope_expired`, `transaction_work_unfinished` |
 
 When an error from the platform layer has a lowercase code, the SDK canonicalizes
 it to SCREAMING_SNAKE. Two codes are remapped by name rather than mechanically

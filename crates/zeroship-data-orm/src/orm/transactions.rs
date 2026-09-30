@@ -16,9 +16,26 @@ impl TransactionOptions {
 }
 
 impl Database {
-    /// Commit a successful callback or roll back its error. Nested calls use
-    /// the transaction protocol's savepoint frames. Escaped handles expire
-    /// when their callback finishes, including when its future is cancelled.
+    /// Commit a callback that succeeds with nothing it started still running,
+    /// and roll back any other. Nested calls use the transaction protocol's
+    /// savepoint frames. Escaped handles expire when their callback finishes,
+    /// including when its future is cancelled.
+    ///
+    /// A transaction runs one operation at a time: an operation first polled
+    /// while another one of the same callback is outstanding, a nested
+    /// transaction included, fails with `transaction_connection_busy`; see
+    /// [`Collection::execute`] for how `join!` and `select!` order that.
+    ///
+    /// The transaction does not end while an operation its callback started
+    /// is outstanding. Settlement waits for it, then rolls back: a callback
+    /// that returned `Ok` with an operation outstanding fails with
+    /// `transaction_work_unfinished`, and one that returned `Err` hands back
+    /// its own error. The wait lasts until the operation's future completes or
+    /// is dropped, so a future the callback polled and then left unpolled
+    /// holds settlement until the transaction's execution deadline ends it.
+    /// That fails with `transaction_deadline_expired` on SQLite; on PostgreSQL
+    /// the parked statement is still on the wire, the session is withdrawn,
+    /// and the failure is `commit_failed_indeterminate`.
     ///
     /// The callback chooses its own error type, so a domain refusal that must
     /// roll back is returned as itself: `Err(refusal)` rolls back and hands the

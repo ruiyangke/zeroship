@@ -51,7 +51,6 @@ export function assertDeployed(captured: Capture, run: string) {
     cxPar: { legs: [{ n: 1, error: null }, { n: 2, error: null }], countAfter: 2 },
     cxOvl: { aAfter: 0, b: { error: null }, bAfter: 1 },
     cxPlain: { aAfter: 0, b: { inserted: true }, bAfter: 1 },
-    txBranch: { error: { code: "TRANSACTION_CONNECTION_BUSY" }, countAfter: 0 },
     txOrphan: { orphanStarted: 1, error: null, txAfter: 1, orphanAfter: 0 },
   };
   for (const [name, expected] of Object.entries(transactions)) expect.soft(result(name), name).toMatchObject(expected);

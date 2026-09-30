@@ -781,15 +781,17 @@ fn a_transaction_lane_cannot_address_another_apps_tables() {
     })
 }
 
-/// The refusal that survives, and the message that must name the database.
+/// The refusal that survives below admission, and the message that must name
+/// the database.
 ///
-/// A second top-level transaction on the SAME database is still refused
-/// immediately. The lane is per database because the connection is: the actor
-/// resolves a lane's own ATTACH by that name. This is the only producer of
-/// `transaction_connection_busy` on this path, so the message can say which
-/// database it is - the distinction defect L22b names.
+/// A second reservation of the SAME database is still refused immediately. The
+/// lane is per database because the connection is: the actor resolves a lane's
+/// own ATTACH by that name. No creator path reaches it - admission queues a
+/// second transaction for the route before reserving - so it is an internal
+/// refusal rather than a creator-facing code, and its message says which
+/// database it is, the distinction defect L22b names.
 #[test]
-fn a_second_transaction_on_the_same_database_is_still_refused_and_names_it() {
+fn a_second_reservation_of_the_same_database_is_refused_and_names_it() {
     Host::test(|host| {
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
@@ -809,22 +811,13 @@ fn a_second_transaction_on_the_same_database_is_still_refused_and_names_it() {
             let err = backend
                 .fixture_session(&crate::tests::fixtures::harness_alias("app_a"))
                 .await
-                .expect_err("a second transaction on the same database must be refused");
+                .expect_err("a second reservation of the same database must be refused");
             match &err {
-                DbError::ValidationFailed {
-                    code,
-                    message,
-                    hint,
-                } => {
-                    assert_eq!(*code, "transaction_connection_busy", "got {err:?}");
-                    assert!(
-                        message.contains(&crate::tests::fixtures::harness_alias("app_a")),
-                        "the message must name the database whose transaction it is; \
-                         got {message:?}"
-                    );
-                    assert!(hint.is_some(), "the remedy is the creator's, so say it");
-                }
-                other => panic!("expected a typed refusal, got {other:?}"),
+                DbError::Internal { message } => assert!(
+                    message.contains(&crate::tests::fixtures::harness_alias("app_a")),
+                    "the message must name the database whose connection it is; got {message:?}"
+                ),
+                other => panic!("an admission defect is an internal refusal, got {other:?}"),
             }
 
             // Dropping the first lease frees the app's lane immediately - no queue

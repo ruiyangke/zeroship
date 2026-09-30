@@ -11,7 +11,7 @@ import { TRANSACTION_READ } from "./crud";
 import { captureNativeTransaction, type NativeDb, type NativeTransactionFn } from "../../../../packages/db/src/native";
 import { Query } from "./query";
 import { createLive } from "./live";
-import { drainCollectionLoaders } from "./tx-state";
+import { drainCollectionLoaders, inTransactionCallback, runInTransactionCallback } from "./tx-state";
 import { readFrom, scopeAliasedCollection } from "./read";
 import type {
   AliasedCollection,
@@ -38,17 +38,6 @@ import type {
 } from "../../../../packages/db/src/types";
 export type { TransactionDb, TxCollection, TxQuery, TransactionOptions } from "../../../../packages/db/src/db-types";
 export type { Collections, SchemaInput, SchemaShape } from "../../../../packages/db/src/db-types";
-
-type AsyncLocalStorageLike<T> = {
-  getStore(): T | undefined;
-  run<R>(store: T, callback: () => R): R;
-};
-type AsyncLocalStorageConstructor = new <T>() => AsyncLocalStorageLike<T>;
-const asyncHooksSpecifier = "node:" + "async_hooks";
-const { AsyncLocalStorage } = await import(asyncHooksSpecifier) as {
-  AsyncLocalStorage: AsyncLocalStorageConstructor;
-};
-const transactionContext = new AsyncLocalStorage<boolean>();
 
 /** One collection in the host's decoded schema projection. */
 export interface ProjectedCollection {
@@ -384,7 +373,7 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
     queryFn: () => Promise<R[]> | { then(onFulfilled: (value: unknown) => unknown, onRejected?: (reason: unknown) => unknown): unknown },
     liveOptions?: LiveOptions,
   ): LiveQuery<R> {
-    if (transactionContext.getStore() === true) {
+    if (inTransactionCallback()) {
       throw Object.assign(
         new Error("@zeroship/db: db.live cannot be called inside db.transaction"),
         { code: "LIVE_IN_TRANSACTION" as const },
@@ -406,10 +395,11 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
   // (`err.code`, plus `err.status` when the classification has an HTTP
   // remedy).
   //
-  // This wrapper drains pending JS loaders before BEGIN, scopes the
-  // creator-facing transaction handles to the callback, and maps the native
-  // promise to Result. AsyncLocalStorage keeps SDK-only guards local to the
-  // callback continuation while Rust owns connection routing and nesting.
+  // This wrapper drains pending JS loaders before a top-level BEGIN, scopes
+  // the creator-facing transaction handles to the callback, and maps the
+  // native promise to Result. AsyncLocalStorage keeps SDK-only guards local
+  // to the callback continuation while Rust owns connection routing and
+  // nesting.
   //
   // The `txCollections` (SDK collections wrapped `Result`→throw) route
   // through the tx connection automatically, since the native CRUD path
@@ -432,22 +422,25 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
       );
     }
 
-    const collectionList = Object.values(collections);
-
-    // A drain failure aborts before BEGIN.
-    try {
-      await drainCollectionLoaders(collectionList);
-    } catch (drainErr) {
-      const wrapped = Object.assign(
-        new Error(
-          `pre-transaction drain failed: ${
-            drainErr instanceof Error ? drainErr.message : String(drainErr)
-          }`,
-          { cause: drainErr instanceof Error ? drainErr : undefined },
-        ),
-        { code: "TX_DRAIN_FAILED" as const },
-      );
-      return err(wrapped);
+    // A nested transaction is one call of its parent callback, issued when it
+    // is made like the callback's other calls; flushing here would issue it
+    // later, and would run reads other code batched inside this transaction.
+    if (!inTransactionCallback()) {
+      // A drain failure aborts before BEGIN.
+      try {
+        await drainCollectionLoaders(Object.values(collections));
+      } catch (drainErr) {
+        const wrapped = Object.assign(
+          new Error(
+            `pre-transaction drain failed: ${
+              drainErr instanceof Error ? drainErr.message : String(drainErr)
+            }`,
+            { cause: drainErr instanceof Error ? drainErr : undefined },
+          ),
+          { code: "TX_DRAIN_FAILED" as const },
+        );
+        return err(wrapped);
+      }
     }
 
     try {
@@ -481,7 +474,7 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
             }
             return txCollection;
           };
-          return transactionContext.run(true, async () => {
+          return runInTransactionCallback(async () => {
             try {
               return await fn({ ...txCollections, collection, from } as TransactionDb<T>);
             }

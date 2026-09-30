@@ -11,7 +11,17 @@
 //! whole [`DbBinding`] - the tenant, the database, the physical schema and the
 //! role the session narrows to - plus the immutable SQL registration used by
 //! query preparation and the usage sink its host attached.
+//!
+//! A dispatch inside a callback also claims its transaction frame, at the
+//! moment its operation is ISSUED, and holds the claim until the operation
+//! settles; see [`TransactionScope::claim_operation`] for why the refusal of an
+//! overlapping operation cannot wait for it to run. When that moment is depends
+//! on the host: a V8 call starts its work the moment it is made, so the adapter
+//! claims at capture ([`CapturedRoute::capture`]), while a Rust future does
+//! nothing until it is polled, so the native API claims on the first poll
+//! (`CapturedRoute::capture_deferred`, which binds there).
 
+use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::backend::BackendHandle;
@@ -19,7 +29,7 @@ use crate::binding::{DbBinding, DbRoute};
 use crate::metrics::UsageSink;
 use crate::sql::SchemaName;
 use crate::sql::registration::SqlRegistration;
-use crate::transaction::scope::TransactionScope;
+use crate::transaction::scope::{OperationClaim, TransactionScope};
 
 /// A synchronous routing decision awaiting backend binding.
 /// Capture callback identity before asynchronous connection setup can yield.
@@ -31,11 +41,25 @@ pub struct CapturedRoute {
     /// database**.
     in_tx: bool,
     scope: Option<TransactionScope>,
+    /// When, and whether, this dispatch claims its transaction frame.
+    claim: FrameClaim,
     /// Compiler, codecs, and effective support captured before backend acquisition.
     registration: SqlRegistration,
     connection: CapturedConnection,
     /// Where this dispatch reports its usage; `None` reports nothing.
     usage: Option<Arc<dyn UsageSink>>,
+}
+
+/// When a captured dispatch claims its transaction frame.
+#[derive(Debug)]
+enum FrameClaim {
+    /// Outside a callback, or a test route: nothing claims.
+    Unclaimed,
+    /// Claimed at capture, where a host whose calls start at once issued it.
+    Held(OperationClaim),
+    /// Claimed by [`CapturedRoute::bind`], which the native API reaches on the
+    /// operation's first poll.
+    AtBind,
 }
 
 #[derive(Debug)]
@@ -54,6 +78,10 @@ pub struct TxRoute {
     usage: Option<Arc<dyn UsageSink>>,
     in_tx: bool,
     scope: Option<TransactionScope>,
+    /// The frame claim the dispatch took when it was issued, shared by every clone
+    /// the operation makes of its route and released when the last one drops.
+    /// Nothing reads it: it is held for its `Drop`.
+    _claim: Option<Rc<OperationClaim>>,
     backend: BackendHandle,
     registration: SqlRegistration,
     connection: crate::connection::ConnectionIdentity,
@@ -88,7 +116,43 @@ impl CapturedRoute {
     /// `usage` is the sink the host attached to this binding. Every capture
     /// site states it, so a host cannot meter one entry point and forget
     /// another; `None` reports nothing and never refuses the dispatch.
+    ///
+    /// This is the capture for a host whose calls start their work the moment
+    /// they are made, which is the V8 adapter: call it once per operation, in
+    /// the dispatch prologue. A dispatch inside a callback claims its frame
+    /// here and keeps the claim, through [`Self::bind`], until every route it
+    /// made has dropped. The native API, whose futures are inert until polled,
+    /// uses `Self::capture_deferred` instead.
+    ///
+    /// # Errors
+    /// Inside a callback, the refusals of
+    /// [`TransactionScope::claim_operation`]: `transaction_scope_expired`, or
+    /// `transaction_connection_busy` while another issued operation or an open
+    /// nested frame holds the connection. Outside one, none.
     pub fn capture(
+        current_scope: Option<&TransactionScope>,
+        binding: &DbBinding,
+        registration: SqlRegistration,
+        connection: crate::connection::ConnectionIdentity,
+        usage: Option<Arc<dyn UsageSink>>,
+    ) -> Result<Self, crate::error::DbError> {
+        let mut captured =
+            Self::capture_deferred(current_scope, binding, registration, connection, usage);
+        if let Some(scope) = &captured.scope {
+            captured.claim = FrameClaim::Held(scope.claim_operation()?);
+        }
+        Ok(captured)
+    }
+
+    /// Freeze the scope as [`Self::capture`] does, but claim the frame in
+    /// [`Self::bind`] rather than here.
+    ///
+    /// For the native API, whose operation futures bind on their first poll: a
+    /// future prepared and never polled has issued nothing, so preparing two
+    /// and awaiting them one after the other overlaps nothing and is not
+    /// refused. Crate-private so an adapter whose calls start at once cannot
+    /// reach it by mistake.
+    pub(crate) fn capture_deferred(
         current_scope: Option<&TransactionScope>,
         binding: &DbBinding,
         registration: SqlRegistration,
@@ -102,10 +166,14 @@ impl CapturedRoute {
         // first is not admitted to the first's lane.
         let route = binding.route();
         let scope = current_scope.filter(|scope| scope.route() == &route).cloned();
-        let in_tx = scope.is_some();
         Self {
             binding: binding.clone(),
-            in_tx,
+            in_tx: scope.is_some(),
+            claim: if scope.is_some() {
+                FrameClaim::AtBind
+            } else {
+                FrameClaim::Unclaimed
+            },
             scope,
             registration,
             connection: CapturedConnection::Bound(connection),
@@ -151,7 +219,12 @@ impl CapturedRoute {
 
     /// Bind the frozen decision to the backend its SQL will run on.
     ///
-    /// Binding consumes the captured route so it cannot be attached twice.
+    /// Binding consumes the captured route so it cannot be attached twice. A
+    /// route from `Self::capture_deferred` claims its frame here.
+    ///
+    /// # Errors
+    /// A registration or connection that does not match `backend`, and for a
+    /// deferred route the refusals of [`TransactionScope::claim_operation`].
     pub fn bind(self, backend: BackendHandle) -> Result<TxRoute, crate::error::DbError> {
         if self.registration.identity() != backend.sql_registration().identity() {
             return Err(crate::error::DbError::config(
@@ -172,11 +245,21 @@ impl CapturedRoute {
             #[cfg(test)]
             CapturedConnection::Unbound => backend.connection_identity(),
         };
+        let claim = match self.claim {
+            FrameClaim::Unclaimed => None,
+            FrameClaim::Held(claim) => Some(claim),
+            FrameClaim::AtBind => self
+                .scope
+                .as_ref()
+                .map(TransactionScope::claim_operation)
+                .transpose()?,
+        };
         Ok(TxRoute {
             usage: self.usage,
             binding: self.binding,
             in_tx: self.in_tx,
             scope: self.scope,
+            _claim: claim.map(Rc::new),
             backend,
             registration: self.registration,
             connection,
@@ -191,6 +274,7 @@ impl CapturedRoute {
             binding: crate::tests::fixtures::harness_binding(app_id),
             in_tx: false,
             scope: None,
+            claim: FrameClaim::Unclaimed,
             registration,
             connection: CapturedConnection::Unbound,
             usage: None,
@@ -205,13 +289,16 @@ impl CapturedRoute {
             binding: binding.clone(),
             in_tx: false,
             scope: None,
+            claim: FrameClaim::Unclaimed,
             registration,
             connection: CapturedConnection::Unbound,
             usage: None,
         }
     }
 
-    /// Test-only route claiming the binding's currently installed transaction scope.
+    /// Test-only route inside the binding's currently installed transaction
+    /// scope. It takes no operation claim, so a test can drive statements
+    /// beside a dispatch that holds one.
     #[cfg(test)]
     #[doc(hidden)]
     pub fn tx_on_binding_for_tests(binding: &DbBinding, registration: SqlRegistration) -> Self {
@@ -219,6 +306,7 @@ impl CapturedRoute {
             binding: binding.clone(),
             in_tx: true,
             scope: TransactionScope::current(&binding.route()).ok(),
+            claim: FrameClaim::Unclaimed,
             registration,
             connection: CapturedConnection::Unbound,
             usage: None,
@@ -307,6 +395,10 @@ impl TxRoute {
     /// have to come from [`CapturedRoute::capture`]. Bulk write fan-out uses it
     /// only after opening either a top-level transaction or a savepoint, so
     /// every statement and its deferred broker event share that frame.
+    ///
+    /// The frame it moves onto is the operation's own, so no claim is taken
+    /// for it; the claim the dispatch took when it was issued stays with the route and
+    /// keeps every other operation off the frame it was issued from.
     pub fn into_internal_transaction(mut self) -> Result<Self, crate::error::DbError> {
         self.in_tx = true;
         self.scope = Some(TransactionScope::current(&self.binding.route())?);

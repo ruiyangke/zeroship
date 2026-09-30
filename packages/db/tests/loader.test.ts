@@ -282,8 +282,12 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
       { native },
     );
 
+    // Awaited one after the other: a transaction's calls may not overlap. The
+    // loader would batch even one id through `$in`, so a single-row `find`
+    // per call is still what shows the bypass.
     const { data, error } = await db.transaction(async (tx) => {
-      const [u1, u2] = await Promise.all([tx.users.get("1"), tx.users.get("2")]);
+      const u1 = await tx.users.get("1");
+      const u2 = await tx.users.get("2");
       return { u1, u2 };
     });
     assert.equal(error, null);
@@ -292,6 +296,94 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
     assert.equal(data!.u2?.email, "b@b.com");
     assert.equal(calls.findSingle.length, 2, "tx-active reads dispatch directly with limit:1");
     assert.equal(calls.findBatched.length, 0);
+  });
+
+  test("inside a transaction callback a root-handle get(id) is issued when it is called", async () => {
+    const { native, calls } = makeMockNative({
+      1: { id: "1", email: "a@b.com", name: "Alice" },
+      2: { id: "2", email: "b@b.com", name: "Bob" },
+    });
+    const db = installSchemaForTest(
+      {
+        users: {
+          email: t.string().required().unique(),
+          name: t.string().required(),
+        },
+      },
+      { native },
+    );
+
+    // Outside a transaction the same call waits for its batch.
+    const outside = db.users.get("2");
+    assert.equal(calls.find.length, 0, "the batch is issued on a later microtask");
+    assert.equal((await outside).data?.email, "b@b.com");
+
+    // A transaction admits one call at a time, so a call held back for a
+    // batch would reach it after calls the callback made later.
+    const { data, error } = await db.transaction(async () => {
+      const before = calls.find.length;
+      const pending = db.users.get("1");
+      const issued = calls.find.length - before;
+      return { issued, row: await pending };
+    });
+    assert.equal(error, null);
+    assert.equal(data!.issued, 1, "the find is made inside the get call");
+    assert.equal(data!.row.data?.email, "a@b.com");
+    assert.equal(calls.findBatched.length, 1, "only the call outside the transaction was batched");
+  });
+
+  test("a nested transaction is issued when it is called and leaves other code's batched reads outside it", async () => {
+    const { AsyncLocalStorage } = await import("node:async_hooks");
+    // Stands in for the native routing: a call belongs to the transaction whose
+    // callback it was made in, whichever transaction is open when it runs.
+    const route = new AsyncLocalStorage<string>();
+    const events: string[] = [];
+    const rows: Record<string, AnyRec> = {
+      1: { id: "1", email: "a@b.com", name: "Alice" },
+      2: { id: "2", email: "b@b.com", name: "Bob" },
+    };
+    const native = {
+      async transaction(cb: (raw: unknown) => unknown, _o?: { isolationLevel?: string }) {
+        const scope = `${route.getStore() ?? ""}tx`;
+        events.push(`begin ${scope}`);
+        return route.run(scope, () => cb(undefined));
+      },
+      collection(_name: string) {
+        return {
+          async find(filter: AnyRec, _o: AnyRec) {
+            events.push(`find ${route.getStore() ?? "outside"}`);
+            const clause = filter.id as { $in?: string[] } | string;
+            const ids = typeof clause === "string" ? [clause] : clause.$in ?? [];
+            return ids.map((id) => rows[id]).filter(Boolean);
+          },
+        };
+      },
+    };
+    const db = installSchemaForTest(
+      {
+        users: {
+          email: t.string().required().unique(),
+          name: t.string().required(),
+        },
+      },
+      { native: native as unknown as NativeDb },
+    );
+    // Code outside the transaction that runs while its callback does, as
+    // another request's handler would.
+    const outsideTransaction = AsyncLocalStorage.snapshot();
+
+    let outside: Promise<{ data: AnyRec | null }> | undefined;
+    const { data: begun, error } = await db.transaction(async () => {
+      outside = outsideTransaction(() => db.users.get("2"));
+      const nested = db.transaction(async () => {});
+      const begun = events.filter((event) => event.startsWith("begin")).length;
+      assert.equal((await nested).error, null);
+      return begun;
+    });
+    assert.equal(error, null);
+    assert.equal(begun, 2, "the nested transaction reached the native call inside db.transaction()");
+    assert.equal((await outside!).data?.email, "b@b.com");
+    assert.deepEqual(events, ["begin tx", "begin txtx", "find outside"]);
   });
 
   test("pre-tx batched reads complete BEFORE the tx begin runs", async () => {

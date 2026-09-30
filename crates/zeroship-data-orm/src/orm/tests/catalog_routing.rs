@@ -100,6 +100,9 @@ async fn sqlite_catalog_reads_transaction_local_protection() {
                     .is_some_and(|column| column.mask.is_some()),
                 "the reserved connection must see transaction-local protection: {transactional:?}"
             );
+            // The route above issued this test's raw statements, so it holds
+            // the callback's frame until it drops.
+            drop(route);
 
             tx.collection("protected_records")?
                 .insert(value!({"id":"refused", "label":"cold", "secret":"private"}))

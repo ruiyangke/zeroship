@@ -190,6 +190,12 @@ impl FrameStack {
         self.frames.last()
     }
 
+    /// The outermost frame: the transaction's own, which root settlement ends.
+    #[must_use]
+    pub fn root(&self) -> Option<&Frame> {
+        self.frames.first()
+    }
+
     /// Whether a captured callback still owns an open frame.
     pub fn contains(&self, id: u64) -> bool {
         self.frames.iter().any(|frame| frame.id.get() == id)

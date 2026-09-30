@@ -481,7 +481,52 @@ pub enum SettleOutcome {
 /// to come back, and a session that is genuinely unreachable when terminal
 /// SQL is due is `Indeterminate`, which withdraws and tells the creator. An
 /// absent client is never proof that terminal SQL has run.
-pub async fn exec_settle(
+///
+/// # Everything a callback starts finishes inside it
+///
+/// The call itself is the moment the callback settled, so the frame's claims
+/// are sampled - and the frame closed to new claims - synchronously, before
+/// the returned future is first polled. An operation made after that is
+/// refused as expired rather than waited for. Settlement then waits until no
+/// issued operation holds the frame - an operation still running owns the
+/// connection, and ending the frame beneath it would leave the outcome to
+/// whichever finished first. After that:
+///
+/// - a callback that failed is rolled back, as it always is;
+/// - a callback that succeeded while one of its operations still held the frame
+///   started work it never waited for. That work is rolled back with the frame,
+///   and the settle fails with `transaction_work_unfinished` rather than
+///   committing it.
+#[expect(
+    clippy::future_not_send,
+    reason = "settlement drives this thread's compio transaction lane"
+)]
+pub fn exec_settle(
+    route: &DbRoute,
+    success: bool,
+    frame: Option<reducer::frames::FrameId>,
+) -> impl std::future::Future<Output = SettleOutcome> + use<> {
+    let outstanding = scope::OutstandingWork::sample(route, frame);
+    let route = route.clone();
+    async move {
+        let unfinished = match &outstanding {
+            Some(outstanding) => {
+                outstanding.drained().await;
+                success && outstanding.held()
+            }
+            None => false,
+        };
+        let outcome = settle_frame(&route, success && !unfinished, frame).await;
+        match outcome {
+            SettleOutcome::Ok if unfinished => SettleOutcome::SettleErr(scope::work_unfinished()),
+            outcome => outcome,
+        }
+    }
+}
+
+/// Send the frame's terminal statement once nothing the callback started is
+/// still running.
+async fn settle_frame(
     route: &DbRoute,
     success: bool,
     frame: Option<reducer::frames::FrameId>,

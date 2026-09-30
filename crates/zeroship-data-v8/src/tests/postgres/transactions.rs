@@ -2230,3 +2230,62 @@ const _procedures = { poisonThenCommit };
 // ===========================================================================
 // SC-1 driver: the actions, executed against a real server
 // ===========================================================================
+
+/// The deployed tier's answer to overlapping calls and to unfinished work, as
+/// a creator's code meets it through the SDK.
+///
+/// The overlap is refused where the second call is made, with the documented
+/// code and hint; a callback that returns with a call still running is rolled
+/// back and fails as unfinished, at the root and nested; the parent of a nested
+/// one carries on and commits its own row, which is the only row that lands.
+#[test]
+fn overlapping_and_unfinished_transaction_work_is_refused() {
+    let (_postgres, url) = require_pg();
+    let app = crate::tests::fixtures::test_app_id!();
+    reset_schema(&url, &app);
+    let source = build_src(
+        r#"
+async function contract() {
+    const overlap = await env.db.transaction(async tx => {
+        await Promise.all([tx.notes.insert({title: "first"}), tx.notes.insert({title: "second"})]);
+    });
+    const root = await env.db.transaction(async tx => {
+        tx.notes.insert({title: "unfinished"});
+    });
+    let nested;
+    const parent = await env.db.transaction(async tx => {
+        nested = await env.db.transaction(async inner => {
+            inner.notes.insert({title: "child"});
+        });
+        await tx.notes.insert({title: "parent"});
+    });
+    return {
+        overlap: overlap.error?.code ?? null,
+        hinted: typeof overlap.error?.hint === "string" && overlap.error.hint.includes("Await"),
+        root: root.error?.code ?? null,
+        nested: nested.error?.code ?? null,
+        parent: parent.error?.code ?? null,
+    };
+}
+contract.config = {kind: "action"};
+const _procedures = {contract};
+"#,
+    );
+    let (status, body) = dispatch_zs(&url, &source, "contract", &app);
+    assert_eq!(status, 200, "transaction contract: {body}");
+    assert_eq!(
+        body["json"],
+        serde_json::json!({
+            "overlap": "TRANSACTION_CONNECTION_BUSY",
+            "hinted": true,
+            "root": "transaction_work_unfinished",
+            "nested": "transaction_work_unfinished",
+            "parent": null,
+        })
+    );
+    assert_eq!(
+        count_notes(&url, &app),
+        1,
+        "only the parent's own row commits"
+    );
+}

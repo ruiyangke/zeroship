@@ -1196,7 +1196,13 @@ fn schedule_timer(
 /// Every refusal carries its own code - `TxProtocolError::code()` - so a caller
 /// can branch on what was refused rather than on a collapsed message. The
 /// backend error, when there is one, supplies the detail.
+///
+/// The overlap refusal is the creator's to fix, so it is lowered to the one
+/// documented error that says how, whichever guard caught the overlap.
 pub fn protocol_error(refusal: TxProtocolError, detail: Option<DbError>) -> DbError {
+    if refusal == TxProtocolError::TransactionConnectionBusy {
+        return super::scope::connection_busy();
+    }
     let message = detail.as_ref().map_or_else(
         || format!("db.transaction: {}", refusal.code()),
         |error| {
@@ -1286,6 +1292,29 @@ mod tests {
             next_backend_generation() > second,
             "the generation sequence must keep increasing"
         );
+    }
+
+    /// The reducer's overlap refusal reaches the creator as the documented
+    /// error: its code, and the hint that names the remedy. Every path that
+    /// refuses an overlap speaks with this one voice.
+    #[test]
+    fn the_reducers_overlap_refusal_carries_the_documented_hint() {
+        use super::{protocol_error, DbError, TxProtocolError};
+
+        let error = protocol_error(TxProtocolError::TransactionConnectionBusy, None);
+        assert_eq!(error.code(), "transaction_connection_busy");
+        match &error {
+            DbError::ValidationFailed {
+                hint: Some(hint), ..
+            }
+            | DbError::Coded {
+                hint: Some(hint), ..
+            } => assert!(hint.contains("Await"), "the hint names the remedy: {hint}"),
+            other => panic!("the overlap refusal must carry its hint, got {other:?}"),
+        }
+        // Control: a refusal with no documented remedy keeps its bare shape.
+        let not_ready = protocol_error(TxProtocolError::TransactionNotReady, None);
+        assert_eq!(not_ready.code(), "transaction_not_ready");
     }
 
     /// `reset_context_for_tests` must NOT restart the sequence.

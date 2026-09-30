@@ -3,6 +3,35 @@ import type { IdValue } from "../../../../packages/db/src/types";
 
 type LoaderRow = { id: IdValue };
 
+type AsyncLocalStorageLike<T> = {
+  getStore(): T | undefined;
+  run<R>(store: T, callback: () => R): R;
+};
+type AsyncLocalStorageConstructor = new <T>() => AsyncLocalStorageLike<T>;
+const asyncHooksSpecifier = "node:" + "async_hooks";
+const { AsyncLocalStorage } = await import(asyncHooksSpecifier) as {
+  AsyncLocalStorage: AsyncLocalStorageConstructor;
+};
+const transactionContext = new AsyncLocalStorage<boolean>();
+
+/**
+ * Run `callback` as a transaction callback. Code it runs, and every
+ * continuation of that code, reports {@link inTransactionCallback}.
+ */
+export function runInTransactionCallback<R>(callback: () => R): R {
+  return transactionContext.run(true, callback);
+}
+
+/**
+ * Whether the calling code runs inside a transaction callback. Its database
+ * calls belong to that transaction, which admits one call at a time, so the
+ * SDK issues each of them when it is made rather than deferring any of them
+ * into a batch other code shares.
+ */
+export function inTransactionCallback(): boolean {
+  return transactionContext.getStore() === true;
+}
+
 /**
  * JS loader state carried by each Collection.
  */

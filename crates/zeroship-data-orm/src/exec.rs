@@ -22,23 +22,11 @@ fn tx_scope_expired() -> DbError {
     crate::transaction::scope::expired()
 }
 
-/// The route says "in transaction" and the transaction is still open, but
-/// its connection is checked out by another in-flight operation for the same
-/// app. A transaction serializes operations on its owned connection.
-fn tx_connection_busy() -> DbError {
-    DbError::validation_hinted(
-        "transaction_connection_busy",
-        "db: another operation is already using this transaction's connection".to_string(),
-        "A transaction has one connection, so its operations cannot overlap. Await each env.db \
-         call inside the db.transaction(...) callback before starting the next — a Promise.all \
-         over several tx operations runs them concurrently on that one connection.",
-    )
-}
-
-/// Which of the two empty-slot causes applies for this route.
+/// Which of the two empty-slot causes applies for this route: the transaction
+/// is still open and another operation holds its connection, or it has gone.
 fn tx_slot_unavailable(route: &crate::binding::DbRoute) -> DbError {
     if crate::tx_lanes::with(|l| l.tx_claimed_by(route)) {
-        tx_connection_busy()
+        crate::transaction::scope::connection_busy()
     } else {
         tx_scope_expired()
     }

@@ -59,6 +59,20 @@ pub struct TxLane {
     /// directly.
     pending_emits: Vec<ChangeEvent>,
 
+    /// The frames an issued operation holds right now, each as its session
+    /// generation and frame id. See
+    /// [`crate::transaction::scope::OperationClaim`].
+    claimed_frames: HashSet<(u64, u64)>,
+
+    /// Parked on a frame's claims draining: a settlement waiting for the work
+    /// its callback started to finish before it ends the frame.
+    frame_waiters: Vec<std::task::Waker>,
+
+    /// The frames whose callback has settled, each as its session generation
+    /// and frame id: from that moment no new operation may claim them. See
+    /// [`crate::transaction::scope::OutstandingWork`].
+    settling_frames: HashSet<(u64, u64)>,
+
     /// Nonzero for exactly as long as this lane's callback is being polled.
     ///
     /// A top-level `transaction()` reached from inside that poll can never be
@@ -301,7 +315,10 @@ impl TxLanes {
         let Some(mut lane) = self.lanes.remove(route) else {
             return;
         };
-        for waker in std::mem::take(&mut lane.claim_waiters) {
+        for waker in std::mem::take(&mut lane.claim_waiters)
+            .into_iter()
+            .chain(std::mem::take(&mut lane.frame_waiters))
+        {
             waker.wake();
         }
     }
@@ -329,6 +346,69 @@ impl TxLanes {
         self.lanes
             .get(route)
             .is_some_and(|lane| lane.callback_polls > 0)
+    }
+
+    /// Record that an issued operation holds this frame. `false` when another
+    /// one already does, or when there is no lane to hold it in.
+    pub(crate) fn claim_frame(&mut self, route: &DbRoute, generation: u64, frame: u64) -> bool {
+        self.lanes
+            .get_mut(route)
+            .is_some_and(|lane| lane.claimed_frames.insert((generation, frame)))
+    }
+
+    /// Release a frame [`Self::claim_frame`] recorded. A no-op when the lane,
+    /// and with it every claim, is already gone.
+    pub(crate) fn release_frame_claim(&mut self, route: &DbRoute, generation: u64, frame: u64) {
+        if let Some(lane) = self.lanes.get_mut(route) {
+            if lane.claimed_frames.remove(&(generation, frame)) {
+                wake_all(&mut lane.frame_waiters);
+            }
+        }
+    }
+
+    /// Close a frame to new claims: its callback has settled.
+    pub(crate) fn mark_frame_settling(&mut self, route: &DbRoute, generation: u64, frame: u64) {
+        if let Some(lane) = self.lanes.get_mut(route) {
+            lane.settling_frames.insert((generation, frame));
+        }
+    }
+
+    /// Reopen a frame [`Self::mark_frame_settling`] closed, once its settle
+    /// has finished. A no-op when the lane is gone.
+    pub(crate) fn clear_frame_settling(&mut self, route: &DbRoute, generation: u64, frame: u64) {
+        if let Some(lane) = self.lanes.get_mut(route) {
+            lane.settling_frames.remove(&(generation, frame));
+        }
+    }
+
+    /// Whether this frame's callback has settled and its settle is running.
+    pub(crate) fn frame_settling(&self, route: &DbRoute, generation: u64, frame: u64) -> bool {
+        self.lanes
+            .get(route)
+            .is_some_and(|lane| lane.settling_frames.contains(&(generation, frame)))
+    }
+
+    /// Whether an issued operation holds this frame right now.
+    pub(crate) fn frame_claimed(&self, route: &DbRoute, generation: u64, frame: u64) -> bool {
+        self.lanes
+            .get(route)
+            .is_some_and(|lane| lane.claimed_frames.contains(&(generation, frame)))
+    }
+
+    /// Park a waker until a frame claim is released, the transaction is forced
+    /// into cleanup, or it is retired. A no-op wake when there is no lane.
+    pub(crate) fn push_frame_waiter(&mut self, route: &DbRoute, waker: &std::task::Waker) {
+        let Some(lane) = self.lanes.get_mut(route) else {
+            waker.wake_by_ref();
+            return;
+        };
+        if !lane
+            .frame_waiters
+            .iter()
+            .any(|parked| parked.will_wake(waker))
+        {
+            lane.frame_waiters.push(waker.clone());
+        }
     }
 
     /// Park a waker on `route`'s lane closing.
@@ -543,10 +623,15 @@ impl TxLanes {
         event: crate::transaction::reducer::TxEvent,
         now: std::time::Instant,
     ) -> Option<Vec<crate::transaction::reducer::Action>> {
-        self.lanes
-            .get_mut(route)
-            .and_then(|lane| lane.reducer.as_mut())
-            .map(|reducer| reducer.apply(event, now))
+        let lane = self.lanes.get_mut(route)?;
+        let reducer = lane.reducer.as_mut()?;
+        let actions = reducer.apply(event, now);
+        // A forced transaction never settles through its frames again, so a
+        // settlement waiting for them to drain must go and join the cleanup.
+        if reducer.cleanup().is_some() {
+            wake_all(&mut lane.frame_waiters);
+        }
+        Some(actions)
     }
 
     /// Borrow `route`'s reducer, for the frame stack and the latched cleanup
@@ -608,6 +693,7 @@ impl TxLanes {
             if let Some(completion) = lane.completion.take() {
                 completion.abandon();
             }
+            wake_all(&mut lane.frame_waiters);
         }
         self.wake_tx_slot_waiters(route);
     }
@@ -707,6 +793,12 @@ impl TxLanes {
         if let Some(lane) = self.lanes.get_mut(route) {
             lane.pending_emits.clear();
         }
+    }
+}
+
+fn wake_all(waiters: &mut Vec<std::task::Waker>) {
+    for waker in std::mem::take(waiters) {
+        waker.wake();
     }
 }
 

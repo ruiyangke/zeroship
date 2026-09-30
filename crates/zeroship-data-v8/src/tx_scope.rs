@@ -139,6 +139,14 @@ pub(crate) fn cdc_relay() -> Option<zeroship_data_orm::cdc::relay::RelayConfig> 
 /// Every creator dispatch reaches the ORM through here, so this is where the
 /// service's meter becomes the route's usage sink. A metered binding whose app
 /// id cannot be attributed is refused with `invalid_meter_app_id`.
+///
+/// It is also where a creator's call ISSUES its operation. A JS call inside a
+/// transaction callback starts its work at once, so the capture claims the
+/// callback's frame here, in the prologue, and a second call made while the
+/// first is outstanding is refused with `transaction_connection_busy` - on
+/// every backend, however quickly the first would have finished. The claim
+/// rides the captured route into the queued operation and is released when
+/// that operation settles.
 pub(crate) fn capture_route(
     scope: &mut v8::PinScope<'_, '_>,
     binding: &zeroship_data_orm::binding::DbBinding,
@@ -146,13 +154,13 @@ pub(crate) fn capture_route(
     let connection = crate::context::with(|context| context.connection_identity())
         .ok_or_else(|| DbError::config("not_configured", "db: no connection is installed"))?;
     let usage = crate::usage::sink_for(binding)?;
-    Ok(crate::tx_route::CapturedRoute::capture(
+    crate::tx_route::CapturedRoute::capture(
         current_tx_scope(scope).as_ref(),
         binding,
         configured_sql_registration(),
         connection,
         usage,
-    ))
+    )
 }
 
 /// Resolve the registered ORM connection and open it lazily.
@@ -208,6 +216,35 @@ mod tests {
         crate::tests::fixtures::harness_binding("app_a")
     }
 
+    /// Open a real dev-tier transaction for `app` and return the scope its
+    /// callback runs in, so a capture inside it has a live frame to claim.
+    ///
+    /// Keep the directory bound for the whole test: the backend holds its file.
+    fn live_transaction(app: &str) -> (tempfile::TempDir, super::TransactionScope) {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        crate::tests::fixtures::reset_context();
+        crate::tests::fixtures::set_database_url(&format!(
+            "sqlite:{}",
+            dir.path().join("control.sqlite").display()
+        ));
+        let binding = crate::tests::fixtures::harness_binding(app);
+        let route = binding.route();
+        run(async {
+            let backend = super::ensure_backend()
+                .await
+                .expect("open the sqlite backend");
+            let admission = crate::transaction::TxAdmission::acquire(route.clone())
+                .await
+                .expect("claim the free lane");
+            crate::transaction::exec_begin_or_savepoint(false, None, &binding, backend)
+                .await
+                .expect("BEGIN");
+            admission.handed_to_reducer();
+        });
+        let scope = super::TransactionScope::current(&route).expect("the transaction is open");
+        (dir, scope)
+    }
+
     #[test]
     fn a_configured_sqlite_registration_is_captured_without_an_open_backend() {
         in_scope!(let scope);
@@ -238,14 +275,8 @@ mod tests {
     #[test]
     fn dispatch_inside_the_callback_routes_to_the_transaction() {
         in_scope!(let scope);
-        let prev = super::enter(
-            scope,
-            &super::TransactionScope::observed(
-                crate::tests::fixtures::harness_route("app_a"),
-                1,
-                1,
-            ),
-        );
+        let (_dir, callback) = live_transaction("app_a");
+        let prev = super::enter(scope, &callback);
         assert!(
             super::capture_route(scope, &app_a_binding())
                 .unwrap()
@@ -258,19 +289,14 @@ mod tests {
                 .in_tx(),
             "leaving the scope must stop routing to the tx"
         );
+        crate::tests::fixtures::reset_context();
     }
 
     #[test]
     fn a_co_resident_apps_transaction_scope_does_not_capture_this_app() {
         in_scope!(let scope);
-        let prev = super::enter(
-            scope,
-            &super::TransactionScope::observed(
-                crate::tests::fixtures::harness_route("app_other"),
-                2,
-                1,
-            ),
-        );
+        let (_dir, callback) = live_transaction("app_other");
+        let prev = super::enter(scope, &callback);
         assert!(
             !super::capture_route(scope, &app_a_binding())
                 .unwrap()
@@ -280,14 +306,17 @@ mod tests {
         let other = crate::tests::fixtures::harness_binding("app_other");
         assert!(super::capture_route(scope, &other).unwrap().in_tx());
         super::leave(scope, prev);
+        crate::tests::fixtures::reset_context();
     }
 
     /// The one-variable control that separates the two discriminators.
     ///
-    /// Inside the scope, `capture` answers "transaction" while the per-isolate
-    /// slot this app-id would be looked up in is EMPTY, so `has_tx_for` answers
-    /// "no transaction". A `capture` implemented on the pre-fix ambient test
-    /// cannot produce this pair.
+    /// Inside the scope, `capture` routes to that scope's transaction while
+    /// the per-isolate slot this app-id would be looked up in is EMPTY, so
+    /// `has_tx_for` answers "no transaction". No transaction is open under
+    /// the observed identity, so the capture is refused as expired - an answer
+    /// only a route bound to the scope can give; a `capture` implemented on the
+    /// ambient test would have routed to the pool and succeeded.
     #[test]
     fn capture_is_not_the_ambient_has_tx_for_answer() {
         in_scope!(let scope);
@@ -300,14 +329,17 @@ mod tests {
             ),
         );
         let ambient = zeroship_data_orm::transaction::is_active(&crate::tests::fixtures::harness_route("app_a"));
-        let captured = super::capture_route(scope, &app_a_binding())
-            .unwrap()
-            .in_tx();
+        let captured = super::capture_route(scope, &app_a_binding());
         super::leave(scope, prev);
         assert!(!ambient, "precondition: no transaction is parked for app_a");
+        let refusal =
+            captured.expect_err("capture must read the async scope, not the parked-tx slot");
+        assert_eq!(refusal.code(), "transaction_scope_expired");
         assert!(
-            captured,
-            "capture must read the async scope, not the parked-tx slot"
+            !super::capture_route(scope, &app_a_binding())
+                .unwrap()
+                .in_tx(),
+            "control: outside the scope the same capture routes to the pool"
         );
     }
 

@@ -19,6 +19,12 @@ test("the database contract holds through local and deployed app requests", asyn
     expect(races).toHaveLength(16);
     expect(races.some((result) => result.overlap), "the requests must actually overlap").toBe(true);
     for (const result of races) expect.soft(result.count, `${target.name}: committed rows must match reported successes`).toBe(result.successes);
+    // Two writes issued on parallel branches of one callback: the second is
+    // refused where it is issued, whichever backend answers and however fast,
+    // and the rollback removes the first.
+    expect.soft(object(captured.txBranch).json, `${target.name}: overlapping transaction writes`).toMatchObject({
+      error: { code: "TRANSACTION_CONNECTION_BUSY" }, hint: expect.stringContaining("Await"), countAfter: 0,
+    });
     if (target.name === "postgres") {
       assertDeployed(captured, run);
       const result = (name: string) => object(captured[name]).json;

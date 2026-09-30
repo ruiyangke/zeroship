@@ -213,8 +213,11 @@ impl Database {
         check_scope(self.scope.as_ref())
     }
 
+    /// Capture this handle's route for one operation. On a transaction handle
+    /// the operation claims the callback's frame when the route is bound,
+    /// which is the operation future's first poll.
     fn capture_route(&self) -> CapturedRoute {
-        CapturedRoute::capture(
+        CapturedRoute::capture_deferred(
             self.transaction_scope.as_ref(),
             &self.binding,
             self.backend.sql_registration().clone(),
@@ -280,6 +283,17 @@ impl Collection {
     }
 
     /// Prepare immediately, before returning the future to an executor.
+    ///
+    /// On a transaction handle the operation is issued by the returned
+    /// future's first poll, which claims the callback's frame: until the future
+    /// completes or is dropped, every other operation first polled on that
+    /// frame fails with `transaction_connection_busy`. A future prepared and
+    /// not yet polled has issued nothing, so preparing several and awaiting
+    /// them one after another overlaps nothing. Polling them together is
+    /// refused: `futures::join!` polls its futures in the order written, so
+    /// the first runs and the others are refused, while `futures::select!`
+    /// polls its branches in random order, so which one runs changes from run
+    /// to run. `futures::select_biased!` polls in the order written.
     pub fn execute(
         &self,
         operation: Operation,
