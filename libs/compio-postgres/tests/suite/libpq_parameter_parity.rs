@@ -37,8 +37,9 @@ enum Verdict {
     ///
     /// The evidence that it is implemented is that the failure is about
     /// RESOLVING the value: a key we act on is refused by name for what it
-    /// could not find, whereas an unrecognised key is refused as an unknown
-    /// option. Neither refusal quotes the value.
+    /// could not find, saying it was not found, whereas an unrecognised key
+    /// is refused as an unknown option and an unimplemented one as a feature
+    /// this driver lacks. No refusal quotes the value.
     Resolved,
 }
 
@@ -199,15 +200,16 @@ fn every_libpq_parameter_is_implemented_or_refused_by_name() {
             (Refused, Ok(_)) => wrong.push(format!(
                 "{key}: accepted but unimplemented, so it is silently ignored"
             )),
-            // A refusal that names the key and is not the refusal of an unknown
-            // option is what separates "we tried to resolve it" from "we do
-            // not know this key". The value is no evidence either way: no
-            // refusal quotes connection-string text.
+            // A refusal that names the key and says what it named was not
+            // found is what separates "we tried to resolve it" from "we do not
+            // know this key" and from "we know it and do not implement it",
+            // both of which also name it. The value is no evidence either
+            // way: no refusal quotes connection-string text.
             (Resolved, Err(error))
-                if a_cause_names(&error, key) && !a_cause_names(&error, "unknown option") => {}
+                if a_cause_names(&error, key) && a_cause_names(&error, "not found") => {}
             (Resolved, Err(error)) => wrong.push(format!(
                 "{key}: expected a failure to RESOLVE {value}, but the refusal \
-                 does not name the key, or refuses it as unknown ({error})"
+                 does not name the key, or does not say it was not found ({error})"
             )),
             (Resolved, Ok(_)) => wrong.push(format!(
                 "{key}: resolved {value} against external state this test did \

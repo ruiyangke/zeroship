@@ -1485,6 +1485,34 @@ impl Config {
         self
     }
 
+    /// Add a host a connection string gives, as [`Config::host`] does, and
+    /// refuse it when it is a TCP host holding an `@` after its first byte.
+    ///
+    /// No TCP host name holds an `@`, and a URL yields one whenever its user
+    /// name or password holds an unencoded `@`: the credentials end at the
+    /// first `@`, so `postgres://app:p@ss@db/x` has the password `p` and the
+    /// host `ss@db`, which is the rest of the password. Taken as a host, that
+    /// text would be looked up, and printed wherever the host is, `Config`'s
+    /// Debug included. The refusal says why without quoting it.
+    ///
+    /// The kind of host is the one [`Config::host`] decides, so a leading `@`,
+    /// which on Linux selects the abstract Unix-socket namespace, and a
+    /// socket directory's path are both left alone.
+    fn host_from_connection_string(&mut self, host: &str) -> Result<(), Error> {
+        self.host(host);
+        match self.host.last() {
+            Some(Host::Tcp(tcp)) if tcp.bytes().skip(1).any(|byte| byte == b'@') => {
+                Err(Error::config_parse(
+                    "invalid host: a TCP host cannot hold `@`; in a URL, an `@` in the user \
+                     name or password must be written `%40`, because the first `@` ends them \
+                     and the rest is read as the host"
+                        .into(),
+                ))
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// Gets the hosts that have been added to the configuration with `host`.
     pub fn get_hosts(&self) -> &[Host] {
         &self.host
@@ -1778,17 +1806,27 @@ impl Config {
     /// (`Config::connect_timeout`) - that path is still reachable and its
     /// tests do discriminate.
     fn param(&mut self, key: &str, value: &str) -> Result<(), Error> {
+        // Refused by this driver's own copy of the name, never by `key` (see
+        // `UnknownOption`).
+        let Some(name) = OptionName::parse(key) else {
+            if let Some(&name) = UNSUPPORTED_OPTION_NAMES.iter().find(|name| **name == key) {
+                return Err(Error::config_parse(Box::new(UnsupportedOption(name))));
+            }
+            return Err(Error::config_parse(Box::new(UnknownOption::new(key))));
+        };
+
         // libpq's treatment of `key=` is per-OPTION, not uniform. `port=` uses
         // the compiled default, while the six socket integer options reject an
         // empty value. Enums reject it too; strings generally keep it.
-        if value.is_empty() && key == "port" {
+        if value.is_empty() && name == OptionName::Port {
             // Empty selects the compiled default. Clearing is observable when
             // it overrides an earlier occurrence in the same string.
             self.port.clear();
             return Ok(());
         }
 
-        match key {
+        // No catch-all arm: every `OptionName` is answered here.
+        match name {
             // An EMPTY credential means UNSET, not "a user whose name is the
             // empty string". libpq resolves `?user=` by falling back to the
             // operating-system user: psql on `postgres://:pw@127.0.0.1/postgres`
@@ -1798,16 +1836,16 @@ impl Config {
             // name the server is certain to reject, and an empty password
             // would produce "password authentication failed" where libpq says
             // "no password supplied".
-            "user" => {
+            OptionName::User => {
                 self.user(value);
             }
-            "password" => {
+            OptionName::Password => {
                 self.password(value);
             }
-            "dbname" => {
+            OptionName::Dbname => {
                 self.dbname(value);
             }
-            "options" => {
+            OptionName::Options => {
                 // VERBATIM, backslashes included. libpq documents that a space
                 // inside an option value must be escaped with a backslash, which
                 // reads like something the client unescapes before sending. It
@@ -1822,10 +1860,10 @@ impl Config {
                 // escaped option.
                 self.options(value);
             }
-            "fallback_application_name" => {
+            OptionName::FallbackApplicationName => {
                 self.fallback_application_name(value);
             }
-            "client_encoding" => {
+            OptionName::ClientEncoding => {
                 // The startup packet always announces UTF8 because Rust strings
                 // are UTF-8. Naming UTF8 is therefore a no-op, and naming any
                 // other encoding is a request this driver cannot honour --
@@ -1837,10 +1875,10 @@ impl Config {
                     ))));
                 }
             }
-            "application_name" => {
+            OptionName::ApplicationName => {
                 self.application_name(value);
             }
-            "statement_cache_capacity" => {
+            OptionName::StatementCacheCapacity => {
                 let capacity = value.parse().map_err(|_| {
                     Error::config_parse(Box::new(InvalidValue("statement_cache_capacity")))
                 })?;
@@ -1851,7 +1889,7 @@ impl Config {
             // mean "unlimited": every message carries a header, so a limit of
             // zero would reject the connection's own first frame, and a caller
             // writing it plainly means something else.
-            "max_message_size" => {
+            OptionName::MaxMessageSize => {
                 let max: usize = value
                     .parse()
                     .map_err(|_| Error::config_parse(Box::new(InvalidValue("max_message_size"))))?;
@@ -1872,7 +1910,7 @@ impl Config {
             // an unrecognised value is refused the way libpq refuses it
             // (`invalid gssencmode value: "bogus"`) rather than being waved
             // through as another way of saying off.
-            "gssencmode" => match value {
+            OptionName::Gssencmode => match value {
                 "disable" | "prefer" => {}
                 "require" => {
                     return Err(Error::config_parse(Box::new(UnsupportedOption(
@@ -1884,7 +1922,7 @@ impl Config {
             // Delegation only means anything once GSSAPI is in use. Asking for
             // none is satisfied; asking for it is refused rather than accepted
             // and quietly not done.
-            "gssdelegation" => match value {
+            OptionName::Gssdelegation => match value {
                 "0" => {}
                 "1" => {
                     return Err(Error::config_parse(Box::new(UnsupportedOption(
@@ -1900,7 +1938,7 @@ impl Config {
             // here including nonsense, because the setting is vestigial for it
             // too; this refuses `1` rather than take a request to compress and
             // quietly not compress.
-            "sslcompression" => match value {
+            OptionName::Sslcompression => match value {
                 "0" => {}
                 "1" => {
                     return Err(Error::config_parse(Box::new(UnsupportedOption(
@@ -1919,7 +1957,7 @@ impl Config {
             // `sslmode=require`, and that IS supported - under that name,
             // which is what the error says rather than leaving the caller to
             // guess.
-            "requiressl" => match value {
+            OptionName::Requiressl => match value {
                 "0" => {
                     self.ssl_mode(SslMode::Prefer);
                 }
@@ -1930,7 +1968,7 @@ impl Config {
                 }
                 _ => return Err(Error::config_parse(Box::new(InvalidValue("requiressl")))),
             },
-            "sslmode" => {
+            OptionName::Sslmode => {
                 let mode = match value {
                     "disable" => SslMode::Disable,
                     "allow" => SslMode::Allow,
@@ -1942,7 +1980,7 @@ impl Config {
                 };
                 self.ssl_mode(mode);
             }
-            "sslnegotiation" => {
+            OptionName::Sslnegotiation => {
                 let mode = match value {
                     "postgres" => SslNegotiation::Postgres,
                     "direct" => SslNegotiation::Direct,
@@ -1954,7 +1992,7 @@ impl Config {
                 };
                 self.ssl_negotiation(mode);
             }
-            "sslrootcert" => {
+            OptionName::Sslrootcert => {
                 // libpq 16+ spells the OS trust store `system`; anything else
                 // is a path. A path literally named "system" is therefore
                 // unreachable, which is the same corner libpq has.
@@ -1965,13 +2003,13 @@ impl Config {
                 };
                 self.ssl_root_cert(root);
             }
-            "sslcert" => {
+            OptionName::Sslcert => {
                 if value.is_empty() {
                     return Err(Error::config_parse(Box::new(InvalidValue("sslcert"))));
                 }
                 self.ssl_cert(value);
             }
-            "sslkey" => {
+            OptionName::Sslkey => {
                 if value.is_empty() {
                     return Err(Error::config_parse(Box::new(InvalidValue("sslkey"))));
                 }
@@ -1980,13 +2018,13 @@ impl Config {
                 }
                 self.ssl_key(value);
             }
-            "passfile" => {
+            OptionName::Passfile => {
                 if value.is_empty() {
                     return Err(Error::config_parse(Box::new(InvalidValue("passfile"))));
                 }
                 self.passfile(value);
             }
-            "service" => {
+            OptionName::Service => {
                 if value.is_empty() {
                     return Err(Error::config_parse(Box::new(InvalidValue("service"))));
                 }
@@ -1998,19 +2036,19 @@ impl Config {
             // and it has to arrive in the CONNECTION STRING: a service is
             // expanded while the string is parsed, which is the only point at
             // which the set of explicitly given keys is still known.
-            "servicefile" => {
+            OptionName::Servicefile => {
                 if value.is_empty() {
                     return Err(Error::config_parse(Box::new(InvalidValue("servicefile"))));
                 }
                 self.service_file(value);
             }
-            "sslkeylogfile" => {
+            OptionName::Sslkeylogfile => {
                 if value.is_empty() {
                     return Err(Error::config_parse(Box::new(InvalidValue("sslkeylogfile"))));
                 }
                 self.ssl_key_log_file(value);
             }
-            "sslcertmode" => {
+            OptionName::Sslcertmode => {
                 let mode = match value {
                     "disable" => SslCertMode::Disable,
                     "allow" => SslCertMode::Allow,
@@ -2021,26 +2059,26 @@ impl Config {
                 };
                 self.ssl_cert_mode(mode);
             }
-            "sslpassword" => {
+            OptionName::Sslpassword => {
                 self.ssl_password(value);
             }
-            "sslcrl" => {
+            OptionName::Sslcrl => {
                 self.ssl_crl(value);
             }
-            "sslcrldir" => {
+            OptionName::Sslcrldir => {
                 self.ssl_crl_dir(value);
             }
-            "min_protocol_version" => {
+            OptionName::MinProtocolVersion => {
                 self.min_protocol_version(parse_protocol_version("min_protocol_version", value)?);
             }
-            "max_protocol_version" => {
+            OptionName::MaxProtocolVersion => {
                 self.max_protocol_version(parse_protocol_version("max_protocol_version", value)?);
             }
-            "ssl_min_protocol_version" => {
+            OptionName::SslMinProtocolVersion => {
                 let version = parse_ssl_protocol_version("ssl_min_protocol_version", value)?;
                 self.ssl_min_protocol_version(version);
             }
-            "ssl_max_protocol_version" => {
+            OptionName::SslMaxProtocolVersion => {
                 // An empty maximum is libpq's spelling for leaving the TLS
                 // backend's own upper bound in force.
                 self.ssl_max_protocol_version = if value.is_empty() {
@@ -2052,7 +2090,7 @@ impl Config {
                     )?)
                 };
             }
-            "sslsni" => {
+            OptionName::Sslsni => {
                 let enabled = match value {
                     "0" => false,
                     "1" => true,
@@ -2060,7 +2098,7 @@ impl Config {
                 };
                 self.ssl_sni(enabled);
             }
-            "requirepeer" => {
+            OptionName::Requirepeer => {
                 self.require_peer(value);
             }
             // The list-valued keys CLEAR before they append, so a repeated key
@@ -2076,15 +2114,15 @@ impl Config {
             // several hosts, in both drivers. The builder methods still append;
             // this is a property of PARSING a connection string, where a later
             // key is an override.
-            "host" => {
+            OptionName::Host => {
                 self.host.clear();
                 if !value.is_empty() {
                     for host in value.split(',') {
-                        self.host(host);
+                        self.host_from_connection_string(host)?;
                     }
                 }
             }
-            "hostaddr" => {
+            OptionName::Hostaddr => {
                 self.hostaddr.clear();
                 if !value.is_empty() {
                     for hostaddr in value.split(',') {
@@ -2099,7 +2137,7 @@ impl Config {
                     }
                 }
             }
-            "port" => {
+            OptionName::Port => {
                 self.port.clear();
                 for port in value.split(',') {
                     // Port 0 is refused, as libpq refuses it: it means "any port"
@@ -2119,7 +2157,7 @@ impl Config {
                     self.port(port);
                 }
             }
-            "connect_timeout" => {
+            OptionName::ConnectTimeout => {
                 let timeout = parse_libpq_integer(value, "connect_timeout")?;
                 if timeout > 0 {
                     // TAKEN LITERALLY, INCLUDING 1. PostgreSQL 16 and older
@@ -2132,7 +2170,7 @@ impl Config {
                     self.connect_timeout(Duration::ZERO);
                 }
             }
-            "tcp_user_timeout" => {
+            OptionName::TcpUserTimeout => {
                 let timeout = parse_libpq_integer(value, "tcp_user_timeout")?;
                 if timeout > 0 {
                     // MILLISECONDS, and it is the only member of this family
@@ -2168,7 +2206,7 @@ impl Config {
                 }
             }
             #[cfg(not(target_arch = "wasm32"))]
-            "keepalives" => {
+            OptionName::Keepalives => {
                 // Signed, as libpq is: it reads this with `strtol` and tests the
                 // result against zero, so `keepalives=-1` is non-zero and means
                 // ON. Parsing it as unsigned refuses a value the reference
@@ -2207,21 +2245,21 @@ impl Config {
             // - that would turn a typo into a silently successful connection
             // running on system defaults, which is worse than either.
             #[cfg(not(target_arch = "wasm32"))]
-            "keepalives_idle" => {
+            OptionName::KeepalivesIdle => {
                 let keepalives_idle = keepalive_seconds(value, "keepalives_idle")?;
                 self.keepalives_idle(Duration::from_secs(keepalives_idle));
             }
             #[cfg(not(target_arch = "wasm32"))]
-            "keepalives_interval" => {
+            OptionName::KeepalivesInterval => {
                 let keepalives_interval = keepalive_seconds(value, "keepalives_interval")?;
                 self.keepalives_interval(Duration::from_secs(keepalives_interval));
             }
             #[cfg(not(target_arch = "wasm32"))]
-            "keepalives_count" => {
+            OptionName::KeepalivesCount => {
                 let keepalives_count = parse_nonnegative_libpq_integer(value, "keepalives_count")?;
                 self.keepalives_count(keepalives_count);
             }
-            "target_session_attrs" => {
+            OptionName::TargetSessionAttrs => {
                 let target_session_attrs = match value {
                     "any" => TargetSessionAttrs::Any,
                     "read-write" => TargetSessionAttrs::ReadWrite,
@@ -2237,7 +2275,7 @@ impl Config {
                 };
                 self.target_session_attrs(target_session_attrs);
             }
-            "channel_binding" => {
+            OptionName::ChannelBinding => {
                 let channel_binding = match value {
                     "disable" => ChannelBinding::Disable,
                     "prefer" => ChannelBinding::Prefer,
@@ -2250,12 +2288,12 @@ impl Config {
                 };
                 self.channel_binding(channel_binding);
             }
-            "require_auth" => {
+            OptionName::RequireAuth => {
                 let require_auth = RequireAuth::parse(value)
                     .map_err(|error| Error::config_parse(Box::new(error)))?;
                 self.require_auth(require_auth);
             }
-            "load_balance_hosts" => {
+            OptionName::LoadBalanceHosts => {
                 let load_balance_hosts = match value {
                     "disable" => LoadBalanceHosts::Disable,
                     "random" => LoadBalanceHosts::Random,
@@ -2267,7 +2305,7 @@ impl Config {
                 };
                 self.load_balance_hosts(load_balance_hosts);
             }
-            "replication" => {
+            OptionName::Replication => {
                 // libpq accepts `database`, `true`, `on`, `1`, `yes`,
                 // or `false`/`off`/`0`/`no`. We accept the three the
                 // streaming-replication protocol RFC actually uses
@@ -2290,14 +2328,6 @@ impl Config {
                     return Err(Error::config_parse(Box::new(InvalidValue("replication"))));
                 };
                 self.replication = mode;
-            }
-            // Refused by this driver's own copy of the name, never by `key`
-            // (see `UnknownOption`).
-            key => {
-                if let Some(&name) = UNSUPPORTED_OPTION_NAMES.iter().find(|name| **name == key) {
-                    return Err(Error::config_parse(Box::new(UnsupportedOption(name))));
-                }
-                return Err(Error::config_parse(Box::new(UnknownOption::new(key))));
             }
         }
 
@@ -2500,72 +2530,106 @@ impl fmt::Debug for Config {
     }
 }
 
-/// Every option this driver acts on, by the name a connection string gives it,
-/// except the keepalive options ([`KEEPALIVE_OPTION_NAMES`]).
-///
-/// With [`UNSUPPORTED_OPTION_NAMES`] these are the only option names a refusal
-/// prints: never the key a connection string held (see [`UnknownOption`]).
-/// `known_option_names_are_the_ones_param_answers_to` holds these lists to
-/// [`Config::param`].
-const OPTION_NAMES: &[&str] = &[
-    "user",
-    "password",
-    "dbname",
-    "options",
-    "fallback_application_name",
-    "client_encoding",
-    "application_name",
-    "statement_cache_capacity",
-    "max_message_size",
-    "gssencmode",
-    "gssdelegation",
-    "sslcompression",
-    "requiressl",
-    "sslmode",
-    "sslnegotiation",
-    "sslrootcert",
-    "sslcert",
-    "sslkey",
-    "passfile",
-    "service",
-    "servicefile",
-    "sslkeylogfile",
-    "sslcertmode",
-    "sslpassword",
-    "sslcrl",
-    "sslcrldir",
-    "min_protocol_version",
-    "max_protocol_version",
-    "ssl_min_protocol_version",
-    "ssl_max_protocol_version",
-    "sslsni",
-    "requirepeer",
-    "host",
-    "hostaddr",
-    "port",
-    "connect_timeout",
-    "tcp_user_timeout",
-    "target_session_attrs",
-    "channel_binding",
-    "require_auth",
-    "load_balance_hosts",
-    "replication",
-];
+/// Declares [`OptionName`] from one list, so no variant can exist without its
+/// spelling and its place in [`OptionName::ALL`].
+macro_rules! option_names {
+    ($($(#[$attribute:meta])* $variant:ident => $name:literal,)*) => {
+        /// Every option this driver acts on, by the name a connection string
+        /// gives it.
+        ///
+        /// [`Config::param`] matches on this, not on the key's text, and its
+        /// match has no catch-all arm. So an option added here without an arm
+        /// does not compile, an arm cannot exist without an option here, and
+        /// the names an unknown key's refusal suggests (see [`UnknownOption`])
+        /// are exactly the names the parser takes.
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        enum OptionName {
+            $($(#[$attribute])* $variant,)*
+        }
 
-/// The TCP keepalive options, which [`Config::param`] answers to only where
-/// the socket layer has them.
-#[cfg(not(target_arch = "wasm32"))]
-const KEEPALIVE_OPTION_NAMES: &[&str] = &[
-    "keepalives",
-    "keepalives_idle",
-    "keepalives_interval",
-    "keepalives_count",
-];
-#[cfg(target_arch = "wasm32")]
-const KEEPALIVE_OPTION_NAMES: &[&str] = &[];
+        impl OptionName {
+            /// Every option, in the order a tie between two suggestions is
+            /// settled.
+            const ALL: &[Self] = &[$($(#[$attribute])* Self::$variant,)*];
+
+            /// The name a connection string gives this option.
+            const fn as_str(self) -> &'static str {
+                match self {
+                    $($(#[$attribute])* Self::$variant => $name,)*
+                }
+            }
+        }
+    };
+}
+
+option_names! {
+    User => "user",
+    Password => "password",
+    Dbname => "dbname",
+    Options => "options",
+    FallbackApplicationName => "fallback_application_name",
+    ClientEncoding => "client_encoding",
+    ApplicationName => "application_name",
+    StatementCacheCapacity => "statement_cache_capacity",
+    MaxMessageSize => "max_message_size",
+    Gssencmode => "gssencmode",
+    Gssdelegation => "gssdelegation",
+    Sslcompression => "sslcompression",
+    Requiressl => "requiressl",
+    Sslmode => "sslmode",
+    Sslnegotiation => "sslnegotiation",
+    Sslrootcert => "sslrootcert",
+    Sslcert => "sslcert",
+    Sslkey => "sslkey",
+    Passfile => "passfile",
+    Service => "service",
+    Servicefile => "servicefile",
+    Sslkeylogfile => "sslkeylogfile",
+    Sslcertmode => "sslcertmode",
+    Sslpassword => "sslpassword",
+    Sslcrl => "sslcrl",
+    Sslcrldir => "sslcrldir",
+    MinProtocolVersion => "min_protocol_version",
+    MaxProtocolVersion => "max_protocol_version",
+    SslMinProtocolVersion => "ssl_min_protocol_version",
+    SslMaxProtocolVersion => "ssl_max_protocol_version",
+    Sslsni => "sslsni",
+    Requirepeer => "requirepeer",
+    Host => "host",
+    Hostaddr => "hostaddr",
+    Port => "port",
+    ConnectTimeout => "connect_timeout",
+    TcpUserTimeout => "tcp_user_timeout",
+    TargetSessionAttrs => "target_session_attrs",
+    ChannelBinding => "channel_binding",
+    RequireAuth => "require_auth",
+    LoadBalanceHosts => "load_balance_hosts",
+    Replication => "replication",
+    // Only where the socket layer has TCP keepalives.
+    #[cfg(not(target_arch = "wasm32"))]
+    Keepalives => "keepalives",
+    #[cfg(not(target_arch = "wasm32"))]
+    KeepalivesIdle => "keepalives_idle",
+    #[cfg(not(target_arch = "wasm32"))]
+    KeepalivesInterval => "keepalives_interval",
+    #[cfg(not(target_arch = "wasm32"))]
+    KeepalivesCount => "keepalives_count",
+}
+
+impl OptionName {
+    /// The option `key` names, if this driver acts on one by that name.
+    fn parse(key: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|name| name.as_str() == key)
+    }
+}
 
 /// libpq options this driver knows and refuses by name, because each asks for
 /// a feature it does not implement.
+///
+/// With [`OptionName`] these are the only option names a refusal prints:
+/// never the key a connection string held (see [`UnknownOption`]).
+/// `unsupported_option_names_are_refused_by_name` holds this list to
+/// [`Config::param`].
 const UNSUPPORTED_OPTION_NAMES: &[&str] = &[
     "gsslib",
     "krbsrvname",
@@ -2580,11 +2644,10 @@ const UNSUPPORTED_OPTION_NAMES: &[&str] = &[
 /// Every option name this driver knows, in the order a tie between two
 /// suggestions is settled.
 fn known_option_names() -> impl Iterator<Item = &'static str> {
-    OPTION_NAMES
+    OptionName::ALL
         .iter()
-        .chain(KEEPALIVE_OPTION_NAMES)
-        .chain(UNSUPPORTED_OPTION_NAMES)
-        .copied()
+        .map(|name| name.as_str())
+        .chain(UNSUPPORTED_OPTION_NAMES.iter().copied())
 }
 
 /// This driver's own copy of `key`, when `key` names an option it knows.
@@ -3568,8 +3631,7 @@ impl<'a> UrlParser<'a> {
                 format!("invalid UTF-8 in {} (percent-decoded)", Component::Host).into(),
             )
         })?;
-        self.config.host(decoded);
-        Ok(())
+        self.config.host_from_connection_string(decoded)
     }
 
     /// Trim raw ASCII spaces at a component's boundaries and refuse one in its
@@ -4925,6 +4987,30 @@ mod tests {
         }
     }
 
+    /// THE CONTROL for refusing an `@` in a TCP host: an abstract socket's
+    /// name, which follows the leading `@`, may hold one.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_abstract_socket_name_may_hold_an_at_sign() {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        for dsn in [
+            "host=@zero@ship",
+            "postgresql:///db?host=%40zero%40ship",
+            "postgresql://%40zero%40ship/db",
+        ] {
+            let config = dsn
+                .parse::<Config>()
+                .unwrap_or_else(|error| panic!("{dsn} did not parse: {error}"));
+            match config.get_hosts() {
+                [Host::Unix(path)] => {
+                    assert_eq!(path.as_os_str().as_bytes(), b"\0zero@ship", "{dsn}");
+                }
+                hosts => panic!("{dsn} was not an abstract Unix socket host: {hosts:?}"),
+            }
+        }
+    }
+
     #[test]
     fn test_invalid_hostaddr_parsing() {
         let s = "user=pass_user dbname=postgres host=host1 hostaddr=127.0.0 port=26257";
@@ -5807,6 +5893,40 @@ mod dsn_parse_tests {
         assert_eq!(config.get_ssl_password(), Some(&b"hunter2 secret=x"[..]));
     }
 
+    const AT_IN_HOST: &str = "invalid host: a TCP host cannot hold `@`; in a URL, an `@` in the \
+                              user name or password must be written `%40`, because the first \
+                              `@` ends them and the rest is read as the host";
+
+    /// A URL whose password holds an unencoded `@` yields a TCP host made of
+    /// the rest of the password, and that host is refused without being
+    /// quoted: in either format, and wherever a host is given.
+    #[test]
+    fn a_tcp_host_holding_an_at_sign_is_refused() {
+        assert_refusals(&[
+            ("postgres://app:hunter@secret@db/x", AT_IN_HOST),
+            ("postgres://app:hunter@secret@db:5432/x", AT_IN_HOST),
+            ("postgres://app:hunter@secret@db", AT_IN_HOST),
+            ("postgres://h/x?host=secret%40db", AT_IN_HOST),
+            ("host=secret@db", AT_IN_HOST),
+            ("host=h,secret@db", AT_IN_HOST),
+        ]);
+
+        // THE CONTROLS. The same password, encoded, parses and is carried with
+        // the host that was meant; and an `@` in a host that is not TCP, here
+        // a socket directory's path, is not refused (the abstract namespace is
+        // `an_abstract_socket_name_may_hold_an_at_sign`).
+        let config = "postgres://app:hunter%40secret@db/x"
+            .parse::<Config>()
+            .unwrap();
+        assert_eq!(config.get_password(), Some(&b"hunter@secret"[..]));
+        assert_eq!(config.get_hosts(), [Host::Tcp("db".to_owned())]);
+        #[cfg(unix)]
+        {
+            let config = "host=/run/pg@main".parse::<Config>().unwrap();
+            assert_eq!(config.get_hosts(), [Host::Unix("/run/pg@main".into())]);
+        }
+    }
+
     /// An unknown key is answered with the known option nearest it, so a typo
     /// still gets its help: a swapped pair of letters, a `-` for a `_`, the
     /// wrong case. The suggestion prints only the known name, so it names no
@@ -5844,29 +5964,29 @@ mod dsn_parse_tests {
         ]);
     }
 
-    /// The lists a refusal names options from are the options
-    /// [`Config::param`] answers to: each implemented name is taken, each
-    /// unsupported one is refused by name, and none is refused as unknown.
+    /// Each option is found by its own name, so no two share a spelling and
+    /// no arm of [`Config::param`] is shadowed by another.
     #[test]
-    fn known_option_names_are_the_ones_param_answers_to() {
+    fn every_option_name_parses_to_itself() {
+        assert!(!OptionName::ALL.is_empty());
+        for name in OptionName::ALL {
+            assert_eq!(OptionName::parse(name.as_str()), Some(*name), "{name:?}");
+        }
+        // THE CONTROL: a name on no list parses to nothing.
+        assert_eq!(OptionName::parse("no_such_option"), None);
+    }
+
+    /// Each libpq option this driver does not implement is refused by name,
+    /// not taken and not refused as unknown.
+    #[test]
+    fn unsupported_option_names_are_refused_by_name() {
         let refused_as = |name: &str| {
             Config::new().param(name, "").err().map(|error| {
                 let cause = std::error::Error::source(&error).expect("a cause");
                 (cause.is::<UnknownOption>(), cause.is::<UnsupportedOption>())
             })
         };
-        let implemented: Vec<&str> = OPTION_NAMES
-            .iter()
-            .chain(KEEPALIVE_OPTION_NAMES)
-            .copied()
-            .collect();
-        assert!(!implemented.is_empty() && !UNSUPPORTED_OPTION_NAMES.is_empty());
-        for name in implemented {
-            assert!(
-                !matches!(refused_as(name), Some((true, _) | (_, true))),
-                "{name} is listed as implemented, but param does not implement it"
-            );
-        }
+        assert!(!UNSUPPORTED_OPTION_NAMES.is_empty());
         for name in UNSUPPORTED_OPTION_NAMES {
             assert_eq!(
                 refused_as(name),
