@@ -13,22 +13,12 @@ import { readFileSync } from "node:fs";
 // which is what "the mechanism by which this service installs its own schema"
 // means in this tree. The journal joins them.
 //
-// The other installer this workspace owns cannot target this schema either. The
-// migration service's schema-bundle path (`apply_schema_bundle` in
-// crates/zeroship-migrate-server/src/bundle.rs) calls `provision_database`
-// unconditionally, and that runs `ALTER SCHEMA <target> OWNER TO migrator_<hash>`
-// followed by a per-schema runtime login holding DML on ALL TABLES IN SCHEMA.
-// Pointed at `workflow_manager` it would take the schema away from
-// `zeroship_workflow_migrator` and mint a login with full reach over the
-// manager's queue.
-//
 // WHY RAW SQL. Every object here sits behind the platform-reserved
 // `__zeroship_` prefix, and `validate_collection`
 // (crates/zeroship-migrate-core/src/schema/query.rs) refuses that prefix for
 // every recorded operation, at validate, before lower. The op DSL cannot
-// declare these tables at all. That is the same reason the schema-bundle path
-// carries SQL rather than operations, and the generated artifact is carried
-// verbatim rather than re-authored.
+// declare these tables at all, so the generated artifact is carried verbatim
+// rather than re-authored.
 //
 // ONE ROLE IS GRANTED, AND IT IS NOT NAMED HERE. The grantee is derived below
 // from the grants the coordination tables in this schema already carry, and no
