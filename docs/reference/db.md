@@ -1233,11 +1233,6 @@ const { data, error } = await db.transaction(async (tx) => {
   `Promise.all([tx.a.insert(...), tx.b.insert(...)])` runs them concurrently
   on that one connection and the losing branch is refused with
   `TRANSACTION_CONNECTION_BUSY`.
-  On `pnpm dev` the same code has a second cause, because SQLite has one
-  transaction connection per process: starting a `db.transaction()` while
-  *any* transaction is open — including one belonging to another app in the
-  same dev process — is refused with it too. The error message distinguishes
-  the two; the deployed tier only ever raises the overlapping-operations one.
 - Everything a callback starts must also **finish** inside it. A promise the
   callback never awaits keeps running after the transaction settles, and the
   database calls it then makes belong to a transaction that no longer exists;
@@ -1248,11 +1243,13 @@ const { data, error } = await db.transaction(async (tx) => {
   call is its own unit of work even while another request holds a transaction
   open for the same app, and a call made inside a callback still belongs to
   that transaction no matter where the callback's own async work resumes.
-- On `pnpm dev`, SQLite allows only one transaction per process, shared across
-  every app, so a second `db.transaction()` is refused immediately with
-  `TRANSACTION_CONNECTION_BUSY` rather than waiting. The deployed tier allows
-  concurrent transactions per app. Do not rely on `pnpm dev` to tell you whether
-  concurrent transactional work is correct.
+- A second `db.transaction()` started while one is already open for the same
+  app, and not from inside its callback, waits for the open one to commit or
+  roll back and then runs; it is not refused. `pnpm dev` handles every request
+  on one runtime thread, so there an app's transactions always run one at a
+  time. The deployed tier runs transactions handled on different runtime
+  threads at once. Do not rely on `pnpm dev` to tell you whether concurrent
+  transactional work is correct.
 - PostgreSQL `isolationLevel` accepts `"read uncommitted"`, `"read committed"`,
   `"repeatable read"` or `"serializable"`. Omitting it uses the database default.
   SQLite accepts `"serializable"` or the default and rejects other levels with
