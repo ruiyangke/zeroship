@@ -35,7 +35,7 @@ as the new one.
 **The delivery group is there for one reason.**
 `crates/zeroship-workflow/src/service/publication.rs` opens by saying so:
 
-> Creator-owned, immutable queue publication intents. Journal transitions write intents before
+> Journal-owned, immutable queue publication intents. Journal transitions write intents before
 > COMMIT. Network publication happens after it; only a matching manager receipt confirms an
 > intent. Neither history collection nor an unknown remote outcome retires this deduplication
 > state.

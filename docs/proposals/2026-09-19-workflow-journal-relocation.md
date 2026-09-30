@@ -1,25 +1,27 @@
 # Moving the workflow journal out of creator databases
 
-**Status.** PROPOSED, with Plan steps 1 and 2 in place and step 3 landed for every run call but
-`restart`. `db/migrations-ts/20260919000000_workflow_journal.ts` installs the journal into
+**Status.** Plan steps 1 to 6 are done and step 7 is open.
+`db/migrations-ts/20260919000000_workflow_journal.ts` installs the journal into
 `workflow_manager` and grants it to the role already serving that schema, and
 `journal_is_installed_and_served_by_one_role` in
 `crates/zeroship-workflow-server/tests/platform_schema.rs` holds that posture. The service links
-the engine and answers `status`, `signal`, `transition` and `restart` over its own journal,
-establishing its own ingress epoch. `restart` needs one row the others do not, a held deployment
-intent under `HoldScope::for_app`, and refuses `Unavailable` without it. Nothing in production
-writes this journal yet - there is no `start` endpoint, and the sweeps that would write the rows
-have the capability but no claimant - so step 5 is what gives the endpoints rows to operate on.
+the engine and answers every creator-facing run call over its own journal, establishing its own
+ingress epoch: `configure` in `crates/zeroship-workflow-server/src/api/runs.rs` serves `start`,
+`status`, `signal`, `transition`, `restart`, `step_output` and `output`. `restart` needs one row
+the others do not, a held deployment intent under `HoldScope::for_app`, and refuses `Unavailable`
+without it. Production writes this journal: the worker's `RemoteBackend`
+(`crates/zeroship-workflow-runner/src/remote.rs`) starts runs through that `start` endpoint, and
+the maintenance lane below claims the sweeps, `activate` and `management` among them.
 
-Step 5 has started. The claim predicate that lets two claimants share one queue is in
+The claim predicate that lets two claimants share one queue is in
 `crates/zeroship-workflow-manager/src/scheduling.rs`, deriving its admitted kinds from the same
 declaration that writes `jobs.operation_kind`; the service's maintenance lane and the one
 function that states how it claims are in `crates/zeroship-workflow-server/src/sweeps.rs` and
-`crates/zeroship-workflow-manager/src/maintenance.rs`. The lane is exercised end to end against
-the real journal and the real queue and has NO production caller, which is deliberate and has a
-do-not note of its own. The lane claims every sweep, `cron` and `collect` included, because the
-host that owns the journal owns the store their bytes live in, so what remains of the first bullet
-is starting it. The journal-hold authority is in - `svc/workflow` holds the journal pair,
+`crates/zeroship-workflow-manager/src/maintenance.rs`. `sweep_lane` in
+`crates/zeroship-workflow-server/src/server.rs` composes that lane whenever
+`workflow.maintenance_sweeps` is on, which is its default. The lane claims every sweep, `cron`
+and `collect` included, because the host that owns the journal owns the store their bytes live
+in. The journal-hold authority is in - `svc/workflow` holds the journal pair,
 `ServiceHolds` signs as the role with no instance, and Control classifies the caller before
 decoding a body. So is the deployment registration: `CONTROL_DEPLOY_REGISTRATION`
 (`POST /v1/deploy-registration`) is granted to `svc/workflow` alone, Control derives the summary
@@ -312,24 +314,31 @@ under-read both the cutover and what it has already moved.
 
 ## SQLite dev tier
 
-The embedded store stays. `crates/zeroship-workflow/src/service/mod.rs` says the engine is embedded "in the workflow
-service **and local development**", and `WorkflowBackendFactory` already carries a `Service` variant beside `Remote` and `Ready`, so
-both paths exist by construction rather than by a flag.
+The embedded store stays, and it opens where production's does.
+`crates/zeroship-workflow/src/service/mod.rs` says the engine is embedded "in the workflow service
+**and local development**". `cmd_serve` in `crates/zeroship-cli/src/main.rs` hands
+`LocalHost::start` (`crates/zeroship-cli/src/workflow.rs`) a `HostStorage` over the dev database's
+connection, so `zeroship serve` opens its journal on `journal_binding()` exactly as
+`RunService::connect` (`crates/zeroship-workflow-server/src/runs.rs`) does in production. On
+SQLite that binding's schema is the `ATTACH` alias, so the journal is kept in a file of its own
+beside the session file, apart from every creator database's file;
+`host_storage_opens_the_journal_on_the_production_binding`
+(`crates/zeroship-workflow/src/service/tests/host_storage.rs`) holds both halves. The dev host
+holds the journal because locally it is the service, which is why it binds
+`WorkflowBinding::service` while the worker binds `WorkflowBinding::remote`.
 
 Two consequences to record in `docs/reference/sqlite-divergences.md` rather than leave silent:
-the dev tier keeps the journal in the local file and therefore exercises the SQL store that
-production no longer uses, so a dev-tier pass is not evidence about the production write path;
-and the dev tier binds no schema at all, so it exercises none of the substitution the PostgreSQL
-path depends on. `SCHEMA_PLACEHOLDER` belongs to the PostgreSQL artifact, not to this tier:
+the dev tier runs the journal's SQL on SQLite while production runs it on PostgreSQL, so a
+dev-tier pass is not evidence about the production write path; and the dev tier substitutes no
+schema into its DDL, so it exercises none of the substitution the PostgreSQL path depends on.
+`SCHEMA_PLACEHOLDER` belongs to the PostgreSQL artifact, not to this tier:
 `the_sqlite_artifact_needs_no_binding` (`crates/zeroship-workflow-schema/src/lib.rs`) asserts the
 SQLite SQL must not carry it, while `the_template_still_carries_the_placeholder` in the same module
 requires the PostgreSQL template to.
 
-Write those rows when the severance lands, not before. That page states what is true of the two
-tiers now, one row at a time with the consequence for a caller, and the first of these is not true
-until production stops reaching the creator-schema store. Its neighbour is the existing
-"Platform tables in your database" row, which already explains why `__zeroship_` tables sit in the
-creator's own file on this tier.
+Neither row is on that page yet. Its "Platform tables in your database" row describes the
+migration journal's `__zeroship_schema_*` tables, which do sit in a creator's own file; the
+workflow journal's tables do not, so the new rows state that rather than lean on it.
 
 ---
 
@@ -838,8 +847,9 @@ protocol. This extends a working client rather than inventing one.
    through a third arm. Its own doc records why it cannot live in the client - the engine declares
    `zeroship-workflow-client` in `[dependencies]`, so a client naming `WorkflowBackend` is a Cargo
    CYCLE before it is a crate-ownership violation.
-   What `RemoteBackend` itself still lacks is a production caller, and that is the worker's journal
-   removal below rather than anything missing here.
+   Its production caller is `WorkflowCreatorFactory::open`
+   (`crates/zeroship-worker/src/workflow_creator.rs`), which the worker's journal removal below put
+   in place.
 
    **One is a service capability, and it is in place.** `restart` has its endpoint and handler and
    serves once a held deployment intent exists under `HoldScope::for_app`; what it still lacks is a
@@ -1125,33 +1135,27 @@ protocol. This extends a working client rather than inventing one.
      already binds, then `start`, then the two reads as two-phase.
    - **Then the merged heartbeat**, which cannot land until its timeout budget is settled.
    - **Then the worker stops holding a journal**, which is the flag and is bigger than a schema
-     switch. There is no two-armed choice left to flip, because the one that existed collapsed:
-     `ProductionResources::resolve` (`crates/zeroship-worker/src/workflow_host.rs`) builds its
-     `HostStorage` over `self.db.connection()`, the CREATOR database, composing the schema with
-     `app_schema`, while `RunService::connect` opens `workflow_manager` through
-     `ConnectionFactory::for_platform_url`. A schema switch differs by schema, not by database. So the
-     flag is either repointing the worker's journal connection at the platform database, or the
-     worker opening no journal at all and reaching the service over HTTP. The first of those is
-     what the do-not note below forbids - a DSN to the journal database held by the one process
-     that executes creator code, whose only tenant separation is an `app_id` column - so the flag
-     has one arm rather than two, and the worker opening no journal is it.
+     switch. The flag has one arm rather than two. Repointing a worker's journal connection at the
+     platform database is what the do-not note below forbids - a DSN to the journal database held
+     by the one process that executes creator code, whose only tenant separation is an `app_id`
+     column - so the worker opens no journal at all and reaches the service over HTTP.
+     `ProductionResources::resolve` (`crates/zeroship-worker/src/workflow_host.rs`) builds no
+     store, and `RunService::connect` (`crates/zeroship-workflow-server/src/runs.rs`) opens the
+     journal on the platform database through `HostStorage`.
 
-     **That arm is built and nothing constructs it, so the severance is a wiring change with a
-     known single site.** `RemoteBackend` (`crates/zeroship-workflow-runner/src/remote.rs`)
-     implements `WorkflowBackend`, and `WorkflowBinding::remote`
-     (`crates/zeroship-workflow-v8/src/lib.rs`) binds a host that holds no journal to the service
-     over HTTP. Neither has a caller anywhere, production or test. Meanwhile
-     `WorkflowBinding::service` has exactly three production callers, and only one of them is the
-     worker: `crates/zeroship-worker/src/workflow_runtime.rs` is the site that becomes `::remote`,
-     while `crates/zeroship-cli/src/workflow.rs` and the push inside
-     `crates/zeroship-workflow-v8/src/loader.rs` stay, because `AppRuntimeLoader` is constructed
-     only by `crates/zeroship-cli/src/workflow/host.rs` - the dev tier, which keeps its journal
-     local by design. `WorkflowBinding::ready`, whose one production caller is
-     `crates/zeroship-worker/src/cache.rs`, is a different arm and is not part of this.
-     So the severance is that one switch plus removing the worker's own journal store, the
-     `HostStorage` that `ProductionResources::resolve` builds. Verify the claim rather than
-     trusting it: list the callers of each `WorkflowBinding` constructor and check that `::remote`
-     has acquired one.
+     **That arm is a wiring change with a single site.** `RemoteBackend`
+     (`crates/zeroship-workflow-runner/src/remote.rs`) implements `WorkflowBackend`, and
+     `WorkflowBinding::remote` (`crates/zeroship-workflow-v8/src/lib.rs`) binds a host that holds
+     no journal to the service over HTTP. `WorkflowCreatorFactory::open`
+     (`crates/zeroship-worker/src/workflow_creator.rs`) constructs the `RemoteBackend`, and
+     `crates/zeroship-worker/src/workflow_runtime.rs` is the one site that binds it through
+     `WorkflowBinding::remote`. `WorkflowBinding::service` keeps its other two production callers,
+     `crates/zeroship-cli/src/workflow.rs` and the push inside
+     `crates/zeroship-workflow-v8/src/loader.rs`, because `AppRuntimeLoader` is constructed only by
+     `crates/zeroship-cli/src/workflow/host.rs` - the dev tier, which holds its journal because
+     locally it is the service. `WorkflowBinding::ready`, whose one production caller is
+     `crates/zeroship-worker/src/cache.rs`, is a different arm and is not part of this. Verify the
+     claim rather than trusting it: list the callers of each `WorkflowBinding` constructor.
 
      **And it moves where creator latency comes from, which is worth saying because a later
      bisect will not find it in the diff.** `CreatorRuntime.backend` cannot stay an `AppBackend`,
@@ -2184,58 +2188,50 @@ part that dates, not the verdict.
    answer expires, and the design should say so rather than let a later reader assume a
    migration exists.
 
-6. **ANSWERED as a description - the worker loses a fold it holds only because the journal is
-   under it, and one credential does not move with it.**
+6. **ANSWERED - the worker holds no fold, and one credential does not move with the journal.**
 
-   **What it holds today is a store, not a run.** `build` in
-   `crates/zeroship-worker/src/workflow_creator.rs` opens the journal itself through
-   `HostStorage::open` (`crates/zeroship-workflow/src/service/store.rs`) and constructs a
-   `WorkflowService` over it. That yields `WorkflowService::begin` in
-   `crates/zeroship-workflow/src/service/app.rs` and `Transaction::database` in `store.rs`, so
-   the ORM handle for every row in the schema is held by the process that executes creator code.
-   `AppWorkflows::into_backend` (`crates/zeroship-workflow/src/service/backend.rs`) states the
-   ownership plainly: "Which store the backend reaches is a choice its construction site makes,
-   not one the handle carries." The construction site is the worker.
+   **The worker holds no store.** `WorkflowCreatorFactory::open` in
+   `crates/zeroship-worker/src/workflow_creator.rs` opens a placement with no journal handle - its
+   `Journal` type is `()` - and builds a `RemoteBackend`, so every creator call is an
+   authenticated request answered from the service's journal. The ORM handle for every row of the
+   journal is held by the service, which opens it through `HostStorage::open`
+   (`crates/zeroship-workflow/src/service/store.rs`) in `RunService::connect`
+   (`crates/zeroship-workflow-server/src/runs.rs`), and not by the process that executes creator
+   code.
 
-   **What it does with that reach is not its own run.** Before `DeliverySlot::run`
-   (`crates/zeroship-workflow-runner/src/delivery.rs`) reaches `accept_job` it dispatches
-   `activate_job`, `reconcile_job`, `cron_job`, `management_job`, `release_hold_job`,
-   `collect_job`, `close_job`, `fanout_job` and `propagation_job`, and none of those starts an
-   executor. They are the fold's own sweeps over the app's journal, run in the worker because
-   that is where the journal is.
+   **The fold's sweeps run beside the journal.** `AppWorkflows::maintenance_job`
+   (`crates/zeroship-workflow/src/service/maintenance.rs`) dispatches `activate_job`,
+   `reconcile_job`, `cron_job`, `management_job`, `release_hold_job`, `collect_job`, `close_job`,
+   `fanout_job` and `propagation_job`, and none of those starts an executor. The service's
+   `MaintenanceLane` (`crates/zeroship-workflow-server/src/sweeps.rs`) claims them in production,
+   and the `sweep` loop in `crates/zeroship-cli/src/workflow/host.rs` claims them on the dev host.
 
-   **It is also the manager's only source.** `crates/zeroship-workflow/src/service/publication.rs`
-   opens with "Creator-owned, immutable queue publication intents": a transition writes the
-   intent before COMMIT, and "Network publication happens after it". `publish_pending`
-   (`crates/zeroship-workflow-runner/src/publication.rs`) pages `AppWorkflows::pending_jobs` and
-   submits each through a `JobPublisher`, and `prepare` in
-   `crates/zeroship-workflow-runner/src/assignments.rs` marks an app the first time it binds,
-   because "A previous process may have committed intents it never published." No lease asks for
-   that sweep. It is recovery the worker owes because nothing else reads the journal.
+   **The side that commits an intent is the side that publishes it.**
+   `crates/zeroship-workflow/src/service/publication.rs` opens with "Journal-owned, immutable queue
+   publication intents": a transition writes the intent before COMMIT, and "Network publication
+   happens after it". The service publishes through `LanePublisher`
+   (`crates/zeroship-workflow-server/src/sweeps.rs`), and the worker's `HostTransport`
+   (`crates/zeroship-workflow-runner/src/publication.rs`) publishes nothing: "A host that holds no
+   journal has no outbox of its own".
 
-   **Nothing in the database scopes any of it.** The journal declares no role, no row-level
-   security and no grant (`crates/zeroship-workflow-schema/schema/schema.ts`). What binds the
-   handle is the schema the host composes and a check in Rust. `app_schema`
-   (`crates/zeroship-worker/src/workflow_host.rs`) composes it through
-   `app_derivation::schema_name`, which returns the app id, so a schema holds a single app. A
-   service-owned journal is instead one journal for every app, in a schema the service owns.
-   `Transaction::check_app`
-   (`crates/zeroship-workflow/src/service/store.rs`) refuses a foreign app, and engages only
-   where a policy binding is set, while `OrmStore::begin` in the same file sets none and the
-   worker holds the store. Under a service-owned journal the Rust check is the whole fence, which is Why
-   it is this way seen from the worker's side.
+   **What scopes it is the service boundary.** The journal declares no role, no row-level security
+   and no grant of its own (`crates/zeroship-workflow-schema/schema/schema.ts`). The platform
+   migration grants its tables to the one role already serving `workflow_manager`, and no process
+   that runs creator code holds that login. Inside the service, `Transaction::check_app`
+   (`crates/zeroship-workflow/src/service/store.rs`) refuses a foreign app wherever a policy
+   binding is set, while `OrmStore::begin` in the same file sets none. The Rust check behind the
+   service boundary is the whole fence, which is Why it is this way seen from the worker's side.
 
-   **What it would hold afterwards is its task and the reply.** `accept_job` answers a
+   **What the worker holds is its task and the reply.** `accept_job` answers a
    `JobAcceptance`, `heartbeat_job` a `TaskRenewal` - "Everything one renewal changes about a
    live delivered task, with the run control intent read in the same transaction" - and
-   `complete_job` a `JobReceipt` (`crates/zeroship-workflow/src/service/delivery.rs`). The worker
-   derives each of those for itself: the replayed receipt, the frontier decision, the reclaimed
-   lease, the control intent. Afterwards each is told to it, and a worker that disagrees has no
-   second source.
+   `complete_job` a `JobReceipt` (`crates/zeroship-workflow/src/service/delivery.rs`). Each of
+   those - the replayed receipt, the frontier decision, the reclaimed lease, the control intent -
+   is told to the worker, and a worker that disagrees has no second source.
 
-   **What it costs.** Not the sweeps. They run no creator code, so they move with the fold, and
-   the recovery duty above dissolves rather than transferring: the side that commits the intent
-   is the side that publishes it. The cost is the object-store credential, and collection is the
+   **What it costs.** Not the sweeps: they run no creator code, so they run with the fold, and
+   there is no publication recovery to hand anywhere, because the side that commits the intent is
+   the side that publishes it. The cost is the object-store credential, and collection is the
    weakest case to decide it on.
 
    **Collection is not the forcing operation.** `AppWorkflows::collect_job`

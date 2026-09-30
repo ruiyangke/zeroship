@@ -125,7 +125,7 @@ failure, otherwise `data` is the result — and any other value is used directly
 
 ### The factory's collection
 
-A **collection** is a table in your app's schema. Its name is the table name
+A **collection** is a table in one of your app's databases. Its name is the table name
 you declared in `migrations/`; the naming rules and limits are under
 [Collection names](db.md#collection-names) in [db.md](db.md). The React layer
 treats the name as an opaque string: for a database query it reads the target
