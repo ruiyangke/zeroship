@@ -60,28 +60,29 @@ fn accepts_only_the_named_narrow_worker_posture() {
     validate(&narrow_posture()).expect("narrow worker posture should be accepted");
 }
 
-/// A database provisioned before `runtime_dependents_sql` carried
-/// `WITH INHERIT FALSE` leaves the worker inheriting every app role it has
-/// ever been granted. Boot must refuse rather than serve requests from a
-/// login whose ambient authority is the union of every tenant.
+/// A binding role granted to the worker without `WITH INHERIT FALSE`, by any
+/// grantor, makes that binding's database privileges ambient on the shared
+/// login. Boot must refuse rather than serve requests from a login whose
+/// ambient authority reaches a tenant.
 #[test]
-fn refuses_a_login_that_ambiently_inherits_an_app_role() {
-    // An arbitrary count, deliberately NOT the dev database's measured one:
-    // this case pins that whatever number the query returns reaches the
-    // operator's error, not that any particular database has that many.
+fn refuses_a_login_that_ambiently_inherits_a_binding_role() {
+    // An arbitrary count: this case pins that whatever number the query
+    // returns reaches the operator's error, not that any particular database
+    // has that many.
     const OFFENDING: i64 = 7;
     let mut posture = narrow_posture();
     posture.inheriting_memberships = OFFENDING;
     posture.inheriting_membership_example =
-        Some("app_0191e7a2-b3c4-4d5e-8f90-123456789abc_role".to_string());
+        Some("zs_bind_bnd_03coc2qj4x2ae61h80zwlnnq6".to_string());
 
-    let error = validate(&posture).expect_err("an inheriting app-role grant must be refused");
+    let error = validate(&posture).expect_err("an inheriting binding grant must be refused");
     assert!(
         error.contains("WITH INHERIT FALSE"),
         "the error must name the fix: {error}"
     );
     assert!(
-        error.contains(&OFFENDING.to_string()) && error.contains("app_0191e7a2"),
+        error.contains(&OFFENDING.to_string())
+            && error.contains("zs_bind_bnd_03coc2qj4x2ae61h80zwlnnq6"),
         "the error must carry the count and an offending role: {error}"
     );
 }

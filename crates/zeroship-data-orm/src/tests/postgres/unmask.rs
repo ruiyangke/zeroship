@@ -287,18 +287,20 @@ fn unmask_encrypted_column_on_pg_reads_bytea_raw_sibling() {
 /// WHY THE SIBLING ABOVE DOES NOT COVER THIS.
 /// `unmask_fetch_runs_under_per_app_role_via_rls` blocks the login role with
 /// FORCE RLS on the DATA table only, and its login role holds an INHERITING
-/// membership plus direct `USAGE`/`SELECT` grants. The audit table carries no
-/// RLS, so `write_audit_unmask_row`'s INSERT succeeded there through ambient
-/// inheritance whether or not it was fenced - it passed identically before and
-/// after this fix, which is the one shape a regression guard must not have.
+/// membership plus a direct `USAGE` grant on the schema. The audit table
+/// carries no RLS, so `write_audit_unmask_row`'s INSERT succeeded there
+/// through ambient inheritance whether or not it was fenced - it passed
+/// identically before and after this fix, which is the one shape a regression
+/// guard must not have.
 ///
 /// THE FIXTURE IS PRODUCTION'S POSTURE, not an RLS stand-in for it. The login
-/// role is granted the app role `WITH INHERIT FALSE` - what
-/// `zeroship-migrate-server`'s `runtime_dependents_sql` now emits - and NOTHING
-/// directly. Under that grant a statement that omits `SET LOCAL ROLE` has no
-/// privilege at all, so this case binds the whole dispatch rather than one
-/// table: fetch, decrypt-or-plaintext, and audit all have to narrow or the
-/// call fails.
+/// role is granted the binding role `WITH INHERIT FALSE` - the worker edge
+/// `grant_binding_statements` in
+/// `crates/zeroship-migrate-server/src/datastore/cluster.rs` grants the shared
+/// worker login - and NOTHING directly. Under that grant a statement that omits
+/// `SET LOCAL ROLE` has no privilege at all, so this case binds the whole
+/// dispatch rather than one table: fetch, decrypt-or-plaintext, and audit all
+/// have to narrow or the call fails.
 ///
 #[test]
 fn unmask_audit_insert_runs_under_the_per_app_role_not_the_login_role() {

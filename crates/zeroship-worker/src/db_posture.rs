@@ -22,9 +22,12 @@ const WORKER_DATABASE_ROLE: &str = "zeroship_worker";
 /// a plain `REVOKE` - even as superuser - removes only the issuing grantor's
 /// row. A check shaped "the membership is non-inheriting" passes while an
 /// inheriting sibling row granted by someone else holds the fence open, so this
-/// COUNTS every offending row.
+/// COUNTS every offending row. The test
+/// `a_second_grantors_inheriting_grant_re_opens_the_fence_and_a_plain_revoke_leaves_it_open`
+/// exhibits both halves on a live server by reading a tenant row through the
+/// re-opened fence.
 ///
-/// DENY-BY-DEFAULT, not a `LIKE 'app\_%\_role'` allowlist. A name pattern that
+/// DENY-BY-DEFAULT, not a `LIKE 'zs\_bind\_%'` allowlist. A name pattern that
 /// stops matching after a rename reports green over an empty set, which is the
 /// one failure mode a boot gate must not have. There is no exemption: the
 /// worker holds no ambient membership of any kind, and a future role that
@@ -101,15 +104,16 @@ fn validate(posture: &DatabasePosture) -> Result<(), String> {
     // narrowing.
     //
     // `zeroship_worker` is a single login role shared by every app, and the
-    // migration service grants it each app's runtime role. If those memberships
-    // inherit, the worker's ambient authority is the UNION of every tenant it
-    // has ever served - on the dev database on 2026-08-28, ALL of the worker's
-    // `app_%_role` memberships inherited (the proportion is the point; the
-    // count drifts with every test run) - and a query path that omits
-    // `SET LOCAL ROLE` does not fail, it succeeds with cross-tenant reach.
-    // `runtime_dependents_sql` now grants `WITH INHERIT FALSE`; this refuses to
-    // boot against a database still carrying the old posture, so a stale
-    // deployment is detected instead of silently trusted.
+    // migration service's cluster reconciler grants it every live binding role
+    // (`grant_binding_statements` in
+    // `crates/zeroship-migrate-server/src/datastore/cluster.rs`). If one of
+    // those memberships inherits, the worker's ambient authority includes that
+    // binding's database privileges, and a query path that omits
+    // `SET LOCAL ROLE` does not fail, it succeeds with cross-tenant reach. The
+    // reconciler grants `WITH INHERIT FALSE` and re-grants on every pass, which
+    // converges its own membership rows; it cannot converge a row another
+    // grantor issued, so this refuses to boot against any inheriting row
+    // rather than trusting the reconciler to have been the only grantor.
     if posture.inheriting_memberships > 0 {
         let example = posture
             .inheriting_membership_example
@@ -117,9 +121,10 @@ fn validate(posture: &DatabasePosture) -> Result<(), String> {
             .unwrap_or("<unknown>");
         return Err(format!(
             "worker database role ambiently inherits {} role membership(s) (e.g. {example}); \
-             every app-role grant must carry WITH INHERIT FALSE so SET LOCAL ROLE is a fence \
-             and not an optional narrowing. Re-run a migration apply for the affected apps to \
-             converge the grant, or GRANT <role> TO {WORKER_DATABASE_ROLE} WITH INHERIT FALSE",
+             every membership must carry WITH INHERIT FALSE so SET LOCAL ROLE is a fence and \
+             not an optional narrowing. The grantor that issued an inheriting membership fences \
+             it with GRANT <role> TO {WORKER_DATABASE_ROLE} WITH INHERIT FALSE or withdraws it; \
+             a REVOKE issued by anyone else leaves that grantor's membership in place",
             posture.inheriting_memberships
         ));
     }
