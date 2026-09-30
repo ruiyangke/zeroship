@@ -174,7 +174,7 @@ fn lookup_encryption_meta(
 }
 
 // ---------------------------------------------------------------------------
-// Authorization (per-app policy lookup)
+// Authorization (the app's declared mask policy)
 // ---------------------------------------------------------------------------
 
 /// Actor `kind`s reserved for genuine platform/system callers (migration,
@@ -259,7 +259,7 @@ pub fn check_unmask_authorization(
 /// `crate::tx_scope::ensure_backend` and every entry point in this module
 /// receives what it resolved: a routed one takes it off its `TxRoute`, an
 /// unrouted one is handed the value the V8 dispatcher already opened. What
-/// is left here is the half that is genuinely about unmask - the per-app
+/// is left here is the half that is genuinely about unmask - the per-binding
 /// preparation - and it stays because these paths bypass `exec`.
 async fn prepare_unmask_backend(
     backend: &BackendHandle,
@@ -571,7 +571,7 @@ async fn write_audit_unmask_row(
 // "which columns came back populated".
 //
 // Audit rows reuse the existing `__zeroship_audit_unmask` table to
-// avoid a CHECK-constraint migration on the per-app schema. Each call
+// avoid a CHECK-constraint migration on the database schema. Each call
 // writes ONE audit row regardless of how many (row, column) pairs are
 // requested; the `column` field carries the comma-joined column list
 // and the `row_pk` field carries the comma-joined row PK list (or, for
@@ -615,7 +615,7 @@ pub struct BulkUnmaskResult {
 /// Public dispatch entry for `zeroship.db.bulkUnmaskFields`.
 ///
 /// Atomic authorization (Q-MASK-F): BEFORE any decrypt happens, every
-/// (row_pk, column) pair is authorised against the per-app policy. If
+/// (`row_pk`, column) pair is authorised against the app's declared policy. If
 /// ANY pair is denied, the call refuses entirely with a single
 /// `bulk_unmask_partial_unauthorized` audit row; the authorised pairs
 /// are NOT returned. This prevents inferring authorisation results
@@ -1494,7 +1494,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------
-    // Per-app policy lookup
+    // Mask policy lookup
     // ---------------------------------------------------------------
 
     /// Helper: install a [`crate::protection::mask_policy::MaskPolicy`] for `app_id` on the current

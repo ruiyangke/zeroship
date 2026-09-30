@@ -47,7 +47,7 @@ async fn unmask_route(host: &Host, app: &str) -> zeroship_data_orm::tx_route::Tx
 }
 
 #[test]
-fn unmask_fetch_runs_under_per_app_role_via_rls() {
+fn unmask_fetch_runs_under_the_binding_and_unmask_roles_via_rls() {
     Host::test(|host| {
         host.run(async {
             use zeroship_data_orm::protection::unmask::{self, UnmaskFieldArgs};
@@ -139,7 +139,7 @@ fn unmask_fetch_runs_under_per_app_role_via_rls() {
                 },
             )
             .await
-            .expect("unmask must read under the per-app role");
+            .expect("unmask must read under the binding's roles");
             assert_eq!(result.plaintext, "123-45-6789");
 
             drop(login_pool);
@@ -285,7 +285,7 @@ fn unmask_encrypted_column_on_pg_reads_bytea_raw_sibling() {
 /// including the audit INSERT.
 ///
 /// WHY THE SIBLING ABOVE DOES NOT COVER THIS.
-/// `unmask_fetch_runs_under_per_app_role_via_rls` blocks the login role with
+/// `unmask_fetch_runs_under_the_binding_and_unmask_roles_via_rls` blocks the login role with
 /// FORCE RLS on the DATA table only, and its login role holds an INHERITING
 /// membership plus a direct `USAGE` grant on the schema. The audit table
 /// carries no RLS, so `write_audit_unmask_row`'s INSERT succeeded there
@@ -303,7 +303,7 @@ fn unmask_encrypted_column_on_pg_reads_bytea_raw_sibling() {
 /// have to narrow or the call fails.
 ///
 #[test]
-fn unmask_audit_insert_runs_under_the_per_app_role_not_the_login_role() {
+fn unmask_audit_insert_runs_under_the_binding_role_not_the_login_role() {
     Host::test(|host| {
         host.run(async {
             use zeroship_data_orm::protection::unmask::{self, UnmaskFieldArgs};
@@ -377,7 +377,7 @@ fn unmask_audit_insert_runs_under_the_per_app_role_not_the_login_role() {
             let login_url = login_role_test_url(&url, login_role, "test");
             let login_pool = std::rc::Rc::new(Pool::connect(&login_url, 4).await.unwrap());
 
-            // THE CONTROL. Without this the case would pass just as happily if the app
+            // THE CONTROL. Without this the case would pass just as happily if the binding
             // role had never been granted anything: "denied" is the resting state of a
             // role with no privileges. This proves the login role is genuinely fenced
             // out, so the success below can only come from narrowing.
@@ -410,7 +410,7 @@ fn unmask_audit_insert_runs_under_the_per_app_role_not_the_login_role() {
             )
             .await
             .expect(
-                "every statement in dispatch_unmask must narrow to the per-app role - \
+                "every statement in dispatch_unmask must narrow to the binding's roles - \
          a failure here names the one that did not",
             );
             assert_eq!(result.plaintext, "555-44-3333");
