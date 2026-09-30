@@ -37,9 +37,8 @@ only peers an operator named. Two reaches into `zeroship` remain: placement elig
 reads exist so they can disagree, and the worker registry lookup that authenticates every
 call, which is deferred by decision.
 
-The journal is installed into the creator's own schema today and written by the worker over the
-creator's own connection; this moves storage and the durable fold into the workflow service,
-leaving execution where it is.
+The journal is installed into the workflow service's own schema, and storage and the durable
+fold live in that service while execution stays in the worker.
 
 This is a sibling of `docs/proposals/2026-08-28-app-database-decoupling.md` and should land
 BEFORE it. See Sequencing: that design breaks journal appends if the journal is still where it
@@ -49,44 +48,50 @@ is.
 
 ## What is true today
 
-**The engine is embedded in the worker.** `crates/zeroship-workflow/src/service/mod.rs` opens
-with "Workflow engine embedded in customer workers and local development", and
-`crates/zeroship-workflow/src/service/store.rs` with "Customer-bound journal execution through
-the shared Rust ORM". The store holds a `Database`, a `BackendHandle`, a `DbBinding` and a
-`ProjectKeySource`, so journal rows are written through the same ORM, the same binding and the
-same pooled connection as creator data.
+**The journal lives in the workflow service's own schema.**
+`db/migrations-ts/20260919000000_workflow_journal.ts` installs it into `workflow_manager`, and
+`journal_binding` in `crates/zeroship-workflow/src/service/store.rs` names that schema under the
+service's tenant. `HostStorage::open` in the same file is the one door a host opens the journal
+through, and it takes a connection and nothing that could place the journal anywhere else:
+`RunService::connect` in `crates/zeroship-workflow-server/src/runs.rs` opens it in production, and
+`cmd_serve` in `crates/zeroship-cli/src/main.rs` opens it for `zeroship serve`, where on SQLite the
+schema names the file the journal is kept in. The journal declares no encrypted column, so its
+store resolves no project key; `host_storage_opens_the_journal_on_the_production_binding` and
+`the_journal_declares_no_column_a_project_key_would_decrypt` in
+`crates/zeroship-workflow/src/service/tests/host_storage.rs` hold both.
 
 **The split is deliberate and documented, and the header states which side owns what.**
 `crates/zeroship-workflow-server/src/lib.rs`: "Workflow metadata coordination, and the journal the
 creator-facing run calls are answered from. Customer workers own execution; this service owns the
 journal those runs are recorded in."
 
-**The journal lives inside the creator's schema.**
-`crates/zeroship-worker/src/workflow_creator.rs` resolves a binding and takes
-`binding.schema()`; the control-side caller
-(`crates/zeroship-control/src/publication/journal.rs`) derives the same name. The tables are
-`__zeroship_workflow_*` inside that schema, and `crates/zeroship-workflow-schema/schema/schema.ts`
+**The worker holds no journal.** `WorkflowCreatorFactory` in
+`crates/zeroship-worker/src/workflow_creator.rs` opens a placement with no journal handle - its
+`Journal` type is `()` - and gives the app's isolates a `RemoteBackend`, so every creator call is an
+authenticated request answered from the service's journal.
+
+**One journal serves every app.**
+`crates/zeroship-workflow-schema/src/lib.rs`, under a heading called "The schema is not an app":
+
+> Nothing here takes an app id, and no name should suggest one. One schema holds every app's
+> journal - the `app_id` COLUMNS inside the journal are the tenant discriminator, and
+> [`STAMP_ROW_ID`] is one row per journal, not one per app.
+
+The tables are `__zeroship_workflow_*`, and `crates/zeroship-workflow-schema/schema/schema.ts`
 declares them through a helper rather than one by one - `app_state`, `payloads`, `broadcasts`,
 `schedules`, `occurrences`, `tasks`, the publication and page tables, the receipt tables - nearly
 all keyed with an `app_id` column. Read that list as a sample and not as the set: count
 `CREATE TABLE` in the generated `crates/zeroship-workflow-schema/schema/postgres.sql`, because
 `schema.ts` builds each table through the same call and no total can be read off it.
 
-**One journal serves many apps already.**
-`crates/zeroship-workflow-schema/src/lib.rs`, under a heading called "The schema is not an app":
+**Provisioning is a platform migration.** There is no per-schema installer and no journal endpoint.
+On PostgreSQL the migration above is the only shipped path that creates journal tables, and
+`journal_is_installed_and_served_by_one_role` in
+`crates/zeroship-workflow-server/tests/platform_schema.rs` holds the posture it leaves. The SQLite
+dev tier installs its local journal through `initialize_local` in
+`crates/zeroship-workflow/src/service/schema.rs`, from the same versioned series.
 
-> Nothing here takes an app id, and no name here should suggest one. A journal belongs to a
-> creator database, and one schema holds the journals of every app in it - the `app_id` COLUMNS
-> inside the journal are the tenant discriminator, and `STAMP_ROW_ID` is one row per journal,
-> not one per app.
-
-**Provisioning is per schema, through the migration service.**
-`crates/zeroship-workflow-server/src/journal.rs` builds a `SchemaBundle` with
-`SCHEMA_PLACEHOLDER` substituted, and `ensure_journal`
-(`crates/zeroship-workflow-server/src/api.rs`) applies it. It has two callers: control when an
-app registers, and a worker whose host refused the journal it found.
-
-**The service already has its own storage and a stated boundary.**
+**The service has its own storage and a stated boundary.**
 `crates/zeroship-workflow-server/src/config.rs` declares `workflow.database_url` with the
 comment "Platform coordination metadata login; no customer database credentials", and
 `db/migrations-ts/20260911000000_workflow_coordination.ts` creates the `workflow_manager`
@@ -95,70 +100,44 @@ schema, a `zeroship_workflow_migrator` role and a `zeroship_workflow` login whos
 
 **The creator-facing seam is small.** `crates/zeroship-workflow/src/backend.rs` defines
 `WorkflowBackend` as `start`, `status`, `signal`, `transition`, `restart`, `read_step_output`
-and `read_output`. `crates/zeroship-workflow-v8/src/lib.rs` already composes it through a
+and `read_output`. `crates/zeroship-workflow-v8/src/lib.rs` composes it through a
 `WorkflowBackendFactory` with `Service`, `Remote` and `Ready` variants, constructed through
 `WorkflowBinding`.
 
 **Durability does not rest on transactions.** `crates/zeroship-workflow/src/execution.rs`:
-executors receive replay, and "step idempotency keys must carry it". Nothing requires a step's
-data write and its journal record to commit atomically.
+executors receive replay, and a restart re-executes at the same ordinals under a new generation,
+"so step idempotency keys must carry it". Nothing requires a step's data write and its journal
+record to commit atomically.
 
 ---
 
-## Four defects, three of which exist at 1:1
+## Four defects of a journal in a creator schema
 
-**1. A creator can drop the platform's journal.** The migration service does
-`ALTER SCHEMA ... OWNER TO` the migrator role, and a schema owner's privileges are implicit and
-cannot be revoked. So the schema the platform is actively driving runs against is owned by the
-tenant. `docs/proposals/2026-08-28-migration-record-consolidation.md` accepts exactly this for
+These are why the journal is not kept beside creator data. Each is a property of that placement,
+so the journal being in `workflow_manager` is what answers each of them, rather than a guard.
+
+**1. A creator could drop the platform's journal.** A creator schema is owned by its database's
+migrator role (`converge_database` in `crates/zeroship-migrate-server/src/datastore/cluster.rs`),
+the role a creator's migrations apply as, and a schema owner's privileges are implicit and cannot
+be revoked. `docs/proposals/2026-08-28-migration-record-consolidation.md` accepts exactly this for
 the *migration* journal, on the ground that "it is their database and their app, and corrupting it
-breaks only them" - which is true there and false here, because the platform is mid-execution
+breaks only them" - which is true there and false here, because the platform drives execution
 against this one.
 
-**2. Dropping a database destroys the journal.** Harmless while one app owns one database.
-Under sharing it destroys the workflow state of every app bound to that database, not just the
-one doing the dropping.
+**2. Dropping a database would destroy the journal.** Under sharing that destroys the workflow
+state of every app bound to that database, not just the one doing the dropping.
 
-**3. Column-level grants break journal appends.** This one is live and dated.
-`docs/proposals/2026-08-28-app-database-decoupling.md` deletes the blanket
-`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA` and the prospective
-`ALTER DEFAULT PRIVILEGES` from `runtime_role_provisioning_sql`
-(`crates/zeroship-migrate-server/src/apply.rs`), and regenerates explicit per-column grants
-**from the creator's IR**. The journal tables are not in that IR - they arrive in a separate
-bundle - so they receive no grants and the worker loses the ability to write them. The current
-arrangement works only because the blanket grant covers everything in the schema, and that
-grant is what goes.
+**3. Column-level grants would leave the journal unwritable.** What a session narrowed to a
+binding may read and write is the column grants `grant_capability_columns`
+(`crates/zeroship-migrate-server/src/capability_grants.rs`) converges on every apply, over the
+creator tables the database holds. The journal's tables are not creator tables, so nothing grants
+them, and there is no schema-wide grant for them to fall under.
 
-The tripwire for this is already in the tree, and nothing names it.
-`runtime_provisioning_does_not_narrow_table_access_by_name`, in that same file, asserts the
-provisioning still contains `ON ALL TABLES IN SCHEMA`. Deleting the blanket grant turns that
-test red, and the tempting repair is to relax its assertion - which lands this defect rather
-than catching it. Whoever deletes the grant has to add the journal's tables to the generated
-set in the same change.
-
-**4. Under N:M the journal's home is not a function.** `crates/zeroship-worker/src/workflow_creator.rs` takes the schema
-off whichever binding `provider.resolve(scope)` returned. With one binding that is
-deterministic. With several it is not, and an app's runs could split across two schemas with
-each half invisible to the other and nothing raising.
-
-The fourth is dormant, and what holds it dormant is narrower than it looks. The journal's
-schema is not resolved from a creator binding at all: `app_schema` in
-`crates/zeroship-worker/src/workflow_host.rs` composes it as
-`app_derivation::schema_name(app)`, which returns the app id, and hands it to the binding
-that `workflow_creator.rs` later reads back. So plurality alone does not reach it - an app
-gaining several databases leaves the journal where it was, because nothing consulted
-`SuppliedAppBindings` to place it.
-
-What makes it live is `app_derivation::schema_name` ceasing to return the app id. That
-function is deliberately narrower than what is built around it, and when it widens, the
-journal's home becomes a choice with no owner: "the app's primary database" holds only
-until a creator changes which database is primary, at which point every existing run sits
-in a schema the app no longer points at - invisible, not deleted, and nothing raising.
-
-Relocating removes the question rather than answering it. A journal in `workflow_manager`
-has no creator schema to derive.
-
-The first three are true now.
+**4. Under N:M the journal's home would not be a function.** An app bound to several databases has
+no one schema to derive. "The app's primary database" holds only until a creator changes which
+database is primary, at which point every existing run sits in a schema the app no longer points
+at - invisible, not deleted, and nothing raising. A journal in `workflow_manager` has no creator
+schema to derive.
 
 ---
 
@@ -201,31 +180,17 @@ safe without building anything. See Why it is this way.
 ### What is deleted
 
 ```
-  ensure_journal + its route            crates/zeroship-workflow-server/src/api.rs
-  Journal / journal_bundle / bundle_for crates/zeroship-workflow-server/src/journal.rs
-  ControlCoordinator::ensure_journal    crates/zeroship-workflow-client/src/control.rs
-  WorkerCoordinator::ensure_journal     crates/zeroship-workflow-client/src/lib.rs
-  EnsureJournal                         crates/zeroship-core/src/schema_bundle.rs
-  WORKFLOW_JOURNAL_ENSURE, both grants  crates/zeroship-core/src/service_identity.rs
-  JournalManager, JournalError          crates/zeroship-control/src/publication/journal.rs
-  their re-export                       crates/zeroship-control/src/publication/mod.rs
-  the journal ensure at app registration control's deploy path
-  the worker's journal repair path      crates/zeroship-worker/src/workflow_creator.rs
   zeroship-data-orm from the engine      crates/zeroship-workflow/Cargo.toml
 ```
 
+That is what remains of the deletion; step 6 records the creator-schema path, which is done: no
+endpoint installs or repairs a journal, no principal holds a grant to one, and no worker holds a
+journal to refuse.
+
 `SCHEMA_PLACEHOLDER` stays. A fixed target schema does not remove the need for it: the generated
 PostgreSQL artifact carries the placeholder quoted, and the platform migration substitutes
-`"workflow_manager"` into it exactly as a creator bundle substitutes a creator schema. The
-quoting matters, because substituting the bare word would also rewrite the stamp table's name.
-
-Everything above the ORM entry is one graph, and none of it is available yet. Step 1 left
-`ensure_journal` and `Journal`/`bundle_for`/`journal_bundle` byte-identical on purpose, and they
-stay until a reader exists in `workflow_manager` to replace what they serve; the client
-coordinators, the endpoint constant and its two grants go when the route goes, because each one
-is a reader or an authorization of that same route. Read this list as the end state, not as work
-unlocked by the installation. Step 6 carries the order, the probe that proves the exposure
-closed, and the shared names that must NOT follow the deletion.
+`"workflow_manager"` into it. The quoting matters, because substituting the bare word would also
+rewrite the stamp table's name.
 
 The ORM entry is a dependency-boundary improvement the AGENTS.md invariant already gestures at:
 `zeroship-workflow-schema` is a leaf so a service can install the journal without depending on
@@ -347,8 +312,8 @@ under-read both the cutover and what it has already moved.
 
 ## SQLite dev tier
 
-The embedded store stays. `crates/zeroship-workflow/src/service/mod.rs` already says the engine is embedded "in customer
-workers **and local development**", and `WorkflowBackendFactory` already carries a `Service` variant beside `Remote` and `Ready`, so
+The embedded store stays. `crates/zeroship-workflow/src/service/mod.rs` says the engine is embedded "in the workflow
+service **and local development**", and `WorkflowBackendFactory` already carries a `Service` variant beside `Remote` and `Ready`, so
 both paths exist by construction rather than by a flag.
 
 Two consequences to record in `docs/reference/sqlite-divergences.md` rather than leave silent:
@@ -1641,75 +1606,28 @@ protocol. This extends a working client rather than inventing one.
    manifest listing, which is strictly less than the policy authority it already trusts Control
    for. Take the other arm only if a reason appears that the service must see the bytes itself.
 
-6. **DONE. The creator-schema path is deleted, and the exposure with it.** The endpoint that
-   reached no placement, app or zone is gone, with both its grants and the bundle it served. What
-   follows records where each piece lived, because the pieces reached
-   wider than the workflow crates and three of the names are shared with code that stays. Only
-   once step 5 is green.
+6. **DONE. The creator-schema path is deleted, and the exposure with it.** No endpoint installs
+   or repairs a journal, no principal holds a grant to one, no client posts one, the control plane
+   holds no journal manager, and the worker holds no journal to refuse. The exhaustive table in
+   `crates/zeroship-core/tests/service_authorization_test.rs` holds the grant half:
+   `endpoint_catalog_records_exact_measured_operations` requires every operation
+   `service_allowlist` grants to be pinned by destination, method and path template, and
+   `measured_allowlist_is_encoded_and_enforced_row_by_row` asserts each principal's row exactly.
 
-   In the workflow crates: `ensure_journal` and its route in
-   `crates/zeroship-workflow-server/src/api.rs`, and the journal bundle together with the
-   private charter token `SCHEMA_PLACEHOLDER` in
-   `crates/zeroship-workflow-server/src/journal.rs`.
+   **Two shared names are not part of it, and a tree-wide search for either argues for deleting
+   far too much.** `SCHEMA_PLACEHOLDER` in `crates/zeroship-workflow-schema/src/lib.rs` is the
+   quoted DDL token the PostgreSQL template ships carrying, and the platform migration binds the
+   target schema into it; the do-not note below names the tests that pin it. `ensure_journal`
+   names `MigrationBackend::ensure_journal` across the `zeroship-migrate-*` crates, which creates
+   the migration stamp table and is unrelated to the workflow journal.
 
-   In the client, both coordinators, since each posts the same endpoint and deleting the route
-   alone leaves a caller of a route that is gone: `ControlCoordinator::ensure_journal` in
-   `crates/zeroship-workflow-client/src/control.rs` and `WorkerCoordinator::ensure_journal` in
-   `crates/zeroship-workflow-client/src/lib.rs`.
-
-   In `zeroship-core`: the `EnsureJournal` command in
-   `crates/zeroship-core/src/schema_bundle.rs`, and `WORKFLOW_JOURNAL_ENSURE` in
-   `crates/zeroship-core/src/service_identity.rs` together with both of its grants, to
-   `svc/control` and to `svc/worker`.
-
-   In the control plane: `JournalManager` in
-   `crates/zeroship-control/src/publication/journal.rs` and its re-export from
-   `crates/zeroship-control/src/publication/mod.rs`.
-
-   In the worker: the repair path in `crates/zeroship-worker/src/workflow_creator.rs` - which the
-   SEVERANCE drops ahead of this step, because a worker that holds no journal cannot refuse one and
-   so has nothing to ask the manager to repair. Expect this entry to be already gone by the time
-   step 6 runs; if it is still there, the severance did not finish.
-
-   In the reference docs: the numbered deploy step in `docs/architecture/control-plane.md` that
-   names the endpoint and its `workflow_journal_unavailable` refusal, which renumbers the
-   sequence around it.
-
-   **Two shared names must not follow the deletion, and a tree-wide search for either of them
-   argues for deleting far too much.** `SCHEMA_PLACEHOLDER` names two different constants: the
-   private charter token above, which goes, and the public quoted DDL token in
-   `crates/zeroship-workflow-schema/src/lib.rs`, which stays because the PostgreSQL template ships
-   carrying it and the platform migration binds the target schema into it, quoted; the do-not note
-   below pins both halves with tests. `ensure_journal` also names
-   `MigrationBackend::ensure_journal` across the `zeroship-migrate-*` crates, which creates the
-   migration stamp table and is unrelated to the workflow journal; it is most of what searching
-   the name returns.
-
-   This step also ends an exposure rather than only removing code. `ensure_journal` is the one
-   worker-authenticated endpoint that reaches no placement, app or zone, so the registry key
-   lookup is its whole gate; a lapsed instance was admitted there indefinitely until that lookup
-   learned the lease. The lease predicate is the fix that matters now, and deleting the endpoint
-   is what removes the shape.
-
-   **A capability that existed only for this reader goes with it, which is the same rule one
-   level up.** The migration service's platform-schema install route was granted to
-   `svc/workflow` alone, and its one sender was a workflow client reached from the `journal.rs`
-   this step deletes. So the route, its grant, that client, the exhaustive table's row, and the
-   migration service's peer verification, which authenticated nothing else, go with the reader.
-   So does the per-schema runtime role that route minted after each install: it held DML on every
-   table in the schema and was granted to the shared worker login, the process that runs creator
-   code. Installing a platform schema is a platform migration in `db/migrations-ts/`, which is
-   how the journal itself arrives.
-
-   **The grant and the probe go with the reader.** The exposure is recorded where a search for
-   `ensure_journal` does not reach, because both places name the endpoint constant instead: the
-   allowlist rows in `crates/zeroship-core/src/service_identity.rs`, and the exhaustive table in
-   `crates/zeroship-core/tests/service_authorization_test.rs`, which names the endpoint in its
-   endpoint set, in its method-and-path assertions, and in the `svc/control` and `svc/worker`
-   rows. That suite is what proves the property this step claims to end, so the deletion is
-   finished only when the suite no longer names the endpoint and still passes. The explanatory
-   comments on those rows go with them rather than staying to describe a capability nothing
-   holds.
+   **Installing a platform schema is a platform migration in `db/migrations-ts/`**, which is how
+   the journal itself arrives. The migration service has no platform-schema install route and
+   mints no per-schema runtime role: a role holding DML on every table in a schema and granted to
+   the shared worker login would put that schema within reach of the process that runs creator
+   code. What a session reaches on an app's database is its binding's capability role, narrowed
+   per column by `grant_capability_columns` in
+   `crates/zeroship-migrate-server/src/capability_grants.rs`.
 
 7. **Drop `zeroship-data-orm` from `zeroship-workflow`**, the engine - NOT from
    `crates/zeroship-worker`, which declares it directly and keeps needing it. The worker's uses
@@ -2096,9 +2014,9 @@ part that dates, not the verdict.
    And one is authentication, which is different in kind from the rest and worth saying why.
    Services authenticate each other with one mechanism - a short-lived signed assertion naming
    issuer, audience and a single-use `jti` - but it draws its verifying key from two places, and
-   `ensure_journal` in `crates/zeroship-workflow-server/src/api.rs` states the split at the door:
-   "Control presents a ROLE assertion verified against the peer bundle; a worker presents an
-   INSTANCE assertion verified against the enrolment registry." A role is long-lived and there
+   `WorkflowAuth` in `crates/zeroship-workflow-server/src/auth.rs` keeps them apart: `peer`
+   verifies a ROLE assertion against the peer bundle, and `worker` verifies an INSTANCE assertion
+   against the enrolment registry. A role is long-lived and there
    are a handful, so a static `service-peers.json` carries its key. A worker instance mints its
    own keypair at startup and there are as many as you run, so a static file cannot: the
    registry is the dynamic half of the same scheme, and `active_key` is the read into it. That
@@ -2130,9 +2048,8 @@ part that dates, not the verdict.
    **DECIDED: defer the severing; the registry read stays.** A comprehensive credential design
    comes later, so `active_key` keeps reading `zeroship.worker_instances` and the service keeps
    its binding on Control's database for that one read. Nothing about the check relaxes - the
-   lease predicate added with the fence still refuses a lapsed instance, and the endpoint that
-   most needs the check, `ensure_journal`, reaches no placement, app or zone, so the credential
-   is its whole gate. What this defers is the SEVERING, not the verification. Open 3's own goal
+   lease predicate added with the fence still refuses a lapsed instance. What this defers is the
+   SEVERING, not the verification. Open 3's own goal
    is therefore reached in part: the corpus, the tables and the policy inputs have moved, and
    the registry read is what is left holding the binding open.
 

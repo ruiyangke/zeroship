@@ -941,69 +941,38 @@ Neither is an argument against the relocation. Both are work it creates, on
 sides that have to be reasoned about separately, and only one of them is
 visible from the PostgreSQL schema this document has been reading.
 
-## The leaf invariant is exercised, but not by step 1, and the dependency graph names the wrong crate
+## The leaf invariant is exercised by the platform migration, not by a service
 
 `AGENTS.md` states the invariant step 1 rests on:
 
 > `zeroship-workflow-schema` is a leaf, so a service can install the journal
 > without depending on the engine.
 
-That is not only true, it is already done, and the proposal should point at the
-service that does it rather than argue from the invariant.
-
 `crates/zeroship-workflow-schema/Cargo.toml` declares exactly one dependency,
-`serde_json`. No engine, no ORM, no driver, no V8. **The edge step 1 adds costs
-one leaf crate with one dependency of its own.**
+`serde_json`. No engine, no ORM, no driver, no V8, and
+`the_workflow_schema_crate_reaches_nothing_else_in_the_workspace` in
+`xtask/tests/workflow_architecture.rs` holds it there.
 
-And `crates/zeroship-workflow-server/src/journal.rs` already installs the
-journal from that leaf. Its crate's manifest declares
-`zeroship-workflow-manager`, `zeroship-workflow-schema` and
-`zeroship-workflow-client`, and **no dependency on `zeroship-workflow`, the
-engine**. The install is a migration bundle whose scope is built by substituting
-the schema name:
+The journal's one installer is not a service at all. Step 1 landed as a platform
+migration, `db/migrations-ts/20260919000000_workflow_journal.ts`, which reads the
+leaf's generated artifacts - `crates/zeroship-workflow-schema/schema/postgres.sql`
+and `schema.runtime.json` - binds `workflow_manager` into the quoted
+placeholder, and refuses an artifact that does not create every table the
+descriptor declares.
 
-    const SCHEMA_PLACEHOLDER: &str = "__ZEROSHIP_BUNDLE_SCHEMA__";
+**The service could not be this installer, and the reason is in its
+coordinator.** `Coordinator::verify` refuses to start when
+`has_schema_privilege(current_user,'workflow_manager','CREATE')` is true, so the
+login the service opens with is required, by its own startup contract, to hold
+no DDL on that schema. A service that must not be able to create tables there
+cannot be the thing that creates them. A service being ABLE to install the
+journal somewhere is not evidence it is permitted to install it here, and the
+permission is the part that decided step 1.
 
-So a service that is not the engine, already depending on the manager, already
-installs the journal into a schema it chooses at install time. That is worth
-knowing, and it is NOT what step 1 turned out to be.
-
-**Step 1 could not be this installer pointed at `workflow_manager`, and the
-reason is in the coordinator quoted above.** `Coordinator::verify` refuses to
-start when `has_schema_privilege(current_user,'workflow_manager','CREATE')` is
-true, so the login the service opens with is required, by its own startup
-contract, to hold no DDL on that schema. A service that must not be able to
-create tables there cannot be the thing that creates them.
-
-Step 1 landed instead as a platform migration,
-`db/migrations-ts/20260919000000_workflow_journal.ts`, which states that reason.
-
-The observation in this section holds; the inference drawn from it did not. A
-service being ABLE to install the journal somewhere is not evidence it is
-permitted to install it here, and the permission is the part step 1 turned on.
-
-### One dependency in that graph is not what it looks like
-
-Reading the manifests alone suggests two non-engine services install the
-journal. `crates/zeroship-migrate-server/Cargo.toml` declares
-
-    zeroship-workflow-schema = { workspace = true }
-
-under `[dependencies]`, and does not depend on the engine either - which is
-exactly the shape that makes a crate look like an installer. **No source file in
-that crate references it under any spelling, and the crate has no `build.rs`.**
-The edge is declared and unused.
-
-Two consequences, both small and both worth writing down before someone repeats
-the reading. First, `zeroship-migrate-server` is not a second precedent, so
-`workflow-server` is the one to copy. Second, a dependency edge is not evidence
-of use, and the check that distinguishes them is reading the source rather than
-the manifest - the same distinction as a declared test target that is never
-built.
-
-`zeroship-control` also appears in a search for dependents and is a third false
-positive of a different kind: its edge is under `[dev-dependencies]`, so it is a
-test-only user and ships nothing.
+`crates/zeroship-workflow-server/Cargo.toml` declares the engine,
+`zeroship-workflow`, as well as the leaf: the service answers creator-facing run
+calls through the engine over the journal it serves. The leaf keeps the
+installer free of the engine; it does not keep the service free of it.
 
 ## Correction: the manager's journal ledger is not a boundary artifact, and it survives the move
 
@@ -1067,35 +1036,30 @@ therefore reducible. **One side of a duplicated pair can be a boundary artifact
 while the other is load-bearing for a different reason, and the only way to
 tell is to read what enforces it.**
 
-## What the move does to the grant model, which is the thing app-database decoupling is blocked on
+## What the move does to the grant model
 
-`docs/proposals/2026-08-28-app-database-decoupling.md` is blocked on this relocation
-for one reason: the journal's appends depend on a blanket grant in the app's
-schema. That is worth stating precisely, because the move changes the KIND of
-grant the journal lives under, not just its address.
+`docs/proposals/2026-08-28-app-database-decoupling.md` replaces schema-wide grants
+on an app's database with column grants derived from its creator tables, and a
+journal kept in the app's schema could not live under those. That is worth
+stating precisely, because the move changes the KIND of grant the journal lives
+under, not just its address.
 
-### The app schema's model: a snapshot nothing verifies
+### The creator database's model: column grants an apply converges
 
-`crates/zeroship-migrate-server/src/apply.rs` issues
-
-    GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA {schema_q} TO {role_q};
-
-and `crates/zeroship-migrate-server/src/provisioning.rs` explains what that
-costs:
-
-    /// set is a `GRANT ... ON ALL TABLES` snapshot and this runs before any table
-    /// exists, so a role established here would carry no grant on anything the
-    /// caller goes on to create. Each caller provisions it, and repeats it after
-    /// every step that creates tables. ...
-
-`ON ALL TABLES` binds the tables that exist at that instant. A table created
-afterwards is not covered, the role simply cannot write it, and **nothing
-checks**. The discipline is an ordering rule the callers have to remember.
+A session narrowed to a binding reaches its database through that binding's
+capability role, which the cluster reconciler mints with `USAGE` on the schema
+and nothing else (`crates/zeroship-migrate-server/src/datastore/cluster.rs`).
+Which columns it may read and write is converged by `grant_capability_columns`
+in `crates/zeroship-migrate-server/src/capability_grants.rs` on every apply,
+over the creator tables the database holds at that moment. A table no apply has
+covered is unreachable rather than exposed, and a table under
+`PLATFORM_TABLE_PREFIX` - which a journal's `__zeroship_workflow_*` tables are -
+is never covered at all.
 
 ### The manager schema's model: an enumeration that refuses to start
 
-`crates/zeroship-workflow-server/src/coordinator.rs` installs the manager
-schema - it holds the DDL directly,
+`crates/zeroship-workflow-server/src/coordinator.rs` holds the manager schema's
+DDL directly,
 
     pub const SCHEMA_SQL: &str = include_str!("../../zeroship-workflow-manager/schema/postgres.sql");
 
@@ -1113,16 +1077,17 @@ maintains:
     FROM unnest(ARRAY['SELECT','INSERT','UPDATE','DELETE']) AS p
 
 and it refuses to run at all if the role holds `CREATE` on the schema or
-DDL-shaped rights on `schema_version`. **Where the app schema grants broadly and
-verifies nothing, the manager enumerates narrowly and refuses to start when the
-answer is wrong.**
+DDL-shaped rights on `schema_version`. **Where the creator database grants only
+what an apply derived from creator tables, the manager enumerates its own tables
+and refuses to start when the answer is wrong.**
 
 ### So the move is a change of regime, and it carries one obligation
 
-Relocating the journal into `workflow_manager` takes its tables out of a blanket
-snapshot that nothing audits and puts them under a per-table check that fails
-loudly. That is the substance of what the other branch is waiting for, and it is
-a real improvement rather than a change of address.
+Relocating the journal into `workflow_manager` puts its tables under a per-table
+check that fails loudly, rather than beside creator tables whose grants are
+derived from something the journal is not. That is the substance of what the
+other branch needed, and it is a real improvement rather than a change of
+address.
 
 **The obligation, and it is NOT step 1's:** `MANAGER_TABLES` is a
 hand-maintained constant, and so is the per-column census beside it. Whichever
@@ -1137,7 +1102,9 @@ At step 1 the correct state is no privileges and no entries. This proposal
 first assigned the obligation to step 1; that was wrong, and the check is what
 found it.
 
-The same file is already the journal's installer, in `journal.rs`, and already
-the manager schema's installer. **One service, no engine dependency, both
-installs.** That is worth knowing for the steps still ahead; step 1 itself
-landed elsewhere, as a platform migration.
+Neither schema is installed by the service. The journal arrives by the platform
+migration above, and the manager schema by
+`db/migrations-ts/20260911000000_workflow_coordination.ts`; `SCHEMA_SQL` is the
+manager's generated PostgreSQL DDL, which
+`crates/zeroship-workflow-server/tests/coordinator.rs` applies to stand a fixture
+up.
