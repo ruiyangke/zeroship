@@ -1,8 +1,8 @@
 use super::objects::Objects;
-use super::*;
+use super::{job_door, *};
 use crate::{
     engine::WorkflowOutputRef,
-    service::{app, models, PayloadOpener, PayloadTarget, WorkerIdentity},
+    service::{app, models, PayloadOpener, PayloadTarget},
 };
 use zeroship_data_orm::{orm::Entity, value};
 
@@ -34,16 +34,19 @@ async fn postgres_payload_quota_uses_exact_scoped_aggregates() {
 async fn quota_contract(store: Rc<OrmStore>) {
     let (service, local, foreign, _deployments) = registered_service(store).await;
     let objects = Objects::new();
-    let worker = WorkerIdentity::new("payload-model-worker".into()).unwrap();
     let large = (1_i64 << 53) + 1;
-    let mut local_task = None;
+    let mut local_claim = None;
+    // A placement is per app, so each app gets its own worker rather than one
+    // host polling across both.
     for app_id in [&local, &foreign] {
-        service
-            .fixture_app(app_id.clone())
+        let scope = service.fixture_app(app_id.clone());
+        scope
             .start(&RequestId::mint(), "Example", StartOptions::default())
             .await
             .unwrap();
-        let task = service.poll(&worker).await.unwrap().unwrap();
+        let door = job_door::Worker::new(app_id).await;
+        let claimed = door.claim(&scope).await;
+        let task = claimed.assignment();
         assert_eq!(task.invocation.app_id, app_id.as_str());
         let mut tx = service.begin().await.unwrap();
         app::lock_app(&mut tx, app_id).await.unwrap();
@@ -57,7 +60,7 @@ async fn quota_contract(store: Rc<OrmStore>) {
         }
         tx.commit().await.unwrap();
         if app_id == &local {
-            local_task = Some(task);
+            local_claim = Some((door, claimed));
         }
     }
     service
@@ -73,7 +76,9 @@ async fn quota_contract(store: Rc<OrmStore>) {
         )
         .await
         .unwrap();
-    let task = local_task.unwrap();
+    let (door, claimed) = local_claim.unwrap();
+    let worker = door.identity();
+    let task = claimed.assignment();
     let reference = |bytes: &[u8], content_type: Option<&str>| WorkflowOutputRef {
         hash: crate::service::types::hash(bytes),
         size: bytes.len() as i64,

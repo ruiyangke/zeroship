@@ -13,8 +13,8 @@
 //! consequence off the journal the next dispatch replays rather than off the
 //! rows behind it.
 
-use super::*;
-use crate::{service::WorkerIdentity, WorkflowExecution};
+use super::{job_door, *};
+use crate::{service::AppWorkflows, WorkflowExecution};
 
 #[compio::test]
 async fn sqlite_a_completion_past_the_frontier_ceiling_is_refused_whole() {
@@ -68,26 +68,20 @@ fn steps(count: usize) -> crate::WorkflowExecution {
 /// on what a replayed body would see. The dispatch is released rather than
 /// completed, leaving the run where it was found.
 async fn replayed_ordinals(
-    service: &WorkflowService,
-    worker: &WorkerIdentity,
+    scope: &AppWorkflows,
+    worker: &job_door::Worker,
     run: &str,
 ) -> Vec<i32> {
-    let task = service
-        .poll(worker)
-        .await
-        .unwrap()
-        .expect("the run under test must be dispatchable");
-    assert_eq!(task.invocation.run_id, run);
-    let ordinals = task
+    let claimed = worker.claim(scope).await;
+    assert_eq!(claimed.assignment().invocation.run_id, run);
+    let ordinals = claimed
+        .assignment()
         .invocation
         .journal
         .iter()
         .map(|step| step.ordinal)
         .collect();
-    service
-        .release(worker, &task.id, &task.token)
-        .await
-        .unwrap();
+    claimed.give_back(scope, worker).await.unwrap();
     ordinals
 }
 
@@ -100,7 +94,7 @@ async fn replayed_ordinals(
 async fn width_contract(store: Rc<OrmStore>) {
     let (service, app_id, _, _deployments) = registered_service(store).await;
     let scope = service.fixture_app(app_id.clone());
-    let worker = WorkerIdentity::new("completion-batch".into()).unwrap();
+    let worker = job_door::Worker::new(&app_id).await;
     service
         .policies
         .fixture_install(
@@ -119,36 +113,31 @@ async fn width_contract(store: Rc<OrmStore>) {
         .await
         .unwrap();
 
-    let task = service.poll(&worker).await.unwrap().unwrap();
-    assert_eq!(task.invocation.run_id, run.id);
-    assert!(task.invocation.journal.is_empty());
-    let refused = service
-        .complete(&worker, &task.id, &task.token, steps(CEILING + 1))
-        .await;
+    let claimed = worker.claim(&scope).await;
+    assert_eq!(claimed.assignment().invocation.run_id, run.id);
+    assert!(claimed.assignment().invocation.journal.is_empty());
+    let refused = claimed.finish(&scope, steps(CEILING + 1)).await;
     assert!(
         matches!(&refused, Err(WorkflowServiceError::ResourceExhausted(message))
             if message == "workflow frontier exceeds the configured limit"),
         "a batch past the ceiling must be refused: {refused:?}"
     );
-    service
-        .release(&worker, &task.id, &task.token)
-        .await
-        .unwrap();
+    claimed.give_back(&scope, &worker).await.unwrap();
     assert_eq!(
-        replayed_ordinals(&service, &worker, &run.id).await,
+        replayed_ordinals(&scope, &worker, &run.id).await,
         Vec::<i32>::new(),
         "a refused batch settles none of the ordinals it carried"
     );
 
     // The same run, reported one outcome narrower.
-    let task = service.poll(&worker).await.unwrap().unwrap();
-    assert_eq!(task.invocation.run_id, run.id);
-    service
-        .complete(&worker, &task.id, &task.token, steps(CEILING))
+    let claimed = worker.claim(&scope).await;
+    assert_eq!(claimed.assignment().invocation.run_id, run.id);
+    claimed
+        .finish(&scope, steps(CEILING))
         .await
         .expect("a batch exactly at the ceiling is accepted");
     assert_eq!(
-        replayed_ordinals(&service, &worker, &run.id).await,
+        replayed_ordinals(&scope, &worker, &run.id).await,
         (0..i32::try_from(CEILING).unwrap()).collect::<Vec<_>>(),
         "an accepted batch settles every ordinal it carried"
     );
@@ -169,21 +158,19 @@ async fn width_contract(store: Rc<OrmStore>) {
 /// an engine that refuses whatever narrow batch it is handed.
 async fn floor_contract(store: Rc<OrmStore>) {
     let (service, app_id, _, _deployments) = registered_service(store).await;
-    let scope = service.fixture_app(app_id);
-    let worker = WorkerIdentity::new("completion-floor".into()).unwrap();
+    let scope = service.fixture_app(app_id.clone());
+    let worker = job_door::Worker::new(&app_id).await;
     let run = scope
         .start(&RequestId::mint(), "Example", StartOptions::default())
         .await
         .unwrap();
 
-    let task = service.poll(&worker).await.unwrap().unwrap();
-    assert_eq!(task.invocation.run_id, run.id);
-    assert!(task.invocation.journal.is_empty());
-    let refused = service
-        .complete(
-            &worker,
-            &task.id,
-            &task.token,
+    let claimed = worker.claim(&scope).await;
+    assert_eq!(claimed.assignment().invocation.run_id, run.id);
+    assert!(claimed.assignment().invocation.journal.is_empty());
+    let refused = claimed
+        .finish(
+            &scope,
             WorkflowExecution {
                 outcomes: Vec::new(),
             },
@@ -194,25 +181,22 @@ async fn floor_contract(store: Rc<OrmStore>) {
             if message == "workflow completion requires an outcome"),
         "a completion carrying no outcome must be refused: {refused:?}"
     );
-    service
-        .release(&worker, &task.id, &task.token)
-        .await
-        .unwrap();
+    claimed.give_back(&scope, &worker).await.unwrap();
     assert_eq!(
-        replayed_ordinals(&service, &worker, &run.id).await,
+        replayed_ordinals(&scope, &worker, &run.id).await,
         Vec::<i32>::new(),
         "a refused completion settles nothing"
     );
 
     // The same run, reported one outcome wider.
-    let task = service.poll(&worker).await.unwrap().unwrap();
-    assert_eq!(task.invocation.run_id, run.id);
-    service
-        .complete(&worker, &task.id, &task.token, steps(1))
+    let claimed = worker.claim(&scope).await;
+    assert_eq!(claimed.assignment().invocation.run_id, run.id);
+    claimed
+        .finish(&scope, steps(1))
         .await
         .expect("a completion carrying one outcome is accepted");
     assert_eq!(
-        replayed_ordinals(&service, &worker, &run.id).await,
+        replayed_ordinals(&scope, &worker, &run.id).await,
         vec![0],
         "an accepted completion settles the ordinal it carried"
     );

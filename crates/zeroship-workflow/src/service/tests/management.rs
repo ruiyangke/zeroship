@@ -1,4 +1,4 @@
-use super::*;
+use super::{job_door, *};
 use crate::service::{app, frontier};
 use futures::{
     future::{select, Either},
@@ -263,18 +263,16 @@ async fn postgres_partial_restart_receipt_carries_its_prefix_and_source_pin() {
 /// are asserted separately for that - and it does not exercise a restart onto
 /// the latest deployment, which `latest::exact_target` binds.
 async fn prefix_receipt_contract(store: Rc<OrmStore>) {
-    use super::super::WorkerIdentity;
     let (service, local, _, deployments) = registered_service(store).await;
     let scope = service.fixture_app(local.clone());
-    let worker = WorkerIdentity::new("worker".into()).unwrap();
+    let worker = job_door::Worker::new(&local).await;
     let source = active(&service, &local).await;
     let run = start(&service, &local).await;
-    let task = service.poll(&worker).await.unwrap().unwrap();
-    service
-        .complete(
-            &worker,
-            &task.id,
-            &task.token,
+    worker
+        .claim(&scope)
+        .await
+        .finish(
+            &scope,
             execution(json!([
                 {"kind":"StepCompleted","ordinal":0,"name":"keep","output":1},
                 {"kind":"StepCompleted","ordinal":1,"name":"redo","output":2},

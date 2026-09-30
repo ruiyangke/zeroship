@@ -62,20 +62,26 @@ impl Worker {
     ///
     /// Panics rather than answering an error, because a case that cannot claim
     /// has not reached its subject.
+    /// A job given back is returned to the MANAGER's queue, not to the journal's
+    /// pending set, so a redelivery needs no second publication. Publishing only
+    /// what the journal still holds pending is what lets a case claim, give back
+    /// and claim again.
     pub(in crate::service) async fn claim(&self, scope: &AppWorkflows) -> Claimed {
-        let job = self.publish(scope).await;
+        if !scope.pending_jobs(None, 1).await.unwrap().is_empty() {
+            self.publish(scope).await;
+        }
         let grant = self
             .manager
             .queue
             .claim(&self.owner)
             .await
             .unwrap()
-            .expect("the published job is claimable by this worker's placement");
+            .expect("a published or redelivered job is claimable by this placement");
         let task = match scope.accept_job(&grant).await.unwrap() {
             JobAcceptance::Execute(task) => *task,
             other => panic!("expected execution, got {other:?}"),
         };
-        Claimed { task, grant, job }
+        Claimed { task, grant }
     }
 
     /// Hand the app's next pending job to the manager without claiming it.
@@ -94,17 +100,30 @@ impl Worker {
         job
     }
 
-    /// How many deliveries this worker's manager is holding.
-    pub(in crate::service) fn delivered(&self) -> i64 {
-        self.manager.count()
+    /// Expire a delivery's queue lease so the next claim reclaims it.
+    ///
+    /// The queue redelivers by the clock; a case cannot wait out a lease, so it
+    /// moves the deadline instead.
+    fn lapse_lease(&self, grant: &impl zeroship_core::workflow_jobs::JobLease) {
+        let changed = rusqlite::Connection::open(&self.manager.path)
+            .unwrap()
+            .execute(
+                "UPDATE jobs SET lease_deadline = 0 WHERE id = ?1 AND state = 'leased'",
+                [grant.delivery().job.id.as_str()],
+            )
+            .unwrap();
+        assert_eq!(
+            changed, 1,
+            "a delivery must hold a live queue lease for the next claim to reclaim it"
+        );
     }
 }
 
 /// A claimed task and the grant that authorizes acting on it.
+#[derive(Debug)]
 pub(in crate::service) struct Claimed {
     pub(in crate::service) task: DeliveredTask,
     pub(in crate::service) grant: DeliveryGrant,
-    pub(in crate::service) job: JobSpec,
 }
 
 impl Claimed {
@@ -131,10 +150,19 @@ impl Claimed {
     }
 
     /// Give the claim back un-advanced, leaving the frontier retryable.
+    ///
+    /// The creator door made the run pollable again by itself, setting `due_at`
+    /// to now. This door does not: ending the attempt leaves the delivery on the
+    /// manager's queue under its lease, and redelivery waits for that lease. A
+    /// case that gives back in order to claim again wants the lease lapsed too,
+    /// which is what a real queue does by the clock and a case cannot wait for.
     pub(in crate::service) async fn give_back(
         &self,
         scope: &AppWorkflows,
+        worker: &Worker,
     ) -> Result<(), WorkflowServiceError> {
-        scope.release_job(&self.task, &self.grant).await
+        scope.release_job(&self.task, &self.grant).await?;
+        worker.lapse_lease(&self.grant);
+        Ok(())
     }
 }

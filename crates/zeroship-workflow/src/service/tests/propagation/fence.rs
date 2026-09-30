@@ -1,4 +1,4 @@
-use super::*;
+use super::{job_door, *};
 use crate::operations::RestartOptions;
 use crate::service::{delivery::JobAcceptance, ControlIntent};
 
@@ -6,19 +6,17 @@ pub(super) async fn mid_propagation(store: Rc<OrmStore>) {
     let (service, app, _, _deployments) = registered_service(store).await;
     let scope = service.fixture_app(app.clone());
     let objects = objects::Objects::new();
-    let worker = WorkerIdentity::new("fenced-children".into()).unwrap();
+    let worker = job_door::Worker::new(&app).await;
     let parent = scope
         .start(&RequestId::mint(), "Example", StartOptions::default())
         .await
         .unwrap()
         .id;
-    let task = service.poll(&worker).await.unwrap().unwrap();
-    assert_eq!(task.invocation.run_id, parent);
-    service
-        .complete(
-            &worker,
-            &task.id,
-            &task.token,
+    let claimed = worker.claim(&scope).await;
+    assert_eq!(claimed.assignment().invocation.run_id, parent);
+    claimed
+        .finish(
+            &scope,
             execution(json!([0, 1, 2].map(|ordinal| json!({
                 "kind":"Child", "ordinal":ordinal, "name":format!("child-{ordinal}"),
                 "childWorkflowName":"Child", "options":{"cascade":true}
@@ -29,7 +27,7 @@ pub(super) async fn mid_propagation(store: Rc<OrmStore>) {
     // All three children hold live tasks when their parent is cancelled.
     let mut leased = Vec::new();
     for _ in 0..3 {
-        leased.push(service.poll(&worker).await.unwrap().unwrap());
+        leased.push(worker.claim(&scope).await);
     }
     let [continuing, creating, running]: [_; 3] = leased.try_into().unwrap();
     cancel_idle(&scope, &parent).await;
@@ -38,33 +36,34 @@ pub(super) async fn mid_propagation(store: Rc<OrmStore>) {
         RunState::Cancelled
     );
     for child in [&continuing, &creating, &running] {
-        let row = run_row(&service, &app, &child.invocation.run_id).await;
+        let row = run_row(&service, &app, &child.assignment().invocation.run_id).await;
         assert_eq!(row.text("control").unwrap(), "none");
     }
 
     // Before any page reaches it, a leased child's renewal reports cancellation.
     assert_eq!(
-        service
-            .heartbeat(&worker, &running.id, &running.token)
-            .await
-            .unwrap()
-            .control,
+        running.renew(&scope).await.unwrap().control(),
         ControlIntent::Cancel
     );
     // Continuing as new mid-propagation settles the child as cancelled instead.
     let runs = rows(&service, "runs", json!({"app_id":app.as_str()}))
         .await
         .len();
-    let receipt = service
-        .complete(
-            &worker,
-            &continuing.id,
-            &continuing.token,
+    let _receipt = continuing
+        .finish(
+            &scope,
             execution(json!([{"kind":"ContinueAsNew"}])),
         )
         .await
         .unwrap();
-    assert_eq!(receipt.state, RunState::Cancelled);
+    assert_eq!(
+        scope
+            .status(&continuing.assignment().invocation.run_id)
+            .await
+            .unwrap()
+            .state,
+        RunState::Cancelled
+    );
     assert_eq!(
         rows(&service, "runs", json!({"app_id":app.as_str()}))
             .await
@@ -73,7 +72,7 @@ pub(super) async fn mid_propagation(store: Rc<OrmStore>) {
     );
     assert_eq!(
         scope
-            .status(&continuing.invocation.run_id)
+            .status(&continuing.assignment().invocation.run_id)
             .await
             .unwrap()
             .output,
@@ -81,20 +80,25 @@ pub(super) async fn mid_propagation(store: Rc<OrmStore>) {
     );
     // A child created mid-propagation belongs to its cancelled creator's own
     // obligation, which fences it before any page reaches it.
-    let receipt = service
-        .complete(
-            &worker,
-            &creating.id,
-            &creating.token,
+    let _receipt = creating
+        .finish(
+            &scope,
             cascade::child_call("grandchild"),
         )
         .await
         .unwrap();
-    assert_eq!(receipt.state, RunState::Cancelled);
+    assert_eq!(
+        scope
+            .status(&creating.assignment().invocation.run_id)
+            .await
+            .unwrap()
+            .state,
+        RunState::Cancelled
+    );
     let grandchild = rows(
         &service,
         "runs",
-        json!({"app_id":app.as_str(), "parent_id":creating.invocation.run_id}),
+        json!({"app_id":app.as_str(), "parent_id":creating.assignment().invocation.run_id}),
     )
     .await;
     assert_eq!(grandchild.len(), 1);
@@ -109,7 +113,7 @@ pub(super) async fn mid_propagation(store: Rc<OrmStore>) {
         .len(),
         2
     );
-    assert!(service.poll(&worker).await.unwrap().is_none());
+    assert!(scope.pending_jobs(None, 1).await.unwrap().is_empty());
     assert_eq!(
         scope.status(&grandchild).await.unwrap().state,
         RunState::Cancelled
@@ -129,7 +133,7 @@ pub(super) async fn mid_propagation(store: Rc<OrmStore>) {
         .len(),
         0
     );
-    let row = run_row(&service, &app, &running.invocation.run_id).await;
+    let row = run_row(&service, &app, &running.assignment().invocation.run_id).await;
     assert_eq!(row.text("control").unwrap(), "cancel");
     // The late result is staged first, so the run reports a result that exists
     // and the discarded value is the one a promotion would have recorded. A
@@ -138,9 +142,9 @@ pub(super) async fn mid_propagation(store: Rc<OrmStore>) {
     let late = output_reference(LATE);
     let staged = service
         .stage_payload(
-            &worker,
-            &running.id,
-            &running.token,
+            &worker.identity(),
+            &running.assignment().id,
+            &running.assignment().token,
             &RequestId::mint(),
             late.clone(),
             objects.upload(LATE),
@@ -153,9 +157,9 @@ pub(super) async fn mid_propagation(store: Rc<OrmStore>) {
     );
     let receipt = service
         .complete(
-            &worker,
-            &running.id,
-            &running.token,
+            &worker.identity(),
+            &running.assignment().id,
+            &running.assignment().token,
             execution(json!([{"kind":"RunCompleted","outputRef":late}])),
         )
         .await
@@ -163,7 +167,7 @@ pub(super) async fn mid_propagation(store: Rc<OrmStore>) {
     assert_eq!(receipt.state, RunState::Cancelled);
     assert_eq!(
         scope
-            .status(&running.invocation.run_id)
+            .status(&running.assignment().invocation.run_id)
             .await
             .unwrap()
             .output,
@@ -171,7 +175,7 @@ pub(super) async fn mid_propagation(store: Rc<OrmStore>) {
     );
     assert!(matches!(
         scope
-            .read_output(&running.invocation.run_id, objects.open())
+            .read_output(&running.assignment().invocation.run_id, objects.open())
             .await,
         Err(WorkflowServiceError::NotFound(_))
     ));
