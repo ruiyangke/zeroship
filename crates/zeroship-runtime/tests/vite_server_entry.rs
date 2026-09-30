@@ -1,7 +1,8 @@
 //! Build the fixture app the way `vite build` does and exercise the worker it
 //! packs through native dispatch. The app loads one import through a Vite
 //! plugin of its own, so the worker exists only if the app's plugins apply to
-//! server code.
+//! server code. The app imports a Node built-in by its bare name and through
+//! a CommonJS `require`, neither of which the runtime answers as written.
 
 use std::time::Duration;
 
@@ -141,6 +142,25 @@ async fn vite_artifact_retains_procedure_metadata_and_native_module_identity() {
     assert_eq!(
         rpc(&runtime, "greeting", Value::Null).await,
         json!("hello from an app plugin"),
+    );
+    assert_eq!(
+        rpc(&runtime, "builtins", Value::Null).await,
+        json!({
+            "imported": "a/b",
+            "required": "c/d",
+            "tsDefault": "g/h",
+            "kernel": "function",
+            "cjsProcess": "object",
+            "cjsSlept": "slept",
+            "cjsCreateRequire": "i/j",
+            "esmProcess": true,
+            "esmSlept": "slept",
+            "esmCreateRequire": "k/l",
+            "esmIsBuiltin": true,
+            "esmCreateRequireMissing": "MODULE_NOT_FOUND",
+            "esmTimersSignal": "ERR_ZEROSHIP_UNSUPPORTED_OPTION",
+            "optional": "fallback",
+        }),
     );
     assert_eq!(
         rpc(&runtime, "eager", json!(3)).await,

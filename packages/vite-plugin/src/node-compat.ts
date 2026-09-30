@@ -16,7 +16,9 @@
  *     same class.
  */
 
-import type { Plugin } from "vite";
+import type { Plugin, Rolldown } from "vite";
+import { RUNTIME_MODULE_SPECIFIER } from "./constants.js";
+import { RUNTIME_REQUIRE_PREFIX, runtimeRequireModule } from "./zeroship-module.js";
 import { fileURLToPath } from "node:url";
 import { defineEnv } from "unenv";
 // `@rollup/plugin-inject` ships dual ESM/CJS; the static type pulls in
@@ -78,112 +80,132 @@ const RUNTIME_NATIVE_MODULES = new Set([
   "node:util",
 ]);
 
-/** Custom polyfill code for modules unenv doesn't implement well for V8. */
+/**
+ * Custom polyfills for modules unenv doesn't implement well for V8.
+ *
+ * Each is an ordinary ES module: the worker build bundles it, dev serves it
+ * through the environment's transform pipeline, and dev's dependency
+ * optimizer inlines it when a dependency requires it.
+ */
 const customPolyfills: Record<string, string> = {
-  // node:crypto and node:async_hooks are now resolved as native V8
-  // SyntheticModules by the runtime itself (see
-  // crates/zeroship-runtime/src/core/native_modules.rs). The vite plugin used
-  // to ship a virtual module that re-exported `globalThis.__zsAsyncHooks`
-  // / `globalThis.__zeroship_node_crypto`; the runtime owns those
-  // specifiers directly now, so the shim entries are gone — the
-  // resolver below falls through `getNodeCompatId` returning null,
-  // and Vite forwards the bare `node:*` import to the runtime
-  // unmodified.
-
   // node:timers/promises — unenv's setInterval is a Promise, not an async
   // generator. The latter is what `for await` consumers (tRPC, langchain
   // streaming) expect.
+  // The timers take no AbortSignal: one passed in options is refused by name
+  // rather than silently never aborting.
   "node:timers/promises": `
-function _setTimeout(ms, value) { return new Promise(r => globalThis.setTimeout(() => r(value), ms || 0)); }
-function _setImmediate(value) { return Promise.resolve(value); }
-async function* _setInterval(ms, value) {
-  while (true) {
-    await new Promise(r => globalThis.setTimeout(r, ms || 0));
-    yield value;
-  }
+function _refuseSignal(name, options) {
+  if (options?.signal == null) return;
+  const error = new TypeError(
+    \`node:timers/promises \${name}(): the signal option is not supported in the zeroship runtime\`,
+  );
+  error.code = "ERR_ZEROSHIP_UNSUPPORTED_OPTION";
+  throw error;
 }
-Object.assign(__vite_ssr_exports__, { setTimeout: _setTimeout, setImmediate: _setImmediate, setInterval: _setInterval, default: { setTimeout: _setTimeout, setImmediate: _setImmediate, setInterval: _setInterval } });
+export function setTimeout(ms, value, options) {
+  _refuseSignal("setTimeout", options);
+  return new Promise((resolve) => globalThis.setTimeout(() => resolve(value), ms || 0));
+}
+export function setImmediate(value, options) {
+  _refuseSignal("setImmediate", options);
+  return Promise.resolve(value);
+}
+export function setInterval(ms, value, options) {
+  _refuseSignal("setInterval", options);
+  return (async function* () {
+    while (true) {
+      await new Promise((resolve) => globalThis.setTimeout(resolve, ms || 0));
+      yield value;
+    }
+  })();
+}
+export default { setTimeout, setImmediate, setInterval };
 `,
 
-  // node:module — unenv@2's createRequire returns a notImplemented
-  // thrower, which breaks packages that probe createRequire at module
-  // init (notably @vercel/oidc, transitive via @ai-sdk/gateway). The
-  // probe results get template-literal'd into a userAgent string, so a
-  // self-referential proxy with a Symbol.toPrimitive of "" satisfies
-  // both `mod.fn()` chains and string coercion without throwing.
-  // Real createRequire usage is rare in our app surface — this is a
-  // soft mock, not a feature.
+  // node:module — the isolate has no CommonJS loader. createRequire() returns
+  // a require that answers the modules the runtime implements, by either name,
+  // from their native namespaces, and throws MODULE_NOT_FOUND for anything
+  // else, as Node does for a module that is not there. createRequire() itself
+  // never throws, so a bundler helper that calls it at module init loads, and
+  // an optional require in try/catch takes its fallback.
   "node:module": `
-const _noopProxy = new Proxy(function(){}, {
-  get(_t, prop) {
-    if (prop === Symbol.toPrimitive) return () => "";
-    if (prop === "toString" || prop === "valueOf") return () => "";
-    if (prop === Symbol.iterator) return function*(){};
-    return _noopProxy;
-  },
-  apply: () => _noopProxy,
-  construct: () => ({}),
-});
-const _noop = function() { return _noopProxy; };
-function createRequire() { return _noop; }
-function builtinModules() { return []; }
-function isBuiltin() { return false; }
-function syncBuiltinESMExports() {}
-const _default = { createRequire, builtinModules: [], isBuiltin, syncBuiltinESMExports };
-Object.assign(__vite_ssr_exports__, {
-  default: _default,
-  createRequire,
-  builtinModules: [],
-  isBuiltin,
-  syncBuiltinESMExports,
-  Module: function(){},
-});
+${[...RUNTIME_NATIVE_MODULES].map((specifier, index) => `import * as _runtime${index} from ${JSON.stringify(specifier)};`).join("\n")}
+const _runtimeModules = {
+${[...RUNTIME_NATIVE_MODULES].map((specifier, index) => `  ${JSON.stringify(specifier.slice("node:".length))}: _runtime${index},`).join("\n")}
+};
+function _runtimeModule(id) {
+  const name = String(id).startsWith("node:") ? String(id).slice(5) : String(id);
+  return Object.hasOwn(_runtimeModules, name) ? _runtimeModules[name] : undefined;
+}
+export function createRequire() {
+  return function require(id) {
+    const module = _runtimeModule(id);
+    if (module !== undefined) return module;
+    const error = new Error(
+      \`Cannot find module '\${id}': the zeroship runtime has no CommonJS loader, and require \` +
+        \`answers only its own modules (\${Object.keys(_runtimeModules).join(", ")})\`,
+    );
+    error.code = "MODULE_NOT_FOUND";
+    throw error;
+  };
+}
+export const builtinModules = Object.keys(_runtimeModules);
+export function isBuiltin(id) {
+  return _runtimeModule(id) !== undefined;
+}
+export function syncBuiltinESMExports() {}
+export function Module() {}
+export default { createRequire, builtinModules, isBuiltin, syncBuiltinESMExports, Module };
 `,
 
   // node:process — re-export the Rust-set globalThis.process so bare
-  // `process`, `import process from "node:process"`, and direct global
+  // \`process\`, \`import process from "node:process"\`, and direct global
   // reads all see the same instance. Methods absent on globalThis (e.g.
   // cwd, chdir, exit, EventEmitter API) get harmless no-op shims so
-  // npm packages probing `process.cwd()` don't crash.
+  // npm packages probing \`process.cwd()\` don't crash.
   //
   // We deliberately don't try to wire the EventEmitter surface — the
   // V8 isolate has no signal-handling story, and most consumers only
-  // call `.on('SIGINT', ...)` defensively at top level. A no-op `on`
+  // call \`.on('SIGINT', ...)\` defensively at top level. A no-op \`on\`
   // is safer than an incomplete EventEmitter.
   "node:process": `
 const _proc = globalThis.process;
 const _noop = () => {};
-const _emitter = { on: _noop, off: _noop, once: _noop, removeListener: _noop, removeAllListeners: _noop, listeners: () => [], addListener: _noop, setMaxListeners: _noop, getMaxListeners: () => 10, eventNames: () => [] };
 function _bind(name, fallback) {
   const fn = _proc?.[name];
-  if (typeof fn === "function") return fn.bind(_proc);
-  return fallback;
+  return typeof fn === "function" ? fn.bind(_proc) : fallback;
 }
-const _exports = {
-  default: _proc,
-  env: _proc.env,
-  argv: _proc.argv ?? [],
-  argv0: _proc.argv0 ?? "node",
-  pid: _proc.pid ?? 0,
-  ppid: _proc.ppid ?? 0,
-  title: _proc.title ?? "zeroship",
-  versions: _proc.versions,
-  version: _proc.version,
-  platform: _proc.platform,
-  arch: _proc.arch,
-  release: _proc.release ?? { name: "node" },
-  cwd: _bind("cwd", () => "/"),
-  chdir: _bind("chdir", _noop),
-  exit: _bind("exit", _noop),
-  nextTick: _bind("nextTick", (fn, ...a) => queueMicrotask(() => fn(...a))),
-  hrtime: _proc.hrtime ?? (() => [0, 0]),
-  stdout: _proc.stdout,
-  stderr: _proc.stderr,
-  stdin: _proc.stdin,
-  emitWarning: _bind("emitWarning", _noop),
-  ..._emitter,
-};
-Object.assign(__vite_ssr_exports__, _exports);
+export default _proc;
+export const env = _proc.env;
+export const argv = _proc.argv ?? [];
+export const argv0 = _proc.argv0 ?? "node";
+export const pid = _proc.pid ?? 0;
+export const ppid = _proc.ppid ?? 0;
+export const title = _proc.title ?? "zeroship";
+export const versions = _proc.versions;
+export const version = _proc.version;
+export const platform = _proc.platform;
+export const arch = _proc.arch;
+export const release = _proc.release ?? { name: "node" };
+export const cwd = _bind("cwd", () => "/");
+export const chdir = _bind("chdir", _noop);
+export const exit = _bind("exit", _noop);
+export const nextTick = _bind("nextTick", (fn, ...args) => queueMicrotask(() => fn(...args)));
+export const hrtime = _proc.hrtime ?? (() => [0, 0]);
+export const stdout = _proc.stdout;
+export const stderr = _proc.stderr;
+export const stdin = _proc.stdin;
+export const emitWarning = _bind("emitWarning", _noop);
+export const on = _noop;
+export const off = _noop;
+export const once = _noop;
+export const removeListener = _noop;
+export const removeAllListeners = _noop;
+export const listeners = () => [];
+export const addListener = _noop;
+export const setMaxListeners = _noop;
+export const getMaxListeners = () => 10;
+export const eventNames = () => [];
 `,
 };
 
@@ -218,10 +240,100 @@ export function getNodeCompatId(specifier: string): string | null {
   return null;
 }
 
-/** True if the V8 runtime owns this specifier (synthetic module). */
+/** True if the V8 runtime owns this specifier (synthetic module), under either spelling. */
 export function isRuntimeNative(specifier: string): boolean {
+  return runtimeNativeSpecifier(specifier) != null;
+}
+
+/** The `node:` spelling of a module the runtime owns, the only one it answers. */
+export function runtimeNativeSpecifier(specifier: string): string | null {
   const normalized = specifier.startsWith("node:") ? specifier : `node:${specifier}`;
-  return RUNTIME_NATIVE_MODULES.has(normalized);
+  return RUNTIME_NATIVE_MODULES.has(normalized) ? normalized : null;
+}
+
+/**
+ * True if a built worker may import `specifier` unbundled: the kernel module,
+ * or a module the runtime owns under its `node:` spelling. A bare `path` is
+ * not one: the runtime resolves only `node:path`.
+ */
+export function isRuntimeModuleSpecifier(specifier: string): boolean {
+  return specifier === RUNTIME_MODULE_SPECIFIER || RUNTIME_NATIVE_MODULES.has(specifier);
+}
+
+/** Where unenv@2's `./*` subpath export points: `./dist/runtime/*.mjs`. */
+function unenvModule(subpath: string): string {
+  return `${UNENV_ROOT}dist/runtime/${subpath}.mjs`;
+}
+
+type BuiltinResolution = { id: string; external?: true } | { resolveFurther: string };
+
+/**
+ * How server code reaches a Node built-in, in the worker build, in dev, and
+ * in dev's dependency optimizer:
+ * - a module the runtime implements is imported as `node:<name>`, the only
+ *   spelling the runtime answers. A CommonJS `require` of one resolves to a
+ *   stand-in ES module that re-exports it (`RUNTIME_REQUIRE_PREFIX`), because
+ *   the isolate has no `require`;
+ * - any other built-in resolves to its polyfill, which is bundled.
+ * Null when `id` is not a built-in. `resolveFurther` names a polyfill
+ * specifier the caller resolves with its own resolver.
+ */
+function resolveNodeBuiltin(id: string, kind: string | undefined): BuiltinResolution | null {
+  const native = runtimeNativeSpecifier(id);
+  if (native) {
+    return kind === "require-call"
+      ? { id: RUNTIME_REQUIRE_PREFIX + native }
+      : { id: native, external: true };
+  }
+  // Bare `unenv/*` specifiers — emitted by @rollup/plugin-inject for inject
+  // targets like `process` → `unenv/node/process`. The user app doesn't
+  // depend on unenv directly, so we resolve from vite-plugin's own copy.
+  if (id.startsWith("unenv/")) return { id: unenvModule(id.slice("unenv/".length)) };
+  const resolved = getNodeCompatId(id);
+  if (!resolved) return null;
+  // Custom polyfills → virtual module ID
+  if (resolved.startsWith(CUSTOM_PREFIX)) return { id: resolved };
+  if (resolved.startsWith("unenv/")) return { id: unenvModule(resolved.slice("unenv/".length)) };
+  return { resolveFurther: resolved };
+}
+
+/** Load the modules `resolveNodeBuiltin` names. */
+function loadNodeBuiltin(id: string): string | null {
+  if (id.startsWith(RUNTIME_REQUIRE_PREFIX)) {
+    return runtimeRequireModule(id.slice(RUNTIME_REQUIRE_PREFIX.length));
+  }
+  return getCustomPolyfillCode(id);
+}
+
+/**
+ * `resolveNodeBuiltin` for dev's dependency optimizer, which pre-bundles
+ * server dependencies with Rolldown and runs none of the app's Vite plugins.
+ * - The kernel module stays an external under either kind of import; a
+ *   require of it gets the same stand-in the worker build uses.
+ * - A CommonJS `require` of a built-in resolves as it does in the worker
+ *   build: left to the optimizer, it becomes `createRequire` from
+ *   `node:module`, which the isolate has not got.
+ * - An ES import of a built-in stays an external, which the dev environment
+ *   answers.
+ */
+export function nodeCompatOptimizerPlugin(): Rolldown.Plugin {
+  return {
+    name: "zeroship:node-compat-deps",
+    async resolveId(id, _importer, options) {
+      if (id === RUNTIME_MODULE_SPECIFIER) {
+        return options?.kind === "require-call"
+          ? RUNTIME_REQUIRE_PREFIX + id
+          : { id, external: true };
+      }
+      if (options?.kind !== "require-call") return null;
+      const resolved = resolveNodeBuiltin(id, options.kind);
+      if (resolved == null) return null;
+      return "resolveFurther" in resolved ? this.resolve(resolved.resolveFurther) : resolved;
+    },
+    load(id) {
+      return loadNodeBuiltin(id);
+    },
+  };
 }
 
 /** Source code for a custom polyfill virtual module, or null. */
@@ -260,47 +372,21 @@ export function nodeCompatPlugin(): Plugin {
     name: "zeroship:node-compat",
     enforce: "pre" as const,
 
-    async resolveId(id: string) {
+    async resolveId(id: string, _importer: string | undefined, options?: { kind?: string }) {
       // Apply to server code: the "zeroship" environment in dev and in
       // `vite build`, and the dev archive's `ssr` build. Skip the client
       // environment so a bundle that incidentally references `node:`
       // doesn't get polyfilled into the browser asset.
       const envName = (this as any).environment?.name;
       if (envName === "client") return null;
-
-      // Runtime-native specifier: keep the bare import in the bundle
-      // so the V8 runtime's module loader sees it and resolves it via
-      // SyntheticModule.
-      if (isRuntimeNative(id)) return { id, external: true };
-
-      // Bare `unenv/*` specifiers — emitted by @rollup/plugin-inject
-      // for inject targets like `process` → `unenv/node/process`. The
-      // user app doesn't depend on unenv directly, so we resolve from
-      // vite-plugin's own copy.
-      if (id.startsWith("unenv/")) {
-        const sub = id.slice("unenv/".length);
-        // unenv@2's `./*` subpath export maps to `./dist/runtime/*.mjs`.
-        return `${UNENV_ROOT}dist/runtime/${sub}.mjs`;
-      }
-
-      const resolved = getNodeCompatId(id);
-      if (!resolved) return null;
-
-      // Custom polyfills → virtual module ID
-      if (resolved.startsWith(CUSTOM_PREFIX)) return resolved;
-
-      // unenv paths → resolve from vite-plugin's own copy (see above).
-      if (resolved.startsWith("unenv/")) {
-        const sub = resolved.slice("unenv/".length);
-        return `${UNENV_ROOT}dist/runtime/${sub}.mjs`;
-      }
-
-      // Fallback: let Vite resolve normally.
-      return this.resolve(resolved);
+      const resolved = resolveNodeBuiltin(id, options?.kind);
+      if (resolved == null) return null;
+      // Fallback: let Vite resolve the polyfill specifier normally.
+      return "resolveFurther" in resolved ? this.resolve(resolved.resolveFurther) : resolved;
     },
 
     load(id: string) {
-      return getCustomPolyfillCode(id) ?? null;
+      return loadNodeBuiltin(id);
     },
   };
 }

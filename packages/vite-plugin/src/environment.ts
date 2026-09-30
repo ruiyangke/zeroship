@@ -6,7 +6,11 @@
 
 import * as vite from "vite";
 import type { FetchFunctionOptions, FetchResult } from "vite/module-runner";
-import { getNodeCompatId, getCustomPolyfillCode, isRuntimeNative } from "./node-compat.js";
+import {
+  getNodeCompatId,
+  isRuntimeNative,
+  nodeCompatOptimizerPlugin,
+} from "./node-compat.js";
 import {
   RUNTIME_MODULE_SPECIFIER,
   VITE_RUNTIME_MODULE_ID,
@@ -92,16 +96,9 @@ Object.assign(__vite_ssr_exports__, m, { default: m.default ?? m });
 
       const compatId = getNodeCompatId(id);
       if (compatId) {
-        // Custom polyfill (e.g. crypto) → return code directly
-        const code = getCustomPolyfillCode(compatId);
-        if (code) {
-          const result = { id, url: id, code, file: id } as vite.FetchResult;
-          this.builtinFetchCache.set(id, result);
-          return result;
-        }
-        // unenv polyfill → resolve and transform through Vite's pipeline.
-        // We use transformRequest() which runs resolveId → load → transform,
-        // converting the unenv module to SSR-compatible code.
+        // Custom and unenv polyfills are ES modules: resolve and transform
+        // them through Vite's pipeline. transformRequest() runs resolveId →
+        // load → transform, converting the module to SSR-compatible code.
         let pending = this.builtinTransformCache.get(id);
         if (!pending) {
           pending = this.transformRequest(compatId)
@@ -178,6 +175,10 @@ export function createZeroshipEnvironmentOptions(
       entries: serverEntry
         ? [serverEntry]
         : ["src/index.{ts,tsx,js,jsx}", "src/server.{ts,js}", "server.{ts,js}"],
+      // A dependency's CommonJS `require` of a Node built-in reaches the
+      // built-in the way the worker build does, rather than through
+      // `createRequire`, which the isolate has not got.
+      rolldownOptions: { plugins: [nodeCompatOptimizerPlugin()] },
       // Framework imports are resolved through the plugin installation.
     },
   };

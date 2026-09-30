@@ -88,8 +88,20 @@ interface AppOptions {
    */
   clientInput?: "none" | "object";
   mode?: "full" | "static";
-  /** Server code imports a module the app marks external. */
-  externalImport?: boolean;
+  /**
+   * A module the worker must not leave unbundled:
+   * - `import`: server code imports `left-out`, which an app plugin resolves
+   *   as external;
+   * - `require`: a CommonJS dependency requires `left-out`, which an app
+   *   plugin resolves as external;
+   * - `bare-builtin`: server code imports `path`, which an app plugin
+   *   resolves as an external under its bare name;
+   * - `client-external`: server code imports `pick-me`, which the app's
+   *   top-level `build.rollupOptions.external` names for its client;
+   * - `worker-external`: server code imports `left-out`, which the app names
+   *   in `environments.zeroship.build.rollupOptions.external`.
+   */
+  leftOut?: "import" | "require" | "bare-builtin" | "client-external" | "worker-external";
   /**
    * Give the CLIENT environment its own `build.outDir` (and `zeroship.jsonc`
    * the matching `build.dist`), leaving the top-level `build.outDir` alone.
@@ -100,7 +112,12 @@ interface AppOptions {
 /** The fixture app's inline Vite config, without the plugins. */
 function viteOptions(root: string, options: AppOptions): InlineConfig {
   const build: Record<string, unknown> = {};
-  if (options.externalImport) build.rollupOptions = { external: ["left-out"] };
+  if (options.leftOut === "client-external") build.rollupOptions = { external: ["pick-me"] };
+  const environments: Record<string, unknown> = {};
+  if (options.leftOut === "worker-external") {
+    environments.zeroship = { build: { rollupOptions: { external: ["left-out"] } } };
+  }
+  if (options.clientOutDir) environments.client = { build: { outDir: options.clientOutDir } };
   if (options.clientInput === "object") {
     build.manifest = true;
     build.rollupOptions = { input: { main: resolve(root, "pages/main.html") } };
@@ -110,9 +127,7 @@ function viteOptions(root: string, options: AppOptions): InlineConfig {
     define: { __APP_DEFINED__: JSON.stringify("from the app define") },
     resolve: { alias: { "~lib": resolve(root, "src/lib") } },
     build,
-    ...(options.clientOutDir
-      ? { environments: { client: { build: { outDir: options.clientOutDir } } } }
-      : {}),
+    ...(Object.keys(environments).length > 0 ? { environments } : {}),
   };
 }
 
@@ -124,7 +139,14 @@ async function makeApp(options: AppOptions = {}): Promise<string> {
   };
   await write(
     "src/server.ts",
-    options.externalImport ? SERVER_TS.replace('"use server";\n', '"use server";\nimport "left-out";\n') : SERVER_TS,
+    SERVER_TS.replace('"use server";\n', `"use server";\n${{
+      import: 'import "left-out";\n',
+      "worker-external": 'import "left-out";\n',
+      require: 'import "requires-left-out";\n',
+      "bare-builtin": 'import "path";\n',
+      "client-external": "",
+      none: "",
+    }[options.leftOut ?? "none"]}`),
   );
   await write("src/hello.greeting", "hello from an app plugin\n");
   await write("src/lib/suffix.ts", `export const suffix = "aliased";\n`);
@@ -149,6 +171,11 @@ async function makeApp(options: AppOptions = {}): Promise<string> {
     await write(`node_modules/pick-by-field/${build}.js`, `export const field = ${JSON.stringify(build)};\n`);
   }
   await write("node_modules/pick-by-field/main.js", `exports.field = "main";\n`);
+  await write(
+    "node_modules/requires-left-out/package.json",
+    JSON.stringify({ name: "requires-left-out", main: "index.js" }),
+  );
+  await write("node_modules/requires-left-out/index.js", `exports.value = require("left-out");\n`);
   await write(
     "node_modules/@zeroship/rpc/package.json",
     JSON.stringify({ type: "module", exports: { "./server": "./server.js", "./client": "./client.js" } }),
@@ -221,10 +248,25 @@ function greeting() {
   };
 }
 
+// Resolves the named modules as externals, ahead of zeroship's own resolvers.
+function externals(names) {
+  return {
+    name: "fixture:externals",
+    enforce: "pre",
+    resolveId(id) {
+      return names.includes(id) ? { id, external: true } : null;
+    },
+  };
+}
+
 export default {
   ...${JSON.stringify(viteOptions(root, options))},
   // An empty process environment: nothing in the test's shell reaches the plugin.
-  plugins: [greeting(), ...zeroshipPlugins({}, {})],
+  plugins: [
+    externals(${JSON.stringify({ import: ["left-out"], require: ["left-out"], "bare-builtin": ["path"] }[options.leftOut as string] ?? [])}),
+    greeting(),
+    ...zeroshipPlugins({}, {}),
+  ],
 };
 `,
   );
@@ -365,9 +407,54 @@ describe("vite build compiles the worker from the app's config", () => {
   });
 
   test("a worker that imports a module it did not bundle is refused", async () => {
-    const root = await makeApp({ externalImport: true });
+    const root = await makeApp({ leftOut: "import" });
     try {
       await assert.rejects(viteBuildCli(root), /unbundled import: left-out/);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a worker that requires a module it did not bundle is refused", async () => {
+    // The isolate has no `require`: a CommonJS require of an external would
+    // become a shim that throws when the worker starts.
+    const root = await makeApp({ leftOut: "require" });
+    try {
+      await assert.rejects(viteBuildCli(root), /requires left-out[\s\S]*resolve\.alias/);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a worker that imports a Node built-in by its bare name is refused", async () => {
+    // The runtime answers `node:path`, never `path`.
+    const root = await makeApp({ leftOut: "bare-builtin" });
+    try {
+      await assert.rejects(viteBuildCli(root), /unbundled import: path/);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("an external the app names for the worker is refused", async () => {
+    // The worker bundles everything but the runtime's own modules, so an
+    // explicit worker external could only produce a worker that cannot start.
+    const root = await makeApp({ leftOut: "worker-external" });
+    try {
+      await assert.rejects(viteBuildCli(root), /environments\.zeroship\.build\.rollupOptions\.external/);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("the app's client externals are bundled into the worker", async () => {
+    // `build.rollupOptions.external` shapes the client; the worker bundles
+    // everything but the runtime's own modules.
+    const root = await makeApp({ leftOut: "client-external" });
+    try {
+      await viteBuildCli(root);
+      const { entryPath } = await unpackWorker(root);
+      assert.deepEqual(callPacked(root, entryPath, "probe.resolved"), ["browser", "browser"]);
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }

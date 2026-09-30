@@ -11,7 +11,7 @@ import { join, resolve, relative, isAbsolute } from "node:path";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { transformPlugin, type TransformState } from "./transform.js";
-import { nodeCompatPlugin, isRuntimeNative } from "./node-compat.js";
+import { nodeCompatPlugin, isRuntimeModuleSpecifier } from "./node-compat.js";
 import { emitZship } from "./zship.js";
 import {
   rpcRegistryPlugin,
@@ -202,13 +202,39 @@ export function stripUseServer(bundle: string): string {
 }
 
 /**
- * The worker build's graph check: refuses a worker that imports anything it
- * did not bundle, other than the runtime's own modules, and reports the
- * absolute module ids the build read.
+ * The worker build's graph check, and the absolute module ids the build read.
+ *
+ * A built worker may leave unbundled only the runtime's own modules, under
+ * the spellings the runtime answers: `zeroship`, and `node:<name>` for a
+ * module it implements. It refuses, naming the module:
+ * - any other import left in the output, a bare `path` included;
+ * - a CommonJS `require` that resolves to an external. The isolate has no
+ *   `require`, and Rolldown would turn it into a shim that throws when the
+ *   worker starts. The output's import lists never show such a require, so it
+ *   is refused where it is resolved.
  */
 export function serverGraphPlugin(onDependencies?: (ids: string[]) => void): Plugin {
   return {
     name: "zeroship:server-dependencies",
+    resolveId: {
+      order: "pre",
+      async handler(source, importer, options) {
+        if (options?.kind !== "require-call") return null;
+        const resolved = await this.resolve(source, importer, {
+          ...options,
+          kind: options.kind,
+          skipSelf: true,
+        });
+        if (resolved?.external) {
+          this.error(
+            `server executable requires ${source} without bundling it: the runtime has no ` +
+              "`require`, so the worker would throw when it starts. Let the build bundle it, " +
+              `or point ${source} at a stub module with \`resolve.alias\`.`,
+          );
+        }
+        return resolved;
+      },
+    },
     buildEnd(error) {
       if (!error && onDependencies) {
         onDependencies([...new Set([...this.getModuleIds()]
@@ -220,11 +246,7 @@ export function serverGraphPlugin(onDependencies?: (ids: string[]) => void): Plu
       for (const output of Object.values(bundle)) {
         if (output.type !== "chunk") continue;
         for (const imported of [...output.imports, ...output.dynamicImports]) {
-          if (
-            bundle[imported]?.type !== "chunk" &&
-            imported !== "zeroship" &&
-            !isRuntimeNative(imported)
-          ) {
+          if (bundle[imported]?.type !== "chunk" && !isRuntimeModuleSpecifier(imported)) {
             this.error(`server executable contains an unbundled import: ${imported}`);
           }
         }
@@ -508,7 +530,9 @@ export function applyWorkerBuildOptions(environment: EnvironmentOptions, clientO
     rolldownOptions,
     ...build
   } = environment.build ?? {};
-  const inherited = rolldownOptions ?? legacyRollupOptions ?? {};
+  // The app's `external` shapes its client. The worker bundles everything
+  // but the runtime's own modules, which its resolvers mark external.
+  const { external: _clientExternal, ...inherited } = rolldownOptions ?? legacyRollupOptions ?? {};
   environment.build = {
     ...build,
     // The packer walks the CLIENT environment's outDir (`build.dist`) and
@@ -853,6 +877,18 @@ export function buildPlugins(
         throw new Error(
           "[zeroship] vite build --watch is not supported: the worker and the .zship are built " +
             "once per `vite build`. Use `pnpm dev` for a rebuilding server.",
+        );
+      }
+      const workerBuild = userConfig.environments?.[ZEROSHIP_ENVIRONMENT]?.build;
+      if (
+        isBuild &&
+        (workerBuild?.rollupOptions?.external != null || workerBuild?.rolldownOptions?.external != null)
+      ) {
+        throw new Error(
+          `[zeroship] environments.${ZEROSHIP_ENVIRONMENT}.build.rollupOptions.external is not ` +
+            "supported: the worker bundles everything but the runtime's own modules, so an external " +
+            "would leave an import the runtime cannot answer. Let the build bundle the module, or point " +
+            "it at a stub module with `resolve.alias`.",
         );
       }
       // `builder` makes `vite build` build every environment through

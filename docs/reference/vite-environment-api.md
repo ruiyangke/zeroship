@@ -93,10 +93,13 @@ evaluation time. That single fact decides everything below.
 **Resolvable:**
 
 - `zeroship` — the kernel module ([above](#the-zeroship-module)).
-- `node:*` built-ins — a supported set. The runtime owns `node:async_hooks`,
-  `node:buffer`, `node:crypto`, `node:events`, `node:path`, `node:util`,
-  `node:zlib`, and `node:os` (plus `node:net` and `node:tls` where the plan
-  allows); the rest are polyfilled at build time. Bare `Buffer`, `process`,
+- `node:*` built-ins — a supported set. Your server code reaches the runtime's
+  own implementations of `node:async_hooks`, `node:buffer`, `node:crypto`,
+  `node:path` and `node:util`; every other built-in, `node:events`,
+  `node:os`, `node:zlib`, `node:net` and `node:tls` included, is
+  polyfilled at build time. Import one by either name
+  (`path` or `node:path`); a dependency's CommonJS `require` of one works
+  too. Bare `Buffer`, `process`,
   `global`, `setImmediate`, and `clearImmediate` resolve to the same
   implementations. See [node-compat.md](node-compat.md).
 - npm packages and your own modules — bundled server-side. A package may carry
@@ -113,9 +116,11 @@ evaluation time. That single fact decides everything below.
   bundle this dependency or provide a runtime module adapter.
   ```
 
-  The deployed artifact answers differently (the module is simply absent from
-  the bundle), but the rule is the same: if it does not bundle, it does not
-  exist at runtime.
+  `vite build` refuses a worker that would still import or `require` such a
+  module, naming it (`server executable contains an unbundled import:
+  <specifier>`, `server executable requires <specifier> without bundling
+  it`). The rule is the same in both tiers: if it does not bundle, it does
+  not exist at runtime.
 - **Reserved specifiers.** `zeroship`, `zeroship.js`, and the `zeroship:`
   prefix are host-provided; creator artifacts must not supply them.
 - **`zeroship` subpaths.** Only the bare specifier exists.

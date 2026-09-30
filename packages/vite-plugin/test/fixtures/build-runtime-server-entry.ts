@@ -7,7 +7,7 @@
 // to a temporary root, because the build writes its `dist` there.
 
 import assert from "node:assert/strict";
-import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -18,9 +18,45 @@ const source = fileURLToPath(new URL("./runtime-server-entry/", import.meta.url)
 const plugins = fileURLToPath(new URL("../../src/plugins.ts", import.meta.url));
 const sdk = (path: string) => fileURLToPath(new URL(`../../../${path}`, import.meta.url));
 
+// A CommonJS dependency as TypeScript emits one under `esModuleInterop`:
+// `import path from "path"` becomes `__importDefault(require("path")).default`,
+// which reads the `default` of the CommonJS view of an ES module.
+const REQUIRES_BUILTINS = `"use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+  return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+const path = require("path");
+const path_1 = __importDefault(require("path"));
+const zeroship = require("zeroship");
+const process = require("process");
+const timers = require("timers/promises");
+const { createRequire } = require("module");
+// An optional dependency that is not installed: the require throws and the
+// fallback is taken.
+let optional;
+try {
+  optional = require("absent-optional");
+} catch (error) {
+  optional = error;
+}
+exports.optional = () => optional instanceof Error ? "fallback" : "present";
+exports.joined = () => path.join("c", "d");
+exports.tsDefaultJoined = () => path_1.default.join("g", "h");
+exports.kernel = () => typeof zeroship.env.probe.kind;
+exports.processEnv = () => typeof process.env;
+exports.slept = () => timers.setTimeout(1, "slept");
+exports.requiredByCreateRequire = () => createRequire("/")("path").join("i", "j");
+`;
+
 const root = await mkdtemp(join(tmpdir(), "zs-runtime-server-entry-"));
 try {
   await cp(source, root, { recursive: true });
+  // A CommonJS dependency, written here because node_modules is not tracked.
+  await mkdir(join(root, "node_modules", "requires-path"), { recursive: true });
+  await writeFile(join(root, "node_modules", "requires-path", "package.json"),
+    JSON.stringify({ name: "requires-path", main: "index.js" }));
+  await writeFile(join(root, "node_modules", "requires-path", "index.js"), REQUIRES_BUILTINS);
   await writeFile(join(root, "vite.config.mjs"), `import { zeroshipPlugins } from ${JSON.stringify(plugins)};
 
 function greeting() {

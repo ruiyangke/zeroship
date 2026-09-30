@@ -241,6 +241,17 @@ Every `node:` import is classified at build time:
   `node:events`, `node:net`, `node:os`, `node:tls`, `node:zlib`.
 - **General polyfill** — everything else, when one exists.
 
+Import a built-in by either name: `path` and `node:path` reach the same
+module. The built worker imports a runtime-native module by its `node:` name,
+the only name the runtime resolves. A dependency's CommonJS `require` of a
+built-in reaches the same module as an `import` of it, in `vite build` and in
+`pnpm dev` alike: the isolate has no `require`, so the require is compiled to
+an import. What the require returns for an ES module is its namespace object:
+named exports are getters, and `require(x)` is not `require(x).default`. Feature
+detection such as `try { require("crypto") } catch {}` succeeds for the five
+runtime-native modules. `vite build` refuses a worker that would still
+`require` a module it did not bundle, naming the module.
+
 The general polyfill is what makes imports like `node:url`, `node:querystring`
 and `node:string_decoder` work. A function it does not implement throws an
 `Error` whose message names the function and ends `is not implemented yet!`, at
@@ -253,11 +264,17 @@ The purpose-built replacements are:
 
 - **`node:timers/promises`** — `setTimeout(ms, value)`, `setImmediate(value)` and
   `setInterval(ms, value)`, where `setInterval` is an async generator you can
-  `for await` over. There is no `scheduler` object and no `AbortSignal`
-  argument.
-- **`node:module`** — `createRequire()` returns a callable no-op; `builtinModules`
-  is empty, `isBuiltin` returns `false`, and `syncBuiltinESMExports` does
-  nothing. There is no working CommonJS `require`.
+  `for await` over. There is no `scheduler` object. None of them takes an
+  `AbortSignal`: passing `{ signal }` throws a `TypeError` with code
+  `ERR_ZEROSHIP_UNSUPPORTED_OPTION` rather than a timer that never aborts.
+- **`node:module`** — `createRequire()` returns a require that answers the five
+  runtime-native modules, by either name, with their native namespaces, and
+  throws an `Error` with code `MODULE_NOT_FOUND`, naming the module, for any
+  other specifier: there is no CommonJS loader behind it. `createRequire()`
+  itself never throws, so an optional `require` in `try`/`catch` takes its
+  fallback, in the built worker and in `pnpm dev` alike. `builtinModules`
+  lists the five runtime-native modules, `isBuiltin` answers for them, and
+  `syncBuiltinESMExports` does nothing.
 - **`node:process`** — re-exports the runtime's `process` global, so bare
   `process`, the module default and `globalThis.process` are one object, and adds
   named fallbacks so code that destructures `cwd`, `chdir`, `exit`, `nextTick`,
