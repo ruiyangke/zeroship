@@ -3,11 +3,11 @@
 // Playwright's own downloaded browsers are dynamically linked against a
 // standard FHS layout (/lib64/ld-linux-x86-64.so.2, a system libnss, ...).
 // NixOS has none of that, so a browser fetched by `playwright install`
-// cannot start here at all. Measured on this box with PLAYWRIGHT_BROWSERS_PATH
-// unset:
+// cannot start here at all. With PLAYWRIGHT_BROWSERS_PATH unset, a launch looks
+// in Playwright's own cache, under the revision its release names:
 //
 //   Error: browserType.launch: Executable doesn't exist at
-//   ~/.cache/ms-playwright/chromium_headless_shell-1208/.../chrome-headless-shell
+//   ~/.cache/ms-playwright/chromium_headless_shell-<revision>/.../chrome-headless-shell
 //
 // Two things DO work:
 //

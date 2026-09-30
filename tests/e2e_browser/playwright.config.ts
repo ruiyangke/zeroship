@@ -26,11 +26,9 @@ export default defineConfig({
   },
   projects: [
     {
-      // The browser comes from PLAYWRIGHT_BROWSERS_PATH, which has to hold the
-      // Chromium build the pinned @playwright/test names; global setup
-      // launches it first and fails naming both when it cannot. Browsers
-      // downloaded by `playwright install` do not load their libraries on
-      // NixOS.
+      // The browser comes from the development shell's
+      // PLAYWRIGHT_BROWSERS_PATH, and global setup launches it first. Why
+      // @playwright/test has to match it: xtask/tests/playwright_browsers.rs.
       name: "chromium",
       use: { ...devices["Desktop Chrome"] },
     },

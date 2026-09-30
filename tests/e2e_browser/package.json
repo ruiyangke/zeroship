@@ -9,7 +9,7 @@
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "@playwright/test": "1.58.2",
+    "@playwright/test": "catalog:",
     "@types/node": "catalog:",
     "@zeroship/server": "workspace:*",
     "selfsigned": "^5.5.0",

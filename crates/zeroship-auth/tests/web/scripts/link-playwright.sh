@@ -33,12 +33,6 @@ if [ -z "$CAND" ] || [ ! -e "$CAND/package.json" ]; then
   exit 1
 fi
 
-VERSION="$(node -p 'require(process.argv[1]).version' "$CAND/package.json")"
-if [ "$VERSION" != "1.58.2" ]; then
-  echo "FATAL: expected @playwright/test 1.58.2, found $VERSION at $CAND" >&2
-  exit 1
-fi
-
 mkdir -p "$PROJECT_DIR/node_modules/@playwright"
 ln -sfn "$CAND" "$PROJECT_DIR/node_modules/@playwright/test"
 echo "linked @playwright/test -> $CAND"

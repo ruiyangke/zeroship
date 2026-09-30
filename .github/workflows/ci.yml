@@ -241,6 +241,11 @@ jobs:
       - name: Repository dependency and feature contracts
         if: ${{ !cancelled() }}
         run: cargo xtask test repository
+      # No CI job runs a Playwright suite, so this is where a flake.lock bump
+      # that leaves the workspace's Playwright behind fails.
+      - name: Playwright matches the development shell's browsers
+        if: ${{ !cancelled() }}
+        run: cargo xtask test playwright-browsers
       # deploy/compose/docker-compose.yml HAS NO AUTOMATED CHECK as of
       # 2026-08-21. Four steps stood here - named volumes on stateful services,
       # 0.0.0.0 published only by the edge, secret strength, and a worker flag

@@ -49,11 +49,14 @@ It does NOT cover the `zeroship-auth` binary's own startup (argument parsing,
 secret-file loading, the readiness gate). Those are process-level contracts owned
 by `config_env_tier` and `check_config_smtp_test`.
 
-You must be inside the nix env: the runner is nix `playwright` 1.58.2 with
-`PLAYWRIGHT_BROWSERS_PATH`, and `scripts/link-playwright.sh` points the local
-`@playwright/test` at the runner's own copy. npm-downloaded browsers cannot link
-their libraries on NixOS. Do not install a different Playwright version - version
-skew breaks browser launch.
+You must be inside the nix env: the runner is the development shell's own
+`playwright`, which launches the shell's browsers from `PLAYWRIGHT_BROWSERS_PATH`
+and so matches them by construction (the constraint is explained in
+`xtask/tests/playwright_browsers.rs`). Before spawning it, `run_playwright` in
+`auth_ui.rs` runs `scripts/link-playwright.sh`, which points the specs'
+`@playwright/test` at the runner's own copy; that is why this directory declares
+no Playwright dependency. Do not install Playwright here: a second copy splits
+the specs from the runner.
 
 ## Not in CI, deliberately
 

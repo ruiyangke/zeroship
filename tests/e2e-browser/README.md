@@ -47,12 +47,13 @@ So the bar here is not "the tests pass". It is that a demo which cannot work
 ## Three environment hazards this tier handles
 
 **1. NixOS cannot run Playwright's own browsers.** They are linked against a
-standard FHS layout that does not exist here. Measured with
-`PLAYWRIGHT_BROWSERS_PATH` unset:
+standard FHS layout that does not exist here. With `PLAYWRIGHT_BROWSERS_PATH`
+unset, a launch looks in Playwright's own cache, under the revision its release
+names:
 
 ```
 Error: browserType.launch: Executable doesn't exist at
-~/.cache/ms-playwright/chromium_headless_shell-1208/.../chrome-headless-shell
+~/.cache/ms-playwright/chromium_headless_shell-<revision>/.../chrome-headless-shell
 ```
 
 `src/browser.ts` uses the **system** chromium via `executablePath` (Nix built it

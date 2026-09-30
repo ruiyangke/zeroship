@@ -38,6 +38,9 @@ the full stance.
 Prerequisites: a stable Rust toolchain, plus Node.js and pnpm at the versions
 declared by `package.json`. Live database and end-to-end suites use the services
 and ports declared by `deploy/compose/docker-compose.yml`; Docker is required.
+The Playwright browser suites and `cargo xtask test playwright-browsers` also
+need Nix: the suites run inside `nix develop`, and the check reads `flake.nix`
+(`xtask/README.md` lists what it needs).
 
 **First, initialize the submodule** - the workspace won't resolve without it:
 

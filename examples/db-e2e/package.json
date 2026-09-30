@@ -18,7 +18,7 @@
   "devDependencies": {
     "@types/node": "catalog:",
     "@zeroship/types": "workspace:*",
-    "playwright": "1.58.2",
+    "playwright": "catalog:",
     "vitest": "^4.1.7",
     "typescript": "catalog:",
     "vite": "catalog:",

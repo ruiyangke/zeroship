@@ -48,3 +48,24 @@ is the suite-database provisioner, spawned as a child process by
 `tests/live_suite_db.rs`; service tests include preflight source from
 `tests/fixtures/platform_db/`. Its integration tests own PostgreSQL containers
 and generated overlays. No helper package or optional test feature is required.
+
+## Playwright and the development shell's browsers
+
+`cargo xtask test playwright-browsers` checks that the workspace's Playwright
+is the release the development shell's browsers were built for.
+`tests/playwright_browsers.rs` explains why that has to hold and what each check
+reads. It is the one area that needs Nix, and it needs three things:
+
+- Nix installed (https://nixos.org/download). The check enables the
+  `nix-command` and `flakes` features on each `nix` call, so a default
+  configuration works, and it reads `flake.nix` with `nix eval` rather than
+  from the calling shell's environment.
+- `pnpm install` completed, since it reads the installed `playwright-core`.
+- The shell's browsers in the Nix store. Entering `nix develop` builds them.
+
+```console
+cargo xtask test playwright-browsers
+```
+
+CI runs it inside the development shell. Without Nix, run the other areas;
+this one refuses with a message that says what is missing.

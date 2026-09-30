@@ -163,6 +163,20 @@ fn run_playwright(
         "the browser specs are expected at {}",
         web.display()
     );
+    // Before the runner starts, because the first thing it loads is
+    // `playwright.config.ts`, which imports `@playwright/test` as an ES module:
+    // the resolution that needs this link happens before any global setup runs.
+    let link = Command::new("bash")
+        .arg(web.join("scripts/link-playwright.sh"))
+        .output()
+        .expect("spawn `bash scripts/link-playwright.sh`");
+    assert!(
+        link.status.success(),
+        "link the specs' @playwright/test to the runner's copy ({}):\n{}{}",
+        link.status,
+        String::from_utf8_lossy(&link.stdout),
+        String::from_utf8_lossy(&link.stderr)
+    );
     Command::new("playwright")
         .arg("test")
         .current_dir(&web)

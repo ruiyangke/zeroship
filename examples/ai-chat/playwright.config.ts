@@ -21,11 +21,9 @@ export default defineConfig({
   },
   projects: [
     {
-      // Browser comes from the version-matched Nix package via
-      // PLAYWRIGHT_BROWSERS_PATH — run inside `nix develop` (which sets it).
-      // npm @playwright/test is pinned to the nixpkgs playwright-driver
-      // version (1.58.2) so the chromium revision matches; the npm-downloaded
-      // browsers can't link their libs on NixOS, the Nix ones can.
+      // Browser comes from the development shell's PLAYWRIGHT_BROWSERS_PATH:
+      // run inside `nix develop`. Why @playwright/test has to match it:
+      // xtask/tests/playwright_browsers.rs.
       name: "chromium",
       use: { ...devices["Desktop Chrome"] },
     },

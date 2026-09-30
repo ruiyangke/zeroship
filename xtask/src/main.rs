@@ -71,6 +71,9 @@ enum Suite {
     Migrations,
     /// Check workspace dependency and feature declarations.
     Repository,
+    /// Check the workspace's Playwright against the development shell's
+    /// browsers. Needs Nix, `pnpm install` and the shell's browsers built.
+    PlaywrightBrowsers,
     /// Run workflow crates, runtime, control-plane, SDK and example tests.
     Workflow,
     /// Run storage crate tests and the examples' Vitest/Playwright suites.
@@ -155,6 +158,18 @@ fn main() -> ExitCode {
                 "harness unit tests",
             )
         }),
+        Task::Test {
+            suite: Suite::PlaywrightBrowsers,
+        } => checked(
+            cargo().args([
+                "test",
+                "--manifest-path",
+                "xtask/Cargo.toml",
+                "--test",
+                "playwright_browsers",
+            ]),
+            "playwright browsers",
+        ),
         Task::Test {
             suite: Suite::Workflow,
         } => workflow::run(),

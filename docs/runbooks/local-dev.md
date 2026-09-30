@@ -10,6 +10,8 @@ Get a working zeroship stack on your machine. Build the JS SDKs first, then the 
 - PostgreSQL running locally if you run the control plane, full platform, or
   Postgres-backed tests
 - Docker only if you want the compose stack
+- Nix for the Playwright browser suites, which run inside `nix develop`, and
+  for `cargo xtask test playwright-browsers`
 
 ## First-time bootstrap
 
@@ -244,6 +246,11 @@ cargo xtask test worker
 cargo test -p zeroship-runtime --lib
 cargo test -p compio-postgres -- --test-threads=1
 ```
+
+The Playwright suites launch the browsers `nix develop` exports as
+`PLAYWRIGHT_BROWSERS_PATH`, so run them inside it. After `pnpm install`,
+`cargo xtask test playwright-browsers` checks that the installed Playwright is
+the release those browsers were built for; `xtask/README.md` lists what it needs.
 
 ### Test database ownership
 

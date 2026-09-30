@@ -1,17 +1,6 @@
-import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
-
-const here = dirname(fileURLToPath(import.meta.url));
 
 export default async function globalSetup(): Promise<void> {
-  const link = join(here, "scripts", "link-playwright.sh");
-  const linkResult = spawnSync("bash", [link], { stdio: "inherit" });
-  if (linkResult.status !== 0) {
-    throw new Error(`link-playwright.sh exited ${linkResult.status}`);
-  }
-
   const rawBaseURL = process.env.ZEROSHIP_AUTH_UI_BASE_URL;
   if (!rawBaseURL) {
     throw new Error("ZEROSHIP_AUTH_UI_BASE_URL is required");

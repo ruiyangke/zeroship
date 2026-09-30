@@ -23,7 +23,7 @@
     "react-dom": "catalog:react18"
   },
   "devDependencies": {
-    "@playwright/test": "1.58.2",
+    "@playwright/test": "catalog:",
     "@types/react": "catalog:react18",
     "@types/react-dom": "catalog:react18",
     "typescript": "catalog:",

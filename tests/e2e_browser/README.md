@@ -86,13 +86,11 @@ report `skipped`.
 
 ### The browser has to match the pinned Playwright
 
-`@playwright/test` is the workspace's pinned version, and each Playwright
-release launches one Chromium build, looked up by revision under
-`PLAYWRIGHT_BROWSERS_PATH`. `nix develop` points that variable at the
-flake's `playwright-driver` browsers; browsers downloaded by
-`playwright install` do not load their libraries on NixOS. When the directory
-does not hold the build the pinned version names, step 1 of setup fails,
-naming the pinned version and the path.
+The browser comes from the development shell's `PLAYWRIGHT_BROWSERS_PATH`, and
+`@playwright/test` has to be the release those browsers were built for; the
+constraint and its check are explained in `xtask/tests/playwright_browsers.rs`.
+When the directory does not hold the build, step 1 of setup fails, naming the
+installed version and the path.
 
 ## `*.localhost` addressing
 

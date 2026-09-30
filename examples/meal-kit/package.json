@@ -17,7 +17,7 @@
   "devDependencies": {
     "@axe-core/playwright": "^4.11.0",
     "@gather/meal-kit": "workspace:*",
-    "@playwright/test": "1.58.2",
+    "@playwright/test": "catalog:",
     "@types/node": "catalog:",
     "@zeroship/db": "workspace:*",
     "@zeroship/migrate": "workspace:*",

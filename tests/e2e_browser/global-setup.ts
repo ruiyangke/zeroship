@@ -19,7 +19,9 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
     throw new Error(
       `@playwright/test ${runner} could not launch Chromium from PLAYWRIGHT_BROWSERS_PATH=` +
       `${process.env.PLAYWRIGHT_BROWSERS_PATH ?? "(unset)"}, which has to hold the Chromium build ` +
-      "this Playwright version names.",
+      "this Playwright version names. A shell entered before a flake.lock change exports the old " +
+      "browsers: re-enter `nix develop`. `cargo xtask test playwright-browsers` names both sides " +
+      "and the fix (xtask/tests/playwright_browsers.rs).",
       { cause: error },
     );
   });

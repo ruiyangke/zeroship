@@ -25,7 +25,7 @@
   },
   "devDependencies": {
     "@types/node": "catalog:",
-    "@playwright/test": "1.58.2",
+    "@playwright/test": "catalog:",
     "@testing-library/dom": "^10.4.1",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
@@ -33,7 +33,7 @@
     "@types/react-dom": "catalog:react18",
     "@zeroship/types": "workspace:*",
     "jsdom": "^29.1.1",
-    "playwright": "1.58.2",
+    "playwright": "catalog:",
     "selfsigned": "^5.5.0",
     "smol-toml": "^1.8.0",
     "tar": "^7.5.13",
