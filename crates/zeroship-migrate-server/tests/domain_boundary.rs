@@ -50,7 +50,7 @@ fn the_migration_service_carries_no_foreign_domain_vocabulary() {
     assert!(
         offenders.is_empty(),
         "the migration service names a foreign domain. Move the knowledge into that \
-         domain's own crate and send it as a schema bundle:\n{}",
+         domain's own crate; a platform-owned schema arrives through db/migrations-ts:\n{}",
         offenders.join("\n")
     );
 }

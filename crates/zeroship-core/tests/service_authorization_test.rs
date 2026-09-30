@@ -56,7 +56,6 @@ const CATALOG: &[ServiceEndpoint] = &[
     endpoints::CONTROL_ERASURE_PREFLIGHT,
     endpoints::WORKER_DISPATCH,
     endpoints::WORKER_APP_LOGS,
-    endpoints::MIGRATE_SCHEMA_BUNDLE,
 ];
 
 /// The principals the table grants to, which must each own exactly one row.
@@ -399,12 +398,6 @@ fn endpoint_catalog_records_exact_measured_operations() {
             "GET",
             "/internal/v1/cdc/subscribe",
         ),
-        (
-            endpoints::MIGRATE_SCHEMA_BUNDLE,
-            "migrate-server",
-            "POST",
-            "/v1/schema-bundles/apply",
-        ),
     ] {
         assert_endpoint(endpoint, destination, method, path_template);
         recorded.insert(endpoint);
@@ -489,10 +482,6 @@ fn measured_allowlist_is_encoded_and_enforced_row_by_row() {
             // read. The worker is NOT granted it: it holds the artifacts and
             // derives the same summary from them.
             endpoints::CONTROL_DEPLOY_REGISTRATION,
-            // The manager is the ONE principal that may install a platform
-            // schema in a creator database, because it is the one that owns the
-            // artifacts.
-            endpoints::MIGRATE_SCHEMA_BUNDLE,
         ],
         all,
     );

@@ -31,7 +31,6 @@ pub mod pkce;
 pub mod project_data_key;
 pub mod readiness;
 pub mod replication_names;
-pub mod schema_bundle;
 pub mod schema_name;
 pub mod service_assertion;
 pub mod service_identity;

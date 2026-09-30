@@ -585,17 +585,8 @@ services:
       # Compose used to leave this unset, which defaulted it to
       # `{issuer}/.well-known/jwks.json` and sent it out through the edge.
       ZEROSHIP_AUTH_PLATFORM_JWKS_URL: http://auth:9092/oauth2/.well-known/jwks.json
-      # The public halves of its peers, and the ONLY thing that makes the
-      # schema-bundle endpoint answerable: without a bundle it refuses every
-      # call with `schema_bundle_unconfigured` and names this setting. That is
-      # the endpoint the workflow manager installs app journals through, so it
-      # is configured here rather than discovered at the first provision. No
-      # key of its own is mounted - migrate-server verifies callers and
-      # presents no assertion of its own.
-      ZEROSHIP_MIGRATE_SERVER_SERVICE_PEERS_FILE: /etc/zeroship/secrets/service-peers.json
     volumes:
       - ../ops/zeroship.toml:/etc/zeroship/zeroship.toml:ro
-      - ${ZEROSHIP_SECRETS_DIR:-./secrets}/service-peers.json:/etc/zeroship/secrets/service-peers.json:ro
       # The privileged DSN the provision setting above references. Same file,
       # same container path and same `zeroship dev init` output as the
       # `migrate` one-shot's mount; deploy/scripts/deploy-remote.sh discovers
@@ -664,14 +655,13 @@ services:
       # without it, because the retention lane's replies are what it verifies.
       ZEROSHIP_WORKFLOW_SERVICE_KEY_FILE: /etc/zeroship/secrets/svc-workflow.pem
       ZEROSHIP_WORKFLOW_SERVICE_PEERS_FILE: /etc/zeroship/secrets/service-peers.json
-      # The two peers this service dials, by their address on this network
-      # rather than by a public name: Control for deployment-queue retention,
-      # and the migration service for installing and upgrading app journals.
+      # The one peer this service dials, Control, by its address on this
+      # network rather than by a public name.
       #
       # `Transport::configuration` in zeroship-workflow-client admits plain http
       # to a loopback IP LITERAL, or to an exact origin named below. Nothing
-      # here terminates TLS between containers, so both peers are named. Read
-      # the fence's own comment before adding a third: the list decides WHICH
+      # here terminates TLS between containers, so the peer is named. Read
+      # the fence's own comment before adding another: the list decides WHICH
       # peer may be reached in clear and cannot make plaintext safe, a service
       # assertion carries no digest of the request it accompanies, and the list
       # belongs to the PROCESS rather than to one client. Every origin here is

@@ -691,15 +691,13 @@ The rows, by principal:
 - `svc/auth` reaches the gateway's back-channel logout endpoint and Control's erasure preflight. It
   holds no shared key: that single call is on an assertion precisely so the process rendering the
   login form does not also hold the route table, the version feed and both reconcile triggers.
-- `svc/workflow` reaches both of Control's deployment-hold pairs, Control's app-facts read, and the
-  migration service's schema bundle apply. The journal-scoped pair is the direct one `svc/worker`
+- `svc/workflow` reaches both of Control's deployment-hold pairs, Control's app-facts read and
+  Control's deploy registration. The journal-scoped pair is the direct one `svc/worker`
   also holds, and the service reaches it because a journal hold is decided and recorded where the
   journal is while Control is where it takes effect on the deploy catalog; Control admits the
   service there by its role and reads no placement, because a non-worker caller has none. The
   app-facts read is how the workflow manager gets the policy inputs and the deletion marker, which
-  is why it holds no grant on `zeroship.apps` policy columns or on `zeroship.plans`. Routing the
-  bundle through Control would move workflow artifacts into Control, which is the leak the bundle
-  path removes.
+  is why it holds no grant on `zeroship.apps` policy columns or on `zeroship.plans`.
 - `svc/gateway` reaches Control's route feed and the worker's dispatch endpoint.
 - `svc/worker` reaches Control's version, app, environment, data-key and binding reads, Control's
   direct deployment-hold pair, its own retire and renew, the workflow register, assignment, renew,
@@ -886,7 +884,7 @@ row, it is revoked by a cutoff both arms consult.
 | --- | --- | --- |
 | `gateway.signing_key_file` and its previous-key pair | gateway | Signs the app-session cookie. |
 | `gateway.service_key_file` | gateway | Mints dispatch assertions **and** signs identity envelopes. |
-| `*.service_peers_file` | every service | Peer public halves, indexed by issuer. |
+| `*.service_peers_file` | control, gateway, auth, worker, workflow | Peer public halves, indexed by issuer. |
 | `gateway.stash_signing_key` | gateway | MACs the PKCE, state and nonce stash cookie. |
 | `pairwise_salt` | gateway, control | The `pws_` projection. Permanent; rotating it re-keys every app's stored user references. |
 | `anchor_enc_key` (derived at boot) | gateway | AES-256-GCM for the refresh family at rest. |

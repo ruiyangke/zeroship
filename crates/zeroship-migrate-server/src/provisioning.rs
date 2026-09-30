@@ -108,12 +108,11 @@ pub(crate) fn migrator_executor_config(
 /// Idempotently create one schema and the least-privilege migrator role that
 /// owns it.
 ///
-/// Schema-addressed, and it serves the PLATFORM schema-bundle path, whose
-/// schemas no database entity names and whose owner is therefore derived from
-/// the schema text. A CREATOR database's schema is not created here: the
-/// cluster reconciler owns that, because the schema's owner and its two
-/// capability roles are derived from the database id and must be minted in one
-/// transaction with the epoch row that names them.
+/// Schema-addressed: the owner is derived from the schema text, because no
+/// database entity names the schema. A CREATOR database's schema is not created
+/// here: the cluster reconciler owns that, because the schema's owner and its
+/// two capability roles are derived from the database id and must be minted in
+/// one transaction with the epoch row that names them.
 pub async fn provision_database(
     admin: &Client,
     schema: &str,
@@ -289,12 +288,6 @@ pub const AUDIT_UNMASK_TABLE: &str = "__zeroship_audit_unmask";
 /// The migration service owns this DDL so the creator runtime emits no schema
 /// changes. The table stays in the app schema and the runtime writes it through
 /// ordinary parameterized SQL.
-///
-/// # Ordering against the runtime role
-///
-/// Runtime role provisioning must run after this table is created so its broad
-/// table and sequence grants include the audit objects. The apply path repeats
-/// role provisioning after migration execution for the same reason.
 ///
 /// # Idempotence
 ///

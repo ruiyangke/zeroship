@@ -334,8 +334,6 @@ pub struct MigrateServerSection {
     pub execution_zone: Option<String>,
     /// Seconds between cluster reconciliation passes; zero disables the loop.
     pub reconcile_interval_seconds: Option<u64>,
-    /// Issuer-bound peer verification keys for inbound platform-service calls.
-    pub service_peers_file: Option<std::path::PathBuf>,
 }
 
 /// Platform-schema migrate one-shot values supplied by the overlay.

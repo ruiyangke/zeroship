@@ -11,7 +11,6 @@ mod jobs;
 mod journal;
 mod policy;
 mod queue_holds;
-mod schema_bundles;
 mod transport;
 
 pub use app_facts::ControlAppFacts;
@@ -23,7 +22,6 @@ pub use journal::{
 };
 pub use policy::LeasedPolicy;
 pub use queue_holds::QueueDeploymentHolds;
-pub use schema_bundles::{SchemaBundles, MAX_BUNDLE_BYTES};
 pub use transport::Transport;
 
 use std::{sync::Arc, time::Duration};

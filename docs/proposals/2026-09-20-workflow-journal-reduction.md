@@ -976,12 +976,7 @@ contract, to hold no DDL on that schema. A service that must not be able to
 create tables there cannot be the thing that creates them.
 
 Step 1 landed instead as a platform migration,
-`db/migrations-ts/20260919000000_workflow_journal.ts`, which states that reason
-and one more: the migration service's schema-bundle path calls
-`provision_database` unconditionally, which would reassign the schema's owner
-and mint a login holding DML over the manager's queue. `journal.rs` remains the
-installer for a journal in a CREATOR schema, which is a different target with
-different owners.
+`db/migrations-ts/20260919000000_workflow_journal.ts`, which states that reason.
 
 The observation in this section holds; the inference drawn from it did not. A
 service being ABLE to install the journal somewhere is not evidence it is

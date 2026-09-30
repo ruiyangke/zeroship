@@ -163,11 +163,6 @@ pub const WORKER_JOIN_SIGNER_SERVICE_NAME: &str = "svc/worker-join-signer";
 pub const CONTROL_SERVICE_NAME: &str = "svc/control";
 /// The hierarchical name of the workflow manager's service identity.
 pub const WORKFLOW_SERVICE_NAME: &str = "svc/workflow";
-/// The hierarchical name of the migration service's identity.
-///
-/// It holds no endpoint grant of its own: the migration service is a
-/// DESTINATION, never a caller. The name exists so a caller can address it.
-pub const MIGRATE_SERVICE_NAME: &str = "svc/migrate-server";
 /// The hierarchical name of the auth service's identity.
 pub const AUTH_SERVICE_NAME: &str = "svc/auth";
 

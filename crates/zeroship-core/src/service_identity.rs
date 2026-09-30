@@ -620,14 +620,6 @@ pub mod endpoints {
         ServiceEndpoint::new("worker", "POST", "/dispatch/{app_id}");
     pub const WORKER_APP_LOGS: ServiceEndpoint =
         ServiceEndpoint::new("worker", "GET", "/logs/{app_id}");
-    /// Install or upgrade a platform-owned schema inside a creator database.
-    ///
-    /// Addressed by SCHEMA, carried in the body, because a creator database
-    /// holds many apps and the schema is not derivable from an app id. The
-    /// migration service authorizes this on the service identity alone - there
-    /// is no creator principal in a platform provisioning call.
-    pub const MIGRATE_SCHEMA_BUNDLE: ServiceEndpoint =
-        ServiceEndpoint::new("migrate-server", "POST", "/v1/schema-bundles/apply");
 }
 
 /// One individual principal and its machine-identity endpoint grants.
@@ -725,11 +717,6 @@ pub fn service_allowlist() -> &'static [ServiceAuthorization] {
                     // publish. Trusting Control for a manifest listing is
                     // strictly less than the policy authority above it.
                     endpoints::CONTROL_DEPLOY_REGISTRATION,
-                    // The manager owns WHEN a journal must exist, so it is the
-                    // one principal that may send a schema bundle. Routing this
-                    // through Control would move the workflow artifacts into
-                    // Control, which is the leak the bundle path removes.
-                    endpoints::MIGRATE_SCHEMA_BUNDLE,
                 ],
             ),
             ServiceAuthorization::new(

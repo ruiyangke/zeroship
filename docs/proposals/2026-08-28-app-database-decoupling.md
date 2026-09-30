@@ -138,8 +138,6 @@ build reaching a column the database lacks fails at query time with `42703 undef
   login is assumable by every app that login serves - every co-tenant of the database included -
   which is the reach `GRANT ... WITH SET FALSE` on the binding-to-database edge exists to deny.
   What an app may touch is carried by the two capability roles the reconciler minted.
-  `runtime_role_provisioning_sql` survives for PLATFORM schemas, whose one caller is the
-  schema-bundle applier.
 
   **The publication is the datastore's one shared object.**
   `zeroship_core::replication_names::DATASTORE_PUBLICATION` names it; a database's apply takes
@@ -924,13 +922,12 @@ A creator migration cannot widen the ACL back open: the CONFINED ceiling
 at `policies/confined-system-shape.inject.toml`) grants exactly `schema.create_table`,
 `schema.rename` and `safety.destructive_ops`, and a creator draft may only tighten.
 
-Two deletions ship with it, in `runtime_role_provisioning_sql`
-(`crates/zeroship-migrate-server/src/apply.rs`): the blanket
-`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA` and the prospective
-`ALTER DEFAULT PRIVILEGES` rules. Both must be deleted rather than supplemented, because a
-table-level grant alongside a column list returns the plaintext and `ALTER DEFAULT PRIVILEGES` has
-no column-list form. Every apply regenerates explicit per-column grants inside the same
-transaction as the DDL.
+No runtime role receives a creator schema's tables wholesale: neither a blanket
+`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA` nor a prospective
+`ALTER DEFAULT PRIVILEGES` rule is issued to one, and neither may be added beside the column
+grants, because a table-level grant alongside a column list returns the plaintext and
+`ALTER DEFAULT PRIVILEGES` has no column-list form. Every apply regenerates explicit per-column
+grants inside the same transaction as the DDL.
 
 **The audited path needs a role of its own, and that is the third piece.** Withholding the raw
 sibling from the capability roles also withholds it from `dispatch_unmask`, which reads it on the
@@ -2093,10 +2090,9 @@ app's requests and cannot protect a shared cluster from an app under its limit. 
 
     **A stale claim to retire with it.** That same skill says `migrate` creates "the per-app
     database role the runtime assumes on every `env.db` call", and that skipping it fails the first
-    database call "because that role does not exist". The creator apply establishes no such role:
-    `provision_runtime_app_role`'s only production caller is the schema-bundle applier in
-    `crates/zeroship-migrate-server/src/bundle.rs`, for platform schemas. What an app may touch is
-    carried by the two capability roles the reconciler mints.
+    database call "because that role does not exist". The creator apply establishes no such role,
+    and nothing in the migration service provisions one. What an app may touch is carried by the
+    two capability roles the reconciler mints.
 ---
 
 ## Do-not notes

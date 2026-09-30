@@ -8,15 +8,10 @@ use zeroship_authn::rate_limit::RateLimitDecision;
 use zeroship_authz::Action;
 use zeroship_core::DatabaseId;
 
-use zeroship_core::schema_bundle::{SchemaBundle, MIGRATE_AUDIENCE};
-use zeroship_core::service_assertion::presented_issuer;
-use zeroship_core::service_identity::{endpoints, verify_service_call};
-
 use crate::apply::{
     apply_error_kind, apply_ir_documents, ApplyMigrationsRequest, ApplyRequestError,
 };
 use crate::auth::AuthError;
-use crate::bundle::{apply_schema_bundle, BundleError};
 use crate::MigrationServiceState;
 
 /// JSON extractor budget for a migration apply request.
@@ -24,12 +19,6 @@ use crate::MigrationServiceState;
 /// The CLI posts its generated IR envelope verbatim, so this route needs an
 /// explicit budget above Ntex's small default while retaining a bounded body.
 const APPLY_REQUEST_BODY_BYTES: usize = 8 * 1024 * 1024;
-
-/// JSON extractor budget for a schema bundle.
-///
-/// A bundle carries the whole ordered series as SQL, so it is large but bounded
-/// by what the platform itself generates, not by anything a creator writes.
-const SCHEMA_BUNDLE_BODY_BYTES: usize = 4 * 1024 * 1024;
 
 /// THE APPROVAL AND POLICY ENDPOINTS ARE GONE, and their absence is the change
 /// rather than a gap.
@@ -50,109 +39,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .state(web::types::JsonConfig::default().limit(APPLY_REQUEST_BODY_BYTES))
             .route(web::post().to(apply)),
     )
-    .service(
-        web::resource(endpoints::MIGRATE_SCHEMA_BUNDLE.path_template())
-            .state(web::types::JsonConfig::default().limit(SCHEMA_BUNDLE_BODY_BYTES))
-            .route(web::post().to(schema_bundle)),
-    )
     .service(web::resource("/healthz").route(web::get().to(healthz)))
     .service(web::resource("/readyz").route(web::get().to(readyz)));
-}
-
-/// Install or upgrade a PLATFORM-owned schema inside a creator database.
-///
-/// # There is no app in this request, and that is the shape
-///
-/// A creator database holds the schemas of every app in it, so the target is not
-/// derivable from an app id and none is carried. Authorization is therefore not
-/// "does this creator own that app" - there is no creator here. It is "is this a
-/// platform service the allowlist grants this endpoint", decided on the service
-/// assertion alone.
-///
-/// # It is not throttled by the mutation rate limiter
-///
-/// That limiter is a per-source-IP control over creator-driven DDL, and a
-/// platform caller is ONE address issuing provisioning for the whole fleet;
-/// applying it here would throttle the fleet to a creator's quota. Replay of an
-/// assertion is already refused by the single-use claim store, and the operation
-/// is idempotent.
-pub async fn schema_bundle(
-    req: web::HttpRequest,
-    state: State<Arc<MigrationServiceState>>,
-    body: Json<SchemaBundle>,
-) -> web::HttpResponse {
-    let caller = match authorize_platform_service(&req, &state).await {
-        Ok(caller) => caller,
-        Err(response) => return response,
-    };
-    match apply_schema_bundle(&state.provision_dsn, &body).await {
-        Ok(outcome) => {
-            tracing::info!(
-                schema = %outcome.schema,
-                bundle = %outcome.bundle,
-                version = outcome.version,
-                action = ?outcome.action,
-                caller = %caller,
-                "migrate-server: applied schema bundle"
-            );
-            web::HttpResponse::Ok().json(&outcome)
-        }
-        Err(error) => schema_bundle_error_response(&error),
-    }
-}
-
-/// Authorize a platform service for the schema-bundle endpoint.
-///
-/// Returns the verified issuer so the log line names WHICH service provisioned.
-async fn authorize_platform_service(
-    req: &web::HttpRequest,
-    state: &MigrationServiceState,
-) -> Result<String, web::HttpResponse> {
-    let Some(peers) = state.peers.as_ref() else {
-        tracing::error!(
-            "migrate-server: schema bundle refused - no peer bundle is configured; set \
-             migrate_server.service_peers_file"
-        );
-        return Err(web::HttpResponse::ServiceUnavailable().json(&json!({
-            "error": "schema_bundle_unconfigured",
-            "detail": "this service verifies no platform peers",
-        })));
-    };
-    let header = req
-        .headers()
-        .get("authorization")
-        .and_then(|value| value.to_str().ok());
-    let issuer = presented_issuer(header).ok_or_else(|| {
-        web::HttpResponse::Unauthorized().json(&json!({"error": "unauthenticated"}))
-    })?;
-    verify_service_call(
-        peers.as_ref(),
-        header,
-        MIGRATE_AUDIENCE,
-        endpoints::MIGRATE_SCHEMA_BUNDLE,
-    )
-    .await
-    .map_err(|error| {
-        tracing::debug!(?error, "migrate-server: schema bundle assertion rejected");
-        web::HttpResponse::Unauthorized().json(&json!({"error": "unauthenticated"}))
-    })?;
-    Ok(issuer.as_str().to_owned())
-}
-
-fn schema_bundle_error_response(error: &BundleError) -> web::HttpResponse {
-    let (status, kind) = error.kind();
-    if status.is_server_error() {
-        tracing::error!(%error, "migrate-server: schema bundle failed");
-        return web::HttpResponse::build(status).json(&json!({
-            "error": kind,
-            "detail": "schema bundle service unavailable",
-        }));
-    }
-    tracing::warn!(%error, "migrate-server: schema bundle refused");
-    web::HttpResponse::build(status).json(&json!({
-        "error": kind,
-        "detail": error.to_string(),
-    }))
 }
 
 /// Liveness. Constant 200 by design: it must not touch Postgres, or a database
