@@ -39,7 +39,7 @@ use std::{
 };
 use zeroship_bundle::BlobStore;
 use zeroship_core::{
-    app_derivation, app_id::AppId, config::PlaintextPeers, schema_name::SchemaName,
+    app_id::AppId, config::PlaintextPeers,
     service_peers::ServiceAuth, workflow_coordination::AssignedScope,
 };
 use zeroship_data_v8::service::DbService;
@@ -388,10 +388,6 @@ impl WorkflowResourceProvider for ProductionResources {
         // A second hold from this side would name a scope the service does not
         // consult.
         Ok(WorkflowResources {
-            // DERIVED, never selected. The assignment names an app; the schema
-            // that app's data lives in follows from the app id alone, so
-            // placement metadata cannot point an execution at another tenant.
-            schema: app_schema(app)?,
             objects: PayloadObjects::open(self.objects.clone())?,
             artifacts: self.blob_store.clone(),
             max_source_bytes: usize::try_from(MAX_SOURCE_BYTES)
@@ -424,7 +420,6 @@ impl WorkflowContextProvider for SharedContexts {
             .ok_or_else(|| unavailable("workflow app environment is not loaded"))?;
         Ok(WorkflowAppContext {
             app: app.clone(),
-            schema: app_schema(app)?,
             env_vars: HashMap::new(),
             env: env.snapshot.clone(),
             limits: cache::runtime_limits_from_app(&info.runtime),
@@ -433,11 +428,6 @@ impl WorkflowContextProvider for SharedContexts {
             meter: Some(self.meter.clone()),
         })
     }
-}
-
-fn app_schema(app: &AppId) -> Result<SchemaName, WorkflowServiceError> {
-    SchemaName::new(&app_derivation::schema_name(app))
-        .map_err(|_| WorkflowServiceError::InvalidRequest("invalid app schema".into()))
 }
 
 fn unavailable(message: &str) -> WorkflowServiceError {

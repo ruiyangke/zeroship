@@ -155,7 +155,6 @@ impl Fixture {
     pub async fn new() -> Self {
         let directory = tempfile::tempdir().unwrap();
         let app = AppId::mint();
-        let schema = SchemaName::new(app.as_str()).unwrap();
         let policies = Arc::new(HostPolicies::default());
         let policy = install(&policies, app.clone());
         let deployments = deployment_fixture::Deployments::new().await;
@@ -166,7 +165,6 @@ impl Fixture {
         let contexts = Rc::new(Contexts {
             current: RefCell::new(WorkflowAppContext {
                 app: app.clone(),
-                schema: schema.clone(),
                 env_vars: HashMap::new(),
                 env: EnvSnapshot::new(BTreeMap::new(), BTreeMap::new(), Vec::new()),
                 limits: RuntimeLimits {
@@ -181,7 +179,6 @@ impl Fixture {
             calls: Cell::new(0),
         });
         let resources = WorkflowResources {
-            schema,
             objects: PayloadObjects::open(StorageStore::from_backend(Arc::new(LocalFs::new(
                 directory.path().join("objects"),
             ))))

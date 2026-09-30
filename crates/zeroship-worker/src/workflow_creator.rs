@@ -10,7 +10,7 @@ use crate::workflow_runtime::{
 };
 use std::{future::Future, rc::Rc, sync::Arc, time::Duration};
 use zeroship_bundle::BlobStore;
-use zeroship_core::{app_id::AppId, schema_name::SchemaName, workflow_coordination::AssignedScope};
+use zeroship_core::{app_id::AppId, workflow_coordination::AssignedScope};
 use zeroship_workflow_runner::{
     assignments::{CreatorFactory, CreatorRuntime},
     remote::RemoteBackend,
@@ -33,13 +33,8 @@ use zeroship_workflow_v8::V8TaskExecutor;
 /// per-execution context. Contexts resolve fresh env, limits, network policy and
 /// native peers for each execution.
 ///
-/// `schema` is the app's own creator schema, derived by the host from the app
-/// id rather than selected by placement metadata. It is what every execution's
-/// context is checked against, so a context naming another tenant's schema is
-/// refused before any isolate is built.
 #[derive(Clone)]
 pub struct WorkflowResources {
-    pub schema: SchemaName,
     pub objects: PayloadObjects,
     /// The artifact store a pinned deployment's bytes are read from. The
     /// service resolves WHICH deployment a claim is pinned to; this host loads
@@ -52,9 +47,7 @@ pub struct WorkflowResources {
 
 impl std::fmt::Debug for WorkflowResources {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("WorkflowResources")
-            .field("schema", &self.schema)
-            .finish_non_exhaustive()
+        f.debug_struct("WorkflowResources").finish_non_exhaustive()
     }
 }
 
@@ -164,7 +157,6 @@ impl<P: WorkflowResourceProvider> CreatorFactory for WorkflowCreatorFactory<P> {
                 let resources = self.provider.resolve(scope).await?;
                 let contexts = Rc::new(BoundContexts {
                     app: scope.app_id.clone(),
-                    schema: resources.schema.clone(),
                     source: resources.contexts,
                 });
                 contexts.resolve(&scope.app_id)?;
@@ -201,7 +193,6 @@ impl<P: WorkflowResourceProvider> CreatorFactory for WorkflowCreatorFactory<P> {
 
 struct BoundContexts {
     app: AppId,
-    schema: SchemaName,
     source: Rc<dyn WorkflowContextProvider>,
 }
 
@@ -211,7 +202,7 @@ impl WorkflowContextProvider for BoundContexts {
             return Err(WorkflowServiceError::PermissionDenied);
         }
         let context = self.source.resolve(app)?;
-        if context.app != self.app || context.schema != self.schema {
+        if context.app != self.app {
             return Err(WorkflowServiceError::PermissionDenied);
         }
         validate_context(&context)?;

@@ -2,7 +2,7 @@
 
 use std::{collections::HashMap, rc::Rc, sync::Arc};
 use zeroship_bundle::LoadedWorker;
-use zeroship_core::{app_derivation, app_id::AppId, schema_name::SchemaName};
+use zeroship_core::app_id::AppId;
 use zeroship_metering::Meter;
 use zeroship_runtime::{
     transport::net_policy::NetPolicy, EnvSnapshot, ModuleEntry, NativePlugin, Runtime,
@@ -20,7 +20,6 @@ use zeroship_workflow_v8::{LoadedWorkflow, WorkflowBinding, WorkflowRuntimeLoade
 #[derive(Clone)]
 pub struct WorkflowAppContext {
     pub app: AppId,
-    pub schema: SchemaName,
     pub env_vars: HashMap<String, String>,
     pub env: EnvSnapshot,
     pub limits: RuntimeLimits,
@@ -149,17 +148,6 @@ pub(crate) fn validate_context(context: &WorkflowAppContext) -> Result<(), Workf
         let namespace = peer.namespace();
         if namespace == "workflows" || !namespaces.insert(namespace) {
             return Err(invalid("conflicting workflow runtime native peers"));
-        }
-        if namespace == "db" {
-            // The V8 data adapter currently derives its physical schema from
-            // APP_ID; it exposes no public explicit DbBinding injection hook.
-            // Refuse a different host schema instead of opening the wrong one.
-            let expected = app_derivation::schema_name(&context.app);
-            if context.schema.as_str() != expected {
-                return Err(invalid(
-                    "workflow runtime database schema binding is unsupported",
-                ));
-            }
         }
     }
     Ok(())
@@ -399,9 +387,7 @@ mod tests {
             zeroship_runtime::init_v8();
             let directory = tempfile::tempdir().unwrap();
             let app = AppId::mint();
-            let tenant = app_derivation::schema_name(&app);
             let context = WorkflowAppContext {
-                schema: SchemaName::new(&tenant).unwrap(),
                 app: app.clone(),
                 env_vars: HashMap::from([
                     ("APP_ID".into(), "forged-app".into()),
@@ -600,7 +586,7 @@ mod tests {
     }
 
     #[compio::test]
-    async fn refuses_incompatible_schema_conflicting_peers_and_trusted_network() {
+    async fn refuses_conflicting_peers_and_trusted_network() {
         let fixture = Fixture::new().await;
         let executable = fixture.executable("export default {};", None).await;
         let assignment = fixture.assignment();
@@ -610,13 +596,9 @@ mod tests {
             .borrow_mut()
             .peers
             .push(Arc::new(Peer("db")));
-        // The normal creator schema is accepted before the rejection controls.
+        // A db peer on its own is accepted, so the refusals below are about the
+        // namespaces rather than about having one at all.
         drop(fixture.loader().load(&assignment, &executable).unwrap());
-        fixture.contexts.0.borrow_mut().schema = SchemaName::new("other_customer").unwrap();
-        assert!(matches!(
-            fixture.loader().load(&assignment, &executable),
-            Err(WorkflowServiceError::InvalidRequest(_))
-        ));
         fixture.contexts.0.borrow_mut().peers = vec![Arc::new(Peer("workflows"))];
         assert!(matches!(
             fixture.loader().load(&assignment, &executable),

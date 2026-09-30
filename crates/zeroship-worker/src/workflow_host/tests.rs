@@ -139,29 +139,3 @@ fn an_app_with_no_running_host_is_never_ready() {
     assert!(!apps.is_ready(&AppId::mint()));
 }
 
-/// An app schema answers the app it belongs to, and nothing else.
-///
-/// The host derives that schema from the app itself, and `app_derivation::schema_name`
-/// records what re-keying it would move. Two DIFFERENT apps are asserted to
-/// differ first, so "both answered the same schema" cannot pass over two apps
-/// that were secretly the same, and the inequality of their schemas is what
-/// separates a derivation from a constant.
-///
-/// What this does NOT catch: it binds the derivation, not the wiring. An edit
-/// that gave `resolve` some other way to reach a schema would leave this green.
-/// The compiler is what ties them together today - `resolve` has no other.
-#[test]
-fn an_app_schema_answers_the_app_it_belongs_to() {
-    let one = AppId::mint();
-    let two = AppId::mint();
-    assert_ne!(one.as_str(), two.as_str(), "the two apps must differ");
-
-    assert_eq!(
-        app_schema(&one).expect("app schema").as_str(),
-        one.as_str()
-    );
-    assert_ne!(
-        app_schema(&one).expect("app schema").as_str(),
-        app_schema(&two).expect("app schema").as_str()
-    );
-}

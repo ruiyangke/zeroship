@@ -42,24 +42,17 @@ async fn unknown_assignment_and_wrong_policy_are_refused_before_creator_io() {
 }
 
 #[compio::test]
-async fn initial_context_must_match_the_apps_derived_schema() {
-    for wrong_app in [false, true] {
-        let fixture = Fixture::new().await;
-        let other = AppId::mint();
-        if wrong_app {
-            fixture.contexts.current.borrow_mut().app = other;
-        } else {
-            fixture.contexts.current.borrow_mut().schema = SchemaName::new(other.as_str()).unwrap();
-        }
-        assert!(matches!(
-            fixture
-                .factory()
-                .open(&fixture.scope, &fixture.policy, fixture.ingress())
-                .await,
-            Err(WorkflowServiceError::PermissionDenied)
-        ));
-        assert_eq!(fixture.contexts.calls.get(), 1);
-    }
+async fn initial_context_must_name_the_assigned_app() {
+    let fixture = Fixture::new().await;
+    fixture.contexts.current.borrow_mut().app = AppId::mint();
+    assert!(matches!(
+        fixture
+            .factory()
+            .open(&fixture.scope, &fixture.policy, fixture.ingress())
+            .await,
+        Err(WorkflowServiceError::PermissionDenied)
+    ));
+    assert_eq!(fixture.contexts.calls.get(), 1);
 }
 
 #[compio::test]
@@ -149,15 +142,15 @@ async fn factory_executes_a_pinned_frontier_from_a_crossed_resolution() {
     );
 }
 
-/// A context that moves an installed creator's schema is refused at TASK LOAD,
-/// not only at assembly.
+/// A context that moves an installed creator to another app is refused at TASK
+/// LOAD, not only at assembly.
 ///
 /// The loader resolves fresh metadata for every execution, so a provider that
-/// starts answering with another tenant's schema must be refused there. The
-/// control is the same assignment executing again once the schema is restored:
-/// without it, a refusal for any other reason would also pass.
+/// starts answering for another tenant must be refused there. The control is the
+/// same assignment executing again once the app is restored: without it, a
+/// refusal for any other reason would also pass.
 #[compio::test]
-async fn dynamic_context_cannot_move_an_installed_creator_to_another_schema() {
+async fn dynamic_context_cannot_move_an_installed_creator_to_another_app() {
     zeroship_runtime::init_v8();
     let fixture = Fixture::new().await;
     // A workflow whose value stays INLINE, so the only call this execution makes
@@ -188,13 +181,13 @@ async fn dynamic_context_cannot_move_an_installed_creator_to_another_schema() {
         .await
         .unwrap();
     let assignment = fixture.assignment(&deploy_hash);
-    let original = fixture.contexts.current.borrow().schema.clone();
-    fixture.contexts.current.borrow_mut().schema = SchemaName::new(AppId::mint().as_str()).unwrap();
+    let original = fixture.contexts.current.borrow().app.clone();
+    fixture.contexts.current.borrow_mut().app = AppId::mint();
     assert!(matches!(
         execute(&runtime, &assignment).await,
         Err(WorkflowServiceError::PermissionDenied)
     ));
-    fixture.contexts.current.borrow_mut().schema = original;
+    fixture.contexts.current.borrow_mut().app = original;
     execute(&runtime, &assignment).await.unwrap();
     assert!(
         peer.served().await > 0,
