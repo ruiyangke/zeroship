@@ -133,12 +133,16 @@ Ingestion enforces these caps on every deploy:
 | --- | --- | --- |
 | Compressed artifact size | 256 MiB | `413` |
 | Decompressed archive size | 256 MiB | `413` |
-| `manifest.json` size | 1 MiB | `413` |
+| `manifest.json` size, in the archive and as stored | 1 MiB | `413` |
 | Single blob size | 16 MiB | `413` |
 | Blobs per deploy | 10 000 | `400` |
 
-A size refusal names the cap and the observed size. The deploy body must use
-content type `application/x-zship`; anything else is `415`.
+A size refusal names the cap and the observed size. The manifest cap applies
+twice. The `manifest.json` entry is checked as the archive carries it, before
+it is parsed. The manifest the platform stores is checked too: the archive's,
+canonicalized, with `deploy_hash` inserted (see below), so a manifest that fits
+the cap only without that field is refused before any blob is written. The
+deploy body must use content type `application/x-zship`; anything else is `415`.
 
 ## Deployment identity
 

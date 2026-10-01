@@ -535,6 +535,41 @@ async fn local_disk_writes_refuse_a_store_whose_directories_are_gone() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// A manifest over `MAX_MANIFEST_BYTES` is refused on write, because reads
+/// refuse it: a key must never hold bytes no reader can load. A manifest at
+/// the budget writes and reads back.
+#[compio::test]
+async fn local_disk_a_manifest_over_budget_is_refused_on_write() {
+    let root = tmpdir();
+    let store = LocalDiskBlobStore::new(root.clone()).unwrap();
+    let app_id = AppId::mint();
+    let cap = usize::try_from(zeroship_bundle::MAX_MANIFEST_BYTES).unwrap();
+    let at_budget = vec![b'x'; cap];
+    let over_budget = vec![b'x'; cap + 1];
+    let fits = sha256_hex(b"at-budget");
+    let over = sha256_hex(b"over-budget");
+
+    store.put_manifest(&app_id, &fits, &at_budget).await.unwrap();
+    let got = store.get_manifest(&app_id, &fits).await.unwrap();
+    assert_eq!(got.len(), cap);
+
+    let err = store
+        .put_manifest(&app_id, &over, &over_budget)
+        .await
+        .expect_err("a manifest over budget is refused");
+    assert!(matches!(err, BlobError::TooLarge), "unexpected error: {err:?}");
+    assert!(matches!(
+        store.get_manifest(&app_id, &over).await,
+        Err(BlobError::NotFound(_))
+    ));
+    assert_eq!(
+        dir_entries(&root.join("manifests").join(app_id.as_str())),
+        vec![format!("{fits}.json")]
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[compio::test]
 async fn local_disk_local_path_returns_sharded_path() {
     let root = tmpdir();

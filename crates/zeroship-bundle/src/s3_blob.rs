@@ -576,10 +576,7 @@ impl BlobStore for S3BlobStore {
         json: &[u8],
     ) -> Result<(), BlobError> {
         if json.len() as u64 > MAX_MANIFEST_BYTES {
-            return Err(BlobError::Backend(format!(
-                "manifest size {} exceeds MAX_MANIFEST_BYTES {MAX_MANIFEST_BYTES}",
-                json.len()
-            )));
+            return Err(BlobError::TooLarge);
         }
         let key = Self::manifest_key(app_id, deploy_hash);
         let opts = PutOptions {

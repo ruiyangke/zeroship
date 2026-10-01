@@ -21,6 +21,7 @@ use uuid::Uuid;
 use zeroship_bundle::s3_blob::PART_SIZE;
 use zeroship_bundle::{
     sha256_hex, BlobError, BlobStore, LocalDiskBlobStore, PutOutcome, S3BlobStore,
+    MAX_MANIFEST_BYTES,
 };
 
 use compio_s3::{S3Client, S3Config, S3Credentials};
@@ -569,6 +570,22 @@ async fn run_contract<S: BlobStore + ?Sized>(store: &S, tag: &str) {
     );
     let kept = store.get_manifest(&app_a, "deployone").await.expect("get a1 again");
     assert_eq!(kept.as_ref(), &manifest_a1[..], "[{tag}] the first manifest stays");
+
+    // A manifest over the budget reads refuse is refused on write, as
+    // too large, by both stores.
+    let over_budget = vec![b'x'; usize::try_from(MAX_MANIFEST_BYTES).unwrap() + 1];
+    let refused = store.put_manifest(&app_a, "overbudget", &over_budget).await;
+    assert!(
+        matches!(refused, Err(BlobError::TooLarge)),
+        "[{tag}] a manifest over budget must be refused as too large, got {refused:?}"
+    );
+    assert!(
+        matches!(
+            store.get_manifest(&app_a, "overbudget").await,
+            Err(BlobError::NotFound(_))
+        ),
+        "[{tag}] a refused manifest is not stored"
+    );
 
     assert!(
         store

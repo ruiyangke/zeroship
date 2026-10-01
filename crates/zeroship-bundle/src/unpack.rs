@@ -112,6 +112,8 @@ fn truncate_detail(detail: String) -> String {
 /// 3. first entry must be `manifest.json` (capped at 1 MB),
 /// 4. parse + validate the manifest,
 /// 5. compute `deploy_hash` from the canonical, deploy_hash-omitted form,
+///    and build the stored manifest, refusing it when THOSE bytes exceed
+///    `MAX_MANIFEST_BYTES`,
 /// 6. for each subsequent `blobs/<hash>` entry: stream into the blob
 ///    store one chunk at a time (hash-verified by the store, dedup
 ///    detected via the `PutOutcome` return),
@@ -234,6 +236,24 @@ pub async fn ingest(
     let canonical_omit = canonical_manifest_for_hash(&manifest_bytes)?;
     let deploy_hash = sha256_hex(&canonical_omit);
 
+    // The manifest the store keeps. Preserve the exact fields used for
+    // identity: serializing the typed manifest would add defaults and discard
+    // fields outside its Rust model.
+    //
+    // The byte budget applies to THESE bytes, not the archive's: adding
+    // `deploy_hash` can take a manifest that fit over it, and a store refuses
+    // to read back a manifest over budget. Checked here, before any blob is
+    // written, so a refused deploy leaves nothing behind.
+    manifest_value["deploy_hash"] = Value::String(deploy_hash.clone());
+    let final_json = serde_json::to_string(&canonicalize_value(&manifest_value))
+        .map_err(|e| IngestError::Internal(format!("re-serialize manifest: {e}")))?;
+    if final_json.len() as u64 > MAX_MANIFEST_BYTES {
+        return Err(IngestError::TooLarge {
+            cap_bytes: MAX_MANIFEST_BYTES,
+            observed_bytes: final_json.len() as u64,
+        });
+    }
+
     // Step 7: stream subsequent entries directly into the blob store,
     // one at a time. The store hashes as it writes and rejects on
     // mismatch — we don't buffer the entry first.
@@ -326,11 +346,6 @@ pub async fn ingest(
         }
     }
 
-    // Preserve the exact fields used for identity. Serializing the typed
-    // manifest would add defaults and discard fields outside its Rust model.
-    manifest_value["deploy_hash"] = Value::String(deploy_hash.clone());
-    let final_json = serde_json::to_string(&canonicalize_value(&manifest_value))
-        .map_err(|e| IngestError::Internal(format!("re-serialize manifest: {e}")))?;
     if let Err(e) = blob_store
         .put_manifest(app_id, &deploy_hash, final_json.as_bytes())
         .await

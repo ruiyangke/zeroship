@@ -308,3 +308,72 @@ async fn a_traversing_name_in_a_later_entry_is_refused_by_the_allowlist() {
         "refused, but not for the entry name; got {err:?}"
     );
 }
+
+/// The manifest budget applies to the manifest the store keeps, which carries
+/// `deploy_hash` on top of the archive's bytes. An archive manifest exactly at
+/// the budget is over it once `deploy_hash` is added, and is refused as too
+/// large before any blob is written; the same archive with room for the field
+/// deploys and reads back.
+#[compio::test]
+async fn a_manifest_that_outgrows_the_budget_when_stored_is_refused_before_any_blob() {
+    use serde_json::json;
+    use zeroship_bundle::{sha256_hex, MAX_MANIFEST_BYTES};
+
+    let module = b"export default { fetch() { return new Response('ok') } }";
+    let module_hash = sha256_hex(module);
+    let blob_name = format!("blobs/{module_hash}");
+    let cap = usize::try_from(MAX_MANIFEST_BYTES).unwrap();
+    let manifest_with_padding = |padding: usize| {
+        serde_json::to_vec(&json!({
+            "version": 1,
+            "metadata": {"built_at": "2026-06-25T00:00:00Z"},
+            "worker": {"entry": "index.js", "modules": {"index.js": module_hash}},
+            "padding": "x".repeat(padding),
+        }))
+        .unwrap()
+    };
+    let unpadded = manifest_with_padding(0).len();
+    // What storing adds: `"deploy_hash":"<64 hex>",` in the canonical form.
+    let stored_field = r#""deploy_hash":"","#.len() + 64;
+
+    for (padding, fits) in [(cap - unpadded - stored_field, true), (cap - unpadded, false)] {
+        let manifest = manifest_with_padding(padding);
+        assert!(manifest.len() <= cap, "the archive's own manifest is within budget");
+        let root = tmpdir();
+        let store: Arc<dyn BlobStore> = Arc::new(LocalDiskBlobStore::new(root.clone()).unwrap());
+        let app = AppId::mint();
+        let archive = pack_entries(&[("manifest.json", &manifest), (blob_name.as_str(), module)]);
+
+        let result = ingest(&store, &app, &archive).await;
+        if fits {
+            let success = result.unwrap_or_else(|e| panic!("a manifest at the budget once stored: {e:?}"));
+            assert_eq!(success.manifest_json.len(), cap, "the control sits exactly at the budget");
+            let stored = store.get_manifest(&app, &success.deploy_hash).await.unwrap();
+            assert_eq!(stored.as_ref(), success.manifest_json.as_bytes());
+        } else {
+            match result {
+                Err(IngestError::TooLarge {
+                    cap_bytes,
+                    observed_bytes,
+                }) => {
+                    assert_eq!(cap_bytes, MAX_MANIFEST_BYTES);
+                    assert!(observed_bytes > MAX_MANIFEST_BYTES, "{observed_bytes}");
+                }
+                Ok(success) => panic!(
+                    "a stored manifest of {} bytes was accepted over a budget of {MAX_MANIFEST_BYTES}",
+                    success.manifest_json.len()
+                ),
+                Err(other) => panic!("expected TooLarge for the stored manifest, got {other:?}"),
+            }
+            assert!(
+                !store.has_blob(&module_hash).await.unwrap(),
+                "a refused deploy wrote its blob"
+            );
+            assert!(
+                std::fs::read_dir(root.join("manifests").join(app.as_str())).is_err(),
+                "a refused deploy wrote a manifest"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}

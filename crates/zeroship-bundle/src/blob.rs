@@ -726,6 +726,11 @@ impl BlobStore for LocalDiskBlobStore {
         deploy_hash: &str,
         json: &[u8],
     ) -> Result<(), BlobError> {
+        // `get_manifest` refuses a manifest over budget, so one is never
+        // written: the key would hold bytes no reader can load.
+        if json.len() as u64 > crate::MAX_MANIFEST_BYTES {
+            return Err(BlobError::TooLarge);
+        }
         let path = self.manifest_path(app_id, deploy_hash);
         let dir = self.app_manifest_dir(app_id).await?;
         let scratch = Self::stage_manifest(&path, json).await?;
