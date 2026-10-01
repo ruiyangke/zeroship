@@ -1,6 +1,6 @@
 //! Content-addressed blob store. The storage layer that backs `.zship`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use bytes::Bytes;
 use uuid::Uuid;
@@ -131,6 +131,14 @@ pub trait BlobStore: Send + Sync + std::fmt::Debug {
     ) -> Result<u64, BlobError>;
 
     /// Manifest storage — separate keyspace from blobs.
+    ///
+    /// A manifest's bytes are a function of its key: `deploy_hash` is the
+    /// hash of the manifest itself, so a key has exactly one right content.
+    /// That is why a write never replaces a manifest already under its key.
+    /// The same bytes again are success, so concurrent writers of one manifest
+    /// all succeed; anything else under the key - other content, a torn or
+    /// empty file - is refused with [`BlobError::Backend`] for an operator to
+    /// look at, since the store cannot tell which copy is right.
     async fn put_manifest(
         &self,
         app_id: &AppId,
@@ -204,9 +212,27 @@ pub struct LocalDiskBlobStore {
 impl LocalDiskBlobStore {
     /// Create the store, ensuring `<root>/blobs/` and `<root>/manifests/`
     /// exist. Idempotent.
+    ///
+    /// # Errors
+    ///
+    /// Refuses a root whose filesystem cannot hard-link. Manifests are
+    /// published with `hard_link`, the only no-clobber publish that never
+    /// exposes a partial file, so a store on such a filesystem (SMB and many
+    /// FUSE mounts) could never write one; it refuses here, at startup, rather
+    /// than at the first deploy.
     pub fn new(root: PathBuf) -> std::io::Result<Self> {
+        Self::open(root, |original, link| std::fs::hard_link(original, link))
+    }
+
+    /// [`Self::new`], with the hard link it probes the filesystem with handed in.
+    fn open(
+        root: PathBuf,
+        hard_link: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+    ) -> std::io::Result<Self> {
+        let manifests = root.join("manifests");
         std::fs::create_dir_all(root.join("blobs"))?;
-        std::fs::create_dir_all(root.join("manifests"))?;
+        std::fs::create_dir_all(&manifests)?;
+        probe_hard_links(&manifests, hard_link)?;
         Ok(Self { root })
     }
 
@@ -221,6 +247,175 @@ impl LocalDiskBlobStore {
             .join("manifests")
             .join(app_id.as_str())
             .join(format!("{deploy_hash}.json"))
+    }
+
+    /// Write `json` to a scratch file beside `path` that belongs to this
+    /// writer alone. Nothing is visible under the manifest's key until
+    /// [`Self::publish_manifest`].
+    ///
+    /// Two deploys of one artifact write the same key at the same time, so the
+    /// scratch file cannot be named after the key: a shared one lets a later
+    /// writer truncate the file an earlier writer is about to publish, and lets
+    /// the earlier writer's publish take the file out from under the later one.
+    /// `create_new` refuses a scratch file that already exists.
+    async fn stage_manifest(path: &Path, json: &[u8]) -> Result<Scratch, BlobError> {
+        use compio::io::AsyncWriteAtExt;
+
+        if let Some(parent) = path.parent() {
+            compio::fs::create_dir_all(parent).await?;
+        }
+        let (scratch, mut file) = Scratch::create(
+            path.with_extension(format!("json.tmp-{}", Uuid::new_v4().simple())),
+        )
+        .await?;
+        let compio::BufResult(written, _) = file.write_all_at(json.to_vec(), 0).await;
+        written?;
+        file.close().await?;
+        Ok(scratch)
+    }
+
+    /// Publish a staged manifest under `path` without replacing anything
+    /// already there: the local form of S3's conditional create.
+    ///
+    /// `hard_link` fails when the key exists, and never exposes a partial
+    /// file, because the scratch file is complete before it gets a second
+    /// name. When the key is taken, [`check_existing_manifest`] decides: the
+    /// same bytes are success, so writers of one manifest all succeed, and
+    /// anything else is refused. Nothing here ever removes what a key holds.
+    ///
+    /// The scratch file is dropped on every path out, which unlinks its name.
+    async fn publish_manifest(scratch: Scratch, path: &Path, json: &[u8]) -> Result<(), BlobError> {
+        match compio::fs::hard_link(scratch.path(), path).await {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                check_existing_manifest(path, json).await
+            }
+            Err(error) => Err(BlobError::Io(error)),
+        }
+    }
+}
+
+/// Hard-link a probe file inside `dir` and remove both names, refusing with a
+/// message that names the requirement when the filesystem cannot link.
+fn probe_hard_links(
+    dir: &Path,
+    hard_link: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let original = dir.join(format!(".hard-link-probe-{}", Uuid::new_v4().simple()));
+    let link = original.with_extension("link");
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&original)?;
+    let linked = hard_link(&original, &link);
+    let _ = std::fs::remove_file(&link);
+    let _ = std::fs::remove_file(&original);
+    linked.map_err(|error| {
+        std::io::Error::new(
+            error.kind(),
+            format!(
+                "blob store directory {} is on a filesystem that cannot hard-link ({error}); \
+                 manifests are published by hard link, so put the root on a filesystem \
+                 that supports hard links, such as ext4, xfs, btrfs, NFS or CephFS",
+                dir.display()
+            ),
+        )
+    })
+}
+
+/// A publish found `path` taken: succeed only when it holds exactly `json`.
+///
+/// A manifest's bytes are a function of its key, so a key holding anything
+/// else - other content, a torn or empty file, something that is not a file -
+/// is a store that needs an operator, and is refused naming the key. A failure
+/// to read the key is reported as I/O. Neither case removes anything: the blob
+/// root is the system of record, and this writer cannot tell which copy is
+/// right. The read is capped at the length of `json`.
+async fn check_existing_manifest(path: &Path, json: &[u8]) -> Result<(), BlobError> {
+    use compio::io::AsyncReadAtExt;
+
+    let file = compio::fs::File::open(path).await?;
+    let meta = file.metadata().await?;
+    if !meta.is_file() {
+        return Err(BlobError::Backend(format!(
+            "manifest key {} is not a regular file",
+            path.display()
+        )));
+    }
+    let divergent = || {
+        BlobError::Backend(format!(
+            "manifest key {} already holds different bytes",
+            path.display()
+        ))
+    };
+    if meta.len() != json.len() as u64 {
+        return Err(divergent());
+    }
+    let (read, existing) = file.read_exact_at(vec![0; json.len()], 0).await.into();
+    read?;
+    if existing == json {
+        Ok(())
+    } else {
+        Err(divergent())
+    }
+}
+
+/// A scratch file that only this writer uses, beside the key it will publish.
+///
+/// Dropping it removes the file, so every way out of a write cleans up: a
+/// failed write, a publish that did not happen, and a caller that drops the
+/// future between staging and publishing. `Drop` cannot await, so the unlink
+/// is synchronous; it removes one name nothing else knows. After a manifest's
+/// `hard_link` the key keeps the file and only the scratch name goes; after a
+/// blob's `rename` the name is already gone.
+///
+/// Nothing sweeps abandoned scratch files at startup. Several processes share
+/// one blob root, and a sweep in one would remove another's file in flight.
+struct Scratch {
+    path: PathBuf,
+    /// False once the open that would have created the file has failed: the
+    /// name then holds nothing this writer made.
+    created: bool,
+}
+
+impl Scratch {
+    /// Create `path` as a new file for writing. `create_new` refuses a name
+    /// that exists, so the file is this writer's alone.
+    ///
+    /// The guard exists before the open is issued, so a future dropped once
+    /// the kernel has created the file removes it. A drop that lands before
+    /// the kernel runs the open can still leave the file: the open completes
+    /// after the guard has already run. Such a file is inert, because nothing
+    /// reads scratch names, and nothing removes it later.
+    async fn create(path: PathBuf) -> std::io::Result<(Self, compio::fs::File)> {
+        let mut scratch = Self {
+            path,
+            created: true,
+        };
+        match compio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&scratch.path)
+            .await
+        {
+            Ok(file) => Ok((scratch, file)),
+            Err(error) => {
+                scratch.created = false;
+                Err(error)
+            }
+        }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        if self.created {
+            let _ = std::fs::remove_file(&self.path);
+        }
     }
 }
 
@@ -312,13 +507,9 @@ impl BlobStore for LocalDiskBlobStore {
         // Unique tmp suffix so concurrent writes of the same hash from
         // different deploys don't trample each other. `create_new`
         // ensures we never overwrite a partial tmp from another caller.
-        let tmp = path.with_extension(format!("tmp-{}", Uuid::new_v4().simple()));
-
-        let file = compio::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp)
-            .await?;
+        let (tmp, file) =
+            Scratch::create(path.with_extension(format!("tmp-{}", Uuid::new_v4().simple())))
+                .await?;
 
         let result: Result<(), BlobError> = async {
             use compio::io::AsyncWriteAtExt;
@@ -374,16 +565,11 @@ impl BlobStore for LocalDiskBlobStore {
         // closes on drop.
         drop(file);
 
-        match result {
-            Ok(()) => {
-                compio::fs::rename(&tmp, &path).await?;
-                Ok(PutOutcome::Wrote)
-            }
-            Err(e) => {
-                let _ = compio::fs::remove_file(&tmp).await;
-                Err(e)
-            }
-        }
+        // `tmp` removes its file when it drops, on the error paths and when
+        // the rename fails; after a rename it names nothing.
+        result?;
+        compio::fs::rename(tmp.path(), &path).await?;
+        Ok(PutOutcome::Wrote)
     }
 
     async fn has_blob(&self, hash: &str) -> Result<bool, BlobError> {
@@ -499,16 +685,8 @@ impl BlobStore for LocalDiskBlobStore {
         json: &[u8],
     ) -> Result<(), BlobError> {
         let path = self.manifest_path(app_id, deploy_hash);
-        if let Some(parent) = path.parent() {
-            compio::fs::create_dir_all(parent).await?;
-        }
-        let tmp = path.with_extension("json.tmp");
-        let owned = json.to_vec();
-        let (res, _buf): (std::io::Result<()>, Vec<u8>) =
-            compio::fs::write(&tmp, owned).await.into();
-        res?;
-        compio::fs::rename(&tmp, &path).await?;
-        Ok(())
+        let scratch = Self::stage_manifest(&path, json).await?;
+        Self::publish_manifest(scratch, &path, json).await
     }
 
     async fn get_manifest(&self, app_id: &AppId, deploy_hash: &str) -> Result<Bytes, BlobError> {
@@ -592,4 +770,128 @@ async fn verify_local_blob(path: &std::path::Path, hash: &str) -> Result<(), Blo
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entries(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .expect("read the app's manifest directory")
+            .map(|entry| entry.expect("entry").file_name().into_string().expect("utf-8"))
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// The interleaving two identical deploys produce when both reach
+    /// `put_manifest`: each writer stages the manifest before either publishes
+    /// it. The writer that publishes second still succeeds, the key holds the
+    /// complete manifest after each publish, and neither scratch file remains.
+    #[compio::test]
+    async fn two_writers_staged_before_either_publishes_both_publish() {
+        let root = tempfile::tempdir().expect("blob root");
+        let store = LocalDiskBlobStore::new(root.path().to_path_buf()).expect("blob store");
+        let app_id = AppId::mint();
+        let deploy_hash = sha256_hex(b"raced-deploy");
+        let json = br#"{"version":1,"rules":[],"assets":{}}"#;
+        let path = store.manifest_path(&app_id, &deploy_hash);
+
+        let first = LocalDiskBlobStore::stage_manifest(&path, json)
+            .await
+            .expect("the first writer stages");
+        let second = LocalDiskBlobStore::stage_manifest(&path, json)
+            .await
+            .expect("the second writer stages");
+        assert!(
+            matches!(
+                store.get_manifest(&app_id, &deploy_hash).await,
+                Err(BlobError::NotFound(_))
+            ),
+            "a staged manifest is not visible under its key"
+        );
+
+        LocalDiskBlobStore::publish_manifest(first, &path, json)
+            .await
+            .expect("the first writer publishes");
+        let got = store.get_manifest(&app_id, &deploy_hash).await.unwrap();
+        assert_eq!(got.as_ref(), json);
+
+        LocalDiskBlobStore::publish_manifest(second, &path, json)
+            .await
+            .expect("the second writer publishes after the first");
+        let got = store.get_manifest(&app_id, &deploy_hash).await.unwrap();
+        assert_eq!(got.as_ref(), json);
+        assert_eq!(
+            entries(path.parent().expect("app directory")),
+            vec![format!("{deploy_hash}.json")]
+        );
+    }
+
+    /// A staged manifest whose publish never happens takes its scratch file
+    /// with it, and nothing appears under the key.
+    #[compio::test]
+    async fn a_staged_manifest_dropped_unpublished_leaves_nothing() {
+        let root = tempfile::tempdir().expect("blob root");
+        let store = LocalDiskBlobStore::new(root.path().to_path_buf()).expect("blob store");
+        let app_id = AppId::mint();
+        let deploy_hash = sha256_hex(b"abandoned-deploy");
+        let json = br#"{"version":1,"rules":[],"assets":{}}"#;
+        let path = store.manifest_path(&app_id, &deploy_hash);
+
+        let staged = LocalDiskBlobStore::stage_manifest(&path, json)
+            .await
+            .expect("stages");
+        let app_dir = path.parent().expect("app directory");
+        assert_eq!(entries(app_dir).len(), 1, "the scratch file exists while staged");
+        drop(staged);
+        assert!(entries(app_dir).is_empty(), "the scratch file outlived its writer");
+    }
+
+    /// A scratch file is only ever created new. A name that already holds a
+    /// file is refused, and the refused guard leaves that file alone: it
+    /// belongs to whoever made it, not to this writer.
+    #[compio::test]
+    async fn a_scratch_file_never_takes_over_an_existing_name() {
+        let root = tempfile::tempdir().expect("scratch directory");
+        let taken = root.path().join("key.json.tmp-taken");
+        std::fs::write(&taken, b"another writer's bytes").expect("plant a file");
+
+        let refused = Scratch::create(taken.clone()).await;
+        assert_eq!(
+            refused.map(|_| ()).map_err(|e| e.kind()),
+            Err(std::io::ErrorKind::AlreadyExists)
+        );
+        assert_eq!(
+            std::fs::read(&taken).expect("the planted file survives"),
+            b"another writer's bytes"
+        );
+    }
+
+    /// A root whose filesystem refuses hard links is refused when the store
+    /// opens, with a message naming the requirement, and the probe leaves no
+    /// file behind. The refusal is driven through the seam `open` takes,
+    /// because no filesystem without hard links (SMB, many FUSE mounts) can be
+    /// mounted by an unprivileged test. EPERM is what Linux returns for a
+    /// filesystem that does not support links.
+    #[test]
+    fn a_root_that_cannot_hard_link_is_refused_at_startup() {
+        let root = tempfile::tempdir().expect("blob root");
+        let refused = LocalDiskBlobStore::open(root.path().to_path_buf(), |_, _| {
+            Err(std::io::Error::from_raw_os_error(1))
+        })
+        .expect_err("a root without hard links is refused");
+        assert_eq!(refused.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(
+            refused.to_string().contains("cannot hard-link"),
+            "the refusal names the requirement: {refused}"
+        );
+        assert!(entries(&root.path().join("manifests")).is_empty(), "the probe left a file");
+
+        // The control: the real filesystem under the same root links, and
+        // opening leaves nothing behind either.
+        LocalDiskBlobStore::new(root.path().to_path_buf()).expect("a local filesystem links");
+        assert!(entries(&root.path().join("manifests")).is_empty(), "the probe left a file");
+    }
 }

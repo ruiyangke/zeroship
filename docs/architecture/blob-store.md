@@ -24,7 +24,7 @@ Current `BlobStore` methods:
 
 Two shipping backends, selected per process by `--blob-store` / `ZEROSHIP_BLOB_STORE`:
 
-- a bare path (the dev default, e.g. `./bundles`) → `LocalDiskBlobStore`
+- a bare path (the dev default, e.g. `./bundles`) → `LocalDiskBlobStore`. The path must be on a filesystem that supports hard links (ext4, xfs, btrfs and other local filesystems; not SMB or most FUSE mounts), because manifests are published by hard link; `LocalDiskBlobStore::new` probes for this and the process refuses to start without it.
 - an `s3://bucket/prefix?region=…` URL → `S3BlobStore` (over `compio-s3`)
 
 `LocalDiskBlobStore` layout:
@@ -48,7 +48,8 @@ Important behavior:
 - `put_blob_stream` re-hashes bytes while reading and rejects size/hash mismatches. On `S3BlobStore` it streams the single-pass reader through **multipart** in `PART_SIZE` (8 MiB) chunks while running a whole-object SHA-256 hasher, verifies `sha256(stream) == hash` BEFORE `complete_multipart` (aborting on mismatch so nothing is ever committed under the wrong key), and uses a single `PutObject` for objects below one part. This preserves the same content-addressing integrity guarantee `LocalDiskBlobStore` gives, across parts.
 - `LocalDiskBlobStore::local_path` is a cheap path computation; it does not check whether the file exists. `S3BlobStore::local_path` is always `None` — the gateway hot path uses the disk-cache refill below, not `local_path`.
 - Reads validate the stored bytes again (re-hash) and return `BlobError::HashMismatch` if content is corrupt. `get_blob_to_file` re-verifies SHA-256 on the way out before the caller publishes.
-- Manifest writes are immutable-key: the key embeds `deploy_hash`, so `put_manifest` uses a conditional create (`If-None-Match: *`); an identical replay is success, divergent content is a backend error.
+- Manifest writes are immutable-key on both stores. A manifest's bytes are a function of its key (the key embeds `deploy_hash`, the manifest's own hash), so a write never replaces a manifest already there: an identical replay is success, and anything else under the key - divergent content, a torn or empty file, something that is not a file - is a backend error naming the key, for an operator to look at. Neither store repairs a key. `S3BlobStore::put_manifest` uses a conditional create (`If-None-Match: *`). `LocalDiskBlobStore::put_manifest` stages the bytes in a scratch file only that writer uses and hard-links it to the key, which fails when the key exists and never exposes a partial file; a key it cannot read is an I/O error, never a removal.
+- Two identical deploys racing each other both ingest, so both write one manifest key at once, and every writer must succeed. Neither store lets concurrent writers truncate or move each other's bytes, and a reader sees a complete manifest or none. A local write that fails or is dropped removes its scratch file; nothing sweeps scratch files at startup, because several processes share one blob root.
 
 ## Current ingest path
 

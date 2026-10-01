@@ -560,6 +560,16 @@ async fn run_contract<S: BlobStore + ?Sized>(store: &S, tag: &str) {
         .await
         .expect("[{tag}] identical manifest replay is ok");
 
+    // Different bytes under a key that holds a manifest are refused, and the
+    // manifest already there stays. Asserted here so it binds both stores.
+    let divergent = store.put_manifest(&app_a, "deployone", &manifest_a2).await;
+    assert!(
+        matches!(divergent, Err(BlobError::Backend(_))),
+        "[{tag}] divergent manifest bytes must be refused, got {divergent:?}"
+    );
+    let kept = store.get_manifest(&app_a, "deployone").await.expect("get a1 again");
+    assert_eq!(kept.as_ref(), &manifest_a1[..], "[{tag}] the first manifest stays");
+
     assert!(
         store
             .delete_manifest(&app_a, "deploytwo")

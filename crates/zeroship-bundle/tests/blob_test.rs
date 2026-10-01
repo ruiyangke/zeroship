@@ -2,7 +2,8 @@
 //! since `LocalDiskBlobStore` is async over compio's filesystem APIs.
 
 use zeroship_id::AppId;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::task::Poll;
 
 use uuid::Uuid;
 use zeroship_bundle::blob::{
@@ -204,6 +205,294 @@ async fn local_disk_round_trip_manifest() {
         .await
         .unwrap_err();
     matches!(err, BlobError::NotFound(_));
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The names in `dir`, sorted; none when it does not exist.
+fn dir_entries(dir: &Path) -> Vec<String> {
+    let Ok(read) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = read
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    names
+}
+
+/// Run `writers` concurrent puts of one manifest key, all polled in this one
+/// task so their filesystem operations overlap, and require every one to
+/// succeed and the key to hold the complete bytes.
+async fn race_one_manifest(
+    store: &LocalDiskBlobStore,
+    app_id: &AppId,
+    deploy_hash: &str,
+    json: &[u8],
+    writers: usize,
+) {
+    let results = futures::future::join_all(
+        (0..writers).map(|_| store.put_manifest(app_id, deploy_hash, json)),
+    )
+    .await;
+    assert_eq!(results.len(), writers, "every writer reported");
+    let failures: Vec<String> = results
+        .iter()
+        .filter_map(|result| result.as_ref().err().map(ToString::to_string))
+        .collect();
+    assert!(
+        failures.is_empty(),
+        "concurrent writers of one manifest failed: {failures:?}"
+    );
+    let got = store.get_manifest(app_id, deploy_hash).await.unwrap();
+    assert_eq!(got.as_ref(), json);
+}
+
+/// Writers of one manifest key racing each other all succeed and leave the
+/// complete bytes behind. Two identical deploys racing through control both
+/// ingest the artifact, so each writes the same
+/// `manifests/<app_id>/<deploy_hash>.json`; a writer that shares its scratch
+/// file with another finds it truncated or already moved away.
+#[compio::test]
+async fn local_disk_concurrent_puts_of_one_manifest_all_succeed() {
+    let root = tmpdir();
+    let store = LocalDiskBlobStore::new(root.clone()).unwrap();
+    let app_id = AppId::mint();
+    let earlier_hash = sha256_hex(b"earlier-deploy");
+    let raced_hash = sha256_hex(b"raced-deploy");
+    let json = br#"{"version":1,"rules":[],"assets":{}}"#;
+
+    // The app's directory exists before the race, so every writer issues the
+    // same filesystem operations in the same order. The exact interleaving is
+    // pinned beside `LocalDiskBlobStore::stage_manifest` in `src/blob.rs`.
+    store
+        .put_manifest(&app_id, &earlier_hash, json)
+        .await
+        .expect("seed the app's manifest directory");
+
+    race_one_manifest(&store, &app_id, &raced_hash, json, 16).await;
+
+    // No writer's scratch file outlives it: the app's keyspace holds exactly
+    // the two published manifests.
+    let mut expected = vec![format!("{earlier_hash}.json"), format!("{raced_hash}.json")];
+    expected.sort();
+    assert_eq!(
+        dir_entries(&root.join("manifests").join(app_id.as_str())),
+        expected
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The same race into an app with no manifest yet: the writers also race to
+/// create the app's directory.
+#[compio::test]
+async fn local_disk_concurrent_puts_of_a_new_apps_first_manifest_all_succeed() {
+    let root = tmpdir();
+    let store = LocalDiskBlobStore::new(root.clone()).unwrap();
+    let app_id = AppId::mint();
+    let raced_hash = sha256_hex(b"first-deploy");
+    let json = br#"{"version":1,"rules":[],"assets":{}}"#;
+    let app_dir = root.join("manifests").join(app_id.as_str());
+    assert!(!app_dir.exists(), "the app has no manifest directory yet");
+
+    race_one_manifest(&store, &app_id, &raced_hash, json, 16).await;
+
+    assert_eq!(dir_entries(&app_dir), vec![format!("{raced_hash}.json")]);
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A manifest key is written once. Different bytes under a key that already
+/// holds a manifest are refused as the S3 store refuses them, and the
+/// manifest already there stays.
+#[compio::test]
+async fn local_disk_a_manifest_key_refuses_different_bytes() {
+    let root = tmpdir();
+    let store = LocalDiskBlobStore::new(root.clone()).unwrap();
+    let app_id = AppId::mint();
+    let deploy_hash = sha256_hex(b"deploy");
+    let first = br#"{"version":1,"deploy":"first"}"#;
+    let other = br#"{"version":1,"deploy":"other"}"#;
+    let longer = br#"{"version":1,"deploy":"first","extra":true}"#;
+
+    store.put_manifest(&app_id, &deploy_hash, first).await.unwrap();
+    for (bytes, case) in [(&other[..], "same length"), (&longer[..], "longer")] {
+        let err = store
+            .put_manifest(&app_id, &deploy_hash, bytes)
+            .await
+            .expect_err(case);
+        assert!(matches!(err, BlobError::Backend(_)), "{case}: {err:?}");
+        let got = store.get_manifest(&app_id, &deploy_hash).await.unwrap();
+        assert_eq!(got.as_ref(), first, "{case}: the first manifest stays");
+    }
+    // The control: the same bytes again are success.
+    store.put_manifest(&app_id, &deploy_hash, first).await.unwrap();
+    assert_eq!(
+        dir_entries(&root.join("manifests").join(app_id.as_str())),
+        vec![format!("{deploy_hash}.json")]
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A key holding a torn copy of the manifest (a write cut short), down to an
+/// empty file, is refused and keeps its bytes. A manifest's bytes are a
+/// function of its key, so any other bytes under it need an operator; the
+/// store never repairs a key.
+#[compio::test]
+async fn local_disk_a_torn_or_empty_manifest_is_refused_and_kept() {
+    let json = br#"{"version":1,"rules":[],"assets":{}}"#;
+    for torn in [&json[..json.len() / 2], &[][..]] {
+        let root = tmpdir();
+        let store = LocalDiskBlobStore::new(root.clone()).unwrap();
+        let app_id = AppId::mint();
+        let deploy_hash = sha256_hex(b"torn-deploy");
+        let app_dir = root.join("manifests").join(app_id.as_str());
+        let key = app_dir.join(format!("{deploy_hash}.json"));
+        std::fs::create_dir_all(&app_dir).unwrap();
+        std::fs::write(&key, torn).unwrap();
+
+        let err = store
+            .put_manifest(&app_id, &deploy_hash, json)
+            .await
+            .expect_err("a torn key is refused");
+        assert!(
+            matches!(&err, BlobError::Backend(message) if message.contains(&*key.to_string_lossy())),
+            "torn copy of {} bytes: {err:?}",
+            torn.len()
+        );
+        assert_eq!(std::fs::read(&key).unwrap(), torn, "the key keeps its bytes");
+        assert_eq!(dir_entries(&app_dir), vec![format!("{deploy_hash}.json")]);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+/// A key this process cannot read is refused as an I/O failure and keeps its
+/// bytes: failing to read a key is never a reason to remove it.
+#[compio::test]
+async fn local_disk_an_unreadable_manifest_key_is_refused_and_kept() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let root = tmpdir();
+    let store = LocalDiskBlobStore::new(root.clone()).unwrap();
+    let app_id = AppId::mint();
+    let deploy_hash = sha256_hex(b"unreadable-deploy");
+    let json = br#"{"version":1,"deploy":"mine"}"#;
+    let other = br#"{"version":1,"deploy":"theirs"}"#;
+    let app_dir = root.join("manifests").join(app_id.as_str());
+    let key = app_dir.join(format!("{deploy_hash}.json"));
+    std::fs::create_dir_all(&app_dir).unwrap();
+    std::fs::write(&key, other).unwrap();
+    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o000)).unwrap();
+    assert_eq!(
+        std::fs::read(&key).map_err(|e| e.kind()).err(),
+        Some(std::io::ErrorKind::PermissionDenied),
+        "the key must be unreadable to this process for the test to mean anything"
+    );
+
+    let err = store
+        .put_manifest(&app_id, &deploy_hash, json)
+        .await
+        .expect_err("an unreadable key is refused");
+    assert!(matches!(err, BlobError::Io(_)), "unexpected error: {err:?}");
+
+    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(std::fs::read(&key).unwrap(), other, "the key keeps its bytes");
+    assert_eq!(dir_entries(&app_dir), vec![format!("{deploy_hash}.json")]);
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A publish that fails leaves no scratch file behind. A directory at the
+/// key is not a manifest, so the write is refused naming the key, and the
+/// app's directory then holds only what was there before.
+#[compio::test]
+async fn local_disk_a_failed_manifest_publish_leaves_no_scratch_file() {
+    let root = tmpdir();
+    let store = LocalDiskBlobStore::new(root.clone()).unwrap();
+    let app_id = AppId::mint();
+    let deploy_hash = sha256_hex(b"blocked-deploy");
+    let json = br#"{"version":1,"rules":[],"assets":{}}"#;
+    let app_dir = root.join("manifests").join(app_id.as_str());
+    let key = app_dir.join(format!("{deploy_hash}.json"));
+    std::fs::create_dir_all(key.join("occupant")).unwrap();
+
+    let err = store
+        .put_manifest(&app_id, &deploy_hash, json)
+        .await
+        .expect_err("a directory at the key refuses the publish");
+    assert!(
+        matches!(&err, BlobError::Backend(message)
+            if message.contains(&*key.to_string_lossy()) && message.contains("not a regular file")),
+        "unexpected error: {err:?}"
+    );
+    assert_eq!(dir_entries(&app_dir), vec![format!("{deploy_hash}.json")]);
+    assert_eq!(dir_entries(&key), vec!["occupant".to_string()]);
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A caller that drops a manifest write while it is in flight (a timeout, a
+/// cancelled request) leaves no file behind and publishes nothing.
+#[compio::test]
+async fn local_disk_a_manifest_write_dropped_in_flight_leaves_nothing() {
+    let root = tmpdir();
+    let store = LocalDiskBlobStore::new(root.clone()).unwrap();
+    let app_id = AppId::mint();
+    let deploy_hash = sha256_hex(b"dropped-deploy");
+    let json = br#"{"version":1,"rules":[],"assets":{}}"#;
+    let app_dir = root.join("manifests").join(app_id.as_str());
+
+    // Drive the write only until a file of its own exists in the app's
+    // directory, then drop it.
+    let mut write = store.put_manifest(&app_id, &deploy_hash, json);
+    let finished = std::future::poll_fn(|cx| match write.as_mut().poll(cx) {
+        Poll::Ready(result) => Poll::Ready(Some(result)),
+        Poll::Pending if dir_entries(&app_dir).is_empty() => Poll::Pending,
+        Poll::Pending => Poll::Ready(None),
+    })
+    .await;
+    assert!(
+        finished.is_none(),
+        "the write finished before it was seen in flight: {finished:?}"
+    );
+    assert_eq!(dir_entries(&app_dir).len(), 1, "the write had a file in flight");
+    drop(write);
+
+    assert!(
+        dir_entries(&app_dir).is_empty(),
+        "a dropped write left {:?} behind",
+        dir_entries(&app_dir)
+    );
+    assert!(matches!(
+        store.get_manifest(&app_id, &deploy_hash).await,
+        Err(BlobError::NotFound(_))
+    ));
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A blob write whose final rename fails leaves no temp file behind. A
+/// directory at the blob's path cannot be replaced by a file.
+#[compio::test]
+async fn local_disk_a_failed_blob_rename_leaves_no_temp_file() {
+    let root = tmpdir();
+    let store = LocalDiskBlobStore::new(root.clone()).unwrap();
+    let data = b"blob whose path is taken";
+    let hash = sha256_hex(data);
+    let path = store.local_path(&hash).expect("local path");
+    std::fs::create_dir_all(path.join("occupant")).unwrap();
+    let shard = path.parent().expect("shard directory");
+    let name = path.file_name().unwrap().to_str().unwrap().to_string();
+
+    let err = store
+        .put_blob(&hash, data)
+        .await
+        .expect_err("a directory at the blob path refuses the rename");
+    assert!(matches!(err, BlobError::Io(_)), "unexpected error: {err:?}");
+    assert_eq!(dir_entries(shard), vec![name]);
 
     let _ = std::fs::remove_dir_all(&root);
 }
