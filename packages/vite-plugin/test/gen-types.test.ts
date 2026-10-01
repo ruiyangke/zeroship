@@ -159,18 +159,52 @@ describe("dev-server → in-process gen-types", () => {
     });
     try {
       const devPlugin = bootDevServer(fx.root);
-      const envDb = join(fx.root, "generated/zeroship/env.db.ts");
-      // Let the boot regen land, then wipe the outputs so the hotUpdate assertion
-      // measures the hotUpdate branch alone.
-      assert.ok(await waitForFile(envDb));
+      const migration = join(fx.root, "migrations", "20240617123000_create_notes.ts");
+      // A migration hot update settles only after the boot regen and its own
+      // regen have both finished writing, so awaiting one is the completion
+      // signal for both. Wiping the outputs after it makes the next assertion
+      // measure the hotUpdate branch alone.
+      await hook(devPlugin, "hotUpdate")({ file: migration });
       await fs.rm(join(fx.root, "generated"), { recursive: true, force: true });
 
-      hook(devPlugin, "hotUpdate")({
-        file: join(fx.root, "migrations", "20240617123000_create_notes.ts"),
-      });
-      assert.ok(await waitForFile(envDb), "hotUpdate regenerated env.db.ts");
-      await fs.access(join(fx.root, "generated/zeroship/schema.runtime.json"));
+      await hook(devPlugin, "hotUpdate")({ file: migration });
+      await fs.access(join(fx.root, "generated/zeroship/env.db.ts"));
+      const json = join(fx.root, "generated/zeroship/schema.runtime.json");
+      const descriptor = JSON.parse(await fs.readFile(json, "utf8"));
+      assert.ok(descriptor.collections.notes, "hotUpdate regenerated the descriptor");
     } finally {
+      await fx.cleanup();
+    }
+  });
+
+  test("a boot regen says whether it rewrote the artifacts", async () => {
+    const fx = await makeFixture({
+      "migrations/20240617123000_create_notes.ts": CREATE_NOTES,
+    });
+    const migration = join(fx.root, "migrations", "20240617123000_create_notes.ts");
+    const printed: string[] = [];
+    const consoleLog = console.log;
+    console.log = (...args: unknown[]) => { printed.push(args.map(String).join(" ")); };
+    try {
+      // A first boot writes both artifacts; the hot update is its completion signal.
+      await hook(bootDevServer(fx.root), "hotUpdate")({ file: migration });
+      const first = printed.splice(0).filter((line) => line.includes("gen-types"));
+      assert.ok(
+        first.some((line) => line.includes("regenerated env.db.ts + schema.runtime.json")),
+        `the first boot regenerates: ${JSON.stringify(first)}`,
+      );
+
+      // A second boot over the same migrations writes nothing and says so.
+      await hook(bootDevServer(fx.root), "hotUpdate")({ file: migration });
+      const second = printed.filter((line) => line.includes("gen-types"));
+      assert.ok(second.length > 0, "the second boot reports its regen");
+      assert.deepEqual(
+        second.filter((line) => !line.includes("already match the migrations")),
+        [],
+        "a regen that wrote nothing does not claim it regenerated",
+      );
+    } finally {
+      console.log = consoleLog;
       await fx.cleanup();
     }
   });
@@ -182,13 +216,16 @@ describe("dev-server → in-process gen-types", () => {
     try {
       const devPlugin = bootDevServer(fx.root);
       const genDir = join(fx.root, "generated");
-      assert.ok(await waitForFile(join(genDir, "zeroship/env.db.ts")));
+      // Settles once the boot regen has finished writing (see above), so the
+      // wipe below cannot race it.
+      await hook(devPlugin, "hotUpdate")({
+        file: join(fx.root, "migrations", "20240617123000_create_notes.ts"),
+      });
+      await fs.access(join(genDir, "zeroship/env.db.ts"));
       await fs.rm(genDir, { recursive: true, force: true });
 
-      // A source file outside migrations → the migration regen branch must not fire.
-      hook(devPlugin, "hotUpdate")({ file: join(fx.root, "src", "app.ts") });
-      // Give any (erroneous) async regen a chance to write, then assert absence.
-      await new Promise((r) => setTimeout(r, 200));
+      // A source file outside migrations: the migration regen branch must not fire.
+      await hook(devPlugin, "hotUpdate")({ file: join(fx.root, "src", "app.ts") });
       await assert.rejects(
         () => fs.access(join(genDir, "zeroship/env.db.ts")),
         "no regen for a non-migration change",

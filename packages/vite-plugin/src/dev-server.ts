@@ -14,11 +14,13 @@ import http from "node:http";
 import {
   MODULE_FETCH_PATH,
   HMR_POLL_PATH,
+  HMR_FIRST_LOAD_PARAM,
   PROCEDURE_BINDINGS_PATH,
   RUNTIME_MODULE_SPECIFIER,
   VITE_RUNTIME_MODULE_ID,
   DEV_RUNTIME_STATE_HEADER,
   DEV_RUNTIME_FRESH_REQUIRED,
+  DEV_RUNTIME_SUPERSEDED,
   ENV_DEV,
   ENV_VITE_ORIGIN,
   ENV_ENTRY,
@@ -134,6 +136,12 @@ type FetchMethod = "fetchModule" | "getBuiltins";
  *               threw, or the child's `error` event arrived with no process).
  *               No child exists, so nothing exits and nothing is retried on a
  *               timer; an app change spawns afresh. Requests are NOT proxied.
+ * - `unsettled` - `MAX_RAPID_RESTARTS` runtimes in a row were replaced because
+ *               the source changed while each one loaded its entry
+ *               (`superseded`), none of them staying up `RUNTIME_HEALTHY_MS`,
+ *               and the next one reported the same. Something keeps rewriting
+ *               a watched file. No further runtime is replaced for it; an app
+ *               change spawns afresh. Requests are NOT proxied.
  *
  * WHY `failing` STOPS PROXYING RATHER THAN LETTING THE PROXY FAIL NATURALLY.
  * The dev runtime listens on a port of its OWN (`devServerPort`), separate from
@@ -155,12 +163,17 @@ type FetchMethod = "fetchModule" | "getBuiltins";
  * resolves itself. Named here so the next reader does not mistake the guard for
  * total.
  */
-type RuntimeHealth = "ok" | "failing" | "fatal" | "unstartable";
+type RuntimeHealth = "ok" | "failing" | "fatal" | "unstartable" | "unsettled";
 
 interface RuntimeStatus {
   health: RuntimeHealth;
   /** Consecutive exits faster than `RUNTIME_HEALTHY_MS`. */
   rapidFailures: number;
+  /**
+   * Runtimes replaced in a row because each reported `superseded` before
+   * staying up `RUNTIME_HEALTHY_MS`.
+   */
+  supersededReplacements: number;
   /** Tail of the current/last child's own stdout+stderr. */
   logTail: string[];
   /** Port the child was told to bind, for the operator-facing message. */
@@ -219,6 +232,8 @@ function runtimeDownEnvelope(status: RuntimeStatus): Record<string, unknown> {
   // output to quote: the cause is the dev server's own account of the command.
   const message = status.health === "unstartable"
     ? `zeroship dev runtime could not be started: ${cause} Fix that, then restart \`pnpm dev\`.`
+    : status.health === "unsettled"
+    ? `zeroship dev runtime is no longer being replaced: ${cause}`
     : fatal
     ? `zeroship dev runtime failed to start on port ${status.port} and was given up on `
       + `after ${MAX_RAPID_RESTARTS} attempts. The runtime said: ${cause} `
@@ -234,7 +249,9 @@ function runtimeDownEnvelope(status: RuntimeStatus): Record<string, unknown> {
     details: {
       state: status.health,
       devServerPort: status.port,
-      attempts: status.rapidFailures,
+      attempts: status.health === "unsettled"
+        ? status.supersededReplacements
+        : status.rapidFailures,
       runtimeOutput: status.logTail,
     },
   };
@@ -360,21 +377,35 @@ async function regenTypesDev(
   root: string,
   migrations: MigrationPaths,
   fatal: boolean,
+  signal: AbortSignal,
 ): Promise<{ descriptorJson: string | undefined; generated: boolean }> {
   const migrationsDir = resolve(root, migrations.migrations);
   const outDir = resolve(root, migrations.out);
   let generated = false;
   try {
-    await genTypesFromMigrations(migrationsDir, outDir, {
+    const { status } = await genTypesFromMigrations(migrationsDir, outDir, {
       label: migrations.label,
       primary: migrations.primary,
       check: false,
+      signal,
     });
     generated = true;
     console.log(
-      "[zeroship] gen-types: regenerated env.db.ts + schema.runtime.json from the migrations"
+      status === "unchanged"
+        ? "[zeroship] gen-types: env.db.ts + schema.runtime.json already match the migrations"
+        : "[zeroship] gen-types: regenerated env.db.ts + schema.runtime.json from the migrations",
     );
   } catch (e) {
+    if (signal.aborted) {
+      // The dev server is closing. The fold is left running unobserved (a
+      // migration's module evaluation cannot be cancelled), and gen-types
+      // writes nothing once aborted.
+      console.warn(
+        "[zeroship] gen-types: a regeneration still folding the migrations was abandoned " +
+          "because the dev server closed; env.db.ts and schema.runtime.json were not written",
+      );
+      return { descriptorJson: undefined, generated: false };
+    }
     if (isMigrationSourceError(e)) {
       // Dev: never throw on a MALFORMED MIGRATION. The creator just broke their
       // own source and knows it; a message plus a live server is what they want.
@@ -624,8 +655,28 @@ export function devServerPlugin(
   let devDb: DevDatabase | null = null;
   let disposeRuntime: (() => void) | null = null;
   let restartRuntimeForAppChange: (() => void) | null = null;
-  let restartRuntimeAfterInitialFailure: (() => boolean) | null = null;
-  let initialStartupFailed = false;
+  // Set once the runtime reports it can no longer load its entry. A source
+  // change then replaces it through `replaceFailedRuntime`.
+  let runtimeFailed = false;
+  let replaceFailedRuntime: (() => boolean) | null = null;
+  // Hands the supervisor each runtime answer's `DEV_RUNTIME_STATE_HEADER`
+  // value, `undefined` for an answer that carries none.
+  let reportRuntimeState: ((state: string | undefined) => void) | null = null;
+  // What the current child took from the change queue after its first load
+  // began, and the procedure bindings version when it began: what a runtime
+  // superseded while it loaded was superseded by. The first load's own take
+  // (`HMR_FIRST_LOAD_PARAM`) is dropped by the runtime, so it is not recorded.
+  const changedDuringLoad = new Set<string>();
+  let bindingsAtLoad: string | undefined;
+  // Migration regenerations in flight. Vite runs a hot update from its watcher
+  // without tracking it, so `buildEnd` waits for these itself: one still
+  // writing after the server closed would write into a project its owner may
+  // already be removing.
+  const regenerations = new Set<Promise<void>>();
+  // Aborted by `buildEnd`. A regeneration still folding then stops being
+  // waited for and writes nothing: a migration whose top-level await never
+  // settles would otherwise hold `server.close()`, and with it a restart.
+  const regenerationAbort = new AbortController();
   let devPublisher: DevPublisher | undefined;
   let devPublicationStopped: Promise<void> = Promise.resolve();
 
@@ -698,6 +749,7 @@ export function devServerPlugin(
       const runtimeStatus: RuntimeStatus = {
         health: "ok",
         rapidFailures: 0,
+        supersededReplacements: 0,
         logTail: [],
         port: devPort,
       };
@@ -742,9 +794,10 @@ export function devServerPlugin(
         // `regenTypesDev` never throws: a malformed migration is logged and
         // survived, a PLATFORM fault exits the process here (`fatal: true`)
         // rather than serving a stale descriptor for the rest of the session.
-        bootRegenDone = regenTypesDev(root, database, true).then(async ({
+        bootRegenDone = regenTypesDev(root, database, true, regenerationAbort.signal).then(async ({
           descriptorJson: json,
         }) => {
+          if (regenerationAbort.signal.aborted) return;
           runtimeDescriptorJson = json;
           // Report — do NOT apply. Migrating is `pnpm migrate`, a separate step
           // run ahead of `pnpm dev`; see `reportDevSchemaState`.
@@ -902,6 +955,12 @@ export function devServerPlugin(
           pendingHmrChanges.clear();
 
           const bindingsVersion = serverBindingVersionFromState(state);
+          if (new URL(req.url ?? "", "http://localhost").searchParams.has(HMR_FIRST_LOAD_PARAM)) {
+            changedDuringLoad.clear();
+            bindingsAtLoad = bindingsVersion;
+          } else {
+            for (const file of changed) changedDuringLoad.add(file);
+          }
           res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
           res.end(JSON.stringify({ changed, bindingsVersion }));
         }
@@ -928,7 +987,10 @@ export function devServerPlugin(
         let restartTimer: ReturnType<typeof setTimeout> | null = null;
         let healthyTimer: ReturnType<typeof setTimeout> | null = null;
         let appRestartPending = false;
-        let initialFailureRestartPending = false;
+        let failedRuntimeReplacementPending = false;
+        // The child whose `superseded` answer was last acted on: every answer
+        // from one runtime carries the same state.
+        let supersededChild: ChildProcess | null = null;
         let spawnInFlight = false;
         let tornDown = false;
 
@@ -996,11 +1058,16 @@ export function devServerPlugin(
          */
         const markHealthy = () => {
           healthyTimer = null;
-          if (runtimeStatus.health === "fatal") return;
+          // A child staying up lifts a verdict about exits and ends a run of
+          // superseded replacements. The terminal states each say why the
+          // supervisor stopped, and a child that stays up changes none of
+          // those reasons.
+          if (runtimeStatus.health !== "ok" && runtimeStatus.health !== "failing") return;
           if (runtimeStatus.rapidFailures > 0) {
             console.log("[zeroship] runtime is up and stable again");
           }
           runtimeStatus.rapidFailures = 0;
+          runtimeStatus.supersededReplacements = 0;
           runtimeStatus.health = "ok";
         };
 
@@ -1060,10 +1127,13 @@ export function devServerPlugin(
               return;
             }
 
-            if (initialFailureRestartPending) {
-              initialFailureRestartPending = false;
+            if (failedRuntimeReplacementPending) {
+              failedRuntimeReplacementPending = false;
               resetSupervisorForAppChange();
-              console.log("[zeroship] source changed after startup failed - starting a fresh runtime");
+              console.log(
+                "[zeroship] the runtime cannot load its entry and the source has changed since "
+                  + "it began - starting a fresh runtime",
+              );
               runSpawn();
               return;
             }
@@ -1242,7 +1312,9 @@ export function devServerPlugin(
             return;
           }
           serverProcess = child;
-          initialStartupFailed = false;
+          runtimeFailed = false;
+          changedDuringLoad.clear();
+          bindingsAtLoad = undefined;
 
           // Unhandled, this event is an uncaught exception that takes Vite
           // down. With no pid the process never existed, which is the start
@@ -1297,7 +1369,9 @@ export function devServerPlugin(
         // a successful migration regeneration replaces the child instead of
         // mutating JavaScript globals in the live isolate.
         restartRuntimeForAppChange = () => {
-          if (tornDown || appRestartPending || initialFailureRestartPending) return;
+          if (tornDown || appRestartPending || failedRuntimeReplacementPending) return;
+          // An edit the creator made starts a fresh budget, and lifts `unsettled`.
+          runtimeStatus.supersededReplacements = 0;
 
           const child = serverProcess;
           if (
@@ -1325,10 +1399,14 @@ export function devServerPlugin(
           }, 3000).unref();
         };
 
-        restartRuntimeAfterInitialFailure = () => {
-          if (!initialStartupFailed) return false;
-          pendingHmrChanges.clear();
-          if (tornDown || appRestartPending || initialFailureRestartPending) {
+        replaceFailedRuntime = () => {
+          if (!runtimeFailed) return false;
+          if (
+            tornDown
+            || appRestartPending
+            || failedRuntimeReplacementPending
+            || runtimeStatus.health === "unsettled"
+          ) {
             return true;
           }
 
@@ -1339,7 +1417,7 @@ export function devServerPlugin(
             return true;
           }
 
-          initialFailureRestartPending = true;
+          failedRuntimeReplacementPending = true;
           runtimeStatus.health = "failing";
           child.kill("SIGTERM");
           setTimeout(() => {
@@ -1349,6 +1427,65 @@ export function devServerPlugin(
           }, 3000).unref();
           return true;
         };
+
+        /**
+         * A runtime superseded while it loaded is replaced at once, since the
+         * change it failed on is already behind it. Something that rewrites a
+         * watched file during every load would make that a silent loop, so the
+         * replacements share a budget the way exits do: `MAX_RAPID_RESTARTS` in
+         * a row, each runtime superseded before it stayed up
+         * `RUNTIME_HEALTHY_MS`. A runtime that stays up that long, one that
+         * serves, and an app change each start the count over, so saves spread
+         * across an editing session do not add up. Past the budget the next
+         * superseded runtime is left in place and the supervisor says why.
+         */
+        const giveUpOnSupersededRuntimes = () => {
+          // The healthy timer would otherwise lift the verdict on its own.
+          if (healthyTimer) {
+            clearTimeout(healthyTimer);
+            healthyTimer = null;
+          }
+          const changed = [...changedDuringLoad].map((file) => relative(root, file));
+          const bindingsChanged =
+            bindingsAtLoad !== undefined && serverBindingVersionFromState(state) !== bindingsAtLoad;
+          const seen = [
+            ...(changed.length > 0 ? [`it took changes to ${changed.join(", ")}`] : []),
+            ...(bindingsChanged ? ["the procedure bindings changed"] : []),
+          ];
+          const cause =
+            `${runtimeStatus.supersededReplacements} runtimes in a row were replaced because `
+            + "the source changed while they loaded their entry, and the next one was "
+            + "superseded the same way. "
+            + (seen.length > 0
+              ? `After that one began loading, ${seen.join(" and ")}. `
+              : "The dev server has no record of the change it reported. ")
+            + "Stop whatever keeps rewriting watched files, then save a source file or "
+            + "restart `pnpm dev`.";
+          runtimeStatus.health = "unsettled";
+          runtimeStatus.logTail = [cause];
+          console.error(`[zeroship] dev runtime is no longer being replaced: ${cause}`);
+        };
+
+        reportRuntimeState = (state) => {
+          if (state === DEV_RUNTIME_SUPERSEDED) {
+            runtimeFailed = true;
+            const child = serverProcess;
+            if (child === null || child === supersededChild) return;
+            supersededChild = child;
+            if (runtimeStatus.supersededReplacements >= MAX_RAPID_RESTARTS) {
+              giveUpOnSupersededRuntimes();
+              return;
+            }
+            runtimeStatus.supersededReplacements += 1;
+            replaceFailedRuntime?.();
+            return;
+          }
+          // A runtime that serves, or fails on source nobody is changing,
+          // ends the run.
+          runtimeStatus.supersededReplacements = 0;
+          if (state === DEV_RUNTIME_FRESH_REQUIRED) runtimeFailed = true;
+        };
+
         if (server.httpServer?.listening) {
           runSpawn();
         } else {
@@ -1377,7 +1514,8 @@ export function devServerPlugin(
           cleanupListeners();
           disposeRuntime = null;
           restartRuntimeForAppChange = null;
-          restartRuntimeAfterInitialFailure = null;
+          replaceFailedRuntime = null;
+          reportRuntimeState = null;
         };
         disposeRuntime = dispose;
         server.httpServer?.once("close", dispose);
@@ -1429,12 +1567,13 @@ export function devServerPlugin(
             `http://localhost:${devPort}${url}`,
             { method: req.method, headers: req.headers },
             (proxyRes) => {
-              if (
-                proxyRes.headers[DEV_RUNTIME_STATE_HEADER]
-                === DEV_RUNTIME_FRESH_REQUIRED
-              ) {
-                initialStartupFailed = true;
-              }
+              // `superseded`: the source changed after this runtime began the
+              // load it failed. The runtime consumed that change itself, so no
+              // later edit is owed to trigger the replacement; a fresh runtime
+              // loads the newer source now. `fresh-required`: nothing changed,
+              // so the next source change replaces it.
+              const runtimeState = proxyRes.headers[DEV_RUNTIME_STATE_HEADER];
+              reportRuntimeState?.(typeof runtimeState === "string" ? runtimeState : undefined);
               const responseHeaders = { ...proxyRes.headers };
               delete responseHeaders[DEV_RUNTIME_STATE_HEADER];
               res.writeHead(proxyRes.statusCode ?? 502, responseHeaders);
@@ -1474,24 +1613,37 @@ export function devServerPlugin(
       // it into a fresh isolate. `regenTypesDev` never throws, and is NOT fatal
       // here: a bad migration leaves the last valid runtime serving unchanged.
       if (primaryDatabase != null && migrationsAbs != null && isUnderMigrationsDir(file, migrationsAbs)) {
-        // Serialize behind the boot fold. Otherwise a fast hot fold can publish
-        // a new descriptor while the first spawn is still awaiting the boot
-        // fold, only for that older boot result to overwrite it. Once this
-        // promise settles, spawnRuntime has no asynchronous gap before it
-        // captures the descriptor and installs serverProcess, so the update is
-        // either in the first child or forces the live child to restart.
-        await bootRegenDone;
-        const { descriptorJson, generated } = await regenTypesDev(
-          root,
-          primaryDatabase,
-          false,
-        );
-        if (generated && descriptorJson !== runtimeDescriptorJson) {
-          runtimeDescriptorJson = descriptorJson;
-          await devPublisher?.refresh().catch(error => {
-            console.warn(`[zeroship] app build failed: ${(error as Error).message}`);
-          });
-          restartRuntimeForAppChange?.();
+        const database = primaryDatabase;
+        const regeneration = (async () => {
+          // Serialize behind the boot fold. Otherwise a fast hot fold can publish
+          // a new descriptor while the first spawn is still awaiting the boot
+          // fold, only for that older boot result to overwrite it. Once this
+          // promise settles, spawnRuntime has no asynchronous gap before it
+          // captures the descriptor and installs serverProcess, so the update is
+          // either in the first child or forces the live child to restart.
+          await bootRegenDone;
+          // The server closed while this waited, or before it began: there is
+          // nothing to fold for, and nothing to report abandoned.
+          if (regenerationAbort.signal.aborted) return;
+          const { descriptorJson, generated } = await regenTypesDev(
+            root,
+            database,
+            false,
+            regenerationAbort.signal,
+          );
+          if (generated && descriptorJson !== runtimeDescriptorJson) {
+            runtimeDescriptorJson = descriptorJson;
+            await devPublisher?.refresh().catch(error => {
+              console.warn(`[zeroship] app build failed: ${(error as Error).message}`);
+            });
+            restartRuntimeForAppChange?.();
+          }
+        })();
+        regenerations.add(regeneration);
+        try {
+          await regeneration;
+        } finally {
+          regenerations.delete(regeneration);
         }
         return;
       }
@@ -1500,7 +1652,7 @@ export function devServerPlugin(
         file.endsWith(".ts") || file.endsWith(".tsx") ||
         file.endsWith(".js") || file.endsWith(".jsx")
       ) {
-        if (restartRuntimeAfterInitialFailure?.()) return;
+        if (replaceFailedRuntime?.()) return;
         // Server-module discovery is now path-based (no caches to
         // invalidate). Queue the change for HMR delivery to the V8
         // runtime — the runtime polls /__zeroship_hmr_check and
@@ -1511,7 +1663,11 @@ export function devServerPlugin(
     },
 
     async buildEnd() {
+      regenerationAbort.abort();
       disposeRuntime?.();
+      // Settles promptly once aborted: a regeneration still folding stops
+      // being waited for, and one already writing finishes its write.
+      await Promise.allSettled([bootRegenDone, ...regenerations]);
       await devPublicationStopped;
     },
   };

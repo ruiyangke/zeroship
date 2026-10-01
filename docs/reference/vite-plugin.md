@@ -78,6 +78,24 @@ it, and keeps serving your page. Server calls then fail with `code`
 never forwarded to whatever else holds the runtime port. Nothing is retried on
 its own: fix the binary, then save a change to your app or restart `pnpm dev`.
 
+Whenever the dev server answers for the runtime instead of forwarding to it,
+the error carries `code: "UNAVAILABLE"` and a `details.state` saying why. The
+restart budget below is `MAX_RAPID_RESTARTS` in the plugin's `constants.ts`,
+and a runtime counts as having started once it stays up `RUNTIME_HEALTHY_MS`.
+
+| `details.state` | `retryable` | Meaning | `details.attempts` |
+| --- | --- | --- | --- |
+| `failing` | `true` | The runtime exited before it started and a restart is scheduled, or it is being replaced. | Consecutive exits before starting. |
+| `fatal` | `false` | The runtime exited before it started more times in a row than the restart budget allows, and was given up on. The terminal banner quotes what it said. Fix the cause, then restart `pnpm dev`. | Consecutive exits before starting. |
+| `unstartable` | `false` | The runtime binary could not be run at all (above). | Consecutive exits before starting that preceded it, if any. |
+| `unsettled` | `false` | The source kept changing while each runtime loaded your entry, so each was replaced, more times in a row than the restart budget allows. The message names what changed after the last one began loading. Stop whatever keeps rewriting it, then save a change to your app or restart `pnpm dev`. | Runtimes replaced in a row. |
+
+A runtime that fails while loading your entry is not given up on. When your
+source changed after that load began, the dev server replaces the runtime at
+once; when it did not, the runtime keeps answering with its error until you
+save a change. Only a run of replacements with no runtime staying up
+`RUNTIME_HEALTHY_MS` in between, and no app change, counts toward `unsettled`.
+
 ### `devAuth`
 
 The `pnpm dev` implementation of the [platform auth contract](auth.md):

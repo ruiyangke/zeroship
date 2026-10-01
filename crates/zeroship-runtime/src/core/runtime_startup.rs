@@ -286,11 +286,13 @@ impl RuntimeInner {
         {
             return;
         }
+        let generation = self.dev_entry_loader.as_ref().unwrap().work_generation();
         if self
             .dev_entry_deadline()
             .is_some_and(|deadline| Instant::now() >= deadline)
         {
-            self.dev_entry_loader.as_mut().unwrap().fail_current(
+            self.dev_entry_loader.as_mut().unwrap().abandon(
+                generation,
                 "dev entry loading wall timeout; a fresh runtime is required".into(),
             );
             return;
@@ -313,7 +315,7 @@ impl RuntimeInner {
             self.dev_entry_loader
                 .as_mut()
                 .unwrap()
-                .fail_current(error);
+                .abandon(generation, error);
         } else if let Ok(Some(application)) = result {
             self.application = Some(application);
         }

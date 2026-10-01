@@ -28,7 +28,7 @@ use crate::channel::CancelFlag;
 use crate::init::init_v8;
 use crate::modules::ModuleEntry;
 use crate::plugin::NativePlugin;
-use crate::runtime::{Runtime, RuntimeLimits};
+use crate::runtime::{DevRuntimeState, Runtime, RuntimeLimits};
 use crate::{EnvSnapshot, FetchOutcome, RequestCtx, SettledFetch};
 
 use compio::buf::BufResult;
@@ -1095,16 +1095,20 @@ async fn handle_request(
     }
 }
 
+/// Consumed and removed by the dev host (`packages/vite-plugin/src/dev-server.ts`),
+/// which spells the same names in `packages/vite-plugin/src/constants.ts`. No
+/// test compares the two spellings: each side's tests assert its own.
 const DEV_RUNTIME_STATE_HEADER: &str = "x-zeroship-dev-runtime";
 const DEV_RUNTIME_FRESH_REQUIRED: &str = "fresh-required";
+const DEV_RUNTIME_SUPERSEDED: &str = "superseded";
 
 fn append_dev_runtime_state(runtime: &Runtime, headers: &mut Vec<(String, String)>) {
-    if runtime.dev_runtime_requires_fresh_start() {
-        headers.push((
-            DEV_RUNTIME_STATE_HEADER.into(),
-            DEV_RUNTIME_FRESH_REQUIRED.into(),
-        ));
-    }
+    let value = match runtime.dev_runtime_state() {
+        None => return,
+        Some(DevRuntimeState::FreshRequired) => DEV_RUNTIME_FRESH_REQUIRED,
+        Some(DevRuntimeState::Superseded) => DEV_RUNTIME_SUPERSEDED,
+    };
+    headers.push((DEV_RUNTIME_STATE_HEADER.into(), value.into()));
 }
 
 // ===========================================================================
@@ -2015,6 +2019,337 @@ mod serve_gaps_tests {
         // Port 0 lets the OS choose a free port — always bindable.
         let listener = create_reuseport_listener(0).expect("free port must bind");
         assert!(listener.local_addr().is_ok());
+    }
+}
+
+#[cfg(test)]
+mod dev_runtime_state_tests {
+    //! The state header a development runtime puts on every response once it
+    //! can no longer load its entry, which is how the dev host learns when to
+    //! replace it.
+    use super::*;
+    use crate::runtime::RuntimeLimits;
+    use std::time::Duration;
+
+    fn dev_runtime(source: &str, limits: RuntimeLimits) -> Runtime {
+        init_v8();
+        Runtime::builder()
+            .modules(vec![ModuleEntry {
+                specifier: "dev-host.js".into(),
+                source: source.into(),
+            }])
+            .dev_entry_loader("createDevEntryLoader")
+            .limits(limits)
+            .build()
+    }
+
+    /// Long enough that a trivial first load cannot miss it on a loaded
+    /// machine; a later load that never settles still reaches it.
+    fn wall_limit() -> RuntimeLimits {
+        RuntimeLimits {
+            wall_timeout: Some(Duration::from_secs(1)),
+            ..RuntimeLimits::default()
+        }
+    }
+
+    fn state_headers(runtime: &Runtime) -> Vec<(String, String)> {
+        let mut headers = Vec::new();
+        append_dev_runtime_state(runtime, &mut headers);
+        headers
+    }
+
+    fn state(value: &str) -> Vec<(String, String)> {
+        vec![(DEV_RUNTIME_STATE_HEADER.into(), value.into())]
+    }
+
+    fn no_state() -> Vec<(String, String)> {
+        Vec::new()
+    }
+
+    /// Waits for the runtime to settle its current load. A runtime that keeps
+    /// starting loads never settles, so the wait fails instead of hanging.
+    async fn initialize(runtime: &Runtime) -> Result<(), String> {
+        compio::time::timeout(Duration::from_secs(30), runtime.initialize(&EnvSnapshot::empty()))
+            .await
+            .expect("the runtime must settle its current load")
+    }
+
+    /// Runs `source` in the isolate. Once startup has succeeded the event pump
+    /// keeps running, and the host's change poll calls `invalidate` from a
+    /// timer callback; a call made here stands in for that callback.
+    fn run_script(runtime: &Runtime, source: &str) {
+        runtime.with_scope(|scope| {
+            let source = v8::String::new(scope, source).unwrap();
+            v8::Script::compile(scope, source, None)
+                .unwrap()
+                .run(scope)
+                .unwrap();
+        });
+    }
+
+    fn dev_loads(runtime: &Runtime) -> i64 {
+        runtime.with_scope(|scope| {
+            let global = scope.get_current_context().global(scope);
+            let key = v8::String::new(scope, "devLoads").unwrap();
+            global
+                .get(scope, key.into())
+                .unwrap()
+                .integer_value(scope)
+                .unwrap()
+        })
+    }
+
+    fn body(outcome: FetchOutcome) -> (u16, String) {
+        let FetchOutcome::Response { status, body, .. } = outcome else {
+            panic!("a runtime that cannot load its entry answers at once");
+        };
+        (status, String::from_utf8(body).unwrap())
+    }
+
+    fn request(runtime: &Runtime) -> FetchOutcome {
+        runtime.call_fetch_handler(
+            "GET",
+            "http://localhost/",
+            &[],
+            "",
+            &EnvSnapshot::empty(),
+            RequestCtx::new(CancelFlag::new()),
+        )
+    }
+
+    #[compio::test]
+    async fn a_source_change_during_startup_supersedes_the_runtime() {
+        let runtime = dev_runtime(
+            r"
+            export function createDevEntryLoader(invalidate) {
+                return async () => {
+                    await Promise.resolve();
+                    invalidate();
+                    return { userDefault: {}, fetch() { return new Response('must not run'); } };
+                };
+            }
+        ",
+            RuntimeLimits::default(),
+        );
+        let error = initialize(&runtime)
+            .await
+            .expect_err("an entry invalidated while it loads must fail startup");
+        assert!(error.contains("changed during startup"), "{error}");
+        assert_eq!(state_headers(&runtime), state(DEV_RUNTIME_SUPERSEDED));
+    }
+
+    #[compio::test]
+    async fn a_startup_failure_with_no_source_change_requires_a_fresh_runtime() {
+        let runtime = dev_runtime(
+            r"
+            export function createDevEntryLoader(invalidate) {
+                return () => { throw new Error('creator module threw'); };
+            }
+        ",
+            RuntimeLimits::default(),
+        );
+        let error = initialize(&runtime)
+            .await
+            .expect_err("a throwing entry must fail startup");
+        assert!(error.contains("creator module threw"), "{error}");
+        assert_eq!(state_headers(&runtime), state(DEV_RUNTIME_FRESH_REQUIRED));
+    }
+
+    #[compio::test]
+    async fn a_started_dev_runtime_reports_no_state() {
+        let runtime = dev_runtime(
+            r"
+            export function createDevEntryLoader(invalidate) {
+                globalThis.editSource = invalidate;
+                return () => ({ userDefault: {}, fetch() { return new Response('ok'); } });
+            }
+        ",
+            RuntimeLimits::default(),
+        );
+        initialize(&runtime)
+            .await
+            .expect("the entry loads");
+        assert_eq!(state_headers(&runtime), no_state());
+        run_script(&runtime, "editSource()");
+        assert_eq!(state_headers(&runtime), no_state());
+    }
+
+    #[compio::test]
+    async fn a_later_load_that_settles_with_an_error_reports_no_state() {
+        let runtime = dev_runtime(
+            r"
+            let broken = false;
+            export function createDevEntryLoader(invalidate) {
+                globalThis.breakNextLoad = () => { broken = true; invalidate(); };
+                return async () => {
+                    if (broken) throw new Error('replacement is broken');
+                    return { userDefault: {}, fetch() { return new Response('ok'); } };
+                };
+            }
+        ",
+            RuntimeLimits::default(),
+        );
+        initialize(&runtime)
+            .await
+            .expect("the first load");
+        run_script(&runtime, "breakNextLoad()");
+        let error = initialize(&runtime)
+            .await
+            .expect_err("the replacement load fails");
+        assert!(error.contains("replacement is broken"), "{error}");
+        // The failed load settled, so the next change retries in this isolate.
+        assert_eq!(state_headers(&runtime), no_state());
+    }
+
+    #[compio::test]
+    async fn a_later_load_past_its_wall_deadline_requires_a_fresh_runtime() {
+        let runtime = dev_runtime(
+            r"
+            let hang = false;
+            globalThis.devLoads = 0;
+            export function createDevEntryLoader(invalidate) {
+                globalThis.hangNextLoad = () => { hang = true; invalidate(); };
+                globalThis.editSource = invalidate;
+                return async () => {
+                    globalThis.devLoads++;
+                    if (hang) {
+                        hang = false;
+                        await new Promise(() => {});
+                    }
+                    return { userDefault: {}, fetch() { return new Response('ok'); } };
+                };
+            }
+        ",
+            wall_limit(),
+        );
+        initialize(&runtime)
+            .await
+            .expect("the first load");
+        run_script(&runtime, "hangNextLoad()");
+        let error = initialize(&runtime)
+            .await
+            .expect_err("a later load past its wall deadline is abandoned");
+        assert!(error.contains("dev entry loading wall timeout"), "{error}");
+        assert_eq!(dev_loads(&runtime), 2);
+        assert_eq!(state_headers(&runtime), state(DEV_RUNTIME_FRESH_REQUIRED));
+
+        // The abandoned load may still be running, so a change reported after
+        // it starts no load in this isolate; it tells the host to replace the
+        // runtime now rather than after the next change.
+        run_script(&runtime, "editSource()");
+        let (status, answer) = body(request(&runtime));
+        assert_eq!(status, 500, "{answer}");
+        assert!(answer.contains("dev entry loading wall timeout"), "{answer}");
+        assert_eq!(dev_loads(&runtime), 2);
+        assert_eq!(state_headers(&runtime), state(DEV_RUNTIME_SUPERSEDED));
+    }
+
+    // Each test's stuck load happens once. A loader that wrongly retried in
+    // place then loads successfully and fails an assertion; one that stuck on
+    // every retry would spin the pump without yielding, and no timeout in the
+    // test could fire.
+    fn cpu_limit() -> RuntimeLimits {
+        RuntimeLimits {
+            cpu_limit: Some(Duration::from_secs(1)),
+            ..RuntimeLimits::default()
+        }
+    }
+
+    #[compio::test]
+    async fn a_later_load_terminated_by_its_cpu_limit_requires_a_fresh_runtime() {
+        let runtime = dev_runtime(
+            r"
+            let spin = false;
+            globalThis.devLoads = 0;
+            export function createDevEntryLoader(invalidate) {
+                globalThis.spinNextLoad = () => { spin = true; invalidate(); };
+                globalThis.editSource = invalidate;
+                return () => {
+                    globalThis.devLoads++;
+                    if (spin) {
+                        spin = false;
+                        for (;;) {}
+                    }
+                    return { userDefault: {}, fetch() { return new Response('ok'); } };
+                };
+            }
+        ",
+            cpu_limit(),
+        );
+        initialize(&runtime).await.expect("the first load");
+        run_script(&runtime, "spinNextLoad()");
+        let error = initialize(&runtime)
+            .await
+            .expect_err("a later load V8 terminates is abandoned");
+        assert!(error.contains("CPU time limit exceeded"), "{error}");
+        assert_eq!(dev_loads(&runtime), 2);
+        assert_eq!(state_headers(&runtime), state(DEV_RUNTIME_FRESH_REQUIRED));
+
+        run_script(&runtime, "editSource()");
+        let (status, answer) = body(request(&runtime));
+        assert_eq!(status, 500, "{answer}");
+        assert!(answer.contains("CPU time limit exceeded"), "{answer}");
+        assert_eq!(dev_loads(&runtime), 2, "no load is retried in a terminated isolate");
+        assert_eq!(state_headers(&runtime), state(DEV_RUNTIME_SUPERSEDED));
+    }
+
+    #[compio::test]
+    async fn a_terminated_load_that_invalidated_its_own_generation_is_superseded() {
+        let runtime = dev_runtime(
+            r"
+            let spin = false;
+            export function createDevEntryLoader(invalidate) {
+                globalThis.spinNextLoad = () => { spin = true; invalidate(); };
+                return () => {
+                    if (spin) {
+                        spin = false;
+                        invalidate();
+                        for (;;) {}
+                    }
+                    return { userDefault: {}, fetch() { return new Response('ok'); } };
+                };
+            }
+        ",
+            cpu_limit(),
+        );
+        initialize(&runtime).await.expect("the first load");
+        run_script(&runtime, "spinNextLoad()");
+        let error = initialize(&runtime)
+            .await
+            .expect_err("a later load V8 terminates is abandoned");
+        assert!(error.contains("CPU time limit exceeded"), "{error}");
+        // The source changed after the terminated load began.
+        assert_eq!(state_headers(&runtime), state(DEV_RUNTIME_SUPERSEDED));
+    }
+
+    #[compio::test]
+    async fn a_change_during_an_abandoned_later_load_supersedes_the_runtime() {
+        let runtime = dev_runtime(
+            r"
+            let hang = false;
+            export function createDevEntryLoader(invalidate) {
+                globalThis.hangNextLoad = () => { hang = true; invalidate(); };
+                return async () => {
+                    if (hang) {
+                        hang = false;
+                        invalidate();
+                        await new Promise(() => {});
+                    }
+                    return { userDefault: {}, fetch() { return new Response('ok'); } };
+                };
+            }
+        ",
+            wall_limit(),
+        );
+        initialize(&runtime)
+            .await
+            .expect("the first load");
+        run_script(&runtime, "hangNextLoad()");
+        let error = initialize(&runtime)
+            .await
+            .expect_err("a later load past its wall deadline is abandoned");
+        assert!(error.contains("dev entry loading wall timeout"), "{error}");
+        assert_eq!(state_headers(&runtime), state(DEV_RUNTIME_SUPERSEDED));
     }
 }
 

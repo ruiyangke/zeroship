@@ -222,6 +222,18 @@ impl AsyncWork {
     }
 }
 
+/// A development runtime that can no longer load its entry, as its dev host
+/// must act on it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DevRuntimeState {
+    /// Nothing has changed since the failed load began, so a fresh runtime
+    /// would load the same source. Replace this one once the source changes.
+    FreshRequired,
+    /// The source changed after the failed load began, so a fresh runtime
+    /// would load newer source than this one failed on. Replace this one now.
+    Superseded,
+}
+
 /// Event from AsyncWork that the pump delivers to Runtime for V8 processing.
 pub enum AsyncEvent {
     Op(OpResult),
@@ -482,16 +494,41 @@ impl Runtime {
         self.inner.borrow().notify_pump();
     }
 
-    /// Whether development startup has failed after touching the isolate.
+    /// Whether this development runtime can no longer load its entry, and
+    /// when the dev host should replace it.
     ///
-    /// Creator evaluation and plugin finalization can run arbitrary callbacks
-    /// before they fail, so the dev host must replace this runtime rather than
-    /// retrying startup in the same isolate. A failed later entry generation
-    /// does not set this state: the last published snapshot remains valid and
-    /// another invalidation can retry through its existing loader.
-    pub(crate) fn dev_runtime_requires_fresh_start(&self) -> bool {
+    /// Two failures leave the isolate unable to load again:
+    ///
+    /// - A failed startup. Creator evaluation and plugin finalization can run
+    ///   arbitrary callbacks before they fail, so startup is not retried in
+    ///   the same isolate. The event pump stops with it, so nothing this
+    ///   runtime observes changes afterwards.
+    /// - A later load abandoned before it settled (`DevEntryLoader::abandon`).
+    ///   It may still be running, and loads are serialized, so the loader
+    ///   starts no further load. The pump keeps running, so a source change
+    ///   reported afterwards turns `FreshRequired` into `Superseded`.
+    ///
+    /// A later load that settles with an error leaves the isolate usable: the
+    /// failure is cached for its generation and the next invalidation retries
+    /// through the same loader, so it reports no state.
+    pub(crate) fn dev_runtime_state(&self) -> Option<DevRuntimeState> {
         let inner = self.inner.borrow();
-        inner.dev_entry_factory.is_some() && matches!(inner.startup, StartupState::Failed(_))
+        inner.dev_entry_factory.as_ref()?;
+        let superseded = match inner.startup {
+            StartupState::Failed(_) => {
+                crate::core::dev_entry::invalidated_since_first_load(&inner.isolate)
+            }
+            StartupState::Ready => inner
+                .dev_entry_loader
+                .as_ref()?
+                .superseded_since_abandoned()?,
+            _ => return None,
+        };
+        Some(if superseded {
+            DevRuntimeState::Superseded
+        } else {
+            DevRuntimeState::FreshRequired
+        })
     }
 
     // ---- Methods that enter V8 — borrow internally -----------------------

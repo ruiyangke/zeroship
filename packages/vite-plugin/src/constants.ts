@@ -3,13 +3,31 @@
 /** HTTP endpoints used by the dev host and its runtime module loader. */
 export const MODULE_FETCH_PATH = "/__zeroship_fetch";
 export const HMR_POLL_PATH = "/__zeroship_hmr_check";
+/**
+ * Query parameter on `HMR_POLL_PATH` marking a runtime's first-load take: the
+ * runtime drops those changes, so the dev server does not count them among the
+ * changes that reached it after its load began.
+ */
+export const HMR_FIRST_LOAD_PARAM = "first-load";
 export const PROCEDURE_BINDINGS_PATH = "/__zeroship_bindings";
 export const RUNTIME_MODULE_SPECIFIER = "zeroship";
 export const VITE_RUNTIME_MODULE_ID = "/@id/zeroship";
 
-/** Standalone runtime signal consumed and removed by the Vite supervisor. */
+/**
+ * Standalone runtime signal consumed and removed by the Vite supervisor. The
+ * runtime sets it on every answer once it can no longer load its entry (its
+ * startup failed, or a later load was abandoned before it settled), and spells
+ * the same names in `crates/zeroship-runtime/src/core/serve.rs`. No test
+ * compares the two spellings: each side's tests assert its own.
+ *
+ * - `fresh-required`: nothing changed since the failed load began; replace the
+ *   runtime once the source changes.
+ * - `superseded`: the source changed after the failed load began; replace it
+ *   now.
+ */
 export const DEV_RUNTIME_STATE_HEADER = "x-zeroship-dev-runtime";
 export const DEV_RUNTIME_FRESH_REQUIRED = "fresh-required";
+export const DEV_RUNTIME_SUPERSEDED = "superseded";
 
 /** Environment variable names passed to the zeroship child process. */
 export const ENV_DEV = "ZEROSHIP_DEV";
@@ -70,7 +88,10 @@ export const ENV_DEV_PORT = "ZEROSHIP_DEV_PORT";
  *   as having genuinely started; its later death is a mid-session crash and the
  *   rapid-failure counter resets.
  * - `MAX_RAPID_RESTARTS` - consecutive sub-`RUNTIME_HEALTHY_MS` exits tolerated
- *   before the supervisor gives up and goes terminal.
+ *   before the supervisor gives up and goes terminal. It also bounds the
+ *   runtimes replaced in a row because each reported `superseded` before
+ *   staying up `RUNTIME_HEALTHY_MS`: the next one is left in place and the
+ *   supervisor goes `unsettled`.
  *
  * The backoff is 1s, 2s, 4s, 8s (capped), so the terminal verdict lands ~15s
  * after the first failure - long enough that a port being released by a dying

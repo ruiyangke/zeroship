@@ -1,6 +1,6 @@
 import { after, before, describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { ChildProcess } from "node:child_process";
+import { ChildProcess, spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
 import http from "node:http";
 import { tmpdir } from "node:os";
@@ -10,13 +10,16 @@ import { fileURLToPath } from "node:url";
 import { createServer, type ViteDevServer } from "vite";
 
 import {
+  HMR_FIRST_LOAD_PARAM,
   HMR_POLL_PATH,
+  MAX_RAPID_RESTARTS,
   MODULE_FETCH_PATH,
   PROCEDURE_BINDINGS_PATH,
   RUNTIME_MODULE_SPECIFIER,
   VITE_RUNTIME_MODULE_ID,
   DEV_RUNTIME_STATE_HEADER,
   DEV_RUNTIME_FRESH_REQUIRED,
+  DEV_RUNTIME_SUPERSEDED,
   RUNTIME_HEALTHY_MS,
   ENV_DEV,
   ENV_DEV_AUTH_SECRET,
@@ -33,6 +36,12 @@ import type { TransformState } from "../src/transform.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const BOOTSTRAP_SHIM_PATH = resolve(__dirname, "../src/dev-bootstrap.js");
+/** The development host the runtime evaluates, as source. */
+const DEV_BOOTSTRAP_SOURCE = resolve(__dirname, "../src/dev-bootstrap/index.ts");
+const PLUGIN_ROOT = resolve(__dirname, "..");
+
+/** The stub runtime names its own pid on every answer, so a test can tell runtimes apart. */
+const STUB_PID_HEADER = "x-stub-runtime-pid";
 
 /** A typed app id that is NOT the shared local one, so the two can be told apart. */
 const DECLARED_APP_ID = "app_034klb07lrb9jgma6imvmx000";
@@ -329,13 +338,20 @@ describe("devServerPlugin", () => {
     const harness = await startHarness({
       devServerPort: 3908,
       serveRuntime: true,
-      freshRuntimeRequired: true,
+      failedStartups: [DEV_RUNTIME_FRESH_REQUIRED],
     });
     try {
       const firstRuntime = await harness.runtimeLog();
       const failed = await waitForStatus(`${harness.origin}/api/probe`, 500);
       assert.equal(failed.headers.has(DEV_RUNTIME_STATE_HEADER), false);
       assert.equal(await failed.text(), "module init failed");
+
+      // Nothing has changed since that startup, so a fresh runtime would fail
+      // the same way: the failed one keeps answering until the source changes.
+      const again = await fetch(`${harness.origin}/api/probe`);
+      assert.equal(again.status, 500);
+      assert.equal(again.headers.get(STUB_PID_HEADER), String(firstRuntime.pid));
+      assert.equal(await harness.runtimeSpawnCount(), 1);
 
       await harness.queueHmrChange();
       await waitFor(async () => {
@@ -347,11 +363,256 @@ describe("devServerPlugin", () => {
     }
   });
 
+  test("a runtime whose source changed during startup is replaced without an edit", async () => {
+    const harness = await startHarness({
+      devServerPort: 3920,
+      serveRuntime: true,
+      failedStartups: [DEV_RUNTIME_SUPERSEDED],
+    });
+    try {
+      const firstRuntime = await harness.runtimeLog();
+      const failed = await waitForStatus(`${harness.origin}/api/probe`, 500);
+      assert.equal(failed.headers.get(STUB_PID_HEADER), String(firstRuntime.pid));
+      assert.equal(failed.headers.has(DEV_RUNTIME_STATE_HEADER), false);
+
+      // No source edit: the change the runtime failed on is already behind it.
+      await waitFor(async () => {
+        assert.equal(await harness.runtimeSpawnCount(), 2);
+        assert.notEqual((await harness.runtimeLog()).pid, firstRuntime.pid);
+      });
+      const served = await waitForStatus(`${harness.origin}/api/probe`, 200);
+      assert.equal(await served.text(), "runtime-ok");
+      assert.equal(served.headers.get(STUB_PID_HEADER), String((await harness.runtimeLog()).pid));
+    } finally {
+      await harness.close();
+    }
+  });
+
+  test("stops replacing runtimes that are superseded during every startup", async () => {
+    const harness = await startHarness({
+      devServerPort: 3921,
+      serveRuntime: true,
+      failedStartups: Array.from({ length: MAX_RAPID_RESTARTS + 2 }, () => DEV_RUNTIME_SUPERSEDED),
+    });
+    const printed: string[] = [];
+    const consoleError = console.error;
+    console.error = (...args: unknown[]) => { printed.push(args.map(String).join(" ")); };
+    try {
+      const stale = resolve(harness.root, "src/stale.ts");
+      const changed = resolve(harness.root, "src/value.ts");
+      for (let spawned = 1; spawned <= MAX_RAPID_RESTARTS + 1; spawned += 1) {
+        await waitFor(async () => {
+          assert.equal(await harness.runtimeSpawnCount(), spawned);
+        });
+        // What the runtime takes from the queue: its first load's own take,
+        // which it drops, then a watched file rewritten while that load runs.
+        await harness.queueHmrChange(stale);
+        await takeChanges(harness, { firstLoad: true });
+        await harness.queueHmrChange(changed);
+        await takeChanges(harness);
+        const failed = await waitForStatus(`${harness.origin}/api/probe`, 500);
+        assert.equal(failed.headers.get(STUB_PID_HEADER), String((await harness.runtimeLog()).pid));
+      }
+
+      const assertUnsettled = async () => {
+        const refused = await fetch(`${harness.origin}/api/probe`);
+        assert.equal(refused.status, 503);
+        const body = await refused.json() as {
+          message?: string;
+          retryable?: boolean;
+          details?: { state?: string; attempts?: number };
+        };
+        assert.equal(body.details?.state, "unsettled");
+        assert.equal(body.details?.attempts, MAX_RAPID_RESTARTS);
+        assert.equal(body.retryable, false);
+        assert.match(body.message ?? "", /no longer being replaced/);
+        assert.ok(body.message?.includes("src/value.ts"), `message must name the file: ${body.message}`);
+        assert.ok(
+          !body.message?.includes("src/stale.ts"),
+          `a change the first load dropped is not a cause: ${body.message}`,
+        );
+        assert.ok(!body.message?.includes("bindings"), `the bindings did not change: ${body.message}`);
+      };
+      await assertUnsettled();
+      assert.equal(
+        printed.filter((line) => line.includes("dev runtime is no longer being replaced")).length,
+        1,
+        `the supervisor says why once: ${JSON.stringify(printed)}`,
+      );
+
+      // The last runtime stays up past RUNTIME_HEALTHY_MS; that does not lift
+      // the verdict and let its bare 500s through.
+      await sleep(RUNTIME_HEALTHY_MS + 1_000);
+      await assertUnsettled();
+
+      // The last runtime is left in place rather than replaced once more.
+      await harness.queueHmrChange(changed);
+      assert.equal((await fetch(`${harness.origin}/api/probe`)).status, 503);
+      assert.equal(await harness.runtimeSpawnCount(), MAX_RAPID_RESTARTS + 1);
+
+      // An edit to the app spawns afresh with a fresh budget: the next
+      // superseded runtime is replaced, not given up on.
+      await fs.writeFile(changed, "export const answer = 43;\n");
+      await waitFor(async () => {
+        assert.equal(await harness.runtimeSpawnCount(), MAX_RAPID_RESTARTS + 2);
+      });
+      const superseded = await waitForStatus(`${harness.origin}/api/probe`, 500);
+      assert.equal(superseded.headers.get(STUB_PID_HEADER), String((await harness.runtimeLog()).pid));
+      const served = await waitForStatus(`${harness.origin}/api/probe`, 200);
+      assert.equal(await served.text(), "runtime-ok");
+      assert.equal(await harness.runtimeSpawnCount(), MAX_RAPID_RESTARTS + 3);
+    } finally {
+      console.error = consoleError;
+      await harness.close();
+    }
+  });
+
+  test("a runtime that stays up RUNTIME_HEALTHY_MS starts the superseded count over", async () => {
+    const harness = await startHarness({
+      devServerPort: 3924,
+      serveRuntime: true,
+      failedStartups: Array.from({ length: MAX_RAPID_RESTARTS + 2 }, () => DEV_RUNTIME_SUPERSEDED),
+    });
+    try {
+      const probeRuntime = async (spawned: number) => {
+        await waitFor(async () => {
+          assert.equal(await harness.runtimeSpawnCount(), spawned);
+        });
+        const failed = await waitForStatus(`${harness.origin}/api/probe`, 500);
+        assert.equal(failed.headers.get(STUB_PID_HEADER), String((await harness.runtimeLog()).pid));
+      };
+      // One replacement short of the budget.
+      for (let spawned = 1; spawned <= MAX_RAPID_RESTARTS; spawned += 1) await probeRuntime(spawned);
+
+      // This runtime stays up RUNTIME_HEALTHY_MS before anything supersedes it.
+      await waitFor(async () => {
+        assert.equal(await harness.runtimeSpawnCount(), MAX_RAPID_RESTARTS + 1);
+      });
+      await sleep(RUNTIME_HEALTHY_MS + 1_000);
+      await probeRuntime(MAX_RAPID_RESTARTS + 1);
+
+      // Replaced, and so is the next one, rather than going unsettled.
+      await probeRuntime(MAX_RAPID_RESTARTS + 2);
+      const served = await waitForStatus(`${harness.origin}/api/probe`, 200);
+      assert.equal(await served.text(), "runtime-ok");
+      assert.equal(await harness.runtimeSpawnCount(), MAX_RAPID_RESTARTS + 3);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  test("closing the server abandons a regeneration whose migration never settles", async () => {
+    const harness = await startHarness({
+      devServerPort: 3925,
+      migrations: { migrationSource: migrationCreating("todos", "title") },
+    });
+    const printed: string[] = [];
+    const consoleWarn = console.warn;
+    console.warn = (...args: unknown[]) => { printed.push(args.map(String).join(" ")); };
+    try {
+      const hanging = resolve(harness.root, "migrations/20240617123100_hangs.ts");
+      await fs.writeFile(
+        hanging,
+        `await new Promise(() => {});\n${migrationCreating("hangs", "body")}`,
+      );
+      const update = harness.queueHmrChange(hanging);
+
+      const closed = await Promise.race([
+        harness.server.close().then(() => "closed"),
+        sleep(30_000).then(() => "still waiting"),
+      ]);
+      assert.equal(closed, "closed", "server.close() waited on a migration that never settles");
+      await update;
+      assert.ok(
+        printed.some((line) => line.includes("regeneration still folding the migrations was abandoned")),
+        `the abandonment is reported: ${JSON.stringify(printed)}`,
+      );
+      const descriptor = JSON.parse(foldedDescriptor(harness.root) ?? "null");
+      assert.ok(descriptor?.collections.todos, "the fold from before close is intact");
+      assert.equal(descriptor?.collections.hangs, undefined, "the abandoned fold wrote nothing");
+    } finally {
+      console.warn = consoleWarn;
+      await harness.close();
+    }
+  });
+
+  test("closing the server settles a migration regeneration in flight", async () => {
+    const harness = await startHarness({
+      devServerPort: 3922,
+      migrations: { migrationSource: migrationCreating("todos", "title") },
+    });
+    const printed: string[] = [];
+    const consoleWarn = console.warn;
+    console.warn = (...args: unknown[]) => { printed.push(args.map(String).join(" ")); };
+    try {
+      const migrationFile = resolve(harness.root, "migrations/20240617123100_notes.ts");
+      await fs.writeFile(migrationFile, migrationCreating("notes", "body"));
+      let settled = false;
+      const update = harness.queueHmrChange(migrationFile).then(() => { settled = true; });
+
+      await harness.server.close();
+      assert.equal(settled, true, "server.close() resolved while a regeneration was still running");
+      await update;
+      // Closed mid-fold, the regeneration is abandoned and writes nothing;
+      // closed later, it finishes. Either way it is whole, and it is over.
+      const descriptor = JSON.parse(foldedDescriptor(harness.root) ?? "null");
+      const abandoned = printed.some((line) =>
+        line.includes("regeneration still folding the migrations was abandoned"));
+      assert.ok(descriptor?.collections.todos, "the boot fold is intact");
+      assert.equal(
+        Boolean(descriptor?.collections.notes),
+        !abandoned,
+        `folded notes: ${Boolean(descriptor?.collections.notes)}, reported abandoned: ${abandoned}`,
+      );
+
+      // A hot update Vite starts after the server closed folds nothing and
+      // reports nothing abandoned: nothing began.
+      const reportedBefore = printed.length;
+      const lateFile = resolve(harness.root, "migrations/20240617123200_tags.ts");
+      await fs.writeFile(lateFile, migrationCreating("tags", "label"));
+      await harness.queueHmrChange(lateFile);
+      assert.deepEqual(printed.slice(reportedBefore), [], "a late hot update reports nothing");
+      const after = JSON.parse(foldedDescriptor(harness.root) ?? "null");
+      assert.equal(after?.collections.tags, undefined, "no regeneration after close");
+      assert.deepEqual(after, descriptor, "the fold on disk is the one from before close");
+    } finally {
+      console.warn = consoleWarn;
+      await harness.close();
+    }
+  });
+
+  test("the bootstrap's first load drops changes queued before it and reports later ones", async () => {
+    const harness = await startHarness({ devServerPort: 3923 });
+    let host: ReturnType<typeof startBootstrapHost> | undefined;
+    try {
+      // Queued before the host's first load, as the edit that got a runtime
+      // spawned is.
+      await harness.queueHmrChange();
+
+      host = startBootstrapHost(harness);
+      const loaded = await host.next("loaded");
+      assert.equal(loaded.fetch, "function", "the first load returns the entry's handlers");
+
+      // The load cleared the queue: nothing stale is left for anyone to take.
+      const stale = await fetch(`${harness.origin}${HMR_POLL_PATH}`);
+      assert.deepEqual((await stale.json() as { changed?: unknown }).changed, []);
+
+      // Control: a change after the load reaches the host's poll.
+      await harness.queueHmrChange();
+      await host.next("invalidated");
+      const exit = await host.stop();
+      assert.equal(exit.invalidations, 1, "only the change made after the load invalidated it");
+    } finally {
+      host?.kill();
+      await harness.close();
+    }
+  });
+
   test("serves the dev-auth flow while creator runtime startup is broken", async () => {
     const harness = await startHarness({
       devServerPort: 3909,
       serveRuntime: true,
-      freshRuntimeRequired: true,
+      failedStartups: [DEV_RUNTIME_FRESH_REQUIRED],
     });
     try {
       await waitForStatus(`${harness.origin}/api/probe`, 500);
@@ -984,6 +1245,78 @@ async function assertAnsweredForUnstartable(origin: string, command: string): Pr
   );
 }
 
+/** Take the queued changes as a runtime does, optionally as its first-load take. */
+async function takeChanges(harness: Harness, options: { firstLoad?: boolean } = {}): Promise<unknown> {
+  const query = options.firstLoad ? `?${HMR_FIRST_LOAD_PARAM}` : "";
+  const resp = await fetch(`${harness.origin}${HMR_POLL_PATH}${query}`);
+  assert.equal(resp.status, 200);
+  return (await resp.json() as { changed?: unknown }).changed;
+}
+
+/**
+ * Run the development host from its TypeScript source in a Node child (under
+ * tsx, not the V8 runtime), against the harness's real Vite server. What it
+ * exercises is the host's own wiring to that server. The child's environment
+ * carries the two variables the host reads and nothing else. It prints one
+ * event line per step and exits when told to.
+ */
+function startBootstrapHost(harness: Harness) {
+  const script = [
+    `const { createDevEntryLoader } = await import(${JSON.stringify(DEV_BOOTSTRAP_SOURCE)});`,
+    "const emit = (event) => process.stdout.write(`HOST-EVENT ${JSON.stringify(event)}\\n`);",
+    "let invalidations = 0;",
+    "const load = createDevEntryLoader(() => {",
+    "  invalidations += 1;",
+    "  emit({ event: 'invalidated', invalidations });",
+    "});",
+    "const entry = await load();",
+    "emit({ event: 'loaded', fetch: typeof entry.fetch });",
+    "process.stdin.on('data', () => {",
+    "  emit({ event: 'exit', invalidations });",
+    "  process.exit(0);",
+    "});",
+  ].join("\n");
+  const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", script], {
+    cwd: PLUGIN_ROOT,
+    stdio: ["pipe", "pipe", "pipe"],
+    env: {
+      [ENV_ENTRY]: harness.serverEntry,
+      [ENV_VITE_ORIGIN]: harness.origin,
+    },
+  });
+  const events: Array<Record<string, unknown>> = [];
+  let output = "";
+  let buffered = "";
+  child.stdout!.on("data", (chunk: Buffer) => {
+    output += chunk.toString();
+    buffered += chunk.toString();
+    const lines = buffered.split("\n");
+    buffered = lines.pop()!;
+    for (const line of lines) {
+      if (line.startsWith("HOST-EVENT ")) events.push(JSON.parse(line.slice("HOST-EVENT ".length)));
+    }
+  });
+  child.stderr!.on("data", (chunk: Buffer) => { output += chunk.toString(); });
+  const next = async (name: string): Promise<Record<string, unknown>> => {
+    let found: Record<string, unknown> | undefined;
+    await waitFor(async () => {
+      found = events.find((event) => event.event === name);
+      assert.ok(found, `the host never reported ${name}; it printed:\n${output}`);
+    }, 30_000);
+    return found!;
+  };
+  return {
+    next,
+    async stop() {
+      child.stdin!.write("exit\n");
+      return next("exit");
+    },
+    kill() {
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    },
+  };
+}
+
 async function startHarness(options: {
   dotenv?: string;
   /**
@@ -1007,7 +1340,12 @@ async function startHarness(options: {
   };
   rapidExitSpawns?: number;
   serveRuntime?: boolean;
-  freshRuntimeRequired?: boolean;
+  /**
+   * The state header each served spawn, in order, answers every request with,
+   * as a runtime whose startup failed does: 500 plus `x-zeroship-dev-runtime`.
+   * A spawn past the end of the list serves `runtime-ok`.
+   */
+  failedStartups?: string[];
 } = {}): Promise<Harness> {
   const root = await fs.mkdtemp(join(tmpdir(), "zs-vite-dev-server-"));
   const serverEntry = resolve(root, "src/server.ts");
@@ -1113,9 +1451,9 @@ async function startHarness(options: {
     "}, null, 2));",
     `const rapidExitSpawns = ${options.rapidExitSpawns ?? 0};`,
     `const serveRuntime = ${options.serveRuntime === true};`,
-    `const freshRuntimeRequired = ${options.freshRuntimeRequired === true};`,
+    `const failedStartups = ${JSON.stringify(options.failedStartups ?? [])};`,
     `const runtimeStateHeader = ${JSON.stringify(DEV_RUNTIME_STATE_HEADER)};`,
-    `const freshRequired = ${JSON.stringify(DEV_RUNTIME_FRESH_REQUIRED)};`,
+    `const pidHeader = ${JSON.stringify(STUB_PID_HEADER)};`,
     "const stop = () => {",
     "  writeFileSync(stopPath, 'stopped');",
     "  process.exit(0);",
@@ -1129,10 +1467,12 @@ async function startHarness(options: {
     "  const { createServer } = require('node:http');",
     "  const portArg = args.find((arg) => arg.startsWith('--port='));",
     "  const port = Number(portArg.slice('--port='.length));",
+    "  const failedStartup = failedStartups[spawnCount - rapidExitSpawns - 1];",
     "  createServer((_req, res) => {",
-    "    if (freshRuntimeRequired) {",
+    "    res.setHeader(pidHeader, String(process.pid));",
+    "    if (failedStartup !== undefined) {",
     "      res.statusCode = 500;",
-    "      res.setHeader(runtimeStateHeader, freshRequired);",
+    "      res.setHeader(runtimeStateHeader, failedStartup);",
     "      res.end('module init failed');",
     "    } else {",
     "      res.end('runtime-ok');",

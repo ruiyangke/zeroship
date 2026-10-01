@@ -9,7 +9,7 @@ interface EvaluatedModulesLike {
   invalidateModule(node: EvaluatedModuleNodeLike): void;
 }
 
-interface ModuleRunnerLike {
+export interface ModuleRunnerLike {
   evaluatedModules: EvaluatedModulesLike;
 }
 
@@ -65,6 +65,33 @@ export function invalidateChangedFiles(
   return affected.length;
 }
 
+/** Take the changes the dev server holds. Rejects when it cannot be reached. */
+export async function fetchHmrChanges(
+  pollUrl: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<HmrUpdate> {
+  const resp = await fetchImpl(pollUrl);
+  if (!resp.ok) throw new Error(`HMR poll failed with HTTP ${resp.status}`);
+  const payload = await resp.json() as {
+    changed?: unknown;
+    bindingsVersion?: unknown;
+  };
+  const changed: string[] = [];
+  if (Array.isArray(payload.changed)) {
+    for (const file of payload.changed) {
+      if (typeof file === "string") {
+        changed.push(file);
+      }
+    }
+  }
+  return {
+    changed,
+    ...(typeof payload.bindingsVersion === "string"
+      ? { bindingsVersion: payload.bindingsVersion }
+      : {}),
+  };
+}
+
 export async function pollHmrChanges({
   pollUrl,
   fetchImpl = fetch,
@@ -72,33 +99,14 @@ export async function pollHmrChanges({
   onChange,
 }: PollHmrChangesOptions): Promise<HmrUpdate> {
   try {
-    const resp = await fetchImpl(pollUrl);
-    if (!resp.ok) throw new Error(`HMR poll failed with HTTP ${resp.status}`);
-    const payload = await resp.json() as {
-      changed?: unknown;
-      bindingsVersion?: unknown;
-    };
-    const changed: string[] = [];
-    if (Array.isArray(payload.changed)) {
-      for (const file of payload.changed) {
-        if (typeof file === "string") {
-          changed.push(file);
-        }
-      }
-    }
-    const update: HmrUpdate = {
-      changed,
-      ...(typeof payload.bindingsVersion === "string"
-        ? { bindingsVersion: payload.bindingsVersion }
-        : {}),
-    };
-    if (changed.length > 0) {
-      log?.(`[zeroship:hmr] ${changed.length} module(s) updated`);
+    const update = await fetchHmrChanges(pollUrl, fetchImpl);
+    if (update.changed.length > 0) {
+      log?.(`[zeroship:hmr] ${update.changed.length} module(s) updated`);
     }
     onChange?.(update);
     return update;
   } catch {
-    // Vite not ready or restarting — silently ignore
+    // Vite not ready or restarting: the next tick asks again.
     return { changed: [] };
   }
 }

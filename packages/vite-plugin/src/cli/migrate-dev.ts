@@ -143,8 +143,12 @@ async function main(): Promise<number> {
   //    what keeps them from disagreeing. Unlike the dev server, a failure here is
   //    fatal: this command's whole job is the schema, so a bad migration must
   //    stop it rather than be logged past.
-  await genTypesFromMigrations(migrationsDir, outDir, { label, primary, check: false });
-  console.log("[zeroship] gen-types: regenerated env.db.ts + schema.runtime.json");
+  const { status } = await genTypesFromMigrations(migrationsDir, outDir, { label, primary, check: false });
+  console.log(
+    status === "unchanged"
+      ? "[zeroship] gen-types: env.db.ts + schema.runtime.json already match the migrations"
+      : "[zeroship] gen-types: regenerated env.db.ts + schema.runtime.json",
+  );
 
   const collections = collectionNamesFrom(readGeneratedRuntimeDescriptorAt(outDir));
 

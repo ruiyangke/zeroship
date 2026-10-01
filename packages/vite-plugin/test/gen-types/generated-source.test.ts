@@ -223,6 +223,39 @@ describe("generated schema source (record -> genArtifacts)", () => {
     }
   });
 
+  test("regenerating an unchanged migration set leaves both artifacts untouched", async () => {
+    // The dev server regenerates on every boot into a directory its own watcher
+    // covers. A rewrite of identical bytes is still an edit to that watcher, and
+    // it reaches the dev runtime as a source change while it loads.
+    const fx = await makeFixture({ "migrations/20260711000000_create_hits.ts": CREATE_HITS });
+    const outDir = join(fx.root, "generated/zeroship");
+    const migrations = join(fx.root, "migrations");
+    const artifacts = [ENV_DB_FILE, RUNTIME_DESCRIPTOR_FILE].map((file) => join(outDir, file));
+    const pinned = new Date("2001-02-03T04:05:06Z");
+    const mtimes = () => Promise.all(artifacts.map(async (path) => (await fs.stat(path)).mtimeMs));
+    try {
+      await genTypesFromMigrations(migrations, outDir, MAIN);
+      for (const path of artifacts) await fs.utimes(path, pinned, pinned);
+
+      const again = await genTypesFromMigrations(migrations, outDir, MAIN);
+      assert.equal(again.status, "unchanged");
+      assert.deepEqual(await mtimes(), [pinned.getTime(), pinned.getTime()]);
+
+      // Control: a fold that changes rewrites both.
+      await fs.writeFile(
+        join(migrations, "20260712000000_create_notes.ts"),
+        CREATE_HITS.replaceAll("hits", "notes"),
+      );
+      const changed = await genTypesFromMigrations(migrations, outDir, MAIN);
+      assert.equal(changed.status, "written");
+      for (const mtime of await mtimes()) assert.notEqual(mtime, pinned.getTime());
+      const json = JSON.parse(await fs.readFile(join(outDir, RUNTIME_DESCRIPTOR_FILE), "utf8"));
+      assert.ok(json.collections.notes, "the changed fold reached the descriptor");
+    } finally {
+      await fx.cleanup();
+    }
+  });
+
   test("db-hitcounter regenerates BYTE-IDENTICAL to its committed artifacts (--check clean)", async () => {
     // The proof: the committed generated/zeroship artifacts are exactly what the
     // in-process emitter produces from the migrations. `--check` regenerates in

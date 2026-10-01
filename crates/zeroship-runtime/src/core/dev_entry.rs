@@ -18,6 +18,14 @@ enum LoadState {
     },
     Ready(u64),
     Failed(u64, String),
+    /// A load given up on before it settled: its wall deadline passed, or V8
+    /// terminated it. It may still be running, and loads are serialized, so no
+    /// later load may start in this isolate. Every generation answers with the
+    /// error until the host replaces the runtime.
+    Abandoned {
+        generation: u64,
+        error: String,
+    },
 }
 
 pub(crate) struct DevEntryLoader {
@@ -59,6 +67,7 @@ impl DevEntryLoader {
         match &self.state {
             LoadState::Ready(loaded) if *loaded == generation => Ok(true),
             LoadState::Failed(loaded, error) if *loaded == generation => Err(error.clone()),
+            LoadState::Abandoned { error, .. } => Err(error.clone()),
             _ => Ok(false),
         }
     }
@@ -76,13 +85,28 @@ impl DevEntryLoader {
 
     pub fn work_generation(&self) -> u64 {
         match self.state {
-            LoadState::Loading { generation, .. } => generation,
+            LoadState::Loading { generation, .. } | LoadState::Abandoned { generation, .. } => {
+                generation
+            }
             _ => self.invalidation.0.get(),
         }
     }
 
-    pub fn fail_current(&mut self, error: String) {
-        self.state = LoadState::Failed(self.invalidation.0.get(), error);
+    /// Give up on the load of `generation` without waiting for it to settle.
+    /// The caller names the generation it read from `work_generation` before
+    /// the load ran: a load that invalidated its own generation leaves no trace
+    /// of which one it was.
+    pub fn abandon(&mut self, generation: u64, error: String) {
+        self.state = LoadState::Abandoned { generation, error };
+    }
+
+    /// For an abandoned load, whether the host has reported a source change
+    /// since that load began.
+    pub fn superseded_since_abandoned(&self) -> Option<bool> {
+        match self.state {
+            LoadState::Abandoned { generation, .. } => Some(self.invalidation.0.get() > generation),
+            _ => None,
+        }
     }
 
     pub fn poll_initial(
@@ -179,6 +203,14 @@ impl DevEntryLoader {
             }
         }
     }
+}
+
+/// Whether the host has reported a source change since this isolate's dev
+/// entry loader was created, which is when its first load began.
+pub(crate) fn invalidated_since_first_load(isolate: &v8::Isolate) -> bool {
+    isolate
+        .get_slot::<Rc<Invalidation>>()
+        .is_some_and(|invalidation| invalidation.0.get() != 0)
 }
 
 fn call<'s>(

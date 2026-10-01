@@ -2,6 +2,7 @@ import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  fetchHmrChanges,
   invalidateChangedFiles,
   pollHmrChanges,
 } from "../src/dev-bootstrap/hmr.js";
@@ -121,5 +122,22 @@ describe("dev-bootstrap HMR", () => {
       fetchImpl: async () => new Response("unavailable", { status: 503 }),
     });
     assert.deepEqual(failed, { changed: [] });
+  });
+
+  test("a direct take rejects when the host cannot answer", async () => {
+    // The first load's queue clear uses this, so it can say the clear failed
+    // instead of treating an unreachable dev server as an empty queue.
+    await assert.rejects(
+      fetchHmrChanges(
+        "http://vite.test/__zeroship_hmr_check",
+        async () => new Response("unavailable", { status: 503 }),
+      ),
+      /HTTP 503/,
+    );
+    const update = await fetchHmrChanges(
+      "http://vite.test/__zeroship_hmr_check",
+      async () => new Response(JSON.stringify({ changed: ["/app/src/server.ts"] })),
+    );
+    assert.deepEqual(update, { changed: ["/app/src/server.ts"] });
   });
 });

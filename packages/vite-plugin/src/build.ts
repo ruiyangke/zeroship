@@ -694,14 +694,16 @@ export function buildPlugins(
         // `selectBuildTarget`, not from the fold: the emitted module keys
         // `EnvDatabases` on the label, and only the primary declares
         // `Env.db`.
-        await genTypesFromMigrations(migrationsAbs, outDir, {
+        const { status } = await genTypesFromMigrations(migrationsAbs, outDir, {
           label: database.label,
           primary: database.primary,
           check: isProd,
         });
         console.log(
-          isProd
+          status === "checked"
             ? `[zeroship] gen-types --check: ${database.label} env.db.ts + schema.runtime.json track the migrations`
+            : status === "unchanged"
+            ? `[zeroship] gen-types: ${database.label} env.db.ts + schema.runtime.json already match the migrations`
             : `[zeroship] gen-types: regenerated ${database.label} env.db.ts + schema.runtime.json from the migrations`,
         );
       } catch (e) {

@@ -2,11 +2,13 @@
 import type { ModuleRunner } from "vite/module-runner";
 import {
   ENV_VITE_ORIGIN,
+  HMR_FIRST_LOAD_PARAM,
   HMR_POLL_PATH,
   PROCEDURE_BINDINGS_PATH,
 } from "../constants.js";
-import { buildDevEntrySnapshot, type DevServerBindingSnapshot } from "./entry";
-import { invalidateChangedFiles, startHmrPoll, type HmrUpdate } from "./hmr";
+import type { DevServerBindingSnapshot } from "./entry";
+import { fetchHmrChanges, startHmrPoll } from "./hmr";
+import { createEntryLoader } from "./loader";
 import { createRunner } from "./transport";
 
 const processEnv = (globalThis as {
@@ -38,10 +40,6 @@ function resetRunner(): void {
   runnerPromise = null;
 }
 
-function isDependencyRefresh(error: unknown): boolean {
-  return error instanceof Error && error.message.includes("is in the optimize deps directory");
-}
-
 async function readBindingSnapshot(): Promise<DevServerBindingSnapshot> {
   if (!VITE_ORIGIN) throw new Error(`[zeroship] ${ENV_VITE_ORIGIN} not set`);
   const response = await fetch(`${VITE_ORIGIN}${PROCEDURE_BINDINGS_PATH}`);
@@ -68,71 +66,25 @@ export function createDevEntryLoader(invalidate: () => void): () => Promise<unkn
   }
   if (!ENTRY) throw new Error("[zeroship] ZEROSHIP_ENTRY not set");
   if (!VITE_ORIGIN) throw new Error(`[zeroship] ${ENV_VITE_ORIGIN} not set`);
-  const entry = ENTRY;
-  const viteOrigin = VITE_ORIGIN;
+  const pollUrl = `${VITE_ORIGIN}${HMR_POLL_PATH}`;
 
-  const pendingChanged = new Set<string>();
-  let bindingVersion: string | null = null;
-  let loadStarted = false;
-
-  const receiveHmr = (update: HmrUpdate) => {
-    for (const file of update.changed) pendingChanged.add(file);
-    const bindingsChanged =
-      bindingVersion !== null &&
-      update.bindingsVersion !== undefined &&
-      update.bindingsVersion !== bindingVersion;
-    if (update.bindingsVersion !== undefined && bindingVersion !== null) {
-      bindingVersion = update.bindingsVersion;
-    }
-    if (loadStarted && (update.changed.length > 0 || bindingsChanged)) invalidate();
-  };
-
-  if (!stopHmrPoll) {
-    stopHmrPoll = startHmrPoll(`${viteOrigin}${HMR_POLL_PATH}`, receiveHmr, console.log);
-    const proc = (globalThis as {
-      process?: { once?: (event: string, listener: () => void) => void };
-    }).process;
-    proc?.once?.("exit", () => {
-      stopHmrPoll?.();
-      stopHmrPoll = null;
-    });
-  }
-
-  async function loadWith(current: ModuleRunner): Promise<unknown> {
-    const changed = [...pendingChanged];
-    pendingChanged.clear();
-    if (changed.length > 0) invalidateChangedFiles(current, changed);
-    const userModule = await current.import(entry);
-    let bindings = await readBindingSnapshot();
-    const seenVersions = new Set<string>();
-    while (true) {
-      if (seenVersions.has(bindings.version)) {
-        throw new Error("procedure bindings changed cyclically while loading the entry");
-      }
-      seenVersions.add(bindings.version);
-      // Development resolves lazy bindings now so an older retained snapshot
-      // cannot import replacement code after its ModuleRunner graph is invalidated.
-      const snapshot = await buildDevEntrySnapshot(current, userModule, bindings.bindings);
-      const currentBindings = await readBindingSnapshot();
-      if (currentBindings.version === bindings.version) {
-        bindingVersion = bindings.version;
-        return snapshot;
-      }
-      bindings = currentBindings;
-    }
-  }
-
-  return async function loadEntry(): Promise<unknown> {
-    loadStarted = true;
-    let current = await getRunner();
-    try {
-      return await loadWith(current);
-    } catch (error) {
-      if (!isDependencyRefresh(error)) throw error;
-      console.log("[zeroship:dev] dependencies refreshed, resetting ModuleRunner");
-      resetRunner();
-      current = await getRunner();
-      return loadWith(current);
-    }
-  };
+  return createEntryLoader({
+    entry: ENTRY,
+    takeChanges: () => fetchHmrChanges(`${pollUrl}?${HMR_FIRST_LOAD_PARAM}`),
+    watchChanges(onChange) {
+      if (stopHmrPoll) return;
+      stopHmrPoll = startHmrPoll(pollUrl, onChange, console.log);
+      const proc = (globalThis as {
+        process?: { once?: (event: string, listener: () => void) => void };
+      }).process;
+      proc?.once?.("exit", () => {
+        stopHmrPoll?.();
+        stopHmrPoll = null;
+      });
+    },
+    readBindings: readBindingSnapshot,
+    runner: getRunner,
+    resetRunner,
+    warn: (message) => console.warn(message),
+  }, invalidate);
 }
