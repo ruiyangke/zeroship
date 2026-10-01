@@ -18,7 +18,7 @@ import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { createBuilder, createServer, build as viteBuild, type InlineConfig, type Plugin } from "vite";
+import { createBuilder, createServer, parseAst, build as viteBuild, type InlineConfig, type Plugin } from "vite";
 
 import { zeroshipPlugins } from "../src/plugins.js";
 import { createZeroshipEnvironmentOptions } from "../src/environment.js";
@@ -32,7 +32,8 @@ const PLUGINS = fileURLToPath(new URL("../src/plugins.ts", import.meta.url));
 // branch of a `process.env.NODE_ENV` check. A second procedure reports which
 // build the worker bundled of a package with conditional exports, and of one
 // with only entry fields. A third reads `NODE_ENV` and a runtime-supplied value
-// through each spelling of `process` a package uses.
+// through each spelling of `process` a package uses. A fourth is written in
+// ES2024 syntax.
 const SERVER_TS = `
 "use server";
 import { query } from "@zeroship/rpc/server";
@@ -55,6 +56,8 @@ export const environment = query(async () => [
   String(globalThis.process.env.PROBE_KEY),
   String(global.process.env.PROBE_KEY),
 ], { id: "probe.environment" });
+
+export const syntax = query(async () => "aB".replace(/[\\p{L}--[a-z]]/gv, "_"), { id: "probe.syntax" });
 
 export default {
   fetch() {
@@ -435,6 +438,30 @@ describe("vite build compiles the worker from the app's config", () => {
         "from the runtime env",
         "from the runtime env",
       ]);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("the worker is compiled for ES2024, whose syntax it keeps as written", async () => {
+    // A `v`-flag regular expression literal is ES2024 syntax, which the
+    // runtime runs natively. A lower target rewrites it into a `new RegExp`
+    // call, which defers its syntax check to the call.
+    const root = await makeApp();
+    try {
+      await viteBuildCli(root);
+      const { modules, entryPath } = await unpackWorker(root);
+      const flags: string[] = [];
+      const visit = (node: unknown): void => {
+        if (Array.isArray(node)) return node.forEach(visit);
+        if (node === null || typeof node !== "object") return;
+        const regex = (node as { regex?: { flags: string } }).regex;
+        if (regex) flags.push(regex.flags);
+        Object.values(node).forEach(visit);
+      };
+      visit(parseAst(modules.get("index.js")!.toString("utf8")));
+      assert.ok(flags.includes("gv"), JSON.stringify(flags));
+      assert.equal(callPacked(root, entryPath, "probe.syntax"), "a_");
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }

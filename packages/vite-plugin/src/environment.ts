@@ -32,6 +32,12 @@ export const ZEROSHIP_ENVIRONMENT = "zeroship";
 export const ZEROSHIP_RESOLVE_CONDITIONS = ["zeroship", "worker", "module", "import", "default"];
 export const ZEROSHIP_MAIN_FIELDS = [...vite.defaultServerMainFields];
 
+/**
+ * The syntax the worker is compiled for. The runtime's V8 runs ES2024 as
+ * written, so syntax up to it reaches the worker unchanged; dev lowers none.
+ */
+export const ZEROSHIP_BUILD_TARGET = "es2024";
+
 const NODEISH_IMPORT_RE = /^(crypto|buffer|path|util|events|stream|os|url|http|https|fs|assert|process|async_hooks|timers|string_decoder|querystring|punycode|net|tls|dns|zlib|worker_threads|diagnostics_channel|perf_hooks|module)(\/.+)?$/;
 
 // ── DevEnvironment ─────────────────────────────────────────────────────────
@@ -172,7 +178,7 @@ export function createZeroshipEnvironmentOptions(
         return new ZeroshipDevEnvironment(name, config);
       },
     },
-    build: { target: "es2024" },
+    build: { target: ZEROSHIP_BUILD_TARGET },
     keepProcessEnv: true,
     // Enable dep optimization (CJS → ESM conversion).
     optimizeDeps: {

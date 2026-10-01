@@ -3,7 +3,7 @@
 // configureServer hook that wires the dev runtime through the Vite
 // Environment API.
 
-import type { Plugin, ViteDevServer } from "vite";
+import type { Plugin, PluginOption, ViteDevServer } from "vite";
 import { resolve, dirname, relative, extname } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -41,7 +41,7 @@ import {
   createZeroshipEnvironmentOptions,
 } from "./environment.js";
 import { findServerEntry } from "./build.js";
-import { buildDevBundle } from "./dev-bundle.js";
+import { buildDevBundle, type DevBuildConfig } from "./dev-bundle.js";
 import { DevPublisher } from "./dev-publisher.js";
 import {
   defaultProjectConfig,
@@ -630,6 +630,8 @@ export function devServerPlugin(
   options: DevServerOptions,
   state: TransformState,
   project: ProjectConfigHolder,
+  /** Fresh zeroship plugins from the same options, for the dev archive's builder. */
+  archivePlugins: () => PluginOption[],
 ): Plugin[] {
   const { processEnv } = options;
   const devPort =
@@ -995,13 +997,21 @@ export function devServerPlugin(
         let tornDown = false;
 
         const dependencies = new Set<string>();
+        // Every archive is built from the dev server's own config.
+        const buildConfig: DevBuildConfig = {
+          root,
+          configFile: server.config.configFile,
+          inlineConfig: server.config.inlineConfig,
+          mode: server.config.mode,
+          plugins: archivePlugins,
+        };
         if (serverEntry) {
           devPublisher = new DevPublisher(
             resolve(root, ".zeroship/app.zship"),
             async () => {
               await bootRegenDone;
               return buildDevBundle({
-                root, entry: serverEntry, project: projectConfig,
+                config: buildConfig, project: projectConfig,
                 databases:
                   primaryDatabase == null || runtimeDescriptorJson === undefined
                     ? []

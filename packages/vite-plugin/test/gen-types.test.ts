@@ -27,6 +27,7 @@ import { randomUUID } from "node:crypto";
 
 import { DEFAULTS } from "../src/project-config/generated.js";
 import { devServerPlugin } from "../src/dev-server.js";
+import { zeroshipPlugins } from "../src/plugins.js";
 import { createProjectConfigHolder } from "../src/project-config/index.js";
 import type { TransformState } from "../src/transform.js";
 
@@ -123,6 +124,7 @@ function bootDevServer(root: string) {
     { processEnv: {} },
     state,
     createProjectConfigHolder({ processEnv: {} }),
+    () => zeroshipPlugins({}, {}),
   );
   const [envPlugin, devPlugin] = plugins as any[];
   hook(envPlugin, "configResolved")({ root, command: "serve" });

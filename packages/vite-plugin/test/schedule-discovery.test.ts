@@ -72,7 +72,7 @@ schedule({
   catchUp: { mode: "backfill", max: 3 },
 });
 `;
-      getHandler(plugin).call(makeCtx("ssr"), code, `${root}/src/schedules.ts`);
+      getHandler(plugin).call(makeCtx("zeroship"), code, `${root}/src/schedules.ts`);
 
       assert.equal(state.discoveredSchedules.length, 1);
       const extras = await computeManifestExtras({
@@ -119,7 +119,7 @@ schedule({
 
 
 `;
-      getHandler(plugin).call(makeCtx("ssr"), code, `${root}/src/schedules.ts`);
+      getHandler(plugin).call(makeCtx("zeroship"), code, `${root}/src/schedules.ts`);
 
       await assert.rejects(
         () =>

@@ -73,7 +73,7 @@ describe("transform — procedure metadata", () => {
     const plugin = transformPlugin(state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
-    const ctx = makeCtx("ssr");
+    const ctx = makeCtx("zeroship");
     const code = `"use server";
 import { procedure } from "@zeroship/rpc/server";
 export const add = procedure(async (input) => input);
@@ -93,7 +93,7 @@ add.config = { kind: "mutation", idempotent: true };
     const plugin = transformPlugin(state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
-    const ctx = makeCtx("ssr");
+    const ctx = makeCtx("zeroship");
     // The generic `procedure()` marker leaves kind unset on .config.
     // Reads must opt in via query() or explicit config.kind; names are
     // deliberately ignored so `searchAndDestroy` cannot become a query.
@@ -115,7 +115,7 @@ export const searchPosts = procedure(async () => []);
     const plugin = transformPlugin(state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
-    const ctx = makeCtx("ssr");
+    const ctx = makeCtx("zeroship");
     const code = `"use server";
 import { procedure } from "@zeroship/rpc/server";
 export const logStream = procedure(async function* () { yield 1; yield 2; });
@@ -132,7 +132,7 @@ export const logStream = procedure(async function* () { yield 1; yield 2; });
     const plugin = transformPlugin(state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
-    const ctx = makeCtx("ssr");
+    const ctx = makeCtx("zeroship");
     const code = `"use server";
 import { procedure } from "@zeroship/rpc/server";
 export const $config = { auth: "user", rateLimit: { rpm: 600, per: "user" } };
@@ -157,7 +157,7 @@ export const listTodos = procedure(async () => []);
     const plugin = transformPlugin(state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
-    const ctx = makeCtx("ssr");
+    const ctx = makeCtx("zeroship");
     const code = `"use server";
 import { procedure } from "@zeroship/rpc/server";
 export const listTodos = procedure(async (input) => []);
@@ -193,7 +193,7 @@ listTodos.config = {
     const plugin = transformPlugin(state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
-    const ctx = makeCtx("ssr");
+    const ctx = makeCtx("zeroship");
     const code = `"use server";
 import { procedure } from "@zeroship/rpc/server";
 export const list = procedure(async () => []);
@@ -211,7 +211,7 @@ export const list = procedure(async () => []);
     const plugin = transformPlugin(state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
-    const ctx = makeCtx("ssr");
+    const ctx = makeCtx("zeroship");
     const code = `"use server";
 import { procedure } from "@zeroship/rpc/server";
 export const ping = procedure(async () => "pong");
@@ -228,7 +228,7 @@ export const ping = procedure(async () => "pong");
     const plugin = transformPlugin(state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
-    const ctx = makeCtx("ssr");
+    const ctx = makeCtx("zeroship");
     const code = `"use server";
 import { procedure } from "@zeroship/rpc/server";
 export const deeplyNested = procedure(async () => 42);
@@ -245,7 +245,7 @@ export const deeplyNested = procedure(async () => 42);
     const plugin = transformPlugin(state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
-    const ctx = makeCtx("ssr");
+    const ctx = makeCtx("zeroship");
     const code = `
 import { procedure } from "@zeroship/rpc/server";
 export const shouldNotBeDiscovered = procedure(async () => 1);
@@ -285,7 +285,7 @@ export const helper = () => "private";
     const plugin = transformPlugin(state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
-    const ctx = makeCtx("ssr");
+    const ctx = makeCtx("zeroship");
     const code = `
 export async function unmigrated() { return 1; }
 `;
@@ -309,7 +309,7 @@ export async function unmigrated() { return 1; }
     const plugin = transformPlugin(state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
-    const ctx = makeCtx("ssr");
+    const ctx = makeCtx("zeroship");
     const code = `export async function unmigrated() { return 1; }`;
     const handler = getHandler(plugin);
     handler.call(ctx, code, "/r/src/server/api.ts");
@@ -324,7 +324,7 @@ export async function unmigrated() { return 1; }
     const plugin = transformPlugin(state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
-    const ctx = makeCtx("ssr");
+    const ctx = makeCtx("zeroship");
     // "use server" appears, but it's NOT body[0] — it follows a var
     // declaration. Per ECMAScript Directive Prologue rules, this is
     // not a directive; the file is a regular client module.
@@ -344,7 +344,7 @@ export async function nope() { return 1; }
     const plugin = transformPlugin(state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
-    const ctx = makeCtx("ssr");
+    const ctx = makeCtx("zeroship");
     const code = `// File header comment
 /* multi-line block
    comment */

@@ -4,6 +4,7 @@ import { promises as fs } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { DevPublisher } from "../src/dev-publisher.js";
+import { WorkerBuildError } from "../src/build.js";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -81,6 +82,32 @@ test("closing during a build prevents publication and waits for cleanup", async 
     await Promise.all([refresh, closed]);
     assert.deepEqual(await fs.readdir(root), []);
     await assert.rejects(publisher.refresh(), /closed/);
+  } finally {
+    await publisher.close();
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a failed worker build reports the sources it read", async () => {
+  // The caller watches what the last build read, so the source that broke a
+  // build is watched until it is fixed.
+  const root = await fs.mkdtemp(join(tmpdir(), "zs-workflow-publisher-"));
+  const path = join(root, "app.zship");
+  const results: Array<() => { archive: Buffer; dependencies: string[] }> = [
+    () => ({ archive: Buffer.from("first"), dependencies: ["entry.ts"] }),
+    () => { throw new WorkerBuildError(new Error("broken catalog"), ["entry.ts", "messages.po"]); },
+    () => { throw new Error("not a worker build"); },
+  ];
+  const seen: string[][] = [];
+  const publisher = new DevPublisher(path, async () => results.shift()!(), (files) => {
+    seen.push(files);
+  });
+  try {
+    await publisher.refresh();
+    await assert.rejects(publisher.refresh(), /broken catalog/);
+    await assert.rejects(publisher.refresh(), /not a worker build/);
+    assert.deepEqual(seen, [["entry.ts"], ["entry.ts", "messages.po"]]);
+    assert.equal(await fs.readFile(path, "utf8"), "first");
   } finally {
     await publisher.close();
     await fs.rm(root, { recursive: true, force: true });

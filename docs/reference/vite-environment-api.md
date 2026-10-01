@@ -107,10 +107,8 @@ evaluation time. That single fact decides everything below.
   the order `zeroship`, `worker`, `module`, `import`, `default`. A package
   without `exports` resolves through its `module` field, then `jsnext:main`
   and `jsnext`, then `main`. Neither the `browser` condition nor the
-  `browser` field is used: the isolate is not a browser. The dev module runner
-  and the built worker resolve every package the same way. The local
-  deployment that dev packs for workflow runs is the exception; see
-  [Production](#production).
+  `browser` field is used: the isolate is not a browser. Dev and the built
+  worker resolve every package the same way.
 
 **Not resolvable, and the failure:**
 
@@ -131,8 +129,9 @@ evaluation time. That single fact decides everything below.
   prefix are host-provided; creator artifacts must not supply them.
 - **`zeroship` subpaths.** Only the bare specifier exists.
 
-You can write syntax up to ES2024 in server code; both tiers compile it for the
-runtime without a separate downlevel step.
+Server code may use syntax up to ES2024. The worker is compiled for ES2024 and
+keeps that syntax as written, dev lowers none, and the runtime runs it
+natively, so neither tier needs a separate downlevel step.
 
 ## Dev Database
 
@@ -215,25 +214,20 @@ and the deployed runtime does not fetch transforms from Vite. The kernel is
 identical: the `zeroship` module, `env.*`, and the import rules above are the
 same contract in both tiers.
 
-`vite build` compiles your server code in the same `zeroship` environment the
-dev module runner runs it in, from the same Vite config. Your plugins, your
-`define` and your `resolve.alias` apply to it, and packages resolve by the same
-conditions and entry fields, so a dependency is the same build in the dev
-module runner and in the deployed worker.
-
-One dev build is separate. `pnpm dev` also packs a local deployment,
-`.zeroship/app.zship`, for the dev runtime's workflow host, and workflow runs
-in dev execute its worker. That worker is built without your Vite config, with
-zeroship's own plugins in Vite's `ssr` environment for a web worker. Your
-plugins, `define` and `resolve.alias` do not apply to it, it resolves packages
-by the `browser` condition and the `browser` field, and it reads
-`globalThis.process.env` and `global.process.env` as an empty object.
+`vite build` compiles your server code in the same `zeroship` environment dev
+runs it in, from the same Vite config. Your plugins, your `define` and your
+`resolve.alias` apply to it, and packages resolve by the same conditions and
+entry fields, so a dependency is the same build in dev and in the deployed
+worker. `pnpm dev` compiles the worker the same way for the local deployment
+its workflow runs execute (`.zeroship/app.zship`), and builds it again when a
+source that build read changes.
 
 What differs is the parts this page marks as dev-only (the SQLite database, the
 dev auth surface, the env injection, and the looser limits) and two properties
-of the built worker. `NODE_ENV` is replaced with `"production"` at build time,
-through `process.env`, `global.process.env` and `globalThis.process.env` alike.
-The worker is packed as one bundled module.
+of the built worker. `NODE_ENV` is replaced at build time, through
+`process.env`, `global.process.env` and `globalThis.process.env` alike: with
+`"production"` by `vite build`, and with `"development"` in the dev
+deployment. The worker is packed as one bundled module.
 
 ## Non-Goals
 

@@ -21,7 +21,6 @@ import { emitZship } from "../src/zship.js";
 import {
   CLIENT_MANIFEST_RESOLVED_ID,
   CLIENT_MANIFEST_VIRTUAL_ID,
-  buildSsrInlineConfig,
   clientManifestPlugin,
   stripUseServer,
 } from "../src/build.js";
@@ -1139,58 +1138,7 @@ describe("clientManifestPlugin", () => {
   });
 });
 
-// ── Bug 4: SSR build should NOT copy public/ ──────────────────────────────
-describe("buildSsrInlineConfig", () => {
-  test("ssr_build_no_publicdir_copy", () => {
-    // The SSR sub-build's `publicDir` MUST be `false` — otherwise Vite
-    // copies `<root>/public/*` into `dist/server/`, and those files
-    // get cataloged as worker.modules entries by the .zship emitter.
-    const config = buildSsrInlineConfig({
-      root: "/tmp/myapp",
-      ssrEntry: "/tmp/myapp/src/server.ts",
-      outDir: "dist/server",
-      ssrPlugins: [],
-    });
-    assert.equal(
-      config.publicDir,
-      false,
-      "publicDir is false on the SSR sub-build"
-    );
-    // Sanity: the rest of the contract is intact.
-    assert.equal(config.root, "/tmp/myapp");
-    const ssr = config.ssr as { noExternal?: boolean; target?: string };
-    assert.equal(ssr.noExternal, true);
-    assert.equal(ssr.target, "webworker");
-    const build = config.build as { ssr?: string; outDir?: string };
-    assert.equal(build.ssr, "/tmp/myapp/src/server.ts");
-    assert.equal(build.outDir, "dist/server");
-  });
-
-  test("virtual_ssr_entry_routes_via_rollup_input", () => {
-    // When `ssrEntry` is a virtual specifier, `build.ssr` becomes `true`
-    // (so Vite still treats this as an SSR build) and the entry is
-    // threaded through `rolldownOptions.input.index`. This bypasses
-    // Vite's default `path.resolve(root, ssrEntry)` mangling, which
-    // would otherwise turn `virtual:zeroship/_server-entry` into a
-    // bogus filesystem path.
-    const config = buildSsrInlineConfig({
-      root: "/tmp/myapp",
-      ssrEntry: "virtual:zeroship/_server-entry",
-      outDir: "dist/server",
-      ssrPlugins: [],
-    });
-    const build = config.build as {
-      ssr?: boolean | string;
-      rolldownOptions?: { input?: Record<string, string> };
-    };
-    assert.equal(build.ssr, true, "build.ssr === true for virtual entry");
-    assert.deepEqual(
-      build.rolldownOptions?.input,
-      { index: "virtual:zeroship/_server-entry" },
-      "virtual id threaded through rolldown input"
-    );
-  });
-
+describe("static mode", () => {
   test("static_only_mode_skips_rollup", async () => {
     // SSG-only fixture: no JS, only static HTML files. After build,
     // the .zship should contain those HTML files as assets, no worker,

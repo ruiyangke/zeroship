@@ -64,7 +64,7 @@ export const list = query(async () => [{ id: 1 }]);
 export const greet = procedure(async (name) => "hi " + name);
 export const create = mutation(async (input) => input, { id: "create.v2" });
 `;
-    getHandler(plugin).call(makeCtx("ssr"), code, "/r/src/api.ts");
+    getHandler(plugin).call(makeCtx("zeroship"), code, "/r/src/api.ts");
 
     const exportNames = state.discoveredProcedures.map((p) => p.exportName).sort();
     assert.deepEqual(
@@ -93,7 +93,7 @@ export const create = mutation(async (input) => input, { id: "create.v2" });
 import { query } from "@zeroship/rpc/server";
 export const list = query(async () => []);
 `;
-    const out = getHandler(plugin).call(makeCtx("ssr"), code, "/r/src/api.ts");
+    const out = getHandler(plugin).call(makeCtx("zeroship"), code, "/r/src/api.ts");
     assert.ok(out, "transform returned output");
     const emitted: string = out.code;
 
@@ -116,7 +116,7 @@ import { query as q, mutation as m } from "@zeroship/rpc/server";
 export const listFoo = q(async () => []);
 export const addFoo = m(async (x) => x);
 `;
-    getHandler(plugin).call(makeCtx("ssr"), code, "/r/src/api.ts");
+    getHandler(plugin).call(makeCtx("zeroship"), code, "/r/src/api.ts");
 
     assert.equal(state.discoveredProcedures.length, 2);
     const byName = new Map(state.discoveredProcedures.map((p) => [p.exportName, p.kind]));
@@ -133,7 +133,7 @@ export const addFoo = m(async (x) => x);
 import { procedure } from "@zeroship/rpc/server";
 export const ping = procedure(async () => "pong");
 `;
-    getHandler(plugin).call(makeCtx("ssr"), code, "/r/src/api.ts");
+    getHandler(plugin).call(makeCtx("zeroship"), code, "/r/src/api.ts");
 
     assert.equal(state.discoveredProcedures.length, 1);
     assert.equal(state.discoveredProcedures[0].exportName, "ping");
@@ -150,7 +150,7 @@ export const ping = procedure(async () => "pong");
 import { procedure } from "some-other-lib";
 export const ping = procedure(async () => "pong");
 `;
-    getHandler(plugin).call(makeCtx("ssr"), code, "/r/src/api.ts");
+    getHandler(plugin).call(makeCtx("zeroship"), code, "/r/src/api.ts");
 
     assert.equal(
       state.discoveredProcedures.length,
@@ -168,7 +168,7 @@ export const ping = procedure(async () => "pong");
 import * as zs from "@zeroship/rpc/server";
 export const ping = zs.procedure(async () => "pong");
 `;
-    getHandler(plugin).call(makeCtx("ssr"), code, "/r/src/api.ts");
+    getHandler(plugin).call(makeCtx("zeroship"), code, "/r/src/api.ts");
 
     // `zs.procedure(...)` is a MemberExpression callee — not bare
     // identifier — so the static symbol table doesn't match.
@@ -189,7 +189,7 @@ import { stream } from "@zeroship/rpc/server";
 // Plain async fn that returns an iterator — wrapper still tags as stream.
 export const drip = stream(async () => makeIterator());
 `;
-    getHandler(plugin).call(makeCtx("ssr"), code, "/r/src/api.ts");
+    getHandler(plugin).call(makeCtx("zeroship"), code, "/r/src/api.ts");
 
     assert.equal(state.discoveredProcedures.length, 1);
     assert.equal(state.discoveredProcedures[0].kind, "stream");

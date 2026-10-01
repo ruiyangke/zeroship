@@ -47,7 +47,7 @@ import { procedure } from "@zeroship/rpc/server";
 export const wizard = procedure(async (input) => input);
 wizard.config = { id: "wizard", kind: "mutation", lazy: true };
 `;
-    getHandler(plugin).call(makeCtx("ssr"), code, "/r/src/actions/wizard.ts");
+    getHandler(plugin).call(makeCtx("zeroship"), code, "/r/src/actions/wizard.ts");
 
     assert.equal(state.discoveredProcedures.length, 1);
     const p = state.discoveredProcedures[0];
@@ -67,7 +67,7 @@ wizard.config = { id: "wizard", kind: "mutation", lazy: true };
 import { mutation } from "@zeroship/rpc/server";
 export const heavyOp = mutation(async (x) => x, { id: "heavyOp", lazy: true });
 `;
-    getHandler(plugin).call(makeCtx("ssr"), code, "/r/src/actions/heavy.ts");
+    getHandler(plugin).call(makeCtx("zeroship"), code, "/r/src/actions/heavy.ts");
 
     assert.equal(state.discoveredProcedures.length, 1);
     assert.equal(state.discoveredProcedures[0].lazy, true);
@@ -83,7 +83,7 @@ import { mutation } from "@zeroship/rpc/server";
 export const fast = mutation(async (x) => x);
 fast.config = { id: "fast" };
 `;
-    getHandler(plugin).call(makeCtx("ssr"), code, "/r/src/actions/fast.ts");
+    getHandler(plugin).call(makeCtx("zeroship"), code, "/r/src/actions/fast.ts");
 
     assert.equal(state.discoveredProcedures.length, 1);
     assert.equal(
@@ -102,7 +102,7 @@ fast.config = { id: "fast" };
 import { mutation } from "@zeroship/rpc/server";
 export const op = mutation(async (x) => x, { lazy: false });
 `;
-    getHandler(plugin).call(makeCtx("ssr"), code, "/r/src/actions/op.ts");
+    getHandler(plugin).call(makeCtx("zeroship"), code, "/r/src/actions/op.ts");
 
     assert.equal(state.discoveredProcedures.length, 1);
     assert.equal(state.discoveredProcedures[0].lazy, undefined);
@@ -119,7 +119,7 @@ const useLazy = process.env.LAZY === "1";
 export const op = mutation(async (x) => x);
 op.config = { id: "op", lazy: useLazy };
 `;
-    const ctx = makeCtx("ssr");
+    const ctx = makeCtx("zeroship");
     getHandler(plugin).call(ctx, code, "/r/src/actions/op.ts");
 
     assert.equal(state.discoveredProcedures.length, 1);
@@ -145,7 +145,7 @@ import { mutation } from "@zeroship/rpc/server";
 export const op = mutation(async (x) => x, { lazy: true });
 op.config = { id: "op", lazy: false };
 `;
-    getHandler(plugin).call(makeCtx("ssr"), code, "/r/src/actions/op.ts");
+    getHandler(plugin).call(makeCtx("zeroship"), code, "/r/src/actions/op.ts");
 
     assert.equal(state.discoveredProcedures[0].lazy, undefined, "legacy false wins");
   });

@@ -1217,12 +1217,9 @@ export function transformPlugin(state: TransformState): Plugin {
         id: { include: /\.(ts|tsx|js|jsx)$/, exclude: /node_modules/ },
       },
       handler(this: any, code: string, id: string) {
-        // Server environment detection:
-        //  - dev and `vite build`: the `zeroship` environment
-        //  - the dev archive: its build runs in Vite's `ssr` environment
-        //  - the client: environment name is `"client"`.
-        const envName = this.environment?.name;
-        const isServerEnv = envName === ZEROSHIP_ENVIRONMENT || envName === "ssr";
+        // Server code is compiled in the `zeroship` environment, in dev, in
+        // the dev archive and in `vite build`; anything else is a client.
+        const isServerEnv = this.environment?.name === ZEROSHIP_ENVIRONMENT;
 
         // Each transform replaces this module's whole procedure contribution.
         // This also clears a previous contribution when HMR removes the

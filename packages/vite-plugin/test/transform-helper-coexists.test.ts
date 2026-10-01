@@ -48,7 +48,7 @@ describe('helper + procedure coexistence in a single "use server" file', () => {
     const plugin = transformPlugin(state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
-    const ctx = makeCtx("ssr");
+    const ctx = makeCtx("zeroship");
     // Realistic server-module shape: a few RPC procedures alongside
     // helpers used by other server modules.
     const code = `"use server";
@@ -99,7 +99,7 @@ export const provision = procedure(async (req) => ({ provisioned: req }));
     const plugin = transformPlugin(state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
-    const ctx = makeCtx("ssr");
+    const ctx = makeCtx("zeroship");
     // The original path-based auto-publish footgun:
     // `export * from "./helpers"`
     // silently published every helper as `/__zeroship/v1/<helperName>`.
@@ -129,7 +129,7 @@ export const real = procedure(async () => 42);
     const plugin = transformPlugin(state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
-    const ctx = makeCtx("ssr");
+    const ctx = makeCtx("zeroship");
     // Apps may export a `default.fetch` for HTTP fall-through. The
     // discovery pass ignores `export default` regardless of shape.
     const code = `"use server";

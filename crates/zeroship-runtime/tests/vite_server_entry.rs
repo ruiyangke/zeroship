@@ -166,6 +166,7 @@ async fn vite_artifact_retains_procedure_metadata_and_native_module_identity() {
             "esmIntervalSignal": "rejected ERR_ZEROSHIP_UNSUPPORTED_OPTION",
             "esmWorker": "ERR_ZEROSHIP_UNSUPPORTED_API",
             "offThread": "inline",
+            "es2024": "a_",
             "optional": "fallback",
         }),
     );

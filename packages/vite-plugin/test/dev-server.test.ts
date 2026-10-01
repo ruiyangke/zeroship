@@ -4,10 +4,11 @@ import { ChildProcess, spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
 import http from "node:http";
 import { tmpdir } from "node:os";
+import { zstdDecompressSync } from "node:zlib";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { createServer, type ViteDevServer } from "vite";
+import { createServer, type Plugin, type ViteDevServer } from "vite";
 
 import {
   HMR_FIRST_LOAD_PARAM,
@@ -29,6 +30,7 @@ import {
   ENV_VITE_ORIGIN,
 } from "../src/constants.js";
 import { devServerPlugin } from "../src/dev-server.js";
+import { zeroshipPlugins } from "../src/plugins.js";
 import { DEV_APP_ID } from "../src/gen-types/dev-apply.js";
 import { readGeneratedRuntimeDescriptorAt } from "../src/gen-types/read-descriptor.js";
 import { createProjectConfigHolder } from "../src/project-config/index.js";
@@ -776,6 +778,61 @@ describe("devServerPlugin", () => {
     }
   });
 
+  test("a catalog that broke the startup archive rebuilds it once fixed", async () => {
+    // Server code imports a `.po` catalog, which only the app's own plugin
+    // loads. The broken catalog fails the startup build, so there is no
+    // archive and no runtime; fixing it is the edit that recovers both.
+    const catalog: Plugin = {
+      name: "fixture:catalog",
+      transform(code, id) {
+        if (!id.endsWith(".po")) return null;
+        const greeting = /^msgstr "(.*)"$/m.exec(code)?.[1];
+        if (greeting === undefined) throw new Error("the catalog has no msgstr");
+        return { code: `export default ${JSON.stringify({ greeting })};`, map: null, moduleType: "js" };
+      },
+    };
+    let startupFailed!: () => void;
+    const failed = new Promise<void>((resolveFailed) => { startupFailed = resolveFailed; });
+    const warn = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warn(...args);
+      if (String(args[0]).includes("runtime spawn failed")) startupFailed();
+    };
+    let harness: Harness | undefined;
+    try {
+      harness = await startHarness({
+        awaitRuntime: false,
+        appPlugins: [catalog],
+        files: {
+          "src/server.ts": [
+            "import messages from \"./messages.po\";",
+            "export default { fetch() { return new Response(messages.greeting); } };",
+            "",
+          ].join("\n"),
+          "src/messages.po": "msgid \"greeting\"\nmsgstr BROKEN\n",
+        },
+      });
+      await failed;
+      const path = resolve(harness.root, ".zeroship/app.zship");
+      await assert.rejects(fs.access(path), { code: "ENOENT" });
+      await assert.rejects(fs.access(harness.runtimeLogPath), { code: "ENOENT" });
+
+      await fs.writeFile(resolve(harness.root, "src/messages.po"), "msgid \"greeting\"\nmsgstr \"hello from the fixed catalog\"\n");
+      await waitFor(async () => {
+        assert.match(zstdDecompressSync(await fs.readFile(path)).toString(), /hello from the fixed catalog/);
+      });
+      await waitFor(async () => {
+        assert.equal((await harness!.runtimeLog()).spawnCount, 1);
+      });
+    } finally {
+      console.warn = warn;
+      if (harness) {
+        const spawned = await fs.access(harness.runtimeLogPath).then(() => true, () => false);
+        await harness.close({ expectRuntimeStop: spawned });
+      }
+    }
+  });
+
   test("serves versioned procedure bindings to the runtime loader", async () => {
     const harness = await startHarness();
     try {
@@ -1328,6 +1385,10 @@ async function startHarness(options: {
   processEnv?: (root: string) => NodeJS.ProcessEnv;
   /** Copies of the runtime stub beyond the project's own bin, relative to the root. */
   extraRuntimeStubs?: string[];
+  /** The app's own plugins, inline beside zeroship's. */
+  appPlugins?: Plugin[];
+  /** Source files written over the fixture's, relative to the root, before the server starts. */
+  files?: Record<string, string>;
   /** Wait for a stub to record its spawn before returning. Off when none can start. */
   awaitRuntime?: boolean;
   /** The `devServerPort` option; `null` passes none, so the environment decides. */
@@ -1373,6 +1434,10 @@ async function startHarness(options: {
     "export const answer = 42;\n",
   );
   await fs.writeFile(resolve(root, "index.html"), "<!doctype html><html><body></body></html>\n");
+  for (const [path, body] of Object.entries(options.files ?? {})) {
+    await fs.mkdir(dirname(resolve(root, path)), { recursive: true });
+    await fs.writeFile(resolve(root, path), body);
+  }
   if (options.dotenv) {
     await fs.writeFile(resolve(root, ".env"), options.dotenv);
   }
@@ -1507,14 +1572,17 @@ async function startHarness(options: {
   // takes. The project config and the dev server read the SAME environment,
   // as they do under `zeroship()`.
   const processEnv = options.processEnv?.(root) ?? {};
-  const plugins = devServerPlugin(
+  const devServerPlugins = devServerPlugin(
     {
       devServerPort: options.devServerPort === null ? undefined : options.devServerPort ?? 3901,
       processEnv,
     },
     state,
     createProjectConfigHolder({ override: { build: { serverEntry } } as never, processEnv }),
+    // The dev archive's own zeroship plugins, from the same options.
+    () => zeroshipPlugins({ config: { build: { serverEntry } } as never }, processEnv),
   );
+  const plugins = [...(options.appPlugins ?? []), ...devServerPlugins];
   const devServerPluginImpl = plugins.find((plugin) => plugin.name === "zeroship:dev-server");
   assert.ok(devServerPluginImpl?.hotUpdate, "expected dev-server plugin with hotUpdate hook");
 

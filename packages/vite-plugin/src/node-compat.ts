@@ -406,10 +406,10 @@ export function nodeCompatPlugin(): Plugin {
     enforce: "pre" as const,
 
     async resolveId(id: string, _importer: string | undefined, options?: { kind?: string }) {
-      // Apply to server code: the "zeroship" environment in dev and in
-      // `vite build`, and the dev archive's `ssr` build. Skip the client
-      // environment so a bundle that incidentally references `node:`
-      // doesn't get polyfilled into the browser asset.
+      // Apply to server code: the "zeroship" environment, in dev, in the dev
+      // archive and in `vite build`. Skip the client environment so a bundle
+      // that incidentally references `node:` doesn't get polyfilled into the
+      // browser asset.
       const envName = (this as any).environment?.name;
       if (envName === "client") return null;
       const resolved = resolveNodeBuiltin(id, options?.kind);

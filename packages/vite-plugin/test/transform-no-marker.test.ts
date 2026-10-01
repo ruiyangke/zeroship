@@ -54,7 +54,7 @@ describe("unmigrated server modules", () => {
     const plugin = transformPlugin(state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
-    const ctx = makeCtx("ssr");
+    const ctx = makeCtx("zeroship");
     const code = `
 import { z } from "@zeroship/server";
 
@@ -89,7 +89,7 @@ addTodo.config = { id: "addTodo" };
     const plugin = transformPlugin(state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
-    const ctx = makeCtx("ssr");
+    const ctx = makeCtx("zeroship");
     // Directive opts the file in, but no exports are wrapped — the
     // file's exports stay private (helpers, constants, types).
     const code = `"use server";
@@ -117,7 +117,7 @@ export const arrowHelper = async () => null;
     const plugin = transformPlugin(state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
-    const ctx = makeCtx("ssr");
+    const ctx = makeCtx("zeroship");
     // Path matches the legacy convention AND directive is present;
     // since the directive is satisfied no migration warning fires.
     // No wrappers means no procedures.

@@ -76,6 +76,8 @@ export default {
       esmIntervalSignal: await failure(() => every(1, "x", { signal: new AbortController().signal }).next()),
       esmWorker: code(() => new Worker("", { eval: true })),
       offThread: await offThread(),
+      // ES2024 syntax, which the worker keeps as written.
+      es2024: "aB".replace(/[\p{L}--[a-z]]/gv, "_"),
       optional: optional(),
     }),
   },

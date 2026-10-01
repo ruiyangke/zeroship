@@ -48,7 +48,7 @@ export function zeroshipPlugins(
     nodeInjectPlugin(),
     zeroshipModulePlugin(),
     transformPlugin(state),
-    ...devServerPlugin({ ...options, processEnv }, state, project),
+    ...devServerPlugin({ ...options, processEnv }, state, project, () => zeroshipPlugins(options, processEnv)),
     ...buildPlugins(state, project, options.app),
   ];
 }

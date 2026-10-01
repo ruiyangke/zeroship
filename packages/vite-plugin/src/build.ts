@@ -3,13 +3,12 @@ import {
   type Plugin,
   type ViteBuilder,
   BuildEnvironment,
-  build as viteBuild,
 } from "vite";
 import { join, resolve, relative, isAbsolute } from "node:path";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { transformPlugin, type TransformState } from "./transform.js";
-import { nodeCompatPlugin, isRuntimeModuleSpecifier } from "./node-compat.js";
+import type { TransformState } from "./transform.js";
+import { isRuntimeModuleSpecifier } from "./node-compat.js";
 import { emitZship } from "./zship.js";
 import {
   rpcRegistryPlugin,
@@ -20,8 +19,8 @@ import {
   type DiscoveredProcedure,
   type DiscoveredSchedule,
 } from "./manifest.js";
-import { zeroshipModulePlugin } from "./zeroship-module.js";
 import {
+  ZEROSHIP_BUILD_TARGET,
   ZEROSHIP_ENVIRONMENT,
   ZEROSHIP_MAIN_FIELDS,
   ZEROSHIP_RESOLVE_CONDITIONS,
@@ -51,80 +50,6 @@ export const CLIENT_MANIFEST_RESOLVED_ID = "\0" + CLIENT_MANIFEST_VIRTUAL_ID;
 export const STATIC_STUB_VIRTUAL_ID = "virtual:zeroship/static-stub";
 /** Internal (\0-prefixed) id Vite uses for the static stub. */
 export const STATIC_STUB_RESOLVED_ID = "\0" + STATIC_STUB_VIRTUAL_ID;
-
-/**
- * Build the InlineConfig the dev archive's server build passes to
- * `viteBuild()`. `vite build` does not use it: it builds the worker in the
- * app builder's `zeroship` environment (see `applyWorkerBuildOptions`).
- *
- * Exposed (and exported) so tests can verify the shape without spinning
- * up a real Vite environment. Notable invariants:
- *   - `publicDir: false` - the SSR outDir is `<build.dist>/server/`, and Vite's
- *     default would copy `public/*` into it. Those copies then end up
- *     cataloged as `worker.modules` entries, which is wrong: public
- *     files are static assets, not worker code. The client build keeps
- *     its `publicDir` so they still ship to `dist/<root>/`.
- *   - `noExternal: true` — bundle every dep (npm packages have no
- *     ESM resolver inside the V8 runtime).
- *   - `target: "webworker"` — picks the right export-conditions map.
- *   - `entryFileNames: "index.js"` — deterministic name; the .zship
- *     emitter uses it as the worker entry.
- *   - `build.ssr: true` + `rollupOptions.input` — when ssrEntry is a
- *     virtual specifier (e.g. `virtual:zeroship/_server-entry`), Vite's
- *     own SSR-string handler prepends `path.resolve(root, …)` and
- *     mangles it. Threading the virtual id through `rollupOptions.input`
- *     bypasses that; the plugin's `resolveId` hook sees the literal
- *     specifier and routes it to our virtual-module loader.
- */
-export function buildSsrInlineConfig(opts: {
-  root: string;
-  ssrEntry: string;
-  outDir: string;
-  ssrPlugins: unknown[];
-}): Record<string, unknown> {
-  // If ssrEntry is a virtual id (`virtual:…`), pass it via rollupOptions.input
-  // so Vite doesn't `path.resolve()` it into nonsense. For real file paths
-  // we keep the historical `build.ssr: <path>` form.
-  const isVirtual = opts.ssrEntry.startsWith("virtual:");
-  return {
-    root: opts.root,
-    configFile: false,
-    plugins: opts.ssrPlugins,
-    // Vite would otherwise copy `<root>/public/*` into the SSR outDir.
-    // We don't want public files cataloged as worker modules — they're
-    // static assets. The client build keeps publicDir.
-    publicDir: false,
-    ssr: {
-      noExternal: true,
-      target: "webworker",
-    },
-    // Preserve `process.env.X` and `process.env` references at runtime
-    // — the zeroship runtime injects a real `process.env` (populated
-    // from `worker_env` and the app's exposed-secrets list). Without
-    // these defines, the `target: "webworker"` SSR build statically
-    // rewrites `process.env` to `{}`, so libraries like `@ai-sdk/openai`
-    // that read `process.env.OPENAI_API_KEY` at runtime see undefined
-    // even when the var is set on the host.
-    define: {
-      "process.env": "process.env",
-      "process.env.NODE_ENV": '"production"',
-    },
-    build: {
-      // `true` (instead of a path string) tells Vite "this is an SSR
-      // build" without specifying the entry — entry comes from
-      // rollupOptions.input below.
-      ssr: isVirtual ? true : opts.ssrEntry,
-      outDir: opts.outDir,
-      emptyOutDir: false,
-      rolldownOptions: {
-        ...(isVirtual ? { input: { index: opts.ssrEntry } } : {}),
-        output: { format: "esm", entryFileNames: "index.js" },
-      },
-      minify: true,
-    },
-    logLevel: "warn",
-  };
-}
 
 /**
  * Build the Vite plugin that exposes the Vite client manifest as a
@@ -214,6 +139,9 @@ export function stripUseServer(bundle: string): string {
  *   `require`, and Rolldown would turn it into a shim that throws when the
  *   worker starts. The output's import lists never show such a require, so it
  *   is refused where it is resolved.
+ *
+ * A build that fails reports the modules it reached, the one that broke it
+ * included, so the dev server can rebuild when that one is fixed.
  */
 export function serverGraphPlugin(onDependencies?: (ids: string[]) => void): Plugin {
   return {
@@ -237,12 +165,11 @@ export function serverGraphPlugin(onDependencies?: (ids: string[]) => void): Plu
         return resolved;
       },
     },
-    buildEnd(error) {
-      if (!error && onDependencies) {
-        onDependencies([...new Set([...this.getModuleIds()]
-          .map(id => id.split("?")[0])
-          .filter(id => isAbsolute(id)))].sort());
-      }
+    buildEnd() {
+      if (!onDependencies) return;
+      onDependencies([...new Set([...this.getModuleIds()]
+        .map(id => id.split("?")[0])
+        .filter(id => isAbsolute(id)))].sort());
     },
     generateBundle(_options, bundle) {
       for (const output of Object.values(bundle)) {
@@ -255,58 +182,6 @@ export function serverGraphPlugin(onDependencies?: (ids: string[]) => void): Plu
       }
     },
   };
-}
-
-/** Build server modules for retained local replay (the dev archive). */
-export async function buildServerBundle(opts: {
-  root: string;
-  entry: string;
-  outDir: string;
-  clientDistDir: string;
-  state: TransformState;
-}): Promise<string[]> {
-  let dependencies: string[] = [];
-  const graph = serverGraphPlugin(ids => {
-    dependencies = ids;
-  });
-  // Discover procedure bindings before generating the static server entry.
-  // Server-only builds and retained dev archives may have no client graph
-  // to populate this state before the synthetic entry loads.
-  const userEntryRel = opts.entry.replace(/\\/g, "/");
-  const discoveryConfig = buildSsrInlineConfig({
-    root: opts.root,
-    ssrEntry: userEntryRel,
-    outDir: opts.outDir,
-    ssrPlugins: [
-      nodeCompatPlugin(),
-      zeroshipModulePlugin(),
-      transformPlugin(opts.state),
-      clientManifestPlugin({ root: opts.root, distDir: opts.clientDistDir }),
-    ],
-  });
-  (discoveryConfig.build as Record<string, unknown>).write = false;
-  await viteBuild(discoveryConfig as Parameters<typeof viteBuild>[0]);
-  const config = buildSsrInlineConfig({
-    root: opts.root,
-    ssrEntry: SERVER_ENTRY_VIRTUAL_ID,
-    outDir: opts.outDir,
-    ssrPlugins: [
-      nodeCompatPlugin(),
-      zeroshipModulePlugin(),
-      transformPlugin(opts.state),
-      rpcRegistryPlugin({
-        root: opts.root,
-        userEntryRel,
-        state: opts.state,
-      }),
-      clientManifestPlugin({ root: opts.root, distDir: opts.clientDistDir }),
-      graph,
-    ],
-  });
-  await viteBuild(config as Parameters<typeof viteBuild>[0]);
-  const entryPath = resolve(opts.outDir, "index.js");
-  writeFileSync(entryPath, stripUseServer(readFileSync(entryPath, "utf8")), "utf8");
-  return dependencies;
 }
 
 /**
@@ -553,7 +428,7 @@ export function applyWorkerBuildOptions(environment: EnvironmentOptions, clientO
     sourcemap: false,
     license: false,
     minify: true,
-    target: "baseline-widely-available",
+    target: ZEROSHIP_BUILD_TARGET,
     ssr: true,
     rolldownOptions: {
       ...inherited,
@@ -576,24 +451,69 @@ export function applyWorkerBuildOptions(environment: EnvironmentOptions, clientO
  * procedures; the synthetic entry the environment build then loads imports
  * each declaring module from that record. Both passes use the environment's
  * resolved config, so the app's plugins apply to both.
+ *
+ * `overrides`, when given, build the worker in a fresh environment with them
+ * merged over the worker's own options. The discovery pass writes nothing,
+ * so they do not apply to it.
  */
-async function buildWorker(builder: ViteBuilder, entry: string): Promise<void> {
+async function buildWorker(
+  builder: ViteBuilder,
+  entry: string,
+  overrides?: EnvironmentOptions,
+): Promise<void> {
   const environment = builder.environments[ZEROSHIP_ENVIRONMENT];
   if (environment == null) {
     throw new Error(
       `[zeroship] the app builder has no "${ZEROSHIP_ENVIRONMENT}" environment to build the worker in`,
     );
   }
-  const discovery = new BuildEnvironment(ZEROSHIP_ENVIRONMENT, environment.getTopLevelConfig(), {
-    options: { build: { write: false, rolldownOptions: { input: { index: entry } } } },
-  });
-  await discovery.init();
-  await builder.build(discovery);
-  await builder.build(environment);
-  const { root, build } = environment.config;
+  const config = environment.getTopLevelConfig();
+  const fresh = async (options: EnvironmentOptions): Promise<BuildEnvironment> => {
+    const built = new BuildEnvironment(ZEROSHIP_ENVIRONMENT, config, { options });
+    await built.init();
+    return built;
+  };
+  await builder.build(await fresh({
+    build: { write: false, rolldownOptions: { input: { index: entry } } },
+  }));
+  const worker = overrides ? await fresh(overrides) : environment;
+  await builder.build(worker);
+  const { root, build } = worker.config;
   const entryPath = resolve(root, build.outDir, "index.js");
   writeFileSync(entryPath, stripUseServer(readFileSync(entryPath, "utf8")), "utf8");
 }
+
+/** A worker build that failed, and the sources it read before it did. */
+export class WorkerBuildError extends Error {
+  constructor(cause: unknown, readonly dependencies: string[]) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause });
+    this.name = "WorkerBuildError";
+  }
+}
+
+/** What the dev archive's worker build discovered and read. */
+export interface DevWorkerBuild {
+  state: TransformState;
+  dependencies: string[];
+}
+
+/**
+ * The build half's API, which the dev archive reaches through the
+ * `zeroship:build` plugin of the builder it creates.
+ */
+export interface ZeroshipBuildApi {
+  /**
+   * Build the worker alone, as `vite build` builds it, into `outDir`, with
+   * `NODE_ENV` replaced by `nodeEnv`. Throws a `WorkerBuildError`.
+   */
+  buildDevWorker(
+    builder: ViteBuilder,
+    options: { outDir: string; nodeEnv: string },
+  ): Promise<DevWorkerBuild>;
+}
+
+/** The name of the plugin that carries `ZeroshipBuildApi`. */
+export const BUILD_PLUGIN_NAME = "zeroship:build";
 
 /** Restrict a plugin to the worker build. */
 function workerBuildOnly(plugin: Plugin): Plugin {
@@ -654,6 +574,8 @@ export function buildPlugins(
   // production-mode gate (every procedure must have an explicit `id`
   // when shipping a production build).
   let viteMode: "production" | "development" = "production";
+  // The absolute module ids the last worker build read.
+  let workerDependencies: string[] = [];
   // Vite's resolved logger. Manifest warnings (notably the fail-closed
   // auth notice, which names procedures that will 401 once deployed) go
   // through it so they land in a normal `vite build` / `pnpm build`
@@ -855,8 +777,31 @@ export function buildPlugins(
   // worker's input is its own.
   let stubInjected = false;
 
+  const api: ZeroshipBuildApi = {
+    async buildDevWorker(builder, options) {
+      const entry = serverEntry;
+      if (!entry) throw new Error("[zeroship] the app has no server entry to build the worker from");
+      const nodeEnv = JSON.stringify(options.nodeEnv);
+      workerDependencies = [];
+      try {
+        await buildWorker(builder, entry, {
+          define: {
+            "process.env.NODE_ENV": nodeEnv,
+            "global.process.env.NODE_ENV": nodeEnv,
+            "globalThis.process.env.NODE_ENV": nodeEnv,
+          },
+          build: { outDir: options.outDir },
+        });
+      } catch (error) {
+        throw new WorkerBuildError(error, workerDependencies);
+      }
+      return { state, dependencies: workerDependencies };
+    },
+  };
+
   const orchestrator: Plugin = {
-    name: "zeroship:build",
+    name: BUILD_PLUGIN_NAME,
+    api,
     // One instance across the builder's environments: `buildApp` reads the
     // state every environment's transforms wrote.
     sharedDuringBuild: true,
@@ -1061,6 +1006,8 @@ export function buildPlugins(
         return relative(root, clientOutDir);
       },
     })),
-    workerBuildOnly(serverGraphPlugin()),
+    workerBuildOnly(serverGraphPlugin((ids) => {
+      workerDependencies = ids;
+    })),
   ];
 }

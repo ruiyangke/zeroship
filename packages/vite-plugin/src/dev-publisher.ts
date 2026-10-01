@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs";
 import { dirname, join } from "node:path";
 import type { DevBundle } from "./dev-bundle.js";
+import { WorkerBuildError } from "./build.js";
 
 /** Serialize rebuilds and replace the host's archive only with a complete image. */
 export class DevPublisher {
@@ -11,6 +12,10 @@ export class DevPublisher {
   constructor(
     readonly path: string,
     private readonly build: () => Promise<DevBundle>,
+    /**
+     * The sources the last build read, a failed worker build's included: an
+     * edit that fixes the source that broke it is one the caller sees.
+     */
     private readonly observe: (dependencies: string[]) => void,
   ) {}
 
@@ -34,6 +39,7 @@ export class DevPublisher {
         bundle = await this.build();
       } catch (error) {
         if (this.closed) return;
+        if (error instanceof WorkerBuildError) this.observe(error.dependencies);
         if (revision !== this.revision) continue;
         throw error;
       }
