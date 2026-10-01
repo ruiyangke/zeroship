@@ -497,6 +497,44 @@ async fn local_disk_a_failed_blob_rename_leaves_no_temp_file() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// A store whose directories are gone after it opened (a volume unmounted
+/// from under it) refuses writes instead of recreating the tree, so nothing
+/// lands in the empty mountpoint where no reader will look.
+#[compio::test]
+async fn local_disk_writes_refuse_a_store_whose_directories_are_gone() {
+    let root = tmpdir();
+    let store = LocalDiskBlobStore::new(root.clone()).unwrap();
+    let data = b"blob written after the volume went away";
+    let hash = sha256_hex(data);
+    let app_id = AppId::mint();
+    let deploy_hash = sha256_hex(b"deploy after the volume went away");
+    let json = br#"{"version":1,"rules":[],"assets":{}}"#;
+
+    // The control: the same writes succeed while the tree is there.
+    let control_root = tmpdir();
+    let control = LocalDiskBlobStore::new(control_root.clone()).unwrap();
+    control.put_blob(&hash, data).await.expect("control blob");
+    control
+        .put_manifest(&app_id, &deploy_hash, json)
+        .await
+        .expect("control manifest");
+
+    std::fs::remove_dir_all(root.join("blobs")).unwrap();
+    std::fs::remove_dir_all(root.join("manifests")).unwrap();
+
+    let blob = store.put_blob(&hash, data).await;
+    assert!(matches!(blob, Err(BlobError::Io(_))), "blob write: {blob:?}");
+    let manifest = store.put_manifest(&app_id, &deploy_hash, json).await;
+    assert!(
+        matches!(manifest, Err(BlobError::Io(_))),
+        "manifest write: {manifest:?}"
+    );
+    assert_eq!(dir_entries(&root), Vec::<String>::new(), "a write recreated the tree");
+
+    let _ = std::fs::remove_dir_all(&control_root);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[compio::test]
 async fn local_disk_local_path_returns_sharded_path() {
     let root = tmpdir();

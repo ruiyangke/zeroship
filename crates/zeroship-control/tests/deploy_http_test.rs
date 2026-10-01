@@ -96,6 +96,20 @@ fn dir_is_empty(path: &PathBuf) -> bool {
     }
 }
 
+/// Whether a file exists anywhere beneath `dir`. The blob store creates
+/// `blobs/` and every shard under it when it is constructed, so "no blob was
+/// written" is no file below `blobs/`, not an empty `blobs/`. A directory that
+/// does not exist holds no file.
+fn holds_a_file(dir: &std::path::Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        let path = entry.path();
+        !path.is_dir() || holds_a_file(&path)
+    })
+}
+
 // ---------------------------------------------------------------------------
 // `.zship` builder — copied from `deploy_test.rs`. The two test files
 // can't easily share helpers (separate compilation units, no shared
@@ -1012,11 +1026,11 @@ async fn deploy_rejects_legacy_manifest_migrations_and_writes_no_blob() {
     // and `manifests/` when it is constructed, so the root is never empty.
     let blobs = fx.blob_root.join("blobs");
     assert!(
-        dir_is_empty(&blobs),
+        !holds_a_file(&blobs),
         "a refused migration-bearing bundle must write no blob, its migration document included"
     );
 
-    // THE CONTROL. `dir_is_empty` also answers true for a directory that does
+    // THE CONTROL. `holds_a_file` also answers false for a directory that does
     // not exist, so the assertion above would hold for a probe aimed anywhere.
     // The same worker module without `manifest.migrations` deploys to the same
     // app, and the same probe must then see what it wrote: the refusal is the
@@ -1037,7 +1051,7 @@ async fn deploy_rejects_legacy_manifest_migrations_and_writes_no_blob() {
         "the same worker module without manifest.migrations must deploy"
     );
     assert!(
-        !dir_is_empty(&blobs),
+        holds_a_file(&blobs),
         "a deploy that succeeded must have written its blobs where the probe looks"
     );
 
@@ -1125,7 +1139,7 @@ async fn deploy_to_nonexistent_app_does_not_write_blobs() {
     // `blobs/` and `manifests/` when it is constructed, so the root is never
     // empty and asserting on it would fail no matter what the handler did.
     assert!(
-        dir_is_empty(&fx.blob_root.join("blobs")),
+        !holds_a_file(&fx.blob_root.join("blobs")),
         "a deploy for a nonexistent app must not leave blobs behind: the app is \
          never created, so nothing will ever reference, bill, or garbage-collect them",
     );

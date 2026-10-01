@@ -204,14 +204,30 @@ pub fn validate_hash_format(hash: &str) -> bool {
 /// `local_path` always returns `Some(path)` regardless of whether the
 /// file currently exists on disk — callers that care should `get_blob`
 /// or `has_blob`. This keeps the accessor cheap (no syscall).
+///
+/// A write that returns `Ok` is durable: the file is synced before it is
+/// published, and every directory whose entries the write created or changed
+/// is synced before the write returns. A write that finds its bytes already
+/// there (a deduplicated blob, the same manifest again) syncs their directory
+/// too, because the writer that put them there may not have yet. `rename` and
+/// `link` are atomic but not durable, and without the directory syncs a power
+/// loss can drop an entry after the caller has recorded the write as done.
+///
+/// Writes never recreate `blobs/`, a shard under it, or `manifests/`: those
+/// exist from [`Self::new`] on, and a write that finds one missing fails. A
+/// store whose volume has been unmounted then refuses writes instead of
+/// filling the empty mountpoint beneath it.
 #[derive(Debug, Clone)]
 pub struct LocalDiskBlobStore {
     root: PathBuf,
 }
 
 impl LocalDiskBlobStore {
-    /// Create the store, ensuring `<root>/blobs/` and `<root>/manifests/`
-    /// exist. Idempotent.
+    /// Create the store: `<root>/blobs/` with every shard beneath it, and
+    /// `<root>/manifests/`, synced so they survive a crash. Idempotent.
+    ///
+    /// Every shard exists before any blob is written, so a blob write only
+    /// ever adds an entry to a shard that is already durable.
     ///
     /// # Errors
     ///
@@ -229,10 +245,16 @@ impl LocalDiskBlobStore {
         root: PathBuf,
         hard_link: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
     ) -> std::io::Result<Self> {
+        let blobs = root.join("blobs");
         let manifests = root.join("manifests");
-        std::fs::create_dir_all(root.join("blobs"))?;
+        for shard in 0..=u8::MAX {
+            std::fs::create_dir_all(blobs.join(format!("{shard:02x}")))?;
+        }
         std::fs::create_dir_all(&manifests)?;
         probe_hard_links(&manifests, hard_link)?;
+        for dir in [&blobs, &manifests, &root] {
+            std::fs::File::open(dir)?.sync_all()?;
+        }
         Ok(Self { root })
     }
 
@@ -261,17 +283,33 @@ impl LocalDiskBlobStore {
     async fn stage_manifest(path: &Path, json: &[u8]) -> Result<Scratch, BlobError> {
         use compio::io::AsyncWriteAtExt;
 
-        if let Some(parent) = path.parent() {
-            compio::fs::create_dir_all(parent).await?;
-        }
         let (scratch, mut file) = Scratch::create(
             path.with_extension(format!("json.tmp-{}", Uuid::new_v4().simple())),
         )
         .await?;
         let compio::BufResult(written, _) = file.write_all_at(json.to_vec(), 0).await;
         written?;
+        // Synced before it is published, so the key never names bytes that a
+        // crash can take back.
+        file.sync_all().await?;
         file.close().await?;
         Ok(scratch)
+    }
+
+    /// Make sure `manifests/<app_id>/` exists and its entry in `manifests/`
+    /// is durable, and return it. `manifests/` is synced even when another
+    /// writer created the directory, because that writer may not have synced
+    /// it yet.
+    async fn app_manifest_dir(&self, app_id: &AppId) -> Result<PathBuf, BlobError> {
+        let manifests = self.root.join("manifests");
+        let dir = manifests.join(app_id.as_str());
+        match compio::fs::create_dir(&dir).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(BlobError::Io(error)),
+        }
+        sync_dir(&manifests).await?;
+        Ok(dir)
     }
 
     /// Publish a staged manifest under `path` without replacing anything
@@ -496,12 +534,13 @@ impl BlobStore for LocalDiskBlobStore {
                         got: supplied,
                     });
                 }
+                // The writer that put the blob here may not have synced the
+                // shard yet, and this caller will record the blob as present.
+                if let Some(shard) = path.parent() {
+                    sync_dir(shard).await?;
+                }
                 return Ok(PutOutcome::Deduped);
             }
-        }
-
-        if let Some(parent) = path.parent() {
-            compio::fs::create_dir_all(parent).await?;
         }
 
         // Unique tmp suffix so concurrent writes of the same hash from
@@ -569,6 +608,9 @@ impl BlobStore for LocalDiskBlobStore {
         // the rename fails; after a rename it names nothing.
         result?;
         compio::fs::rename(tmp.path(), &path).await?;
+        if let Some(shard) = path.parent() {
+            sync_dir(shard).await?;
+        }
         Ok(PutOutcome::Wrote)
     }
 
@@ -685,8 +727,15 @@ impl BlobStore for LocalDiskBlobStore {
         json: &[u8],
     ) -> Result<(), BlobError> {
         let path = self.manifest_path(app_id, deploy_hash);
+        let dir = self.app_manifest_dir(app_id).await?;
         let scratch = Self::stage_manifest(&path, json).await?;
-        Self::publish_manifest(scratch, &path, json).await
+        Self::publish_manifest(scratch, &path, json).await?;
+        // The scratch name is gone by now, so this one sync covers both the
+        // key's entry and the scratch entry's removal. It runs when the key
+        // already held these bytes too, because the writer that put them there
+        // may not have synced the directory yet.
+        sync_dir(&dir).await?;
+        Ok(())
     }
 
     async fn get_manifest(&self, app_id: &AppId, deploy_hash: &str) -> Result<Bytes, BlobError> {
@@ -732,6 +781,13 @@ impl BlobStore for LocalDiskBlobStore {
             Err(e) => Err(BlobError::Io(e)),
         }
     }
+}
+
+/// Sync a directory, so the entries created, renamed or removed in it survive
+/// a crash. The same shape as `sync_dir` in `zeroship-storage`'s local
+/// backend, returning the `std::io::Error` this crate converts from.
+async fn sync_dir(dir: &Path) -> std::io::Result<()> {
+    compio::fs::File::open(dir).await?.sync_all().await
 }
 
 /// Size/hash-verify a local blob file before trusting a dedup hit. Returns
@@ -797,6 +853,7 @@ mod tests {
         let deploy_hash = sha256_hex(b"raced-deploy");
         let json = br#"{"version":1,"rules":[],"assets":{}}"#;
         let path = store.manifest_path(&app_id, &deploy_hash);
+        store.app_manifest_dir(&app_id).await.expect("the app's manifest directory");
 
         let first = LocalDiskBlobStore::stage_manifest(&path, json)
             .await
@@ -839,6 +896,7 @@ mod tests {
         let deploy_hash = sha256_hex(b"abandoned-deploy");
         let json = br#"{"version":1,"rules":[],"assets":{}}"#;
         let path = store.manifest_path(&app_id, &deploy_hash);
+        store.app_manifest_dir(&app_id).await.expect("the app's manifest directory");
 
         let staged = LocalDiskBlobStore::stage_manifest(&path, json)
             .await
