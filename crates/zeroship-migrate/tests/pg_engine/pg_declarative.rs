@@ -6,7 +6,8 @@
 //! `apply_declarative` deploy the diff — the whole flow driven through the shipped
 //! `PostgresBackend<PgDevSession>` over the `driver::SqlSession` seam against real PG.
 //!
-//! REQUIRES `ZERO_MIGRATE_TEST_PG_URL`. An unset DSN FAILS these tests: a skipped
+//! Runs in a database of its own on the PostgreSQL server this binary owns
+//! (`support::pg_database`). A server that cannot start FAILS these tests: a skipped
 //! live suite reports exactly like a passing one, so there is no skip.
 
 use crate::support;
@@ -161,7 +162,7 @@ async fn table_exists(session: &PgDevSession, schema: &str, table: &str) -> bool
 /// structural drift - the type-fidelity proof, over the shipped seam.
 #[compio::test]
 async fn declarative_deploy_creates_table_and_round_trips_with_zero_drift() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -268,7 +269,7 @@ async fn declarative_deploy_creates_table_and_round_trips_with_zero_drift() {
 /// additive `ALTER TABLE … ADD COLUMN` and applies cleanly (desired ⊃ live).
 #[compio::test]
 async fn declarative_add_column_diff_applies() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -406,7 +407,7 @@ async fn declarative_add_column_diff_applies() {
 async fn adding_a_mask_to_populated_plaintext_preserves_data_and_writes() {
     use zeroship_migrate::driver::SqlSession;
 
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -578,7 +579,7 @@ async fn adding_a_mask_to_populated_plaintext_preserves_data_and_writes() {
 async fn adding_a_mask_to_an_existing_encrypted_column_names_key_material_refusal() {
     use zeroship_migrate::driver::SqlSession;
 
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -663,7 +664,7 @@ async fn adding_a_mask_to_an_existing_encrypted_column_names_key_material_refusa
 async fn mask_backfill_uses_creator_wire_text_for_bytes_and_numbers() {
     use zeroship_migrate::driver::SqlSession;
 
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -844,7 +845,7 @@ async fn mask_backfill_uses_creator_wire_text_for_bytes_and_numbers() {
 async fn an_out_of_band_alter_lands_in_altered_objects() {
     use zeroship_migrate::driver::SqlSession;
 
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -990,7 +991,7 @@ async fn an_out_of_band_alter_lands_in_altered_objects() {
 async fn the_name_buckets_fill_on_out_of_band_create_and_drop() {
     use zeroship_migrate::driver::SqlSession;
 
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -1118,7 +1119,7 @@ async fn the_name_buckets_fill_on_out_of_band_create_and_drop() {
 /// rows in it are gone.
 #[compio::test]
 async fn a_rename_hint_on_postgres_produces_a_rename_not_a_drop_and_recreate() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -1236,7 +1237,7 @@ async fn a_rename_hint_on_postgres_produces_a_rename_not_a_drop_and_recreate() {
 async fn rows_survive_a_postgres_online_rename() {
     use zeroship_migrate::driver::SqlSession;
 
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);

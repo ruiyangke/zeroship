@@ -32,7 +32,7 @@
 // The never-applied case already had an accurate message and still does - it is
 // the one state in this branch where "pending" carries its usual meaning.
 //
-// GATE: `ZERO_MIGRATE_TEST_PG_URL`. PostgreSQL only; `resolve` refuses other
+// GATE: the run's PostgreSQL container. PostgreSQL only; `resolve` refuses other
 // dialects, since only PostgreSQL has the online rename.
 
 import assert from "node:assert/strict";

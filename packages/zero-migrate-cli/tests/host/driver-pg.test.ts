@@ -13,8 +13,8 @@
 // also READS as widening the check when it is not.
 //
 // GATE: `connectLivePg` (see `live-db.ts`). The property arms need no database; the
-// live arms skip when no DSN is configured and none is running on the compose
-// default, and fail when a configured DSN does not connect.
+// live arms run against the run's PostgreSQL container and fail when it does not
+// connect.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";

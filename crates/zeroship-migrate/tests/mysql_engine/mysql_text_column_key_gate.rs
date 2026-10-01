@@ -122,7 +122,7 @@ fn the_second_envelope_alone_carries_nothing_the_gate_could_key_on() {
 
 #[compio::test]
 async fn a_text_key_from_an_earlier_envelope_reaches_the_server() {
-    let url = require_live_mysql!();
+    let url = crate::support::mysql::mysql_url();
     let session = MysqlDevSession::connect(&url);
     let database = support::mysql::database_token("textkey");
     let cfg = ExecutorConfig::new(

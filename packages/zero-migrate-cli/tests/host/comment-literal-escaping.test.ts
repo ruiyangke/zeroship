@@ -27,7 +27,7 @@
 // Comments are PostgreSQL-only in this engine; `pg-only-op-matrix.test.ts` covers
 // the refusal on the other two targets, so this file does not repeat it.
 //
-// GATE: `ZERO_MIGRATE_TEST_PG_URL`.
+// GATE: the run's PostgreSQL container.
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -36,7 +36,7 @@ import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { PG_URL_ENV, pgUrl, requireLiveDb } from "./live-db.js";
+import { pgUrl } from "./live-db.js";
 
 // The host suite builds and resolves its addon in one place.
 import "./addon.js";
@@ -49,7 +49,7 @@ const ADDON_PATH = resolve(
   `../../../../crates/zeroship-migrate-node/zeroship-migrate-node.${process.platform}-${process.arch}${ABI}.node`,
 );
 
-const PG_URL = process.env.ZERO_MIGRATE_TEST_PG_URL;
+const PG_URL = pgUrl();
 const OWNER_APP = "app_comment_quote";
 const TABLE = "cmt_t";
 const BYSTANDER = "cmt_bystander";
@@ -102,7 +102,6 @@ export default {
 }
 
 test("a comment carrying a statement terminator cannot execute it", async (ctx) => {
-  requireLiveDb(PG_URL, PG_URL_ENV, "PostgreSQL");
   const pg = await import("pg");
   const client = new pg.Client({ connectionString: pgUrl() });
   await client.connect();

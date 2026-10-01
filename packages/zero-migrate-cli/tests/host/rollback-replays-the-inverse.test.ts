@@ -27,7 +27,7 @@ import { table, t } from "@zeroship/migrate";
 import { apply, rollback, status, type DriverConfig } from "zero-migrate-cli";
 import type { MigrationModule } from "@zeroship/migrate/internal/recorder";
 
-import { MYSQL_URL_ENV, connectLivePg, pgUrl, requireLiveDb } from "./live-db.js";
+import { connectLivePg, mysqlUrl, pgUrl } from "./live-db.js";
 import { noInjectPolicy } from "./policy.js";
 
 // The host suite builds and resolves its addon in one place.
@@ -36,7 +36,7 @@ import "./addon.js";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CLI_BIN = resolve(HERE, "../../src/cli-bin.ts");
 const OWNER_APP = "app_rollback_inverse";
-const MYSQL_URL = process.env.ZERO_MIGRATE_MYSQL_URL;
+const MYSQL_URL = mysqlUrl();
 
 type NamedMigration = MigrationModule & { readonly name: string };
 
@@ -262,7 +262,6 @@ test("CONTROL: a data migration declaring irreversible is still refused", async 
 });
 
 test("MySQL: a recorded inverse is what a rollback runs", async (ctx) => {
-  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   const mysql = (await import("mysql2/promise")).default;
   const admin = await mysql.createConnection({ uri: MYSQL_URL });
   const projectSchema = uniqueNamespace("rbinv_my");

@@ -27,8 +27,8 @@
 // accepting a NUL it would be storing something other than what was authored, and
 // this arm is what would notice.
 //
-// GATE: PG needs `ZERO_MIGRATE_TEST_PG_URL`, MySQL needs `ZERO_MIGRATE_MYSQL_URL`,
-// SQLite always runs.
+// GATE: PG needs the run's PostgreSQL container, MySQL needs the run's MySQL container,
+// SQLite needs no server.
 
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -41,14 +41,14 @@ import { table, t } from "@zeroship/migrate";
 import { apply, type DriverConfig } from "zero-migrate-cli";
 import type { MigrationModule } from "@zeroship/migrate/internal/recorder";
 
-import { MYSQL_URL_ENV, connectLivePg, pgUrl, requireLiveDb } from "./live-db.js";
+import { connectLivePg, mysqlUrl, pgUrl } from "./live-db.js";
 
 // The host suite builds and resolves its addon in one place.
 import "./addon.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const OWNER_APP = "app_literal_binding";
-const MYSQL_URL = process.env.ZERO_MIGRATE_MYSQL_URL;
+const MYSQL_URL = mysqlUrl();
 
 /** Built from char codes so the source file carries no control characters. */
 const NUL = String.fromCharCode(0);
@@ -184,7 +184,6 @@ test("PostgreSQL binds literal values, and refuses a NUL byte rather than trunca
 });
 
 test("MySQL binds literal values and stores a NUL byte exactly", async (ctx) => {
-  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   const mysql = (await import("mysql2/promise")).default;
 
   for (const [label, value] of [...PORTABLE, ["NUL byte", NUL_VALUE] as const]) {

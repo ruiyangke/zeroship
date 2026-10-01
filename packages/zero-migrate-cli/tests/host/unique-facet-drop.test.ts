@@ -32,7 +32,7 @@
 // reading the catalog. A `DROP` that ran but removed the wrong object, or removed
 // nothing, still leaves a clean catalog query looking plausible.
 //
-// GATE: `ZERO_MIGRATE_TEST_PG_URL`. The constraint/index distinction is
+// GATE: the run's PostgreSQL container. The constraint/index distinction is
 // PostgreSQL's; MySQL's unique constraint IS an index, and SQLite's inline UNIQUE
 // creates an implicit one.
 
@@ -43,7 +43,7 @@ import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { PG_URL_ENV, pgUrl, requireLiveDb } from "./live-db.js";
+import { pgUrl } from "./live-db.js";
 
 // The host suite builds and resolves its addon in one place.
 import "./addon.js";
@@ -155,7 +155,6 @@ async function run(
 }
 
 test("a create-time unique facet can be dropped by its derived name", async (ctx) => {
-  requireLiveDb(process.env.ZERO_MIGRATE_TEST_PG_URL, PG_URL_ENV, "PostgreSQL");
   await run(
     `table("${TABLE}").create({
        columns: { id: t.int().required(), e: t.text().unique() },
@@ -183,7 +182,6 @@ test("a create-time unique facet can be dropped by its derived name", async (ctx
 });
 
 test("CONTROL: the addColumn route still drops by the same name", async (ctx) => {
-  requireLiveDb(process.env.ZERO_MIGRATE_TEST_PG_URL, PG_URL_ENV, "PostgreSQL");
   // This route already produced a real constraint, so it must keep working -- the
   // tolerant path must not disturb the case that was never broken.
   await run(
@@ -200,7 +198,6 @@ test("CONTROL: the addColumn route still drops by the same name", async (ctx) =>
 });
 
 test("CONTROL: a name that is neither constraint nor index is STILL refused", async (ctx) => {
-  requireLiveDb(process.env.ZERO_MIGRATE_TEST_PG_URL, PG_URL_ENV, "PostgreSQL");
   // Without this, "tolerant" would mean "never fails", and every mistyped name
   // would become a silent no-op -- a far worse defect than the one being fixed.
   await run(

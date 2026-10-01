@@ -27,7 +27,7 @@
 // it is written down here as a measured fact rather than left implicit. If the
 // gate is ever widened to cover it, this file fails and says so.
 //
-// GATE: `ZERO_MIGRATE_TEST_PG_URL`.
+// GATE: the run's PostgreSQL container.
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";

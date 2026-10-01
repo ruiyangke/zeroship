@@ -1,1 +1,0 @@
-zero-migrate:pg-extension:

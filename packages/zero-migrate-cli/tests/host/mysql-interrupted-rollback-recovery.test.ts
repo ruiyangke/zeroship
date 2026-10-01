@@ -27,7 +27,7 @@
 // Arm 4 is the control. Every assertion before it holds equally for an engine that
 // is simply stuck, and "refuses forever" is not the guarantee.
 //
-// GATE: `ZERO_MIGRATE_MYSQL_URL`.
+// GATE: the run's MySQL container.
 
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
@@ -37,9 +37,9 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import "./addon.js";
-import { MYSQL_URL_ENV, requireLiveDb } from "./live-db.js";
+import { mysqlUrl } from "./live-db.js";
 
-const MYSQL_URL = process.env.ZERO_MIGRATE_MYSQL_URL;
+const MYSQL_URL = mysqlUrl();
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CLI_BIN = resolve(HERE, "../../src/cli-bin.ts");
@@ -121,7 +121,6 @@ function cli(work: string, database: string, argv: string[]) {
 const UNWIND = ["rollback", "--steps", "1", "--approve", "--backup-acknowledged"];
 
 test("an interrupted MySQL unwind is refused on retry, and the printed repair works", async (ctx) => {
-  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   const mysql = (await import("mysql2/promise")).default;
   const connection = await mysql.createConnection({ uri: MYSQL_URL });
 

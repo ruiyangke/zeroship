@@ -139,7 +139,7 @@ fn require_predicate_drift(drift: &StructuralDrift, index: &str) -> Result<(), S
 
 #[compio::test]
 async fn live_postgres_does_not_invent_drift_for_a_constant_true_predicate() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = support::PgDevSession::connect(&url);
     let schema = token();
     let quoted_schema = quote_ident(&schema);

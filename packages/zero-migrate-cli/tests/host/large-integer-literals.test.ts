@@ -26,7 +26,7 @@
 // would have missed it.
 //
 // GATES: the literal arms run everywhere (SQLite exercises the same crossing); the
-// partition-bound arm needs `ZERO_MIGRATE_TEST_PG_URL`.
+// partition-bound arm needs the run's PostgreSQL container.
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -38,7 +38,7 @@ import { fileURLToPath } from "node:url";
 
 // The host suite builds and resolves its addon in one place.
 import "./addon.js";
-import { PG_URL_ENV, requireLiveDb } from "./live-db.js";
+import { pgUrl } from "./live-db.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CLI_BIN = resolve(HERE, "../../src/cli-bin.ts");
@@ -199,7 +199,6 @@ test("an integer at or beyond 2^53 is still refused, and lint agrees", () => {
  *  partition -- just one whose boundary is in the wrong place, which is a data
  *  routing bug rather than an error. */
 test("a large integer partition bound reaches the catalog exactly", async (ctx) => {
-  requireLiveDb(process.env.ZERO_MIGRATE_TEST_PG_URL, PG_URL_ENV, "PostgreSQL");
   const { pgUrl } = await import("./live-db.js");
   const pg = await import("pg");
   const client = new pg.Client({ connectionString: pgUrl() });

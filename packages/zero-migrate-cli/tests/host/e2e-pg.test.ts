@@ -20,9 +20,9 @@
 //   - drift/checksum: two applies of the identical artifact fold the SAME anchor
 //     (drift-free identity), a modified artifact folds a DIFFERENT anchor (drift).
 //
-// REQUIRES `connectLivePg` (see `live-db.ts`), and so `ZERO_MIGRATE_TEST_PG_URL`.
-// An unset DSN and a DSN that does not connect both FAIL; neither skips. Runs under
-// `node --import tsx --test`.
+// REQUIRES `connectLivePg` (see `live-db.ts`), and so the run's PostgreSQL container.
+// An absent address and one that does not connect both FAIL; neither skips. Runs
+// under `tests/host/run.ts`.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";

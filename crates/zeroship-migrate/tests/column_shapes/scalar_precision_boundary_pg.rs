@@ -20,7 +20,8 @@
 //! column is a bigint, and the value is off by one forever. Refusing is the only
 //! behaviour that cannot silently lose the number.
 //!
-//! GATE: `ZERO_MIGRATE_TEST_PG_URL`.
+//! Runs in a database of its own on the PostgreSQL server this binary owns
+//! (`support::pg_database`).
 
 use crate::support;
 
@@ -166,7 +167,7 @@ async fn round_trip(
 
 #[compio::test]
 async fn an_integer_within_the_exact_json_range_round_trips() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
 
     // 2^53 - 1: the largest integer every IEEE-754 double carries exactly.
@@ -181,7 +182,7 @@ async fn an_integer_within_the_exact_json_range_round_trips() {
 
 #[compio::test]
 async fn an_integer_beyond_the_exact_json_range_is_refused_as_a_bare_number() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
 
     // 2^53 + 1. As an IEEE-754 double this IS 9007199254740992, so accepting it
@@ -205,7 +206,7 @@ async fn an_integer_beyond_the_exact_json_range_is_refused_as_a_bare_number() {
 
 #[compio::test]
 async fn the_same_integer_round_trips_exactly_in_its_string_form() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
 
     // The escape hatch the refusal above points at. Same number, carried as a
@@ -231,7 +232,7 @@ async fn a_timestamp_keeps_its_microseconds_and_its_zone() {
     // Sub-second precision is the other place a migration engine loses data
     // quietly: a path that formats through seconds, or drops the offset, still
     // produces a valid-looking timestamp that is simply wrong.
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
 
     let stored = round_trip(
@@ -252,7 +253,7 @@ async fn a_timestamp_keeps_its_microseconds_and_its_zone() {
 
 #[compio::test]
 async fn a_uuid_round_trips_byte_identical() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
 
     // A UUIDv7, so the timestamp-ordered prefix is preserved rather than
@@ -282,7 +283,7 @@ async fn a_text_value_carrying_a_nul_byte_is_not_silently_truncated() {
     // The JSON escape is ASSEMBLED here rather than written literally: char 92 is
     // the backslash, so the fixture reaching the parser is the six-character
     // escape and this source file contains no control byte of its own.
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
 
     let backslash = char::from(92);

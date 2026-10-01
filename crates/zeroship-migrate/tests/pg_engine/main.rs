@@ -6,13 +6,13 @@
 //! Nothing about the tests themselves changed - a `mod` missing from this list is a
 //! test that silently stops running, so the list is the load-bearing part of the file.
 
-#[macro_use]
 #[path = "../support/mod.rs"]
 mod support;
 
 mod advisories_match_live_postgres;
 mod apply_dml_validation_pg;
 mod not_valid_validate_constraint;
+mod owned_server;
 mod pg_column_drop_dependency_oracle;
 mod pg_conformance;
 mod pg_declarative;

@@ -29,7 +29,7 @@
 // generic text carries no value-format contract to validate against. The `tid`
 // column here is declared `t.typedId(...)` for that reason.
 //
-// GATE: `ZERO_MIGRATE_TEST_PG_URL`.
+// GATE: the run's PostgreSQL container.
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -38,7 +38,7 @@ import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { PG_URL_ENV, pgUrl, requireLiveDb } from "./live-db.js";
+import { pgUrl } from "./live-db.js";
 
 // The host suite builds and resolves its addon in one place.
 import "./addon.js";
@@ -51,7 +51,7 @@ const ADDON_PATH = resolve(
   `../../../../crates/zeroship-migrate-node/zeroship-migrate-node.${process.platform}-${process.arch}${ABI}.node`,
 );
 
-const PG_URL = process.env.ZERO_MIGRATE_TEST_PG_URL;
+const PG_URL = pgUrl();
 const OWNER_APP = "app_perrow";
 const TABLE = "pr_rows";
 /** Enough rows that a per-row generator and a once-generated value cannot be
@@ -149,7 +149,6 @@ export default {
 }
 
 test("every perRow generator yields a distinct value per backfilled row", async (ctx) => {
-  requireLiveDb(PG_URL, PG_URL_ENV, "PostgreSQL");
   const pg = await import("pg");
   const client = new pg.Client({ connectionString: pgUrl() });
   await client.connect();

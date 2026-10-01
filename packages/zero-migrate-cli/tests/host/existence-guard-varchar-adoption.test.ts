@@ -64,9 +64,9 @@ import { noInjectPolicy } from "./policy.js";
 
 // The host suite builds and resolves its addon in one place.
 import "./addon.js";
-import { MYSQL_URL_ENV, PG_URL_ENV, requireLiveDb } from "./live-db.js";
+import { mysqlUrl, pgUrl } from "./live-db.js";
 
-const PG_URL = process.env.ZERO_MIGRATE_TEST_PG_URL;
+const PG_URL = pgUrl();
 const OWNER_APP = "app_guard_varchar_adopt";
 const TABLE = "notes";
 
@@ -164,7 +164,6 @@ async function withSeededTable(
 }
 
 test("PostgreSQL: a guarded createTable adopts an existing length-qualified varchar column", async (ctx) => {
-  requireLiveDb(PG_URL, PG_URL_ENV, "PostgreSQL");
   await withSeededTable("guardvarchar_adopt_pg", "varchar(255)", async (client, schema, driver) => {
     assert.deepEqual(
       await pgColumnType(client, schema, "body"),
@@ -189,7 +188,6 @@ test("PostgreSQL: a guarded createTable adopts an existing length-qualified varc
 });
 
 test("PostgreSQL control: the same guarded createTable adopts an existing text column", async (ctx) => {
-  requireLiveDb(PG_URL, PG_URL_ENV, "PostgreSQL");
   await withSeededTable("guardvarchar_text_pg", "text", async (client, schema, driver) => {
     // The ONLY difference from the arm above is the column type -- an unqualified one.
     // This arm passing while that one fails is what proves the LENGTH QUALIFIER is the
@@ -210,7 +208,6 @@ test("PostgreSQL control: the same guarded createTable adopts an existing text c
 });
 
 test("PostgreSQL: a guarded createTable still fails closed on a genuinely divergent varchar length", async (ctx) => {
-  requireLiveDb(PG_URL, PG_URL_ENV, "PostgreSQL");
   await withSeededTable("guardvarchar_drift_pg", "varchar(255)", async (client, schema, driver) => {
     // Live varchar(255), declared varchar(100). Recovering the length is only a fix if
     // a DIFFERENT length is still a refusal: a "fix" that stopped comparing `data_type`,
@@ -253,9 +250,9 @@ test("PostgreSQL: a guarded createTable still fails closed on a genuinely diverg
 // guarded adoption of an existing table does not work on MySQL, and no choice of
 // declared type makes it work.
 //
-// GATE: `ZERO_MIGRATE_MYSQL_URL`.
+// GATE: the run's MySQL container.
 
-const MYSQL_URL = process.env.ZERO_MIGRATE_MYSQL_URL;
+const MYSQL_URL = mysqlUrl();
 
 function mysqlIdent(value: string): string {
   return `\`${value.replaceAll("`", "``")}\``;
@@ -324,7 +321,6 @@ async function mysqlColumnType(
 }
 
 test("MySQL: a guarded createTable refuses a divergent varchar width fail-closed", async (ctx) => {
-  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   await withSeededMysqlTable("guard_my_drift", "varchar(255)", async (admin, database, driver) => {
     await assert.rejects(
       applyGuarded(
@@ -344,7 +340,6 @@ test("MySQL: a guarded createTable refuses a divergent varchar width fail-closed
 });
 
 test("MySQL: the SAME guard refuses even when the declared type matches exactly", async (ctx) => {
-  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   // The arm that carries the finding. A refusal here cannot be a comparison
   // deciding the types differ, because they do not - it is the absence of any
   // comparison, failing closed. Nothing else in this suite says that.

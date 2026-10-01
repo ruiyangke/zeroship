@@ -28,7 +28,7 @@
 // makes the negative control trustworthy rather than dependent on the test host's
 // DNS.
 //
-// GATES: `ZERO_MIGRATE_TEST_PG_URL`, `ZERO_MIGRATE_MYSQL_URL`.
+// GATES: the run's PostgreSQL container, the run's MySQL container.
 
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
@@ -37,7 +37,7 @@ import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { MYSQL_URL_ENV, PG_URL_ENV, pgUrl, requireLiveDb } from "./live-db.js";
+import { mysqlUrl, pgUrl } from "./live-db.js";
 
 // The host suite builds and resolves its addon in one place.
 import "./addon.js";
@@ -50,8 +50,8 @@ const ADDON_PATH = resolve(
   `../../../../crates/zeroship-migrate-node/zeroship-migrate-node.${process.platform}-${process.arch}${ABI}.node`,
 );
 
-const PG_URL = process.env.ZERO_MIGRATE_TEST_PG_URL;
-const MYSQL_URL = process.env.ZERO_MIGRATE_MYSQL_URL;
+const PG_URL = pgUrl();
+const MYSQL_URL = mysqlUrl();
 const OWNER_APP = "app_allowlist";
 const TABLE = "allowlist_rows";
 
@@ -140,7 +140,6 @@ function parts(url: string): { credentials: string; hostPort: string; tail: stri
 }
 
 test("a `host` query parameter cannot escape the PostgreSQL allowlist", async (ctx) => {
-  requireLiveDb(PG_URL, PG_URL_ENV, "PostgreSQL");
   const pg = await import("pg");
   const client = new pg.Client({ connectionString: pgUrl() });
   await client.connect();
@@ -196,7 +195,6 @@ test("a `host` query parameter cannot escape the PostgreSQL allowlist", async (c
 });
 
 test("CONTROL: the same URL without the parameter cannot connect at all", async (ctx) => {
-  requireLiveDb(PG_URL, PG_URL_ENV, "PostgreSQL");
   const { credentials, hostPort, tail } = parts(pgUrl());
   const port = hostPort.split(":")[1];
   const work = project();
@@ -222,7 +220,6 @@ test("CONTROL: the same URL without the parameter cannot connect at all", async 
 });
 
 test("CONTROL: an allowlisted host still applies", async (ctx) => {
-  requireLiveDb(PG_URL, PG_URL_ENV, "PostgreSQL");
   const pg = await import("pg");
   const client = new pg.Client({ connectionString: pgUrl() });
   await client.connect();
@@ -248,7 +245,6 @@ test("CONTROL: an allowlisted host still applies", async (ctx) => {
 });
 
 test("CONTROL: a non-allowlisted host is refused", async (ctx) => {
-  requireLiveDb(PG_URL, PG_URL_ENV, "PostgreSQL");
   const work = project();
   try {
     // The plain case the allowlist was built for; proves it is consulted at all.
@@ -261,7 +257,6 @@ test("CONTROL: a non-allowlisted host is refused", async (ctx) => {
 });
 
 test("MySQL ignores a `host` query parameter, and the allowlist still holds", async (ctx) => {
-  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   const { credentials, hostPort, tail } = parts(String(MYSQL_URL));
   const realHost = hostPort.split(":")[0];
   const port = hostPort.split(":")[1] || "3306";

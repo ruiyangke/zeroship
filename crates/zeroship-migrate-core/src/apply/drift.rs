@@ -2026,9 +2026,9 @@ mod constraint_definition_tests {
     use crate::TableRuntimeOptions;
 
     /// These cover the differ directly rather than through a live database. The
-    /// PostgreSQL round-trip oracle that found the CHECK mismatch is behind
-    /// `require_live_pg!`, so on a checkout with no database configured it cannot run
-    /// at all, and these are what still measure this contract.
+    /// PostgreSQL round-trip oracle that found the CHECK mismatch lives in
+    /// `zeroship-migrate`'s live suites, against a server its test binary starts;
+    /// these measure the contract in this crate, where no server runs.
     fn snapshot_with(constraints: Vec<ConstraintSnapshot>) -> SchemaSnapshot {
         let mut snapshot = SchemaSnapshot::default();
         snapshot.tables.insert(

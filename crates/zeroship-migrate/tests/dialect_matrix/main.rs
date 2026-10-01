@@ -6,7 +6,6 @@
 //! Nothing about the tests themselves changed - a `mod` missing from this list is a
 //! test that silently stops running, so the list is the load-bearing part of the file.
 
-#[macro_use]
 #[path = "../support/mod.rs"]
 mod support;
 #[path = "../dialect_corpus/mod.rs"]

@@ -32,7 +32,7 @@
 // the change would be the worst outcome of all, and the exit code alone does not
 // rule it out.
 //
-// GATE: `ZERO_MIGRATE_TEST_PG_URL`.
+// GATE: the run's PostgreSQL container.
 
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";

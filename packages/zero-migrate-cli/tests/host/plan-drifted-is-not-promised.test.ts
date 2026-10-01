@@ -25,7 +25,7 @@
 // variable. Without it, a fix that dropped migrations from `plan` in general
 // would satisfy the drift arms while breaking every ordinary preview.
 //
-// GATE: `ZERO_MIGRATE_TEST_PG_URL`.
+// GATE: the run's PostgreSQL container.
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";

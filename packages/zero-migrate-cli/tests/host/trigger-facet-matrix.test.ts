@@ -31,7 +31,7 @@ import type { MigrationModule } from "@zeroship/migrate/internal/recorder";
 
 // The host suite builds and resolves its addon in one place.
 import "./addon.js";
-import { MYSQL_URL_ENV, requireLiveDb } from "./live-db.js";
+import { mysqlUrl } from "./live-db.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const OWNER_APP = "app_trigger_facet_matrix";
@@ -226,9 +226,9 @@ test("SQLite refuses the trigger facets the matrix declares unsupported", async 
 // confident result. That mistake produced a false GREEN across seven cells in the
 // first pass and a false ALARM across six in the second.
 //
-// GATE: `ZERO_MIGRATE_MYSQL_URL`.
+// GATE: the run's MySQL container.
 
-const MYSQL_URL = process.env.ZERO_MIGRATE_MYSQL_URL;
+const MYSQL_URL = mysqlUrl();
 
 /** A body MySQL renders: an ordinary UPDATE against a second table. */
 const mysqlBody: TriggerArgs["body"] = (b) => [b.update({ table: "audit", set: { seen: 1 } })];
@@ -276,7 +276,6 @@ async function withMysqlDatabase<T>(
 }
 
 test("MySQL control: a structured trigger body really applies, so the refusals below mean something", async (ctx) => {
-  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   // The arm that corrects the earlier misreading. `Structured trigger body`
   // declares MySQL Yes; this proves it, by finding the trigger in the catalog.
   await withMysqlDatabase("trig_my_ok", async (admin, database, driver) => {
@@ -309,7 +308,6 @@ test("MySQL control: a structured trigger body really applies, so the refusals b
 });
 
 test("MySQL refuses the trigger facets the matrix declares unsupported", async (ctx) => {
-  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   for (const [facet, args] of [
     ["truncate_event", { timing: "before", events: ["truncate"], forEach: "statement", body: mysqlBody }],
     ["statement_level", { timing: "before", events: ["insert"], forEach: "statement", body: mysqlBody }],

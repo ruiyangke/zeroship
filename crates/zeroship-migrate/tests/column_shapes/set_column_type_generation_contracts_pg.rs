@@ -322,7 +322,7 @@ async fn with_deployment<F>(tag: &str, body: F)
 where
     F: AsyncFnOnce(&Deployment<'_>) -> Result<(), String>,
 {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
     let deployment = Deployment::open(&session, tag).await;
     let _schema_guard = support::SchemaGuard::arm(

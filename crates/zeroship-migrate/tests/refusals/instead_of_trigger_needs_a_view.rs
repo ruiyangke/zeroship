@@ -195,7 +195,7 @@ async fn pg_apply(
 
 #[compio::test]
 async fn postgres_refuses_an_instead_of_trigger_on_a_table_and_keeps_one_on_a_view() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
     let schema = token();
     let cfg = ExecutorConfig::new(

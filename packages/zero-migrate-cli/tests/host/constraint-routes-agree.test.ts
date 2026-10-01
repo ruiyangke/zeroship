@@ -35,7 +35,7 @@
 // worth catching. `btree` is used because `gist` over integers needs `btree_gist`,
 // which is a property of the server rather than of this engine.
 //
-// GATE: `ZERO_MIGRATE_TEST_PG_URL`. Exclusion constraints are PostgreSQL-only, and
+// GATE: the run's PostgreSQL container. Exclusion constraints are PostgreSQL-only, and
 // deferrable FKs are not a SQLite/MySQL shape either.
 
 import assert from "node:assert/strict";
@@ -45,7 +45,7 @@ import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { PG_URL_ENV, pgUrl, requireLiveDb } from "./live-db.js";
+import { pgUrl } from "./live-db.js";
 
 // The host suite builds and resolves its addon in one place.
 import "./addon.js";
@@ -199,7 +199,6 @@ async function withApplied(
 }
 
 test("both routes render the identical constraint definition", async (ctx) => {
-  requireLiveDb(process.env.ZERO_MIGRATE_TEST_PG_URL, PG_URL_ENV, "PostgreSQL");
   await withApplied(async (client, namespace) => {
     const { rows } = await client.query(
       `SELECT rel.relname, c.contype::text AS contype,
@@ -248,7 +247,6 @@ test("both routes render the identical constraint definition", async (ctx) => {
 });
 
 test("onDelete cascade reaches the database on both routes", async (ctx) => {
-  requireLiveDb(process.env.ZERO_MIGRATE_TEST_PG_URL, PG_URL_ENV, "PostgreSQL");
   await withApplied(async (client, namespace) => {
     for (const [index, table] of ["fk_inline", "fk_addop"].entries()) {
       const parent = 100 + index;
@@ -271,7 +269,6 @@ test("onDelete cascade reaches the database on both routes", async (ctx) => {
 });
 
 test("initiallyDeferred reaches the database on both routes", async (ctx) => {
-  requireLiveDb(process.env.ZERO_MIGRATE_TEST_PG_URL, PG_URL_ENV, "PostgreSQL");
   await withApplied(async (client, namespace) => {
     for (const [index, table] of ["fk_inline", "fk_addop"].entries()) {
       const parent = 200 + index;
@@ -300,7 +297,6 @@ test("initiallyDeferred reaches the database on both routes", async (ctx) => {
 });
 
 test("the exclusion constraint fires on both routes", async (ctx) => {
-  requireLiveDb(process.env.ZERO_MIGRATE_TEST_PG_URL, PG_URL_ENV, "PostgreSQL");
   await withApplied(async (client, namespace) => {
     for (const table of ["ex_inline", "ex_addop"]) {
       await client.query(

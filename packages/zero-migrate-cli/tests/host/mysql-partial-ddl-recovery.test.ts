@@ -30,7 +30,7 @@
 // server produces the interruption the same way a disconnect or a lock timeout
 // would.
 //
-// GATE: `ZERO_MIGRATE_MYSQL_URL`. MySQL only - PostgreSQL rolls this back.
+// GATE: the run's MySQL container. MySQL only - PostgreSQL rolls this back.
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -41,9 +41,9 @@ import type { MigrationModule } from "@zeroship/migrate/internal/recorder";
 
 // The host suite builds and resolves its addon in one place.
 import "./addon.js";
-import { MYSQL_URL_ENV, requireLiveDb } from "./live-db.js";
+import { mysqlUrl } from "./live-db.js";
 
-const MYSQL_URL = process.env.ZERO_MIGRATE_MYSQL_URL;
+const MYSQL_URL = mysqlUrl();
 const OWNER_APP = "app_partial_ddl";
 
 type NamedMigration = MigrationModule & { readonly name: string };
@@ -78,7 +78,6 @@ scope = "all"
 }
 
 test("a half-applied MySQL migration refuses to replay, and the printed repair works", async (ctx) => {
-  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   const mysql = (await import("mysql2/promise")).default;
   const admin = await mysql.createConnection({ uri: MYSQL_URL, multipleStatements: true });
   const database = uniqueNamespace("partialddl_my");

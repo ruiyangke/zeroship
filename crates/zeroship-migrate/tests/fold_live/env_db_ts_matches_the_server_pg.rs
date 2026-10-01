@@ -21,9 +21,9 @@
 //! not the expected one, so a case whose DDL silently did nothing reports that rather
 //! than reporting an artifact defect.
 //!
-//! REQUIRES `ZERO_MIGRATE_TEST_PG_URL`: without it these tests FAIL. A skipped run
-//! of this file proves nothing while reporting the same pass count as a real one,
-//! which is why it fails rather than skipping. The offline halves of these claims
+//! Runs in a database of its own on the PostgreSQL server this binary owns
+//! (`support::pg_database`). A server that cannot start FAILS these tests: a skipped
+//! run of this file proves nothing while reporting the same pass count as a real one. The offline halves of these claims
 //! live in
 //! `crates/zeroship-migrate/tests/gen_types/gen_types_authoring_tables_from_the_fold.rs` and always run.
 
@@ -295,7 +295,7 @@ async fn apply_ir(
 /// The schema is dropped on every exit path, including an unwind, and the drop's own
 /// failure is reported rather than swallowed.
 async fn measure(label: &str, charter: Charter, ops: &str) -> Measured {
-    let session_url = require_live_pg!();
+    let session_url = crate::support::pg_database();
     let session = PgDevSession::connect(&session_url);
     let schema = token();
     let policy = charter.policy(&schema);
@@ -362,7 +362,6 @@ const REPLACE_SINGLE: &str = r#"{"ir_version":1,"name":"pk_replace_single","ops"
 /// so that is the key `env.db.ts` must declare.
 #[compio::test]
 async fn a_replaced_primary_key_is_the_key_env_db_ts_declares() {
-    let _url = require_live_pg!();
     let measured = measure(
         "replace a single-column primary key",
         Charter::Plain,
@@ -401,7 +400,6 @@ const REPLACE_COMPOSITE: &str = r#"{"ir_version":1,"name":"pk_replace_composite"
 /// ordered array rather than to a set.
 #[compio::test]
 async fn a_replaced_composite_primary_key_keeps_the_servers_column_order() {
-    let _url = require_live_pg!();
     let measured = measure(
         "replace with a composite primary key",
         Charter::Plain,
@@ -432,7 +430,6 @@ const DROP_KEY: &str = r#"{"ir_version":1,"name":"pk_drop","ops":[
 /// that is `primaryKey: null`.
 #[compio::test]
 async fn a_dropped_primary_key_leaves_env_db_ts_declaring_none() {
-    let _url = require_live_pg!();
     let measured = measure("drop the primary key", Charter::Plain, DROP_KEY).await;
 
     assert_eq!(
@@ -461,7 +458,6 @@ const ADD_KEY: &str = r#"{"ir_version":1,"name":"pk_add","ops":[
 /// saying `primaryKey: null` would drop a constraint the migration installed.
 #[compio::test]
 async fn an_added_primary_key_reaches_env_db_ts() {
-    let _url = require_live_pg!();
     let measured = measure("add a primary key", Charter::Plain, ADD_KEY).await;
 
     assert_eq!(
@@ -491,7 +487,6 @@ const REPLACE_DROPS_IDENTITY: &str = r#"{"ir_version":1,"name":"pk_replace_ident
 /// whether `id` still generates values.
 #[compio::test]
 async fn the_identity_a_primary_key_replace_drops_leaves_env_db_ts_too() {
-    let _url = require_live_pg!();
     let measured = measure(
         "replace a primary key and drop the old identity",
         Charter::Plain,
@@ -543,7 +538,6 @@ const DETACH_ATTACHED_PARTITION: &str = r#"{"ir_version":1,"name":"partition_det
 /// drop, is there still a relation called `p1`?
 #[compio::test]
 async fn a_dropped_partition_is_gone_from_the_server_and_from_env_db_ts() {
-    let _url = require_live_pg!();
     let measured = measure(
         "drop an attached partition",
         Charter::Partition,
@@ -581,7 +575,6 @@ async fn a_dropped_partition_is_gone_from_the_server_and_from_env_db_ts() {
 /// equally justified and would be wrong for the op next door.
 #[compio::test]
 async fn a_detached_partition_survives_on_the_server_and_in_env_db_ts() {
-    let _url = require_live_pg!();
     let measured = measure(
         "detach an attached partition",
         Charter::Partition,

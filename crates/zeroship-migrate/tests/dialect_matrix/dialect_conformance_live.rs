@@ -49,90 +49,44 @@
 //!      and `x` to be the same type, which is why there is no single fixture table
 //!      and the prelude is chosen per row.
 //!   2. A LOCALIZATION of the names that are not schema-scoped ([`localize`]).
-//!      A PostgreSQL ROLE is cluster-scoped and an EXTENSION is database-scoped,
-//!      so the corpus's `r` and `citext` would collide with any test binary cargo
-//!      happens to run in parallel. Roles and the `createSchema`/`dropSchema` name
-//!      get a per-row unique suffix; the extension becomes `pgcrypto` and is held
-//!      under [`extension_claim_key`] while a row uses it, because a name cannot
-//!      isolate this one - see that constant. `code.extension` in
-//!      `support::operator_charter` allowlists exactly `citext` and `pgcrypto`, and
-//!      `drop_extension_rollback_pg.rs` claims BOTH, so the binaries take the SAME
-//!      claim out of `support::extension_claim`, keyed by the extension so they queue
-//!      on one key instead of three. `nextval`'s hard-coded `app` schema is
-//!      retargeted at the probe schema, because otherwise a cross-schema POLICY
+//!      A PostgreSQL ROLE is cluster-scoped, so the corpus's `r` would collide with
+//!      a sibling test of this binary on the server they share. Roles and the
+//!      `createSchema`/`dropSchema` name get a per-row unique suffix. The extension
+//!      becomes [`PROBE_EXTENSION`], one of the two `code.extension` in
+//!      `support::operator_charter` allowlists. `nextval`'s hard-coded `app` schema
+//!      is retargeted at the probe schema, because otherwise a cross-schema POLICY
 //!      refusal would mask the capability answer the row is asking about.
 //!   3. A LIVE SCHEMA read back from the catalog after the prelude, so the subject
 //!      op lowers against what actually exists rather than against
 //!      `LiveSchema::default()`.
 //!
-//! ISOLATION. Every PostgreSQL row runs in its own schema pair (project + meta),
-//! created and dropped per row, plus a per-row role. The one shared name is the
-//! extension, and it is isolated in TIME rather than in space: the two rows that
-//! claim it hold a cross-run advisory lock while they do, and ONLY those two rows
-//! drop it. Both halves are load-bearing and both are measured at
-//! [`PROBE_EXTENSION`]. The
-//! PostgreSQL sweep counts `pg_namespace` before and after itself and fails if a
-//! `zmconf_%` schema it is answerable for survives - inside the sweep, not beside
-//! it, because a check whose subject is another test's in-flight state cannot be
-//! its own `#[test]`. Every SQLite row runs in its own `TempDir`. Every MySQL row
-//! runs in its own throwaway DATABASE plus the `_migrations` meta database the
-//! engine creates beside it, both reclaimed by `support::mysql::DatabaseGuard`, and
-//! the MySQL sweep runs the same before/after census over
-//! `information_schema.SCHEMATA`.
+//! ISOLATION. The PostgreSQL sweep runs in a database of its own
+//! ([`support::PgDatabase`]), so the one DATABASE-scoped name the rows touch - the
+//! extension - is this sweep's alone. Inside it, every row runs in its own schema
+//! pair (project + meta), created and dropped per row, plus a per-row role, and the
+//! two rows that install the extension drop it again before the next row runs
+//! ([`touches_the_extension`]). Every SQLite row runs in its own `TempDir`. Every
+//! MySQL row runs in its own throwaway DATABASE plus the `_migrations` meta database
+//! the engine creates beside it, both reclaimed by `support::mysql::DatabaseGuard`.
 //!
-//! LEAK CHECK. "Answerable for" is decided by the pid in the schema name, never by
-//! the `zmconf_` prefix alone. ONE PostgreSQL instance and ONE MySQL instance are
-//! shared by every agent and every gate run working in this tree, so at any moment a
-//! `zmconf_%` schema or database is as
-//! likely to be a sibling run's live probe as it is to be a leak; a guard that reads
-//! the first as the second fails suites that are working. [`probe_owner`] sorts the prefix match three ways: this process's own pid is
-//! always this run's leak; a foreign pid that is still running is a sibling
-//! mid-flight and is ignored; a foreign pid that has exited leaked its schema and
-//! still fails the run. The limits are known and measured, and each is narrow:
-//!
-//!   - A KILLED RUN. The per-row `SchemaGuard` reclaims on a normal return AND on an
-//!     unwind, so a panicking row leaks nothing - measured, by panicking between the
-//!     CREATE and the end of the guard's scope, against a `pg_namespace` that came
-//!     back empty. A SIGNAL is the case `Drop` cannot reach: SIGINT, SIGTERM and
-//!     SIGKILL all end the process without unwinding, so a run killed mid-row leaves
-//!     that row's schema pair on the server - measured, by SIGTERM mid-sweep. The
-//!     next run then reports that pair under "a process that has since exited", and
-//!     that report is this guard WORKING. The leak is real and the run that made it
-//!     is already gone, so the run that finds it is the only one left to report it.
-//!     Drop the named schemas and re-run. Reading that report as a flake - or
-//!     relaxing this assertion to silence it - is how a real leak gets waved through.
-//!     A run cannot leak SILENTLY: its own leftovers carry its own live pid, which
-//!     the sweep's closing assertion fails on before it reports any ledger.
-//!   - PID REUSE. A leak from a dead run whose pid has since been recycled by some
-//!     unrelated live process reads as in-flight and is not reported until that
-//!     process exits. Detection is delayed, never dropped - the schema keeps
-//!     failing later runs until it is cleaned up. A pid wrap takes as many spawns
-//!     as `/proc/sys/kernel/pid_max`, in practice millions. The reverse case is safe
-//!     by construction: a run that
-//!     inherits a leaker's pid reads the leftover as its own and fails loudly.
-//!   - NON-LINUX. [`process_is_running`] reads `/proc`. On a target without it,
-//!     every foreign pid reads as running, which keeps concurrent runs green and
-//!     gives up only the cross-run half of the check. This run's own leftovers are
-//!     still caught, because "is this pid mine" needs no `/proc`.
-//!
-//! The pid discipline does NOT extend to the extension, and cannot: it needs a name
-//! the test is free to choose, and an extension name is a lookup into the server's
-//! library rather than an identifier. That resource is held under a lock instead,
-//! and the leftover a killed holder leaves behind is cleared by the next claimant
-//! under the same lock - see [`PROBE_EXTENSION`] and [`claim_the_extension`].
+//! LEAK CHECK. Each sweep ends by reading the catalog for a `zmconf_%` name that
+//! survived it - `pg_namespace` for PostgreSQL, `information_schema.SCHEMATA` for
+//! MySQL - and fails if it finds one: a survivor is a row whose guard did not run.
+//! The check is a step of the sweep rather than its own `#[test]`, because a check
+//! whose subject is another test's in-flight state has to be sequenced with it. Every
+//! `zmconf_%` name on either server is this sweep's: the PostgreSQL catalog it reads is
+//! its own database's, and no other test of the binary uses the prefix on the MySQL
+//! server they share.
 //!
 //! SCOPE. PostgreSQL, SQLite and MySQL - all three dialects the engine emits for.
 //! The MySQL leg's isolation unit is a throwaway DATABASE rather than a schema,
 //! because MySQL has no CREATE SCHEMA that is not a CREATE DATABASE, and its leak
 //! check reads `information_schema.SCHEMATA` where the PostgreSQL leg reads
-//! `pg_namespace`. Both sort the prefix match with the SAME [`probe_owner`], so the
-//! pid discipline below is one rule, not two. What the MySQL leg needed, and what it
-//! turned out NOT to need, is written down at [`MYSQL_LEG`].
+//! `pg_namespace`. What the MySQL leg needed, and what it turned out NOT to need, is
+//! written down at [`MYSQL_LEG`].
 //!
-//! COST. This is a live suite with one schema round-trip per row. It is gated on
-//! `ZERO_MIGRATE_TEST_PG_URL` and `ZERO_MIGRATE_MYSQL_URL` for the two server legs
-//! exactly like every other live suite here, so a database-free `cargo test` pays only
-//! the SQLite half.
+//! COST. This is a live suite with one schema round-trip per row, against the
+//! PostgreSQL and MySQL servers this binary owns.
 
 use crate::dialect_corpus;
 use crate::support;
@@ -165,17 +119,15 @@ use zeroship_migrate_sqlite::SqliteBackend;
 /// What the MySQL leg needed, and where each piece of it lives. Recorded as a
 /// constant so it is in the file a MySQL author opens, not only in a doc.
 ///
-/// 1. Shared support, in `tests/support/mysql.rs`: `MYSQL_URL_ENV`,
-///    `mysql_url()`, `require_live_mysql!`, and `MysqlDevSession`, which implements
+/// 1. Shared support, in `tests/support/mysql.rs`: `mysql_url()`, the DSN of the
+///    MySQL server this binary owns, and `MysqlDevSession`, which implements
 ///    `driver::SqlSession` over the blocking `mysql` crate exactly as `PgDevSession`
 ///    does over the PostgreSQL one. `DatabaseGuard` is the `SchemaGuard` sibling.
 ///    Three live MySQL suites already ride it (`tests/fold_live/*_mysql.rs`).
 /// 2. Here: [`mysql_verdict`]. MySQL has no CREATE SCHEMA that is not a
 ///    DATABASE, so the per-row isolation unit is a throwaway DATABASE and the
 ///    `pg_namespace` leak check becomes an `information_schema.SCHEMATA` check -
-///    [`mysql_probe_databases`], sorted by the SAME [`probe_owner`] the PostgreSQL
-///    leg uses, because one MySQL instance is shared by every agent and gate run in
-///    this tree and a sibling's live probe read as a leak fails a working suite.
+///    [`mysql_probe_databases`].
 /// 3. Here: the per-row prelude review, [`prelude`]'s `MYSQL` dialect
 ///    arms. The findings are recorded beside them.
 /// 4. Needed nothing: `disposition_for` reads `row.mysql` from the
@@ -917,6 +869,10 @@ fn prelude(
 // The PostgreSQL probe
 // ---------------------------------------------------------------------------
 
+/// A per-row unique base name. A row appends `_aux`, `_migrations` and `_role` to
+/// it, and PostgreSQL truncates an identifier past 63 bytes from the tail, so the
+/// slug is capped and the sequence number that makes the name unique sits inside the
+/// bound.
 fn nonce(kind: &str, variant: &str) -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -926,120 +882,33 @@ fn nonce(kind: &str, variant: &str) -> String {
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
         .collect();
     let slug: String = slug.to_ascii_lowercase().chars().take(28).collect();
-    format!("{}{slug}_{seq}", probe_prefix_for(std::process::id()))
+    format!("{PROBE_PREFIX}{slug}_{seq}")
 }
 
-/// The schema-name prefix every probe schema carries, so the leak check can find
-/// them all with one `pg_namespace` predicate.
+/// The name prefix every probe schema and database carries, so the leak check can
+/// find them all with one catalog predicate.
 const PROBE_PREFIX: &str = "zmconf_";
 
-/// The prefix a probe schema carries when the process whose id is `pid` created it.
-///
-/// The pid is the FIRST segment after [`PROBE_PREFIX`], not a middle one, for two
-/// reasons. A row appends `_aux`, `_migrations` and `_role` to the base name, so
-/// only the head of the name is stable; and PostgreSQL truncates an identifier
-/// past 63 bytes from the tail, so only the head is guaranteed to survive.
-fn probe_prefix_for(pid: u32) -> String {
-    format!("{PROBE_PREFIX}{pid}_")
-}
-
 // ---------------------------------------------------------------------------
-// The one name this suite cannot make unique
+// The extension
 // ---------------------------------------------------------------------------
 
-/// The extension the `createExtension` and `dropExtension` rows claim.
+/// The extension the `createExtension` and `dropExtension` rows install and drop.
 ///
-/// The name is not free even before concurrency is considered. `support`'s operator
-/// charter allowlists `code.extension = ["citext", "pgcrypto"]`, so a row that named
-/// anything else would be refused by POLICY and would stop asking its question, and
-/// BOTH of those two are claimed by `rollback/drop_extension_rollback_pg.rs` - as
-/// `EXT` and as `EXT_GUARDED`. `pgcrypto` is the smaller of the two collisions.
-///
-/// Two failures that motivate the claim, both from one run being blamed for a
-/// neighbour's installation:
-///
-/// ```text
-///   dropExtension/base [postgres] could not be executed and is not pinned in
-///   NOT_EXECUTABLE: prelude apply: ... extension "pgcrypto" already exists
-///   || subject: ServerError [42704] extension "pgcrypto" does not exist
-/// ```
-///
-/// The claim hashes [`extension_claim_key`], which is `support::extension_claim`'s key
-/// and names the EXTENSION and nothing else. A key naming this suite instead would
-/// serialize the rows of this file against each other and against nobody else. Two locks
-/// with different keys protect nothing while looking exactly like protection, so the key
-/// belongs to the RESOURCE. `rollback/extension_claim_is_exclusive.rs` pins that.
+/// `support`'s operator charter allowlists `code.extension = ["citext", "pgcrypto"]`,
+/// so a row that named anything else would be refused by POLICY and would stop asking
+/// its question.
 const PROBE_EXTENSION: &str = "pgcrypto";
 
-/// The advisory-lock key that makes claiming [`PROBE_EXTENSION`] safe across runs.
+/// Whether this row installs [`PROBE_EXTENSION`], as its subject or its prelude.
 ///
-/// WHY A LOCK AND NOT A NAME. Every other non-schema-scoped name this suite touches
-/// is localized by [`nonce`], which puts this process's pid in it, so two runs never
-/// meet - the same discipline [`probe_owner`] adjudicates for schemas. An EXTENSION
-/// has no such freedom. Its name is not an identifier the test chooses, it is a
-/// lookup into the server's extension library, so `pgcrypto_<pid>` is not an
-/// isolated extension, it is `could not open extension control file`. Isolating in
-/// SPACE is unavailable, so these two rows isolate in TIME.
-///
-/// Two runs of this suite's PostgreSQL leg started together against one server both
-/// go red, each holding a different half of the collision:
-///
-/// ```text
-///   createExtension/base  ServerError  [23505] duplicate key value violates
-///                                      unique constraint "pg_extension_name_index"
-///   dropExtension/base    ServerError  [42704] extension "pgcrypto" does not exist
-/// ```
-///
-/// Both name a real row, so both read as a defect in the engine. Neither is one: the
-/// fixture claimed a database-global name twice. This is exactly the distinction the
-/// module doc insists a conformance layer keep - a suite that cannot tell a missing
-/// REFERENT from a wrong DECLARATION reports the fixture as a defect - and the sharp
-/// case is the second line, where the referent went missing because a SIBLING RUN
-/// removed it.
-///
-/// The extension claim deliberately remains a one-argument `hashtext` lock.
-/// Project locks use PostgreSQL's disjoint two-argument advisory-lock namespace,
-/// so a project key cannot collide with this claim. All extension claimants still
-/// hash the same resource string into the same one-key namespace. The key is
-/// `support::extension_claim`'s for [`PROBE_EXTENSION`], because the other binaries
-/// that install `pgcrypto` have to hash the same string or the claim serializes this
-/// suite against itself alone and a neighbour's installation is reported as a defect in
-/// a row of [`DIALECT_TABLE`].
-fn extension_claim_key() -> String {
-    support::extension_claim::claim_key(PROBE_EXTENSION)
-}
-
-/// Whether this row is one of the two that claims [`PROBE_EXTENSION`].
-fn claims_the_extension(kind: &str) -> bool {
+/// An extension is installed per DATABASE, not per schema, so the per-row schema
+/// pair does not reclaim it and the next row would inherit it: the `dropExtension`
+/// row's prelude would then answer `already exists`, an answer about the leftover
+/// rather than about the declaration. [`pg_verdict`] drops it at the end of these two
+/// rows and no others.
+fn touches_the_extension(kind: &str) -> bool {
     matches!(kind, "createExtension" | "dropExtension")
-}
-
-/// Take the cross-run claim on [`PROBE_EXTENSION`], and start it from a known state.
-///
-/// Delegates to `support::extension_claim`, which carries the bound, the
-/// `DROP EXTENSION IF EXISTS` precondition, and the reasons for both. The
-/// precondition is a fixture step of the same kind [`prelude`] establishes: a run
-/// killed between its CREATE and its DROP leaves the extension installed, and the
-/// next claimant's `createExtension` - the SUBJECT of one of these two rows and the
-/// PRELUDE of the other - would then answer `already exists`, an answer about the
-/// leftover rather than about the declaration. The identical statement OUTSIDE the
-/// claim is the race itself, which is why it does not stand in the unconditional
-/// cleanup at the foot of [`pg_verdict`].
-async fn claim_the_extension(session: &PgDevSession) -> Result<(), String> {
-    support::extension_claim::claim(session, PROBE_EXTENSION).await
-}
-
-/// Drop what the row installed under the claim, then release the claim.
-///
-/// Not a `Drop` guard, and it does not need to be. The claim is a SESSION-level
-/// advisory lock on [`PgDevSession`]'s ONE pinned connection, so the server releases
-/// it when that connection closes - which covers an early return, a panic AND a
-/// killed process, the third of which no `Drop` impl reaches. This explicit release
-/// is here so the claim ends at the ROW boundary rather than at the end of
-/// [`pg_verdict`]'s scope, and so the next claimant is not made to wait on the drop
-/// of a session that is already finished with it.
-async fn release_the_extension(session: &PgDevSession) {
-    support::extension_claim::release(session, PROBE_EXTENSION).await;
 }
 
 async fn pg_verdict(url: &str, kind: &str, variant: &str, op: &Op) -> Verdict {
@@ -1051,14 +920,6 @@ async fn pg_verdict(url: &str, kind: &str, variant: &str, op: &Op) -> Verdict {
         role: format!("{base}_role"),
         extension: PROBE_EXTENSION,
     };
-    // The only name in `probe` that is not this run's alone. Taken before anything
-    // else, so a row that cannot get the claim has created nothing to reclaim.
-    let claimed = claims_the_extension(kind);
-    if claimed {
-        if let Err(why) = claim_the_extension(&session).await {
-            return Verdict::of(Outcome::NotExecutable, why);
-        }
-    }
     let policy = support::operator_charter(&probe.schema);
     let cfg = ExecutorConfig::new(format!("prj_{base}"), &probe.schema, policy.clone());
     let _guard = support::SchemaGuard::arm(
@@ -1105,12 +966,15 @@ async fn pg_verdict(url: &str, kind: &str, variant: &str, op: &Op) -> Verdict {
             role = probe.role
         ))
         .await;
-    // Only the two rows that CLAIMED the extension may drop it. An unconditional drop
-    // is the race's second channel: every other row would end by dropping a
-    // database-global object it never created, so a sibling run reaching its
-    // `dropTable` row could remove the extension THIS run had just installed.
-    if claimed {
-        release_the_extension(&session).await;
+    // A failed drop leaves the extension for the next row's prelude to trip over,
+    // which would be reported against that row; it stops the sweep here instead.
+    if touches_the_extension(kind) {
+        if let Err(error) = session
+            .batch(&format!("DROP EXTENSION IF EXISTS \"{PROBE_EXTENSION}\""))
+            .await
+        {
+            panic!("drop {PROBE_EXTENSION} after the {kind}/{variant} row: {error}");
+        }
     }
     verdict
 }
@@ -1128,10 +992,9 @@ async fn pg_verdict(url: &str, kind: &str, variant: &str, op: &Op) -> Verdict {
 /// the reason its own header records - a drop written as the last statement of a
 /// test only runs when the test reaches it.
 ///
-/// The name is [`nonce`]'s, unchanged, so the pid the leak check reads sits in the
-/// same place on both servers. It fits: MySQL caps an identifier at 64 bytes and
-/// `nonce` yields at most 47, which leaves room for the `_migrations` the engine
-/// appends and the `_aux` a `createSchema` row would add.
+/// The name is [`nonce`]'s, unchanged. MySQL caps an identifier at 64 bytes, and the
+/// cap on `nonce`'s slug leaves room under it for the `_migrations` the engine appends
+/// and the `_aux` a `createSchema` row would add.
 async fn mysql_verdict(url: &str, kind: &str, variant: &str, op: &Op) -> Verdict {
     let session = MysqlDevSession::connect(url);
     let base = nonce(kind, variant);
@@ -1178,15 +1041,15 @@ async fn mysql_verdict(url: &str, kind: &str, variant: &str, op: &Op) -> Verdict
 /// database count beside it.
 ///
 /// The MySQL sibling of [`probe_schemas`], and it answers the same two questions in
-/// the same order: the global count moves for reasons that are not this file's
-/// (every other live MySQL suite in this crate creates `zm_%` databases on the same
-/// server), and the prefixed list is the one [`ProbeCensus`] then sorts by pid.
+/// the same order: the global count moves for reasons that are not this file's (the
+/// other live MySQL tests of this binary create databases on the same server), and
+/// the prefixed list is the one the leak check fails on.
 ///
 /// `information_schema.SCHEMATA` rather than `SHOW DATABASES`, because it takes a
 /// bind and returns a named column, which the seam's `query` contract needs. The
 /// underscore in `zmconf_%` is a LIKE wildcard on both servers and is left as one
 /// for the same reason the PostgreSQL query leaves it: it can only widen the match,
-/// and the census, not the pattern, is what decides ownership.
+/// and nothing but this sweep names a database `zmconf`.
 async fn mysql_probe_databases(session: &MysqlDevSession) -> (i64, Vec<String>) {
     let total: i64 = session
         .query_one("SELECT count(*) AS n FROM information_schema.SCHEMATA", &[])
@@ -1654,125 +1517,9 @@ fn judge(dialect: &str, ledger: &[(String, String, Verdict)]) {
     );
 }
 
-/// Who a `zmconf_%` schema in `pg_namespace` belongs to.
-///
-/// The prefix alone cannot answer this. Every agent working in this tree points at
-/// ONE PostgreSQL instance, so a `zmconf_%` schema is as likely to be a sibling
-/// run's live probe as it is to be a leak, and reading the first as the second
-/// fails a suite that is working correctly. The name carries the pid of the process
-/// that created it, which is the evidence that separates the two.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ProbeOwner {
-    /// THIS process created it. No other process can produce this name, so it is
-    /// unconditionally this run's to answer for.
-    Mine,
-    /// Another process created it and that process is still running: a sibling
-    /// suite mid-flight, whose schemas are not this run's to judge.
-    SiblingInFlight,
-    /// No running process can still drop it. A finished run leaked it.
-    Abandoned,
-}
-
-/// The pid a probe schema's name carries, or `None` when there is no number where
-/// [`probe_prefix_for`] puts one.
-fn creating_pid(schema: &str) -> Option<u32> {
-    schema
-        .strip_prefix(PROBE_PREFIX)?
-        .split('_')
-        .next()?
-        .parse()
-        .ok()
-}
-
-/// Whether `pid` is still running, which is the only evidence available that a
-/// probe schema is in flight rather than leaked.
-///
-/// `pg_namespace` is shared, but the pids in these names belong to the machine
-/// running the suite, so `/proc` is the right authority for them. On a target
-/// without `/proc` this answers "running", which keeps concurrent runs passing at
-/// the cost of the cross-run half of the leak check - see the LEAK CHECK note in
-/// the module header.
-fn process_is_running(pid: u32) -> bool {
-    if cfg!(target_os = "linux") {
-        std::path::Path::new(&format!("/proc/{pid}")).exists()
-    } else {
-        true
-    }
-}
-
-/// A binary built before the pid moved to the front of the name wrote it in the
-/// middle (`zmconf_<slug>_<pid>_<seq>`). Such runs share this server right now, so
-/// a live pid anywhere in a name this layout cannot parse still means "sibling in
-/// flight". Delete this once no binary that old can still be running.
-fn legacy_layout_is_in_flight(schema: &str) -> bool {
-    schema
-        .split('_')
-        .filter_map(|segment| segment.parse::<u32>().ok())
-        .any(process_is_running)
-}
-
-/// Judge one `zmconf_%` schema on behalf of the process whose id is `me`.
-fn probe_owner(schema: &str, me: u32) -> ProbeOwner {
-    match creating_pid(schema) {
-        Some(pid) if pid == me => ProbeOwner::Mine,
-        Some(pid) if process_is_running(pid) => ProbeOwner::SiblingInFlight,
-        Some(_) => ProbeOwner::Abandoned,
-        None if legacy_layout_is_in_flight(schema) => ProbeOwner::SiblingInFlight,
-        None => ProbeOwner::Abandoned,
-    }
-}
-
-/// The `zmconf_%` schemas the catalog holds, split by [`ProbeOwner`].
-struct ProbeCensus {
-    mine: Vec<String>,
-    sibling_in_flight: Vec<String>,
-    abandoned: Vec<String>,
-}
-
-impl ProbeCensus {
-    fn take(schemas: Vec<String>, me: u32) -> Self {
-        let mut census = Self {
-            mine: Vec::new(),
-            sibling_in_flight: Vec::new(),
-            abandoned: Vec::new(),
-        };
-        for schema in schemas {
-            match probe_owner(&schema, me) {
-                ProbeOwner::Mine => census.mine.push(schema),
-                ProbeOwner::SiblingInFlight => census.sibling_in_flight.push(schema),
-                ProbeOwner::Abandoned => census.abandoned.push(schema),
-            }
-        }
-        census
-    }
-
-    /// Every schema no running process can still drop. Both buckets are leaks; they
-    /// are reported apart because they accuse different runs.
-    fn leaked(&self) -> bool {
-        !self.mine.is_empty() || !self.abandoned.is_empty()
-    }
-}
-
-/// Keep only the `candidates` a SECOND catalog read (`present`) still shows.
-///
-/// [`ProbeCensus`] reads the catalog and then reads `/proc`, and a sibling can finish
-/// between the two: its rows are already in hand while its pid is already gone, which
-/// reads as abandoned. That sibling dropped its schemas on its way out, so a second
-/// look tells a stale row from a real leak. The re-read itself belongs to the caller
-/// because the two servers answer it with different SQL; the judgement does not, and
-/// is shared.
-fn still_in_the_catalog(candidates: &[String], present: &[String]) -> Vec<String> {
-    candidates
-        .iter()
-        .filter(|candidate| present.contains(candidate))
-        .cloned()
-        .collect()
-}
-
 /// Every `zmconf_%` schema currently in `pg_namespace`, and the whole-catalog
-/// count beside it. The database is shared with every other live suite in this
-/// crate, so the global count moves for reasons that are not this file's; the
-/// prefixed list is the one [`ProbeCensus`] then sorts into this run's and others'.
+/// count beside it. The catalog is the sweep's own database's, so the prefixed list
+/// is exactly the probe schemas the sweep still holds.
 async fn probe_schemas(session: &PgDevSession) -> (i64, Vec<String>) {
     let total: i64 = session
         .query_one("SELECT count(*)::bigint AS n FROM pg_namespace", &[])
@@ -1794,67 +1541,53 @@ async fn probe_schemas(session: &PgDevSession) -> (i64, Vec<String>) {
     (total, prefixed)
 }
 
+/// The name the leak checks plant to prove they can see a leftover at all.
+const LEAK_CONTROL: &str = "zmconf_leak_control";
+
 #[compio::test]
 async fn every_postgres_row_of_the_dialect_table_answers_to_a_live_server() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
 
-    // The isolation claim is VERIFIED, not asserted, and it is verified HERE rather
-    // than in its own `#[test]`. As its own test, libtest ran it concurrently with this
-    // sweep: it observed the FIRST row's schema mid-flight and reported a leak that was
-    // a live probe. A check whose subject is another test's in-progress state has to be
-    // sequenced with it, so it is a step of the sweep.
-    //
-    // The census is by pid, not by prefix. `zmconf_%` alone answers "somebody on
-    // this server is or was running this suite", and every agent in this tree points
-    // at one instance: a sibling's live probe schema read as a leak fails a run that
-    // is working. What a leak actually is - a schema no running process can still
-    // drop - is what the pid in the name settles.
-    let me = std::process::id();
-    let (before_total, before_prefixed) = probe_schemas(&session).await;
-    let mut before = ProbeCensus::take(before_prefixed, me);
-    if !before.abandoned.is_empty() {
-        let (_, present) = probe_schemas(&session).await;
-        before.abandoned = still_in_the_catalog(&before.abandoned, &present);
-    }
-    assert!(
-        !before.leaked(),
-        "probe schemas are on the server that no running process can still drop:\n  \
-         left by THIS process ({me}): {:?}\n  \
-         left by a process that has since exited: {:?}\n\
-         ({} more carry the pid of a process that is still running - a sibling suite \
-         mid-flight - and are not this run's to judge.)",
-        before.mine,
-        before.abandoned,
-        before.sibling_in_flight.len(),
+    // The leak check's rejection control, before it is relied on: a planted probe
+    // schema has to show up in the census, or an empty census at the end proves
+    // nothing about the rows.
+    session
+        .batch(&format!("CREATE SCHEMA \"{LEAK_CONTROL}\""))
+        .await
+        .expect("plant the leak check's control schema");
+    let (_, planted) = probe_schemas(&session).await;
+    assert_eq!(
+        planted,
+        vec![LEAK_CONTROL.to_string()],
+        "the census must see a probe schema that is there, and nothing else yet"
     );
+    session
+        .batch(&format!("DROP SCHEMA \"{LEAK_CONTROL}\""))
+        .await
+        .expect("drop the leak check's control schema");
 
+    let (before_total, _) = probe_schemas(&session).await;
     let mut ledger: Vec<(String, String, Verdict)> = Vec::new();
     for (kind, variant, op) in dialect_corpus::corpus() {
         let verdict = pg_verdict(&url, kind, variant, &op).await;
         ledger.push((kind.to_string(), variant.to_string(), verdict));
     }
 
-    // This half of the check needs no liveness reasoning: `me` is running by
-    // definition, so anything still carrying this pid is this run's own leak.
-    let (after_total, after_prefixed) = probe_schemas(&session).await;
-    let after = ProbeCensus::take(after_prefixed, me);
+    // A step of the sweep rather than its own `#[test]`: a check whose subject is
+    // another test's in-progress state has to be sequenced with it.
+    let (after_total, leaked) = probe_schemas(&session).await;
     println!(
         "LEDGER postgres pg_namespace before={before_total} after={after_total} \
-         probe_schemas_mine_before={} probe_schemas_mine_after={} \
-         probe_schemas_sibling_in_flight_after={}",
-        before.mine.len(),
-        after.mine.len(),
-        after.sibling_in_flight.len(),
+         probe_schemas_after={}",
+        leaked.len(),
     );
     assert!(
-        after.mine.is_empty(),
+        leaked.is_empty(),
         "this suite creates two schemas per row and drops both, but pg_namespace still \
-         holds {} of this process's own ({me}): {:?}. A leaked probe schema means a row's \
-         guard did not run, and a run that inherits this pid will fail its CREATE SCHEMA \
-         against it.",
-        after.mine.len(),
-        after.mine,
+         holds {}: {:?}. A leaked probe schema means a row's guard did not run.",
+        leaked.len(),
+        leaked,
     );
 
     report("postgres", &ledger);
@@ -1864,229 +1597,56 @@ async fn every_postgres_row_of_the_dialect_table_answers_to_a_live_server() {
 
 #[compio::test]
 async fn every_mysql_row_of_the_dialect_table_answers_to_a_live_server() {
-    let url = require_live_mysql!();
+    let url = crate::support::mysql::mysql_url();
     let session = MysqlDevSession::connect(&url);
 
     // Name the server, in the ledger, before anything is measured: a ledger that
     // does not name its scope cannot be trusted for the run it describes.
     println!("LEDGER mysql SERVER version={}", session.server_version());
 
-    // The same before/after census the PostgreSQL sweep runs, sequenced inside the
-    // sweep for the same reason, and sorted by the SAME `probe_owner`: the MySQL
-    // instance is shared with every other agent in this tree, so a sibling's live
-    // probe database read as a leak fails a run that is working.
-    let me = std::process::id();
-    let (before_total, before_prefixed) = mysql_probe_databases(&session).await;
-    let mut before = ProbeCensus::take(before_prefixed, me);
-    if !before.abandoned.is_empty() {
-        let (_, present) = mysql_probe_databases(&session).await;
-        before.abandoned = still_in_the_catalog(&before.abandoned, &present);
+    // The same rejection control the PostgreSQL sweep plants, over
+    // `information_schema.SCHEMATA`.
+    {
+        let _control = DatabaseGuard::arm(&session, [LEAK_CONTROL]);
+        session
+            .batch(&format!("CREATE DATABASE {}", quote_ident(LEAK_CONTROL)))
+            .await
+            .expect("plant the leak check's control database");
+        let (_, planted) = mysql_probe_databases(&session).await;
+        assert!(
+            planted.iter().any(|name| name == LEAK_CONTROL),
+            "the census must see a probe database that is there; saw {planted:?}"
+        );
     }
-    assert!(
-        !before.leaked(),
-        "probe databases are on the server that no running process can still drop:\n  \
-         left by THIS process ({me}): {:?}\n  \
-         left by a process that has since exited: {:?}\n\
-         ({} more carry the pid of a process that is still running - a sibling suite \
-         mid-flight - and are not this run's to judge.)",
-        before.mine,
-        before.abandoned,
-        before.sibling_in_flight.len(),
-    );
 
+    let (before_total, before) = mysql_probe_databases(&session).await;
+    assert!(
+        before.is_empty(),
+        "no probe database may be on the server before the sweep creates one: {before:?}"
+    );
     let mut ledger: Vec<(String, String, Verdict)> = Vec::new();
     for (kind, variant, op) in dialect_corpus::corpus() {
         let verdict = mysql_verdict(&url, kind, variant, &op).await;
         ledger.push((kind.to_string(), variant.to_string(), verdict));
     }
 
-    let (after_total, after_prefixed) = mysql_probe_databases(&session).await;
-    let after = ProbeCensus::take(after_prefixed, me);
+    let (after_total, leaked) = mysql_probe_databases(&session).await;
     println!(
         "LEDGER mysql schemata before={before_total} after={after_total} \
-         probe_databases_mine_before={} probe_databases_mine_after={} \
-         probe_databases_sibling_in_flight_after={}",
-        before.mine.len(),
-        after.mine.len(),
-        after.sibling_in_flight.len(),
+         probe_databases_after={}",
+        leaked.len(),
     );
     assert!(
-        after.mine.is_empty(),
+        leaked.is_empty(),
         "this suite creates a probe database and its `_migrations` meta database per \
-         row and drops both, but information_schema still holds {} of this process's \
-         own ({me}): {:?}. A leaked probe database means a row's guard did not run, and \
-         a run that inherits this pid will fail its CREATE DATABASE against it.",
-        after.mine.len(),
-        after.mine,
+         row and drops both, but information_schema still holds {}: {:?}. A leaked \
+         probe database means a row's guard did not run.",
+        leaked.len(),
+        leaked,
     );
 
     report("mysql", &ledger);
     judge("mysql", &ledger);
-}
-
-/// The leak check reads the pid in the name, not just the prefix - measured against
-/// a real `pg_namespace` row and a real process, in all three directions.
-///
-/// The schema this plants carries a pid that is ALIVE and is not this process's, so
-/// the sweep above - which may be running concurrently in this same binary - reads
-/// it as a sibling in flight and ignores it, exactly as it would a real sibling's.
-/// A schema carrying a DEAD pid is deliberately never put on the shared server: that
-/// is a real leak by every run's reckoning, and planting one would fail a sibling
-/// that is working. The dead-pid verdict is measured on the same name string once
-/// its process has actually been reaped.
-#[compio::test]
-async fn a_probe_schema_is_judged_by_the_pid_in_its_name_not_by_its_prefix() {
-    let url = require_live_pg!();
-    let session = PgDevSession::connect(&url);
-    let me = std::process::id();
-
-    // A real, running, foreign process. `sleep` outlives every assertion that needs
-    // it alive, and is reaped before the one that needs it dead.
-    let mut sibling = std::process::Command::new("sleep")
-        .arg("120")
-        .spawn()
-        .expect("spawn a real sibling process to own a probe schema");
-    let sibling_pid = sibling.id();
-    assert_ne!(sibling_pid, me, "the sibling has to be a different process");
-    assert!(
-        process_is_running(sibling_pid),
-        "the sibling was just spawned; it has to read as running"
-    );
-
-    let sibling_schema = format!("{}leakcheck_0", probe_prefix_for(sibling_pid));
-    let mine_schema = format!("{}leakcheck_0", probe_prefix_for(me));
-
-    {
-        let _guard = support::SchemaGuard::arm(&session, [sibling_schema.clone()]);
-        session
-            .batch(&format!("CREATE SCHEMA \"{sibling_schema}\""))
-            .await
-            .expect("create the sibling's probe schema");
-
-        // The real catalog read the sweep uses, over a real row.
-        let (_, prefixed) = probe_schemas(&session).await;
-        assert!(
-            prefixed.contains(&sibling_schema),
-            "the census must see the schema it is being asked about; saw {prefixed:?}"
-        );
-
-        let census = ProbeCensus::take(prefixed, me);
-        assert!(
-            census.sibling_in_flight.contains(&sibling_schema),
-            "a running foreign pid's schema is a sibling in flight, not a leak"
-        );
-        assert!(
-            !census.mine.contains(&sibling_schema),
-            "another process's schema is never this run's"
-        );
-        assert!(
-            !census.abandoned.contains(&sibling_schema),
-            "its creator is still running, so nothing has been abandoned"
-        );
-    }
-
-    // Scoping by pid must not blind the guard to this run's OWN leftovers.
-    assert_eq!(
-        probe_owner(&mine_schema, me),
-        ProbeOwner::Mine,
-        "a schema carrying this process's pid is this run's own leak"
-    );
-    assert!(
-        ProbeCensus::take(vec![mine_schema.clone()], me).leaked(),
-        "a census holding this run's own leftover has to read as leaked"
-    );
-
-    // ... nor to a schema whose creator has exited, which is what a leak from a
-    // finished run looks like.
-    sibling.kill().expect("stop the sibling process");
-    sibling.wait().expect("reap the sibling process");
-    assert!(
-        !process_is_running(sibling_pid),
-        "the sibling was killed and reaped; it has to read as gone"
-    );
-    assert_eq!(
-        probe_owner(&sibling_schema, me),
-        ProbeOwner::Abandoned,
-        "once its creator has exited, a probe schema is a leak to every run"
-    );
-    assert!(
-        ProbeCensus::take(vec![sibling_schema], me).leaked(),
-        "a census holding a finished run's leftover has to read as leaked"
-    );
-}
-
-/// The extension claim EXCLUDES a second run, and only the two rows that need it
-/// take it.
-///
-/// The sibling of the pid test above, for the resource the pid discipline cannot
-/// reach. It asserts the two halves that the measured failure needed BOTH of:
-///
-///   1. exactly the rows whose op is an extension op claim the extension, so no
-///      other row's cleanup can drop a database-global object it never created;
-///   2. while one session holds the claim, a second session cannot take it, and once
-///      the first releases, the second can.
-///
-/// The second half uses a raw `pg_try_advisory_lock` for the contender rather than
-/// [`claim_the_extension`], because a WAIT and a REFUSAL are indistinguishable from
-/// a test that only ever waits: the try answers `false` immediately and that false
-/// is the observable. It then takes the claim the real way, which may wait for the
-/// sweep in this same binary, so the second half is stated as "the claim is
-/// obtainable once released" rather than "obtainable instantly" - the stronger
-/// version would be a check on another test's in-flight state, which the module doc
-/// says has to be sequenced with it, not asserted beside it.
-#[compio::test]
-async fn the_extension_claim_is_exclusive_and_only_the_extension_rows_take_it() {
-    // The table half needs no server, so it runs whether or not one is configured.
-    let claimants: BTreeSet<&str> = DIALECT_TABLE
-        .iter()
-        .map(|row| row.kind)
-        .filter(|kind| claims_the_extension(kind))
-        .collect();
-    assert_eq!(
-        claimants,
-        BTreeSet::from(["createExtension", "dropExtension"]),
-        "the claim - and the DROP EXTENSION at the foot of pg_verdict - must cover \
-         exactly the rows whose subject or prelude touches the extension. It used to \
-         cover every row, and a sibling run's `dropTable` row would then remove the \
-         extension this run had just installed."
-    );
-    assert!(
-        DIALECT_TABLE
-            .iter()
-            .any(|row| !claims_the_extension(row.kind)),
-        "if every row claimed the extension the assertion above would be vacuous"
-    );
-
-    let url = require_live_pg!();
-    let holder = PgDevSession::connect(&url);
-    let contender = PgDevSession::connect(&url);
-
-    claim_the_extension(&holder)
-        .await
-        .expect("the holder takes the extension claim");
-
-    let held: bool = contender
-        .query_one(
-            "SELECT pg_try_advisory_lock(hashtext($1)::bigint) AS got",
-            &[zeroship_migrate::driver::Bind::Text(extension_claim_key())],
-        )
-        .await
-        .expect("the contender asks for the claim")
-        .try_get::<_, bool>("got")
-        .expect("decode the try-lock answer");
-    assert!(
-        !held,
-        "a second run must NOT be able to take the {PROBE_EXTENSION} claim while a \
-         first holds it; without this exclusion both runs create the extension and \
-         one drops it under the other"
-    );
-
-    release_the_extension(&holder).await;
-
-    claim_the_extension(&contender)
-        .await
-        .expect("a released claim is obtainable by the next run");
-    release_the_extension(&contender).await;
 }
 
 #[compio::test]

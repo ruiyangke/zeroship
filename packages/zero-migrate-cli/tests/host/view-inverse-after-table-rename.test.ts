@@ -25,8 +25,7 @@
 // ops re-fold from the base snapshot together, and the rollback path is never the one
 // that has to recover the body.
 //
-// GATE: `ZERO_MIGRATE_TEST_PG_URL`. The arm announces its skip rather than reporting
-// the same count either way.
+// GATE: the run's PostgreSQL container.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 

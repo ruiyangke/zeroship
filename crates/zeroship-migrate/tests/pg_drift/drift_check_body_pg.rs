@@ -148,7 +148,7 @@ fn drift_mentions_the_constraint(drift: &StructuralDrift) -> bool {
 
 #[compio::test]
 async fn live_postgres_reports_a_check_body_moved_to_another_column() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = support::PgDevSession::connect(&url);
     let schema = token();
     let quoted_schema = quote_ident(&schema);

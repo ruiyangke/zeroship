@@ -40,7 +40,7 @@
 // name. Using a real diagnostic means the test breaks if the engine stops naming
 // the table at all, which is worth knowing too.
 //
-// GATE: `ZERO_MIGRATE_TEST_PG_URL`, with rights to create a role.
+// GATE: the run's PostgreSQL container, with rights to create a role.
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -49,7 +49,7 @@ import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { MYSQL_URL_ENV, PG_URL_ENV, pgUrl, requireLiveDb } from "./live-db.js";
+import { mysqlUrl, pgUrl } from "./live-db.js";
 
 // The host suite builds and resolves its addon in one place.
 import "./addon.js";
@@ -62,7 +62,7 @@ const ADDON_PATH = resolve(
   `../../../../crates/zeroship-migrate-node/zeroship-migrate-node.${process.platform}-${process.arch}${ABI}.node`,
 );
 
-const PG_URL = process.env.ZERO_MIGRATE_TEST_PG_URL;
+const PG_URL = pgUrl();
 const OWNER_APP = "app_redpos";
 const TABLE = "redpos_rows";
 
@@ -150,7 +150,6 @@ const ROLE = TABLE;
 const ROLE_PASSWORD = "Zm0nlyForThisTest";
 
 test("a username matching a word in the diagnostic does not eat that word", async () => {
-  requireLiveDb(PG_URL, PG_URL_ENV, "PostgreSQL");
   const pg = await import("pg");
   const admin = new pg.Client({ connectionString: pgUrl() });
   await admin.connect();
@@ -168,17 +167,13 @@ test("a username matching a word in the diagnostic does not eat that word", asyn
       );
       roleCreated = true;
     } catch (error) {
-      // A role this test cannot create is a database it cannot run against, and
-      // the two likeliest causes are a DSN without CREATEROLE and the stale role
-      // the `finally` below exists to clear. Both used to `ctx.skip` here, which
-      // reported the same exit code as a run that had exercised the redactor -
-      // so the arm could stop running and nothing would say so.
+      // A role this test cannot create is a database it cannot run against. It
+      // fails rather than skips: a skip reports the same exit code as a run that
+      // exercised the redactor, so the arm could stop running and nothing would
+      // say so.
       throw new Error(
-        `cannot create the probe role "${ROLE}" on ${PG_URL_ENV}, so this test has ` +
-          `no server to provoke the diagnostic on: ${(error as Error).message}\n` +
-          `Point ${PG_URL_ENV} at a PostgreSQL whose user may CREATE ROLE, and drop ` +
-          `any "${ROLE}" a killed run left behind: DROP OWNED BY "${ROLE}" CASCADE; ` +
-          `DROP ROLE "${ROLE}";`,
+        `cannot create the probe role "${ROLE}" on the run's PostgreSQL container, so ` +
+          `this test has no server to provoke the diagnostic on: ${(error as Error).message}`,
       );
     }
     await admin.query(`CREATE SCHEMA "${namespace}"`);
@@ -261,7 +256,6 @@ test("a username matching a word in the diagnostic does not eat that word", asyn
  *  Nothing caught it: the sibling suite asserts the password never leaks, and the
  *  password does not appear there. */
 test("the username is still redacted where the text marks it as one", async (ctx) => {
-  requireLiveDb(PG_URL, PG_URL_ENV, "PostgreSQL");
   // Deliberately a user that does not exist: the server rejects the credentials
   // and names the user back, without needing any role to be provisioned.
   const GHOST = "zm_ghost_user";
@@ -318,11 +312,10 @@ test("the username is still redacted where the text marks it as one", async (ctx
  *  double. Covering one dialect's spelling and assuming the other is how the first
  *  correction to this fix still left MySQL leaking, so both are pinned. */
 test("MySQL's access-denied message does not echo the username either", async (ctx) => {
-  const mysqlUrl = process.env.ZERO_MIGRATE_MYSQL_URL;
-  requireLiveDb(mysqlUrl, MYSQL_URL_ENV, "MySQL");
+  const mysqlDsn = mysqlUrl();
   const GHOST = "zm_ghost_my";
   const GHOST_PASSWORD = "WrongPass123";
-  const target = new URL(mysqlUrl);
+  const target = new URL(mysqlDsn);
   target.username = GHOST;
   target.password = GHOST_PASSWORD;
 

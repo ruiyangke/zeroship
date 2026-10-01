@@ -26,7 +26,8 @@
 //! most common migration there is — the kind that teaches operators to ignore the
 //! analyzer. Both directions are asserted.
 //!
-//! GATE: `ZERO_MIGRATE_TEST_PG_URL`.
+//! Runs in a database of its own on the PostgreSQL server this binary owns
+//! (`support::pg_database`).
 
 use zeroship_migrate_postgres::analysis::analyze::analyze;
 
@@ -101,7 +102,7 @@ fn filenode(client: &mut postgres::Client) -> i64 {
 
 #[test]
 fn a_rewrite_is_advised_exactly_when_postgresql_performs_one() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let mut client = postgres::Client::connect(&url, postgres::NoTls).expect("connect to live PG");
 
     for (label, sql, expected_rewrite) in REWRITE_CASES {
@@ -148,7 +149,7 @@ fn a_rewrite_is_advised_exactly_when_postgresql_performs_one() {
 #[test]
 fn not_valid_is_advised_exactly_when_it_validates() {
     const TBL: &str = "adv_notvalid";
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let mut client = postgres::Client::connect(&url, postgres::NoTls).expect("connect to live PG");
 
     // One row violating the constraint, so validation is observable: the plain
@@ -194,7 +195,7 @@ fn not_valid_is_advised_exactly_when_it_validates() {
 #[test]
 fn a_plain_create_index_takes_the_lock_the_advisory_names() {
     const TBL: &str = "adv_index";
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let mut client = postgres::Client::connect(&url, postgres::NoTls).expect("connect to live PG");
     client
         .batch_execute(&seed_rows(TBL))

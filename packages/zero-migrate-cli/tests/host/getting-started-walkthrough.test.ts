@@ -24,7 +24,7 @@
 // name and an empty row would satisfy every exit code and be the worst possible
 // first experience.
 //
-// GATE: `ZERO_MIGRATE_TEST_PG_URL`.
+// GATE: the run's PostgreSQL container.
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";

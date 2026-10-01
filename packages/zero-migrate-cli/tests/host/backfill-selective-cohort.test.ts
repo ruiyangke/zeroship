@@ -27,7 +27,7 @@
 // table, which is silent and destructive and exactly what a migration would do
 // at scale. (1) alone would pass for it.
 //
-// GATE: `ZERO_MIGRATE_TEST_PG_URL`.
+// GATE: the run's PostgreSQL container.
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -36,13 +36,13 @@ import { table, t } from "@zeroship/migrate";
 import { apply, type DriverConfig } from "zero-migrate-cli";
 import type { MigrationModule } from "@zeroship/migrate/internal/recorder";
 
-import { MYSQL_URL_ENV, connectLivePg, pgUrl, requireLiveDb } from "./live-db.js";
+import { connectLivePg, mysqlUrl, pgUrl } from "./live-db.js";
 
 // The host suite builds and resolves its addon in one place.
 import "./addon.js";
 
 const OWNER_APP = "app_backfill_selective";
-const MYSQL_URL = process.env.ZERO_MIGRATE_MYSQL_URL;
+const MYSQL_URL = mysqlUrl();
 
 /** Twenty rows, alternating groups, so the cohort straddles every batch. */
 const ROWS = Array.from({ length: 20 }, (_, index) => ({
@@ -309,7 +309,6 @@ test("MySQL: the same selective backfill reaches the same rows", async (ctx) => 
   // Running the SAME authored migration as the PostgreSQL arm is the point: it
   // shows the two engines AGREE, rather than each doing something locally
   // reasonable with the predicate.
-  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   const mysql = (await import("mysql2/promise")).default;
   const database = uniqueNamespace("bfselmy");
   const meta = `${database}_migrations`;

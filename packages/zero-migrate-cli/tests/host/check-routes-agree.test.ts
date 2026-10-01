@@ -44,8 +44,8 @@
 // limitation rather than a database one, which is exactly the kind of restriction
 // that goes stale silently.
 //
-// GATES: SQLite lint runs anywhere; the rest need `ZERO_MIGRATE_TEST_PG_URL` and
-// `ZERO_MIGRATE_MYSQL_URL`.
+// GATES: SQLite lint needs no server; the rest need the run's PostgreSQL container and
+// the run's MySQL container.
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -54,7 +54,7 @@ import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { MYSQL_URL_ENV, PG_URL_ENV, pgUrl, requireLiveDb } from "./live-db.js";
+import { mysqlUrl, pgUrl } from "./live-db.js";
 
 // The host suite builds and resolves its addon in one place.
 import "./addon.js";
@@ -203,7 +203,6 @@ function run(
 }
 
 test("all three authoring routes render the identical check predicate", async (ctx) => {
-  requireLiveDb(process.env.ZERO_MIGRATE_TEST_PG_URL, PG_URL_ENV, "PostgreSQL");
   const pg = await import("pg");
   const client = new pg.Client({ connectionString: pgUrl() });
   await client.connect();
@@ -263,7 +262,6 @@ test("all three authoring routes render the identical check predicate", async (c
 });
 
 test("and all three enforce it against real rows", async (ctx) => {
-  requireLiveDb(process.env.ZERO_MIGRATE_TEST_PG_URL, PG_URL_ENV, "PostgreSQL");
   const pg = await import("pg");
   const client = new pg.Client({ connectionString: pgUrl() });
   await client.connect();
@@ -331,11 +329,10 @@ test("lint refuses checks on SQLite for both documented rows, and apply agrees",
 });
 
 test("lint refuses checks on MySQL for both documented rows, and apply agrees", async (ctx) => {
-  const mysqlUrl = process.env.ZERO_MIGRATE_MYSQL_URL;
-  requireLiveDb(mysqlUrl, MYSQL_URL_ENV, "MySQL");
+  const mysqlDsn = mysqlUrl();
   const driver = (await import("mysql2/promise")).default;
-  const admin = await driver.createConnection({ uri: String(mysqlUrl) });
-  const base = String(mysqlUrl).replace(/\/[^/]*$/, "");
+  const admin = await driver.createConnection({ uri: String(mysqlDsn) });
+  const base = String(mysqlDsn).replace(/\/[^/]*$/, "");
   try {
     for (const [row, source] of [
       ["Table-level `checks`", CREATE_TIME_ONLY],

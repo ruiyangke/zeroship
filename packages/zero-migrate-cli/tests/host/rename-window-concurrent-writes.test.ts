@@ -23,7 +23,7 @@
 // backfill in flight, max `rows_done` within 20 rows of the end, zero lost
 // updates.
 //
-// GATE: `ZERO_MIGRATE_TEST_PG_URL`. PostgreSQL only.
+// GATE: the run's PostgreSQL container. PostgreSQL only.
 
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";

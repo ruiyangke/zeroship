@@ -33,7 +33,7 @@
 // must be ACCEPTED -- otherwise a plain unique index would satisfy the assertion
 // just as well and the option would be proving nothing.
 //
-// GATE: `ZERO_MIGRATE_TEST_PG_URL`. `NULLS NOT DISTINCT` is PG 15+.
+// GATE: the run's PostgreSQL container. `NULLS NOT DISTINCT` is PG 15+.
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -42,7 +42,7 @@ import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { PG_URL_ENV, pgUrl, requireLiveDb } from "./live-db.js";
+import { pgUrl } from "./live-db.js";
 
 // The host suite builds and resolves its addon in one place.
 import "./addon.js";
@@ -156,7 +156,6 @@ test("lint accepts nullsNotDistinct on BOTH authoring routes", () => {
 });
 
 test("both routes make NULLs collide, and the control proves the option did it", async (ctx) => {
-  requireLiveDb(process.env.ZERO_MIGRATE_TEST_PG_URL, PG_URL_ENV, "PostgreSQL");
   const pg = await import("pg");
   const client = new pg.Client({ connectionString: pgUrl() });
   await client.connect();

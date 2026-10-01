@@ -22,8 +22,8 @@
 // also holds for a build that refuses every cursor, and the file would report a
 // working guard over a dead feature.
 //
-// GATE: PG arms need `ZERO_MIGRATE_TEST_PG_URL`, MySQL arms need
-// `ZERO_MIGRATE_MYSQL_URL`.
+// GATE: PG arms need the run's PostgreSQL container, MySQL arms need
+// the run's MySQL container.
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -32,13 +32,13 @@ import { table } from "@zeroship/migrate";
 import { apply, type DriverConfig } from "zero-migrate-cli";
 import type { MigrationModule } from "@zeroship/migrate/internal/recorder";
 
-import { MYSQL_URL_ENV, connectLivePg, pgUrl, requireLiveDb } from "./live-db.js";
+import { connectLivePg, mysqlUrl, pgUrl } from "./live-db.js";
 
 // The host suite builds and resolves its addon in one place.
 import "./addon.js";
 
 const OWNER_APP = "app_cursor_column_kind";
-const MYSQL_URL = process.env.ZERO_MIGRATE_MYSQL_URL;
+const MYSQL_URL = mysqlUrl();
 
 function uniqueNamespace(prefix: string): string {
   return `${prefix}_${Date.now().toString(36)}_${Math.floor(Math.random() * 1e6).toString(36)}`;
@@ -144,7 +144,6 @@ test("PostgreSQL refuses a generated cursor column and accepts a plain one", asy
 });
 
 test("MySQL refuses generated and ON UPDATE cursor columns, and accepts a plain one", async (ctx) => {
-  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   const mysql = (await import("mysql2/promise")).default;
 
   const run = async (ddl: string, seed: string): Promise<void> => {

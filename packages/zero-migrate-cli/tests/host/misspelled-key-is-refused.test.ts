@@ -26,7 +26,7 @@
 // surface, not one call. `create()` is fixed here; the other entry points still
 // accept unknown keys and are worth the same treatment.
 //
-// GATE: `ZERO_MIGRATE_TEST_PG_URL`.
+// GATE: the run's PostgreSQL container.
 
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";

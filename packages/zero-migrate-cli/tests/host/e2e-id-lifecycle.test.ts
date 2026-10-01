@@ -38,10 +38,10 @@ import { noInjectPolicy } from "./policy.js";
 
 // The host suite builds and resolves its addon in one place.
 import "./addon.js";
-import { MYSQL_URL_ENV, PG_URL_ENV, requireLiveDb } from "./live-db.js";
+import { mysqlUrl, pgUrl } from "./live-db.js";
 
-const PG_URL = process.env.ZERO_MIGRATE_TEST_PG_URL;
-const MYSQL_URL = process.env.ZERO_MIGRATE_MYSQL_URL;
+const PG_URL = pgUrl();
+const MYSQL_URL = mysqlUrl();
 const OWNER_APP = "app_id_lifecycle";
 
 type NamedMigration = MigrationModule & { readonly name: string };
@@ -642,7 +642,6 @@ async function mysqlIdFacetSnapshot(
 }
 
 test("PostgreSQL composite primary key is ordered and enforced", async (ctx) => {
-  requireLiveDb(PG_URL, PG_URL_ENV, "PostgreSQL");
   const pg = (await import("pg")).default;
   const client = new pg.Client({ connectionString: PG_URL });
   await client.connect();
@@ -681,7 +680,6 @@ test("PostgreSQL composite primary key is ordered and enforced", async (ctx) => 
 });
 
 test("MySQL composite primary key is ordered and enforced", async (ctx) => {
-  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   const mysql = (await import("mysql2/promise")).default;
   const admin = await mysql.createConnection({
     uri: MYSQL_URL,
@@ -724,7 +722,6 @@ test("MySQL composite primary key is ordered and enforced", async (ctx) => {
 });
 
 test("PostgreSQL composite foreign key preserves tuple/action and MATCH SIMPLE", async (ctx) => {
-  requireLiveDb(PG_URL, PG_URL_ENV, "PostgreSQL");
   const pg = (await import("pg")).default;
   const client = new pg.Client({ connectionString: PG_URL });
   await client.connect();
@@ -787,7 +784,6 @@ test("PostgreSQL composite foreign key preserves tuple/action and MATCH SIMPLE",
 });
 
 test("MySQL composite foreign key preserves tuple/action and MATCH SIMPLE", async (ctx) => {
-  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   const mysql = (await import("mysql2/promise")).default;
   const admin = await mysql.createConnection({
     uri: MYSQL_URL,
@@ -857,7 +853,6 @@ test("MySQL composite foreign key preserves tuple/action and MATCH SIMPLE", asyn
 });
 
 test("PostgreSQL primary-key replace/add/drop changes live keys and removes identity", async (ctx) => {
-  requireLiveDb(PG_URL, PG_URL_ENV, "PostgreSQL");
   const pg = (await import("pg")).default;
   const client = new pg.Client({ connectionString: PG_URL });
   await client.connect();
@@ -915,7 +910,6 @@ test("PostgreSQL primary-key replace/add/drop changes live keys and removes iden
 });
 
 test("MySQL primary-key replace/add/drop changes live keys and removes AUTO_INCREMENT", async (ctx) => {
-  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   const mysql = (await import("mysql2/promise")).default;
   const admin = await mysql.createConnection({
     uri: MYSQL_URL,
@@ -984,7 +978,6 @@ test("MySQL primary-key replace/add/drop changes live keys and removes AUTO_INCR
 });
 
 test("PostgreSQL synchronizeIdentity advances imported max and preserves an ahead generator", async (ctx) => {
-  requireLiveDb(PG_URL, PG_URL_ENV, "PostgreSQL");
   const pg = (await import("pg")).default;
   const client = new pg.Client({ connectionString: PG_URL });
   await client.connect();
@@ -1058,7 +1051,6 @@ test("PostgreSQL synchronizeIdentity advances imported max and preserves an ahea
 });
 
 test("MySQL synchronizeIdentity keeps explicit imports safe and preserves an ahead generator", async (ctx) => {
-  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   const mysql = (await import("mysql2/promise")).default;
   const admin = await mysql.createConnection({
     uri: MYSQL_URL,
@@ -1134,7 +1126,6 @@ test("MySQL synchronizeIdentity keeps explicit imports safe and preserves an ahe
 });
 
 test("PostgreSQL clean ID facets survive host status and the catalog oracle reports tampering", async (ctx) => {
-  requireLiveDb(PG_URL, PG_URL_ENV, "PostgreSQL");
   const pg = (await import("pg")).default;
   const client = new pg.Client({ connectionString: PG_URL });
   await client.connect();
@@ -1198,7 +1189,6 @@ test("PostgreSQL clean ID facets survive host status and the catalog oracle repo
 });
 
 test("MySQL clean ID facets survive host status and the catalog oracle reports tampering", async (ctx) => {
-  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   const mysql = (await import("mysql2/promise")).default;
   const admin = await mysql.createConnection({
     uri: MYSQL_URL,

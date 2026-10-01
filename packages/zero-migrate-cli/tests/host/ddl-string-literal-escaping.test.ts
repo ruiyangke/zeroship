@@ -40,8 +40,8 @@
 // with a message naming the three ways out is correct behaviour met from a
 // direction that was not testing for it.
 //
-// GATES: SQLite always runs; the others need `ZERO_MIGRATE_TEST_PG_URL` and
-// `ZERO_MIGRATE_MYSQL_URL`.
+// GATES: SQLite needs no server; the others need the run's PostgreSQL container and
+// the run's MySQL container.
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -51,7 +51,7 @@ import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { MYSQL_URL_ENV, PG_URL_ENV, pgUrl, requireLiveDb } from "./live-db.js";
+import { mysqlUrl, pgUrl } from "./live-db.js";
 
 // The host suite builds and resolves its addon in one place.
 import "./addon.js";
@@ -184,7 +184,6 @@ test("SQLite keeps a quote-bearing DDL default inside its literal", () => {
 });
 
 test("PostgreSQL keeps a quote-bearing DDL default inside its literal", async (ctx) => {
-  requireLiveDb(process.env.ZERO_MIGRATE_TEST_PG_URL, PG_URL_ENV, "PostgreSQL");
   const pg = await import("pg");
   const client = new pg.Client({ connectionString: pgUrl() });
   await client.connect();
@@ -221,11 +220,10 @@ test("PostgreSQL keeps a quote-bearing DDL default inside its literal", async (c
 });
 
 test("MySQL hex-encodes a quote-bearing DDL default rather than quoting it", async (ctx) => {
-  const mysqlUrl = process.env.ZERO_MIGRATE_MYSQL_URL;
-  requireLiveDb(mysqlUrl, MYSQL_URL_ENV, "MySQL");
+  const mysqlDsn = mysqlUrl();
   const driver = (await import("mysql2/promise")).default;
-  const admin = await driver.createConnection({ uri: String(mysqlUrl) });
-  const base = String(mysqlUrl).replace(/\/[^/]*$/, "");
+  const admin = await driver.createConnection({ uri: String(mysqlDsn) });
+  const base = String(mysqlDsn).replace(/\/[^/]*$/, "");
   const namespace = uniqueNamespace("ddlq_my");
   // VARCHAR, because MySQL refuses a DEFAULT on TEXT outright.
   const work = project(true);
@@ -259,11 +257,10 @@ test("MySQL hex-encodes a quote-bearing DDL default rather than quoting it", asy
 });
 
 test("MySQL refuses a DEFAULT on TEXT, naming the ways out", async (ctx) => {
-  const mysqlUrl = process.env.ZERO_MIGRATE_MYSQL_URL;
-  requireLiveDb(mysqlUrl, MYSQL_URL_ENV, "MySQL");
+  const mysqlDsn = mysqlUrl();
   const driver = (await import("mysql2/promise")).default;
-  const admin = await driver.createConnection({ uri: String(mysqlUrl) });
-  const base = String(mysqlUrl).replace(/\/[^/]*$/, "");
+  const admin = await driver.createConnection({ uri: String(mysqlDsn) });
+  const base = String(mysqlDsn).replace(/\/[^/]*$/, "");
   const namespace = uniqueNamespace("ddlq_myt");
   // The UNBOUNDED column the arm above deliberately avoids. Pinned because it is
   // why that arm differs, so a reader does not mistake `t.string` for arbitrary.

@@ -19,7 +19,7 @@
 // CLI's own stdout, the result from `information_schema` - and compared on COLUMN
 // ORDER as well as membership, since the injected column leads.
 //
-// GATE: `ZERO_MIGRATE_TEST_PG_URL`.
+// GATE: the run's PostgreSQL container.
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";

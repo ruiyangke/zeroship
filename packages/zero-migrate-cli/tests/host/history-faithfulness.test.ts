@@ -27,8 +27,8 @@
 //     nothing, which is the contrast that makes the statement meaningful rather
 //     than a blanket "everything touches the database".
 //
-// GATE: `ZERO_MIGRATE_TEST_PG_URL`; the MySQL arm additionally needs
-// `ZERO_MIGRATE_MYSQL_URL`. SQLite always runs.
+// GATE: the run's PostgreSQL container; the MySQL arm additionally needs
+// the run's MySQL container. SQLite needs no server.
 
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
@@ -37,7 +37,7 @@ import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { MYSQL_URL_ENV, connectLivePg, pgUrl, requireLiveDb } from "./live-db.js";
+import { connectLivePg, mysqlUrl, pgUrl } from "./live-db.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CLI_BIN = resolve(HERE, "../../src/cli-bin.ts");
@@ -48,7 +48,7 @@ const ADDON_PATH = resolve(
 );
 
 const OWNER_APP = "app_history_faithfulness";
-const MYSQL_URL = process.env.ZERO_MIGRATE_MYSQL_URL;
+const MYSQL_URL = mysqlUrl();
 
 const migrationSource = (name: string, table: string): string =>
   `import { table, t } from "@zeroship/migrate";
@@ -238,7 +238,6 @@ test("history refuses a SQLite target by name rather than reporting an empty str
 });
 
 test("history refuses a MySQL target by name rather than reporting an empty stream", async (ctx) => {
-  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   const mysql = (await import("mysql2/promise")).default;
   const database = uniqueNamespace("histmy");
   const admin = await mysql.createConnection({ uri: MYSQL_URL, multipleStatements: true });

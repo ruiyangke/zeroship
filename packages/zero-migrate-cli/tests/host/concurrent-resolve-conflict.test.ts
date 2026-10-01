@@ -22,7 +22,7 @@
 // neither resolution took effect. Which one survives depends on who won, so the
 // test asserts the COUNT and the agreement with the journal, not the identity.
 //
-// GATE: `ZERO_MIGRATE_TEST_PG_URL`. PostgreSQL only — the online rename is
+// GATE: the run's PostgreSQL container. PostgreSQL only — the online rename is
 // PostgreSQL's.
 
 import assert from "node:assert/strict";

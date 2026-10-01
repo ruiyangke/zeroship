@@ -54,8 +54,8 @@
 //! character-typed column on MySQL and so hands the marker back - is covered at the
 //! unit boundary by `apply::drift::unattributed_snapshot_tests`.
 //!
-//! REQUIRES `ZERO_MIGRATE_MYSQL_URL` through `require_live_mysql!`: a missing DSN is a
-//! failure rather than a green run with no coverage.
+//! Runs against the MySQL server this binary owns (`support::mysql::mysql_url`): a
+//! server that cannot start is a failure rather than a green run with no coverage.
 
 use crate::support;
 
@@ -200,7 +200,7 @@ fn default_line<'d>(
 /// backend provenance, and the ID-default drift on it must still be reported.
 #[compio::test]
 async fn live_mysql_reports_a_default_change_on_a_table_no_backend_claims() {
-    let url = require_live_mysql!();
+    let url = crate::support::mysql::mysql_url();
     let session = MysqlDevSession::connect(&url);
     let database = support::mysql::database_token("unattrib");
     let cfg = cfg_for(&database);

@@ -62,8 +62,9 @@
 //! from a broken harness, and a green one cannot be told apart from a test that never
 //! reached the path.
 //!
-//! REQUIRES `ZERO_MIGRATE_MYSQL_URL` / `ZERO_MIGRATE_TEST_PG_URL`: an unset DSN fails
-//! the test, so the pass count cannot report coverage that never ran.
+//! Runs against the MySQL and PostgreSQL servers this binary owns
+//! (`support::mysql::mysql_url`, `support::pg_database`): a server that cannot start
+//! fails the test, so the pass count cannot report coverage that never ran.
 
 use crate::support;
 
@@ -218,7 +219,7 @@ async fn mysql_row_count(session: &MysqlDevSession, database: &str, table: &str)
 
 #[compio::test]
 async fn a_mysql_declarative_rename_is_refused_at_plan_time_and_nothing_reaches_the_server() {
-    let url = require_live_mysql!();
+    let url = crate::support::mysql::mysql_url();
     let session = MysqlDevSession::connect(&url);
     let database = support::mysql::database_token("decl_rename");
     let cfg = ExecutorConfig::new(
@@ -490,7 +491,7 @@ async fn pg_columns(session: &PgDevSession, schema: &str, table: &str) -> Vec<St
 
 #[compio::test]
 async fn postgres_control_the_same_declarative_rename_applies_and_the_rows_survive() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
     let schema = pg_token();
     let mut cfg = ExecutorConfig::new(

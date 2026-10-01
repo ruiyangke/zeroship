@@ -46,26 +46,6 @@ impl BoundaryResult {
     }
 }
 
-/// The required live-PG DSN, announcing once on stderr that this binary reached a
-/// server. There is no SKIPPED counterpart: a missing DSN panics in
-/// [`require_live_pg!`], so the only banner a run can print is the one that says the
-/// coverage was real.
-fn pg_url_with_banner() -> String {
-    use std::io::Write as _;
-    use std::sync::Once;
-
-    let url = require_live_pg!();
-    static BANNER: Once = Once::new();
-    BANNER.call_once(|| {
-        let _ = writeln!(
-            std::io::stderr(),
-            "LIVE_DATABASE_BANNER=ACTIVE env={}",
-            support::PG_URL_ENV
-        );
-    });
-    url
-}
-
 fn token(label: &str) -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -301,7 +281,7 @@ async fn measure_aggregate_update(url: &str) -> BoundaryResult {
 
 #[compio::test]
 async fn live_server_control_proves_the_suite_reached_postgres() {
-    let url = pg_url_with_banner();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
     let row = session
         .query_one(
@@ -320,7 +300,7 @@ async fn live_server_control_proves_the_suite_reached_postgres() {
 
 #[compio::test]
 async fn qualified_dml_refs_are_rejected_before_postgres_for_present_and_absent_tables() {
-    let url = pg_url_with_banner();
+    let url = crate::support::pg_database();
     let present = measure_qualified_ref(&url, true).await;
     let absent = measure_qualified_ref(&url, false).await;
     let present_report = present.report();
@@ -337,7 +317,7 @@ async fn qualified_dml_refs_are_rejected_before_postgres_for_present_and_absent_
 
 #[compio::test]
 async fn aggregate_update_is_rejected_before_postgres() {
-    let url = pg_url_with_banner();
+    let url = crate::support::pg_database();
     let result = measure_aggregate_update(&url).await;
     let report = result.report();
     eprintln!("MEASURE_AGGREGATE_UPDATE={report}");

@@ -27,7 +27,7 @@
 // Every arm carries a control with a real schema name, because a build where the
 // schema setting was broken outright would satisfy every refusal above.
 //
-// GATE: PG needs `ZERO_MIGRATE_TEST_PG_URL`. SQLite always runs.
+// GATE: PG needs the run's PostgreSQL container. SQLite needs no server.
 
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
@@ -36,7 +36,7 @@ import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { PG_URL_ENV, pgUrl, requireLiveDb } from "./live-db.js";
+import { pgUrl } from "./live-db.js";
 
 // The host suite builds and resolves its addon in one place.
 import "./addon.js";
@@ -49,7 +49,7 @@ const ADDON_PATH = resolve(
   `../../../../crates/zeroship-migrate-node/zeroship-migrate-node.${process.platform}-${process.arch}${ABI}.node`,
 );
 
-const PG_URL = process.env.ZERO_MIGRATE_TEST_PG_URL;
+const PG_URL = pgUrl();
 const OWNER_APP = "app_empty_schema";
 const TABLE = "empty_schema_rows";
 
@@ -175,7 +175,6 @@ test("a real schema still applies on SQLite", async () => {
 });
 
 test("an empty schema is refused on PostgreSQL before any journal is created", async (ctx) => {
-  requireLiveDb(PG_URL, PG_URL_ENV, "PostgreSQL");
   const pg = await import("pg");
   const client = new pg.Client({ connectionString: pgUrl() });
   await client.connect();
@@ -208,7 +207,6 @@ test("an empty schema is refused on PostgreSQL before any journal is created", a
 });
 
 test("a real schema still applies on PostgreSQL", async (ctx) => {
-  requireLiveDb(PG_URL, PG_URL_ENV, "PostgreSQL");
   const pg = await import("pg");
   const client = new pg.Client({ connectionString: pgUrl() });
   await client.connect();

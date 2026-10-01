@@ -1,7 +1,7 @@
 //! Live PostgreSQL coverage for explicit primary-key add/replace/drop.
 //!
-//! REQUIRES `ZERO_MIGRATE_TEST_PG_URL`; an unset DSN fails rather than skips. These
-//! tests drive the public `PostgresBackend<PgDevSession>` seam, not a native
+//! Runs in a database of its own on the PostgreSQL server this binary owns
+//! (`support::pg_database`). These tests drive the public `PostgresBackend<PgDevSession>` seam, not a native
 //! client-only implementation.
 
 use crate::support;
@@ -171,7 +171,7 @@ async fn is_identity(session: &PgDevSession, schema: &str, table: &str, column: 
 
 #[compio::test]
 async fn add_installs_an_exact_candidate_on_a_table_without_a_primary_key() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
     let cfg = cfg_for(&token());
     let _schema_guard = setup(&session, &cfg).await;
@@ -210,7 +210,7 @@ async fn add_installs_an_exact_candidate_on_a_table_without_a_primary_key() {
 
 #[compio::test]
 async fn replace_accepts_only_exact_order_and_supports_single_composite_round_trip() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
     let cfg = cfg_for(&token());
     let _schema_guard = setup(&session, &cfg).await;
@@ -307,7 +307,7 @@ async fn replace_accepts_only_exact_order_and_supports_single_composite_round_tr
 
 #[compio::test]
 async fn drop_and_replace_require_declared_identity_removal_and_drop_identity_transactionally() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
     let cfg = cfg_for(&token());
     let _schema_guard = setup(&session, &cfg).await;
@@ -442,7 +442,7 @@ async fn drop_and_replace_require_declared_identity_removal_and_drop_identity_tr
 
 #[compio::test]
 async fn inbound_fk_refuses_missing_or_stale_alternate_and_accepts_prebound_alternate() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
     let cfg = cfg_for(&token());
     let _schema_guard = setup(&session, &cfg).await;

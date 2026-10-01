@@ -36,7 +36,7 @@
 // `project_lock_holders` and `formatStatusBusy` - the stdout/stderr assertion is
 // what will fail, and it should be replaced with one asserting that notice.
 //
-// GATE: `ZERO_MIGRATE_TEST_PG_URL`.
+// GATE: the run's PostgreSQL container.
 
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";

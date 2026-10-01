@@ -14,8 +14,8 @@
 //! So a cascading drop keeps `down: None` and the planner refuses it. That is the
 //! third refusal in this family, on top of the guarded-drop and no-history ones.
 //!
-//! GATED behind `ZERO_MIGRATE_TEST_PG_URL`. Existence is read from the live
-//! catalog through `snapshot_schema`, which queries `pg_namespace` by name.
+//! Runs in a database of its own on the PostgreSQL server this binary owns
+//! (`support::pg_database`). Existence is read from the live catalog through `snapshot_schema`, which queries `pg_namespace` by name.
 
 use crate::support;
 
@@ -168,7 +168,7 @@ fn pg_guard(cfg: &ExecutorConfig) -> Box<dyn zeroship_migrate::MigrationGuard> {
 
 #[compio::test]
 async fn rolling_back_a_dropped_schema_restores_it() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
     let schema = token("home");
     let target = token("target");
@@ -265,7 +265,7 @@ async fn rolling_back_a_dropped_schema_restores_it() {
 /// The planner must refuse instead.
 #[compio::test]
 async fn a_cascading_schema_drop_keeps_no_inverse() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
     let schema = token("home");
     let target = token("cascade");

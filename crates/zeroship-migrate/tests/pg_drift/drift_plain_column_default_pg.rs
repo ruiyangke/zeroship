@@ -11,7 +11,8 @@
 //! writer says nothing, so an out-of-band `SET DEFAULT` silently changes what the
 //! application stores without changing any type, constraint or index.
 //!
-//! The suite is gated by `ZERO_MIGRATE_TEST_PG_URL`. Every mutation runs in a
+//! The suite runs in a database of its own on the PostgreSQL server this binary
+//! owns (`support::pg_database`). Every mutation runs in a
 //! transaction that is rolled back after introspection, so all assertions share
 //! one authoritative folded snapshot without mutation order coupling.
 
@@ -194,7 +195,7 @@ fn require_no_generated_drift(drift: &StructuralDrift, column: &str) -> Result<(
 
 #[compio::test]
 async fn live_postgres_reports_ordinary_column_default_drift() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = support::PgDevSession::connect(&url);
     let schema = token();
     let quoted_schema = quote_ident(&schema);

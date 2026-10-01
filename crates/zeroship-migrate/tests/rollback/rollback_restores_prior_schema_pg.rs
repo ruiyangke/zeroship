@@ -17,7 +17,8 @@
 //! It also asserts the apply CHANGED the catalog first. Without that, an op that
 //! silently did nothing would "restore" trivially and read as a clean pass.
 //!
-//! GATE: `ZERO_MIGRATE_TEST_PG_URL`.
+//! Runs in a database of its own on the PostgreSQL server this binary owns
+//! (`support::pg_database`).
 
 use crate::support;
 
@@ -82,7 +83,7 @@ async fn catalog_of(session: &PgDevSession, schema: &str) -> Vec<String> {
 
 #[compio::test]
 async fn an_engine_rendered_down_restores_the_catalog_on_postgres() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
 
     // Each op gets its own schema so the two cases cannot disturb each other.

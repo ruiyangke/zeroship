@@ -42,7 +42,8 @@
 //! oracle can cover — `createSchema` cannot be added to `fold_roundtrip_pg.rs`
 //! while this holds.
 //!
-//! GATED behind `ZERO_MIGRATE_TEST_PG_URL`.
+//! Runs in a database of its own on the PostgreSQL server this binary owns
+//! (`support::pg_database`).
 
 use crate::support;
 
@@ -88,7 +89,7 @@ async fn namespace_exists(session: &PgDevSession, name: &str) -> bool {
 
 #[compio::test]
 async fn a_second_schema_folds_to_a_snapshot_live_introspection_cannot_match() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
     let schema = token("proj");
     let other = token("other");

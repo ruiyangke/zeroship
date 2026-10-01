@@ -28,7 +28,7 @@
 // The history arm needs real events, which is why it applies a migration first.
 // An empty journal serializes fine and would make the assertion vacuous.
 //
-// GATE: the history arm needs `ZERO_MIGRATE_TEST_PG_URL`; the validate arms are
+// GATE: the history arm needs the run's PostgreSQL container; the validate arms are
 // offline.
 
 import assert from "node:assert/strict";

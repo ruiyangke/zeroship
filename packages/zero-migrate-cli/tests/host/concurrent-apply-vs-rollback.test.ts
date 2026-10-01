@@ -52,7 +52,7 @@
 // journal still calls rolled back — either of which makes the next deploy's
 // pending computation wrong.
 //
-// GATE: `ZERO_MIGRATE_TEST_PG_URL`.
+// GATE: the run's PostgreSQL container.
 
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";

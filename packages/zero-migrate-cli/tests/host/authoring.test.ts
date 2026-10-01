@@ -9,7 +9,7 @@
 //      shape) and APPLIES it over the real `pg` npm driver via the `hostDriver`
 //      seam — exactly the napi-bridge path.
 //
-// OFFLINE arm (always runs, DB-free): author the envelope and assert its shape
+// OFFLINE arm (needs no server): author the envelope and assert its shape
 // (ir_version from the addon, op count, op kinds). This is the pure-JS recorder
 // proof — no DB, no V8.
 //

@@ -1,10 +1,8 @@
 //! **The ROUND-TRIP ORACLE for `fold_ops` on real MySQL.**
 //!
-//! The MySQL leg of the fold oracle, and the FIRST in-crate Rust test of any kind to
-//! drive a live MySQL server. Until it existed, MySQL was covered at RENDER level
-//! (unit tests over the emitted SQL text) and at CLI/HOST level (TypeScript over
-//! `mysql2`), with nothing in between: `ZERO_MIGRATE_MYSQL_URL` appeared in 52 files
-//! under `packages/` and in exactly one under `crates/`, and that one was source.
+//! The MySQL leg of the fold oracle. MySQL is also covered at RENDER level (unit
+//! tests over the emitted SQL text) and at CLI/HOST level (TypeScript over `mysql2`);
+//! this is the layer in between, where the engine's own pipeline meets the server.
 //!
 //! Same shape as its two siblings. APPLY the corpus through the REAL pipeline
 //! (`load_and_lower_guarded` + `MigrationEngine::apply_plan` over
@@ -25,9 +23,9 @@
 //! engine creates the `<db>_migrations` meta database itself on the first
 //! `ensure_journal`. [`support::mysql::DatabaseGuard`] guards both.
 //!
-//! REQUIRES `ZERO_MIGRATE_MYSQL_URL` through [`require_live_mysql!`], the same
-//! requirement the PostgreSQL suites carry: a missing DSN fails the test. A skip must
-//! never read as a pass, so there is no skip.
+//! Runs against the MySQL server this binary owns ([`support::mysql::mysql_url`]), as
+//! the PostgreSQL suites run against theirs: a server that cannot start fails the
+//! test. A skip must never read as a pass, so there is no skip.
 
 use crate::support;
 
@@ -144,7 +142,7 @@ fn registry(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
 
 #[compio::test]
 async fn fold_equals_introspect_mysql() {
-    let url = require_live_mysql!();
+    let url = crate::support::mysql::mysql_url();
     let session = MysqlDevSession::connect(&url);
     let database = support::mysql::database_token("fold");
     let cfg = cfg_for(&database);

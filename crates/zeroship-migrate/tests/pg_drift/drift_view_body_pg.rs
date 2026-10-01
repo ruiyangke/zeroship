@@ -52,8 +52,8 @@
 //! view's stored body with no statement naming the view, so that clone goes stale
 //! and comparing it reports drift on an untouched view.
 //!
-//! The suite is gated by `ZERO_MIGRATE_TEST_PG_URL`. Every out-of-band mutation runs
-//! in a transaction that is rolled back after introspection, so all assertions share
+//! The suite runs in a database of its own on the PostgreSQL server this binary
+//! owns (`support::pg_database`). Every out-of-band mutation runs in a transaction that is rolled back after introspection, so all assertions share
 //! one authoritative folded snapshot without mutation order coupling.
 
 use crate::support;
@@ -316,7 +316,7 @@ fn require_view_still_paired(drift: &StructuralDrift, view: &str) -> Result<(), 
 /// carry both would let a later reader believe a catalog can yield a typed body.
 #[compio::test]
 async fn both_sides_of_a_view_body_are_measured() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = support::PgDevSession::connect(&url);
     let schema = token();
     let quoted_schema = quote_ident(&schema);
@@ -402,7 +402,7 @@ async fn both_sides_of_a_view_body_are_measured() {
 /// body has to be visible, and a schema nobody has touched has to stay clean.
 #[compio::test]
 async fn live_postgres_reports_view_body_drift() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = support::PgDevSession::connect(&url);
     let schema = token();
     let quoted_schema = quote_ident(&schema);

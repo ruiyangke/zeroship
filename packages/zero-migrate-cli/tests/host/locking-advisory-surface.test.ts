@@ -6,7 +6,7 @@
 // `lint --explain` and the live `plan` preview. The plain-column controls are
 // essential: an unconditional warning would otherwise satisfy the hazard arms.
 //
-// GATES: none for lint; `ZERO_MIGRATE_TEST_PG_URL` for plan.
+// GATES: none for lint; the run's PostgreSQL container for plan.
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";

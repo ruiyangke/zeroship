@@ -1,8 +1,5 @@
 //! The host-selected migration target is independent of foreign-schema grants.
 
-#[path = "../../../../tests/fixtures/postgres/mod.rs"]
-mod postgres_fixture;
-
 use std::collections::BTreeMap;
 
 use zeroship_migrate::apply::backend::MigrationBackend;
@@ -192,8 +189,8 @@ async fn sqlite_file_applies_and_reapplies_without_cross_schema_grants() {
 
 #[compio::test]
 async fn postgres_applies_and_reapplies_without_cross_schema_grants() {
-    let postgres = postgres_fixture::Postgres::start();
-    let session = crate::support::PgDevSession::connect(&postgres.url());
+    let db = crate::support::pg_database();
+    let session = crate::support::PgDevSession::connect(&db);
     let backend = PostgresBackend::new_generic(&session);
     apply_and_reapply(&backend, &zeroship_migrate_postgres::DIALECT).await;
     let rows = session.query("SELECT indexname FROM pg_indexes WHERE schemaname = 'public' AND indexname = 'scope_rows_value_idx'", &[]).await.unwrap();

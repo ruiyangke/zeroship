@@ -30,7 +30,7 @@
 // reported, but it can only ever be evidence, not proof - a race that fails to
 // reproduce proves nothing. The first test is what will catch a regression.
 //
-// GATE: `ZERO_MIGRATE_TEST_PG_URL`.
+// GATE: the run's PostgreSQL container.
 
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";

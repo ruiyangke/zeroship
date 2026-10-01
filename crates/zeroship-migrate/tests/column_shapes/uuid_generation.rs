@@ -1,7 +1,7 @@
 //! Exact database-generated UUID regression tests.
 //!
-//! SQLite runs in-process on every test invocation. PostgreSQL uses the shared
-//! live-test seam and REQUIRES `ZERO_MIGRATE_TEST_PG_URL`; unset, it fails.
+//! SQLite runs in-process. PostgreSQL runs in a database of its own on the
+//! PostgreSQL server this binary owns (`support::pg_database`).
 
 use crate::support;
 
@@ -136,7 +136,7 @@ fn token() -> String {
 
 #[compio::test]
 async fn postgres_uuid_v4_default_generates_exact_rfc_9562_values() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = support::PgDevSession::connect(&url);
     let schema = format!("uuid_v4_{}", token());
     // Dropped on an unwind that skips the explicit cleanup below.

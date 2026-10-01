@@ -19,7 +19,7 @@
 // the gate MUST fail, because further changes to that table are refused anyway and
 // a pipeline that sailed past would deploy code against a half-renamed column.
 //
-// GATE: `ZERO_MIGRATE_TEST_PG_URL`. PostgreSQL only - the online rename is
+// GATE: the run's PostgreSQL container. PostgreSQL only - the online rename is
 // PostgreSQL's.
 
 import assert from "node:assert/strict";

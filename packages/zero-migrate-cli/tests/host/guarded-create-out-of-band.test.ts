@@ -20,7 +20,7 @@
 // ALSO fails, with MySQL's own duplicate-table error, so an exit-code-only test
 // would pass against the wrong behaviour.
 //
-// GATES: `ZERO_MIGRATE_TEST_PG_URL`, `ZERO_MIGRATE_MYSQL_URL`.
+// GATES: the run's PostgreSQL container, the run's MySQL container.
 
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
@@ -30,7 +30,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import "./addon.js";
-import { MYSQL_URL_ENV, PG_URL_ENV, requireLiveDb } from "./live-db.js";
+import { mysqlUrl, pgUrl } from "./live-db.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CLI_BIN = resolve(HERE, "../../src/cli-bin.ts");
@@ -40,8 +40,8 @@ const ADDON_PATH = resolve(
   `../../../../crates/zeroship-migrate-node/zeroship-migrate-node.${process.platform}-${process.arch}${ABI}.node`,
 );
 
-const PG_URL = process.env.ZERO_MIGRATE_TEST_PG_URL;
-const MYSQL_URL = process.env.ZERO_MIGRATE_MYSQL_URL;
+const PG_URL = pgUrl();
+const MYSQL_URL = mysqlUrl();
 const OWNER_APP = "app_oob";
 
 function uniqueNamespace(prefix: string): string {
@@ -109,7 +109,6 @@ function apply(work: string, url: string, namespace: string) {
 }
 
 test("MySQL refuses a guarded create of an out-of-band table during projection", async (ctx) => {
-  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   const mysql = (await import("mysql2/promise")).default;
   const connection = await mysql.createConnection({ uri: MYSQL_URL, multipleStatements: true });
   const database = uniqueNamespace("oobguard_my");
@@ -148,7 +147,6 @@ test("MySQL refuses a guarded create of an out-of-band table during projection",
 });
 
 test("PostgreSQL absorbs the same out-of-band guarded create, the control for the MySQL arm", async (ctx) => {
-  requireLiveDb(PG_URL, PG_URL_ENV, "PostgreSQL");
   const pg = await import("pg");
   const client = new pg.Client({ connectionString: PG_URL });
   await client.connect();

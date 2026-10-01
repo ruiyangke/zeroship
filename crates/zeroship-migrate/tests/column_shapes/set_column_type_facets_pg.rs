@@ -114,7 +114,7 @@ struct Applied {
 /// Author → lower → apply `source`, then run `native_sql`, then compare the fold of
 /// the SAME ops against the live catalog.
 async fn deploy(tag: &str, source: &str, native_sql: &[&str]) -> Applied {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
     let schema = token(tag);
     let policy = charter(&schema);
@@ -270,7 +270,7 @@ async fn a_column_that_is_never_retyped_stays_clean() {
 /// a successful deploy of the typed-id column, so the CHECK it hits is the engine's
 /// own, not a hand-written imitation.
 async fn server_verdict(tag: &str, rendered_type: &str) -> String {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
     let schema = token(tag);
     let policy = charter(&schema);

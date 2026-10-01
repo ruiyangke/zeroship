@@ -7,8 +7,8 @@
 //! back through `pg_get_viewdef`. A rendering that worked only on `SQLite` would
 //! pass there and fail here.
 //!
-//! GATED behind `ZERO_MIGRATE_TEST_PG_URL`, like every other live suite here, and
-//! it announces the skip rather than reporting the same count either way.
+//! Runs in a database of its own on the PostgreSQL server this binary owns
+//! (`support::pg_database`).
 //!
 //! Every assertion reads the live catalog through `snapshot_schema`, never the plan
 //! the engine intended to run.
@@ -195,7 +195,7 @@ async fn live_view_body(session: &PgDevSession, schema: &str) -> Result<Option<S
 
 #[compio::test]
 async fn rolling_back_a_dropped_view_restores_it_on_postgres() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
     let schema = token();
     let cfg = ExecutorConfig::new(
@@ -386,7 +386,7 @@ fn rename_doc(from: &str, to: &str) -> String {
 /// reject the down with `relation ... does not exist`.
 #[compio::test]
 async fn a_table_rename_reaches_the_body_a_dropped_view_is_restored_from() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
     let schema = token();
     let cfg = ExecutorConfig::new(
@@ -558,7 +558,7 @@ async fn a_table_rename_reaches_the_body_a_dropped_view_is_restored_from() {
 /// restored body reads the table under its CURRENT name.
 #[compio::test]
 async fn a_raw_view_body_does_not_follow_a_table_rename_and_its_inverse_is_refused() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
     let schema = token();
     // The operator charter, not `no_inject`: a raw view body is a vendor capability
@@ -720,7 +720,7 @@ async fn a_raw_view_body_does_not_follow_a_table_rename_and_its_inverse_is_refus
 /// on rollback would conjure a view that never existed on this database.
 #[compio::test]
 async fn a_guarded_drop_keeps_no_inverse_on_postgres() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
     let schema = token();
     let cfg = ExecutorConfig::new(
@@ -844,7 +844,7 @@ async fn a_guarded_drop_keeps_no_inverse_on_postgres() {
 /// this is not and which nobody has produced yet.
 #[compio::test]
 async fn a_rust_embedding_refuses_an_absent_view_drop_at_the_database() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
     let schema = token();
     let cfg = ExecutorConfig::new(

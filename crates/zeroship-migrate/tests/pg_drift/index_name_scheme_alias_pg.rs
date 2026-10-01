@@ -17,7 +17,8 @@
 //! changed" with strict table equality and must use the same pairing or it refuses a
 //! non-owner over an index the differ has already accepted.
 //!
-//! REQUIRES `ZERO_MIGRATE_TEST_PG_URL`. An unset DSN FAILS these tests: a skipped
+//! Runs in a database of its own on the PostgreSQL server this binary owns
+//! (`support::pg_database`). A server that cannot start FAILS these tests: a skipped
 //! live suite reports exactly like a passing one, so there is no skip.
 
 use crate::support;
@@ -256,7 +257,7 @@ async fn deploy(
 /// plan must be empty and drift must be clean.
 #[compio::test]
 async fn a_data_plane_named_index_re_diffs_clean() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -399,7 +400,7 @@ async fn a_data_plane_named_index_re_diffs_clean() {
 /// drift. Arm A must not be bought by breaking this.
 #[compio::test]
 async fn b_engine_named_index_still_round_trips_clean() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -476,7 +477,7 @@ async fn b_engine_named_index_still_round_trips_clean() {
 /// silently keep the old name on disk forever.
 #[compio::test]
 async fn c_author_supplied_rename_still_creates_and_drops() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -560,7 +561,7 @@ async fn c_author_supplied_rename_still_creates_and_drops() {
 /// and emits nothing.
 #[compio::test]
 async fn d_alias_accepted_no_op_does_not_trip_ownership() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);

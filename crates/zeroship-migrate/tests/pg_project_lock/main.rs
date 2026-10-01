@@ -16,7 +16,6 @@
 //! subject only it passed every attempt. Keeping the lock tests here is what
 //! preserves the quiet server the race needs; it is not a naming preference.
 
-#[macro_use]
 #[path = "../support/mod.rs"]
 mod support;
 

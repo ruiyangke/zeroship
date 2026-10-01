@@ -177,7 +177,7 @@ async fn column_exists(session: &PgDevSession, schema: &str, table: &str, column
 
 #[compio::test]
 async fn plain_drop_column_refuses_a_blocking_view_and_names_it() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
     let cfg = cfg_for(&token());
     let _schemas = ensure_project_schema(&session, &cfg).await;
@@ -212,7 +212,7 @@ async fn plain_drop_column_refuses_a_blocking_view_and_names_it() {
 
 #[compio::test]
 async fn masked_drop_column_checks_the_sibling_unit_and_names_its_blocker() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
     let cfg = cfg_for(&token());
     let _schemas = ensure_project_schema(&session, &cfg).await;
@@ -275,7 +275,7 @@ async fn masked_drop_column_checks_the_sibling_unit_and_names_its_blocker() {
 
 #[compio::test]
 async fn plain_drop_column_without_blockers_applies_with_its_guard() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
     let cfg = cfg_for(&token());
     let _schemas = ensure_project_schema(&session, &cfg).await;

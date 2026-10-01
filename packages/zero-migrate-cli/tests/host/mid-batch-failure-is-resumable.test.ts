@@ -31,7 +31,7 @@
 // anything -- which is itself worth knowing: the batch stops without the failing
 // migration having touched the database at all.
 //
-// GATES: SQLite always runs; the PostgreSQL arm needs `ZERO_MIGRATE_TEST_PG_URL`.
+// GATES: SQLite needs no server; the PostgreSQL arm needs the run's PostgreSQL container.
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -41,7 +41,7 @@ import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { PG_URL_ENV, pgUrl, requireLiveDb } from "./live-db.js";
+import { pgUrl } from "./live-db.js";
 
 // The host suite builds and resolves its addon in one place.
 import "./addon.js";
@@ -131,7 +131,6 @@ function apply(
 }
 
 test("a mid-batch failure leaves the earlier migration applied and resumes cleanly", async (ctx) => {
-  requireLiveDb(process.env.ZERO_MIGRATE_TEST_PG_URL, PG_URL_ENV, "PostgreSQL");
   const pg = await import("pg");
   const client = new pg.Client({ connectionString: pgUrl() });
   await client.connect();

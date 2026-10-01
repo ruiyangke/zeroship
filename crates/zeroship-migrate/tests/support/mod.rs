@@ -5,7 +5,8 @@
 //! SHIPPED generic PG apply path — `PostgresBackend<PgDevSession>`, the `<D: SqlSession>`
 //! journal/drift/precondition/baseline free functions, `ops::status` — against a live
 //! Postgres through the SAME driver seam the production napi/Node `pg` host
-//! rides.
+//! rides. The Postgres is the one this binary owns ([`server`]), and each test takes a
+//! database of its own on it through [`pg_database`].
 //!
 //! **Never ships.** The `postgres` crate is a `[dev-dependency]` only. It pulls `tokio`
 //! transitively (blocking `postgres` wraps `tokio-postgres` on a private current-thread
@@ -21,11 +22,16 @@
 
 #![allow(dead_code)] // Not every test binary uses every helper.
 
+/// The PostgreSQL and MySQL servers this binary starts and owns.
+pub mod server;
+
+/// Containers a test process owns, removed when that process ends. Shared with the
+/// other crates' fixtures, so it lives beside them under the workspace `tests/`.
+#[path = "../../../../tests/fixtures/container_reaper.rs"]
+pub mod container_reaper;
+
 /// The live-MySQL sibling of everything below: `MysqlDevSession`, `DatabaseGuard`,
-/// and the `ZERO_MIGRATE_MYSQL_URL` requirement. It shares this module's
-/// [`require_live_db_dsn`] discipline, so a missing MySQL DSN fails the tests that
-/// need one rather than skipping them into a green report.
-#[macro_use]
+/// and [`mysql::mysql_url`], the DSN of this binary's owned MySQL server.
 pub mod mysql;
 
 /// The RENAME CARRIER INVENTORY shared by `rename_carrier_sweep_pg` and
@@ -49,19 +55,6 @@ pub mod model_equivalence;
 /// `gen_types_field_defs_from_the_fold.rs`, which compares against it. Two binaries so
 /// a capture harness can never re-bless the file the comparison reads.
 pub mod field_defs_corpus;
-
-/// The cross-run claim on a PostgreSQL EXTENSION, which is installed per DATABASE and
-/// so cannot be localized by the pid the way every other cluster-visible name here is.
-/// It lives in `support` rather than in any one test file BECAUSE the claim only works
-/// when every binary that installs a given extension hashes the SAME key: `rollback`,
-/// `fold_live`, `dialect_matrix` and `pg_engine` are four processes contending for one
-/// server, and four private locks would protect nothing while looking exactly like
-/// protection.
-///
-/// The claimants are not all Rust. `packages/zero-migrate-cli/tests/host/
-/// extension-claim.ts` is the host suite's half, and both sides load the key prefix
-/// from `tests/fixtures/extension-claim-prefix.txt`.
-pub mod extension_claim;
 
 use std::cell::{Cell, RefCell};
 
@@ -292,63 +285,92 @@ scope = "all"
         .expect("explicit no-inject extension test charter composes")
 }
 
-/// The env var carrying the live-Postgres DSN. It is REQUIRED: a live database is not
-/// an optional extra the suite can decide to do without, so an unset DSN fails every
-/// test that needs one instead of quietly reporting green.
-pub const PG_URL_ENV: &str = "ZERO_MIGRATE_TEST_PG_URL";
+/// A database of one test's own on this binary's PostgreSQL server
+/// ([`server::postgres`]), dropped when the value goes out of scope.
+///
+/// Every object a test creates lives inside it, including the ones PostgreSQL scopes
+/// to a DATABASE rather than to a schema: an installed extension, a project's advisory
+/// lock, a publication. Tests running on sibling threads of the binary therefore
+/// cannot see, forge or remove each other's state, and nothing a failed test leaves
+/// behind reaches the next one.
+///
+/// It dereferences to its DSN (as the server's superuser), so a test hands `&db` to
+/// anything that connects -
+/// [`PgDevSession::connect`], `postgres::Client::connect` - and a thread that needs to
+/// connect after the test body has moved on takes `db.to_string()`. Bind it to a name
+/// at the top of the test: the drop runs `DROP DATABASE ... WITH (FORCE)`, which ends
+/// any session still connected, so the database has to outlive the sessions using it.
+#[must_use = "bind the database to a name; it is dropped when it falls out of scope"]
+#[derive(Debug)]
+pub struct PgDatabase {
+    name: String,
+    url: String,
+}
 
-/// `value` — already resolved by the caller through a typed read — or a panic naming
-/// the variable and the server it needs.
-///
-/// Split from the read itself: `zeroship_core::test_env!` needs a compile-time string
-/// literal, so it cannot live behind a function generic over `env_var: &str`. Each
-/// live-DSN macro ([`require_live_pg!`], [`require_live_mysql!`]) reads its own literal
-/// name at its own call site and passes the resolved value in here; `env_var` is
-/// carried only so the panic message can name it, and this function performs no
-/// environment read of its own.
-///
-/// There is no skip. A skipped live suite is INVISIBLE rather than merely quiet: the
-/// early return still counts as a pass, so `cargo test` prints the same tally a
-/// genuine run prints, and no banner reliably survives libtest's output capture. A run
-/// with no database therefore read exactly like a run with one. The only outcome that
-/// cannot be mistaken for coverage is a failure, so that is the only outcome left.
-///
-/// `server` names what the DSN has to point at, so an operator reading the panic knows
-/// which service to start as well as which variable to export.
-///
-/// # Panics
-/// Panics when `value` is `None` or blank, which fails the calling test rather than
-/// passing it without coverage.
-#[must_use]
-pub fn require_live_db_dsn(value: Option<String>, env_var: &str, server: &str) -> String {
-    match value {
-        Some(url) if !url.trim().is_empty() => url,
-        _ => panic!(
-            "{env_var} is unset, so this test has no live {server} to run against and \
-             cannot report coverage it never gathered. Start a {server} and export \
-             {env_var} with its DSN (see CONTRIBUTING.md, \"Live-database tests\")."
-        ),
+impl PgDatabase {
+    /// The database name.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
     }
 }
 
-/// The live-PG DSN from [`PG_URL_ENV`], or a panic naming it.
+impl std::ops::Deref for PgDatabase {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.url
+    }
+}
+
+impl Drop for PgDatabase {
+    fn drop(&mut self) {
+        use std::io::Write as _;
+
+        let dropped = Client::connect(&server::postgres().postgres_admin_url(), NoTls).and_then(
+            |mut admin| {
+                admin.batch_execute(&format!(
+                    "DROP DATABASE IF EXISTS \"{}\" WITH (FORCE)",
+                    self.name
+                ))
+            },
+        );
+        if let Err(error) = dropped {
+            // Never a panic: this runs while a failed test unwinds, and a panicking
+            // `Drop` there aborts the process. The server goes with the process, so
+            // the cost of a failure here is this one line, straight to the process
+            // stderr because libtest captures the print macros.
+            let _ = writeln!(
+                std::io::stderr(),
+                "PgDatabase: {} was not dropped: {error}",
+                self.name
+            );
+        }
+    }
+}
+
+/// A fresh database on this binary's PostgreSQL server, for one test.
 ///
-/// Accepts either the libpq keyword form
-/// (`host=… port=… user=… password=… dbname=…`) or a `postgres://…` URL — the
-/// `postgres` crate parses both.
-///
-/// The literal below MUST stay byte-identical to [`PG_URL_ENV`]: `test_env!` requires a
-/// compile-time literal, so it cannot read the constant, and the two are checked apart
-/// rather than the one place a non-literal form could hold them.
-#[macro_export]
-macro_rules! require_live_pg {
-    () => {{
-        $crate::support::require_live_db_dsn(
-            ::zeroship_core::test_env!("ZERO_MIGRATE_TEST_PG_URL"),
-            $crate::support::PG_URL_ENV,
-            "PostgreSQL",
-        )
-    }};
+/// # Panics
+/// When the server cannot be started (see [`server::postgres`]) or refuses the
+/// `CREATE DATABASE`. Either way the calling test fails: a live test with no database
+/// has gathered no coverage, and must not report any.
+pub fn pg_database() -> PgDatabase {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let server = server::postgres();
+    let name = format!("zm_test_{}", NEXT.fetch_add(1, Ordering::Relaxed));
+    let mut admin = Client::connect(&server.postgres_admin_url(), NoTls).unwrap_or_else(|e| {
+        panic!("connect to the owned PostgreSQL server to create a test database: {e}")
+    });
+    admin
+        .batch_execute(&format!("CREATE DATABASE \"{name}\""))
+        .unwrap_or_else(|e| panic!("create the test database {name}: {e}"));
+    PgDatabase {
+        url: server.postgres_url(&name),
+        name,
+    }
 }
 
 /// How the next statement matching a needle reports back to the engine AFTER the
@@ -389,8 +411,7 @@ impl PgDevSession {
     ///
     /// # Panics
     /// Panics if the connection fails — a test-support harness, so a connect failure
-    /// is a test setup error. It is a DIFFERENT failure from the absent-DSN case, which
-    /// [`require_live_pg!`] has already reported by the time this runs.
+    /// is a test setup error.
     #[must_use]
     pub fn connect(dsn: &str) -> Self {
         let client = Client::connect(dsn, NoTls)
@@ -456,13 +477,11 @@ impl PgDevSession {
 /// test returned or unwound.
 ///
 /// A test that calls `DROP SCHEMA` as its last statement only cleans up when it
-/// reaches that statement. Every `assert!` between the CREATE and the DROP is a
-/// point where a failing run abandons a schema on the server forever, and the leak
-/// is silent: the run reports one failed test, not a database that now carries a
-/// permanent `proj_<pid>_<nanos>_<n>` nobody will ever recognise or reclaim.
-///
-/// Constructed where the CREATE happens; the DROP then rides `Drop` and needs no
-/// statement at the end of the test.
+/// reaches that statement; every `assert!` between the CREATE and the DROP is a point
+/// where a failing test skips it. Constructed where the CREATE happens, the guard puts
+/// the DROP on `Drop`, so it needs no statement at the end of the test. The
+/// [`PgDatabase`] the schemas live in is dropped after the guard, so what the guard
+/// bounds is the schemas' lifetime inside the test, not the server's catalog.
 ///
 /// The DROP goes over the test's own pinned connection, NOT a fresh one. A test
 /// that unwinds mid-transaction leaves that transaction open until its `Client` is

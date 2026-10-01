@@ -107,7 +107,7 @@ async fn attempt_under(
     view: &str,
     policy_for: fn(&str) -> zeroship_migrate::EffectivePolicy,
 ) -> Outcome {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
     let schema = token();
     let policy = policy_for(&schema);
@@ -414,7 +414,7 @@ async fn a_blocked_drop_behind_a_committing_op_leaves_nothing_behind() {
 /// clears nothing" MEANS, and it is measured rather than reasoned about.
 #[compio::test]
 async fn a_drop_behind_a_created_matview_leaves_nothing_behind() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
 
     // ---- STAGE 1: the external oracle. PostgreSQL's answer, before the engine's.
     {
@@ -711,7 +711,7 @@ async fn a_drop_behind_a_replaced_view_still_applies() {
 /// completed long ago.
 #[compio::test]
 async fn a_replayed_plan_is_not_re_judged_against_a_world_that_moved() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
     let schema = token();
     let policy = support::no_inject(&schema);

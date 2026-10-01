@@ -17,8 +17,8 @@
 //! `snapshot_schema` to agree. A literal would be a second opinion about the thing
 //! under test.
 //!
-//! REQUIRES `ZERO_MIGRATE_MYSQL_URL` through `require_live_mysql!`: a missing DSN is
-//! a failure rather than a green run with no coverage.
+//! Runs against the MySQL server this binary owns (`support::mysql::mysql_url`): a
+//! server that cannot start is a failure rather than a green run with no coverage.
 
 use crate::support;
 
@@ -57,7 +57,7 @@ fn table<'a>(
 /// heard of.
 #[compio::test]
 async fn the_snapshots_primary_key_name_is_the_one_the_catalog_reports() {
-    let url = require_live_mysql!();
+    let url = crate::support::mysql::mysql_url();
     let session = MysqlDevSession::connect(&url);
     let database = support::mysql::database_token("pkname");
     let cfg = ExecutorConfig::new(
@@ -198,7 +198,7 @@ async fn apply_doc(
 /// called.
 #[compio::test]
 async fn a_composite_primary_key_deploys_and_folds_to_what_the_server_reports() {
-    let url = require_live_mysql!();
+    let url = crate::support::mysql::mysql_url();
     let session = MysqlDevSession::connect(&url);
     let database = support::mysql::database_token("pkcomp");
     let cfg = ExecutorConfig::new(

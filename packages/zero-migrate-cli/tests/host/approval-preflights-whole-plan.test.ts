@@ -28,7 +28,7 @@
 // unconditional refusal. The control proves the plan is otherwise valid and that
 // approval is the only thing standing between it and the database.
 //
-// GATE: `ZERO_MIGRATE_TEST_PG_URL`.
+// GATE: the run's PostgreSQL container.
 
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";

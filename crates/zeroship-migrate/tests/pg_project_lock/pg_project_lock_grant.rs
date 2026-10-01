@@ -28,7 +28,8 @@
 //! around the injection is still live: a real grant in a real session that stays
 //! open for the whole assertion, judged by a `pg_locks` read from a second session.
 //!
-//! GATED behind `ZERO_MIGRATE_TEST_PG_URL`, like every other live suite here.
+//! Runs in a database of its own on the PostgreSQL server this binary owns
+//! (`support::pg_database`).
 
 use crate::support;
 
@@ -276,7 +277,7 @@ where
 /// shipped acquisition and must never leak.
 #[test]
 fn a_cancelled_lock_wait_leaves_no_advisory_lock_held() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let acquirer = PgDevSession::connect(&url);
     let witness = PgDevSession::connect(&url);
     let cfg = cfg_for(&token());
@@ -356,7 +357,7 @@ fn a_cancelled_lock_wait_leaves_no_advisory_lock_held() {
 /// session exit dropping the lock on its way out.
 #[test]
 fn a_failed_blocking_acquire_leaves_no_advisory_lock_held() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let acquirer = PgDevSession::connect(&url);
     let witness = PgDevSession::connect(&url);
     let cfg = cfg_for(&token());
@@ -378,7 +379,7 @@ fn a_failed_blocking_acquire_leaves_no_advisory_lock_held() {
 /// grants, and the reply is lost on the way back.
 #[test]
 fn a_failed_try_acquire_leaves_no_advisory_lock_held() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let acquirer = PgDevSession::connect(&url);
     let witness = PgDevSession::connect(&url);
     let cfg = cfg_for(&token());
@@ -401,7 +402,7 @@ fn a_failed_try_acquire_leaves_no_advisory_lock_held() {
 /// lock the server granted.
 #[test]
 fn an_undecodable_try_acquire_reply_leaves_no_advisory_lock_held() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let acquirer = PgDevSession::connect(&url);
     let witness = PgDevSession::connect(&url);
     let cfg = cfg_for(&token());
@@ -427,7 +428,7 @@ fn an_undecodable_try_acquire_reply_leaves_no_advisory_lock_held() {
 /// they are guarding.
 #[test]
 fn a_successful_acquire_holds_the_lock_and_one_release_drops_one_hold() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let acquirer = PgDevSession::connect(&url);
     let witness = PgDevSession::connect(&url);
     let cfg = cfg_for(&token());
@@ -463,7 +464,7 @@ fn a_successful_acquire_holds_the_lock_and_one_release_drops_one_hold() {
 /// reports `Acquired` and still holds the lock the caller is about to rely on.
 #[test]
 fn a_successful_try_acquire_holds_the_lock_it_reports() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let acquirer = PgDevSession::connect(&url);
     let witness = PgDevSession::connect(&url);
     let cfg = cfg_for(&token());

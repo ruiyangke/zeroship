@@ -285,7 +285,7 @@ fn sqlite_renders_the_union_flat_column_layout() {
 
 #[compio::test]
 async fn live_postgres_introspection_recovers_the_structured_type_checks() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = support::PgDevSession::connect(&url);
     let schema = format!("structured_{}", live_pg_token());
     let _schema_guard = support::SchemaGuard::arm(&session, [schema.clone()]);

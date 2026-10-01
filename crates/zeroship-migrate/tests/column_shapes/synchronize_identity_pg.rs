@@ -1,7 +1,7 @@
 //! Live PostgreSQL coverage for import-time identity synchronization.
 //!
-//! REQUIRES `ZERO_MIGRATE_TEST_PG_URL`; an unset DSN fails rather than skips. These
-//! tests drive the shipped generic `PostgresBackend<PgDevSession>` seam.
+//! Runs in a database of its own on the PostgreSQL server this binary owns
+//! (`support::pg_database`). These tests drive the shipped generic `PostgresBackend<PgDevSession>` seam.
 
 use crate::support;
 
@@ -145,7 +145,7 @@ async fn set_sequence(session: &PgDevSession, schema: &str, table: &str, value: 
 
 #[compio::test]
 async fn advances_an_uncalled_identity_sequence_by_its_non_unit_increment() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
     let cfg = cfg_for(&token());
     let _schema_guard = setup(&session, &cfg).await;
@@ -174,7 +174,7 @@ async fn advances_an_uncalled_identity_sequence_by_its_non_unit_increment() {
 
 #[compio::test]
 async fn never_moves_an_already_ahead_sequence_backward() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
     let cfg = cfg_for(&token());
     let _schema_guard = setup(&session, &cfg).await;
@@ -203,7 +203,7 @@ async fn never_moves_an_already_ahead_sequence_backward() {
 
 #[compio::test]
 async fn already_ahead_out_of_bounds_imports_are_noops_in_both_directions() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
     let cfg = cfg_for(&token());
     let _schema_guard = setup(&session, &cfg).await;
@@ -244,7 +244,7 @@ async fn already_ahead_out_of_bounds_imports_are_noops_in_both_directions() {
 
 #[compio::test]
 async fn respects_a_descending_owned_sequence() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
     let cfg = cfg_for(&token());
     let _schema_guard = setup(&session, &cfg).await;
@@ -273,7 +273,7 @@ async fn respects_a_descending_owned_sequence() {
 
 #[compio::test]
 async fn supports_serial_and_rejects_a_column_without_an_owned_sequence() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
     let cfg = cfg_for(&token());
     let _schema_guard = setup(&session, &cfg).await;

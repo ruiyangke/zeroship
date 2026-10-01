@@ -27,7 +27,7 @@
 // path may always have been fine — this says so either way rather than leaving it
 // inferred.
 //
-// GATES: `ZERO_MIGRATE_TEST_PG_URL`, `ZERO_MIGRATE_MYSQL_URL`.
+// GATES: the run's PostgreSQL container, the run's MySQL container.
 
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
@@ -36,7 +36,7 @@ import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { MYSQL_URL_ENV, PG_URL_ENV, pgUrl, requireLiveDb } from "./live-db.js";
+import { mysqlUrl, pgUrl } from "./live-db.js";
 
 // The host suite builds and resolves its addon in one place.
 import "./addon.js";
@@ -49,8 +49,8 @@ const ADDON_PATH = resolve(
   `../../../../crates/zeroship-migrate-node/zeroship-migrate-node.${process.platform}-${process.arch}${ABI}.node`,
 );
 
-const PG_URL = process.env.ZERO_MIGRATE_TEST_PG_URL;
-const MYSQL_URL = process.env.ZERO_MIGRATE_MYSQL_URL;
+const PG_URL = pgUrl();
+const MYSQL_URL = mysqlUrl();
 const OWNER_APP = "app_constraint_quoting";
 const TABLE = "cq_rows";
 
@@ -266,7 +266,6 @@ async function runDrop(target: Target): Promise<void> {
 }
 
 test("PostgreSQL adds a stand-alone unique constraint", async (ctx) => {
-  requireLiveDb(PG_URL, PG_URL_ENV, "PostgreSQL");
   const target = await postgres();
   try {
     await runAdd(target);
@@ -276,7 +275,6 @@ test("PostgreSQL adds a stand-alone unique constraint", async (ctx) => {
 });
 
 test("MySQL adds a stand-alone unique constraint", async (ctx) => {
-  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   const target = await mysql();
   try {
     await runAdd(target);
@@ -286,7 +284,6 @@ test("MySQL adds a stand-alone unique constraint", async (ctx) => {
 });
 
 test("PostgreSQL drops a named constraint", async (ctx) => {
-  requireLiveDb(PG_URL, PG_URL_ENV, "PostgreSQL");
   const target = await postgres();
   try {
     await runDrop(target);
@@ -296,7 +293,6 @@ test("PostgreSQL drops a named constraint", async (ctx) => {
 });
 
 test("MySQL drops a named constraint", async (ctx) => {
-  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   const target = await mysql();
   try {
     await runDrop(target);

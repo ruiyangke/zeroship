@@ -58,8 +58,8 @@
 //!   `zeroship-migrate-node/tests/collection_export_round_trip.rs` is where that is pinned.
 //!   This file is about the leg after it.
 //!
-//! REQUIRES `ZERO_MIGRATE_TEST_PG_URL` through `require_live_pg!`: with no DSN the
-//! pass count cannot be mistaken for coverage, because there is none to read.
+//! Runs in a database of its own on the PostgreSQL server this binary owns
+//! (`support::pg_database`).
 
 use crate::support;
 
@@ -168,7 +168,7 @@ async fn measure(
     label: &str,
     make_ops: impl FnOnce(&str, &EffectivePolicy) -> Vec<Op>,
 ) -> Measured {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
     let schema = token();
     let policy = support::no_inject(&schema);
@@ -323,7 +323,6 @@ async fn measure_column(session: &PgDevSession, schema: &str) -> Result<Measured
 /// same column rather than the only opinion there is.
 #[compio::test]
 async fn a_bounded_string_authored_as_ops_is_a_varchar_the_server_enforces() {
-    let _url = require_live_pg!();
     let measured = measure("a bounded string authored as ops", |schema, policy| {
         authored_ops(schema, policy)
     })
@@ -356,7 +355,6 @@ async fn a_bounded_string_authored_as_ops_is_a_varchar_the_server_enforces() {
 /// stored over-long row is a lost CONSTRAINT.
 #[compio::test]
 async fn a_bounded_string_through_the_descriptor_producer_reaches_the_server_unbounded() {
-    let _url = require_live_pg!();
     let measured = measure(
         "a bounded string through the descriptor producer",
         |schema, policy| {
@@ -396,7 +394,7 @@ async fn a_bounded_string_through_the_descriptor_producer_reaches_the_server_unb
 /// widens a constraint the author is still declaring.
 #[compio::test]
 async fn a_reimported_bounded_string_phantom_diffs_the_bound_off_a_live_column() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
     let schema = token();
     let policy = support::no_inject(&schema);

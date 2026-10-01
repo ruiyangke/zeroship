@@ -6,7 +6,6 @@
 //! Nothing about the tests themselves changed - a `mod` missing from this list is a
 //! test that silently stops running, so the list is the load-bearing part of the file.
 
-#[macro_use]
 #[path = "../support/mod.rs"]
 mod support;
 
@@ -19,7 +18,6 @@ mod drop_sequence_rollback_pg;
 mod drop_trigger_rollback_pg;
 mod drop_view_rollback_pg;
 mod drop_view_rollback_sqlite;
-mod extension_claim_is_exclusive;
 mod inverse_carries_no_unguarded_sql;
 mod ir_reverse;
 mod journal_reverse_compat_sqlite;

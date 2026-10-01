@@ -24,8 +24,8 @@
 // leaves a column that looks right and never populates, and the failure surfaces
 // at the first insert rather than at the migration.
 //
-// GATE: PostgreSQL needs `ZERO_MIGRATE_TEST_PG_URL`, MySQL needs
-// `ZERO_MIGRATE_MYSQL_URL`, SQLite always runs.
+// GATE: PostgreSQL needs the run's PostgreSQL container, MySQL needs
+// the run's MySQL container, SQLite needs no server.
 
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -37,14 +37,14 @@ import { table, t, sequence, nextval } from "@zeroship/migrate";
 import { apply, type DriverConfig } from "zero-migrate-cli";
 import type { MigrationModule } from "@zeroship/migrate/internal/recorder";
 
-import { MYSQL_URL_ENV, connectLivePg, pgUrl, requireLiveDb } from "./live-db.js";
+import { connectLivePg, mysqlUrl, pgUrl } from "./live-db.js";
 
 // The host suite builds and resolves its addon in one place.
 import "./addon.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const OWNER_APP = "app_sequence_default";
-const MYSQL_URL = process.env.ZERO_MIGRATE_MYSQL_URL;
+const MYSQL_URL = mysqlUrl();
 /** Verbatim footnote [^2] of the generated matrix. */
 const DEFAULT_REFUSAL = /nextval sequence defaults are PostgreSQL-only/;
 const STANDALONE_REFUSAL = /standalone sequence objects are PostgreSQL-only/;
@@ -168,7 +168,6 @@ test("SQLite refuses a nextval default, naming the default rather than a sequenc
 });
 
 test("MySQL refuses a nextval default, naming the default rather than a sequence op", async (ctx) => {
-  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   const mysql = (await import("mysql2/promise")).default;
   const database = uniqueNamespace("seqdefmy");
   const admin = await mysql.createConnection({ uri: MYSQL_URL, multipleStatements: true });

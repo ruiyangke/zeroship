@@ -23,8 +23,6 @@
 //!
 //! Without (2) this file would pass against a build where `SchemaSnapshot`
 //! dropped both fields.
-//!
-//! GATED behind `ZERO_MIGRATE_TEST_PG_URL`.
 
 use crate::support;
 
@@ -45,18 +43,11 @@ const OWNER: &str = "app_fold_role_extension";
 /// a real catalog change rather than a no-op the oracle could not see.
 ///
 /// Installed per DATABASE, which is what makes property (2) above visible to the
-/// oracle AND what makes it forgeable by a sibling run. `token()` puts this
-/// process's pid in every other name here, including the roles; an extension name
-/// is a lookup into the server's installed library, so `unaccent_<pid>` is `could
-/// not open extension control file` rather than an isolated extension. There is no
-/// second copy of this name to hand out, so the case isolates in TIME instead,
-/// under `support::extension_claim` - keyed by the extension so every binary that
-/// installs `unaccent` queues on one key.
-///
-/// A sibling run can forge BOTH halves of this case: the round-trip, by dropping
-/// the extension mid-case, and the negative control, by removing one this case has
-/// not removed yet. A test whose negative control can be forged by a neighbour is
-/// not measuring the differ.
+/// oracle. The database is the test's own
+/// [`PgDatabase`](crate::support::PgDatabase), so no sibling test can install or
+/// remove the extension mid-case and forge either half of it: the round-trip, by
+/// dropping it, or the negative control, by removing one this case has not removed
+/// yet.
 const EXTENSION: &str = "unaccent";
 
 fn token(tag: &str) -> String {
@@ -114,14 +105,8 @@ scope = "all"
 
 #[compio::test]
 async fn a_role_and_an_extension_fold_to_what_live_introspection_reports() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
-    // Before anything is created, so a case that cannot get the claim has nothing to
-    // reclaim - and LOUD, never a skip: without the extension this case cannot ask
-    // either of its two questions.
-    if let Err(why) = support::extension_claim::claim(&session, EXTENSION).await {
-        panic!("{why}");
-    }
     let schema = token("proj");
     // PostgreSQL folds unquoted role names to lower case; keep the authored name
     // already lower so the comparison is about the fold and not about casing.
@@ -283,10 +268,6 @@ async fn a_role_and_an_extension_fold_to_what_live_introspection_reports() {
             quote_ident(&cfg.confinement.meta_schema)
         ))
         .await;
-    // `release` drops the extension INSIDE the claim rather than beside it, so the
-    // claim ends at the case boundary. Sequenced before the two `expect`s below, both
-    // of which panic. The unwinding path is covered by the pinned connection closing.
-    support::extension_claim::release(&session, EXTENSION).await;
     schemas.expect("drop the test schemas");
     work.expect("fold a role and an extension against live PostgreSQL");
 }
@@ -310,7 +291,7 @@ async fn a_role_and_an_extension_fold_to_what_live_introspection_reports() {
 /// the attributes are really being compared.
 #[compio::test]
 async fn role_attributes_round_trip_and_drift_is_named() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
     let schema = token("schema");
     let role = token("rolattr").to_lowercase();
@@ -475,7 +456,7 @@ async fn role_attributes_round_trip_and_drift_is_named() {
 /// footguns. This pins the engine's half.
 #[compio::test]
 async fn drop_owned_by_removes_the_role_s_objects_and_spares_everyone_else_s() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
     let schema = token("schema");
     let owner_role = token("owned").to_lowercase();
@@ -635,7 +616,7 @@ async fn drop_owned_by_removes_the_role_s_objects_and_spares_everyone_else_s() {
 /// not fail because the role it dropped is already gone.
 #[compio::test]
 async fn drop_role_succeeds_refuses_while_owning_and_no_ops_under_if_exists() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
     let schema = token("schema");
     let plain_role = token("plain").to_lowercase();
@@ -841,7 +822,7 @@ async fn drop_role_succeeds_refuses_while_owning_and_no_ops_under_if_exists() {
 /// its own parser.
 #[compio::test]
 async fn grant_and_revoke_move_exactly_the_named_privilege() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
     let schema = token("schema");
     let grantee = token("grantee").to_lowercase();

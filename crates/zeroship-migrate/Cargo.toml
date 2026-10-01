@@ -43,7 +43,9 @@ zeroship-migrate-mysql = { workspace = true }
 zeroship-migrate-backend = { workspace = true }
 
 [dev-dependencies]
-# Owned PostgreSQL fixtures for target-schema authorization regressions.
+# TEST-ONLY: the PostgreSQL and MySQL servers the live suites start and own
+# (`tests/support/server.rs`), and the per-test PostgreSQL fixture
+# `declared_column_roles.rs` shares with other crates.
 testcontainers = { version = "0.28", default-features = false, features = ["blocking", "watchdog"] }
 url = { workspace = true }
 # The wire contract, named DIRECTLY by the suites that build IR envelopes and dialect
@@ -113,8 +115,8 @@ bytes = "1"
 # MySQL server what the engine actually did.
 #
 # `default-features = false` with `minimal` only: the default set pulls `native-tls`
-# (OpenSSL) and the `derive` proc-macro, and this driver connects to a loopback
-# container over a plaintext socket and derives nothing.
+# (OpenSSL) and the `derive` proc-macro, and this driver connects to the suite's own
+# loopback container over a plaintext socket and derives nothing.
 mysql = { version = "28", default-features = false, features = ["minimal"] }
 # TEST-ONLY, for the suites that build their own inputs rather than reading the
 # engine's outputs: JSON schema-field maps and IR envelopes (`serde_json`), charter
@@ -131,12 +133,8 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 futures = { workspace = true }
 schemars = { workspace = true }
-# TEST-ONLY typed environment-read boundary. `clippy.toml`'s `disallowed-methods` ban
-# on `std::env::var` names this crate's macro as the fix: `support::require_live_db_dsn`
-# used to read `ZERO_MIGRATE_TEST_PG_URL` / `ZERO_MIGRATE_MYSQL_URL` with a raw
-# `std::env::var`, which is exactly the un-enumerable read Section 4.5 of
-# docs/proposals/2026-08-11-config-name-alignment.md exists to remove. `test_env!` is
-# the typed boundary for the remaining first-party test process inputs.
+# TEST-ONLY: `gen_types` mints a `DatabaseId` and derives its project schema through
+# `zeroship_core::database_derivation`, the naming the platform uses.
 #
 # Dev-only, so it never ships (`cargo tree -p zeroship-migrate -e normal` stays free of
 # it). It reaches tokio via `cyper`/`hyper` as a NORMAL dependency of zeroship-core

@@ -22,7 +22,7 @@
 // and `driver-pg.test.ts` assert `typeof eventSeq === "bigint"` there, because
 // napi6 can carry one.
 //
-// GATE: `ZERO_MIGRATE_TEST_PG_URL`.
+// GATE: the run's PostgreSQL container.
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";

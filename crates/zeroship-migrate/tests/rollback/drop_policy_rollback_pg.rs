@@ -3,8 +3,8 @@
 //! PostgreSQL identifies a policy by schema, table, and name. These tests lower
 //! through the guarded authoring path with a `LiveSchema` built from `fold_ops`,
 //! matching the deploy path that refreshes historical live state. The live
-//! rollback case is gated behind `ZERO_MIGRATE_TEST_PG_URL`; the focused controls
-//! always run.
+//! rollback case runs in a database of its own on the PostgreSQL server this binary
+//! owns; the focused controls need no server.
 
 use crate::support;
 
@@ -432,7 +432,7 @@ async fn positive_same_named_policies_on_two_tables_restore_only_the_dropped_one
 
 #[compio::test]
 async fn positive_rolling_back_a_dropped_policy_restores_its_definition() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
     let schema = token();
     let cfg = ExecutorConfig::new(format!("project_{schema}"), &schema, policy(&schema));

@@ -23,8 +23,8 @@
 // values while producing the right column name would satisfy a column-list check
 // and be the worst of the three outcomes.
 //
-// GATE: PostgreSQL needs `ZERO_MIGRATE_TEST_PG_URL`, MySQL needs
-// `ZERO_MIGRATE_MYSQL_URL`, SQLite always runs. Lint is offline.
+// GATE: PostgreSQL needs the run's PostgreSQL container, MySQL needs
+// the run's MySQL container, SQLite needs no server. Lint is offline.
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -34,7 +34,7 @@ import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { MYSQL_URL_ENV, connectLivePg, pgUrl, requireLiveDb } from "./live-db.js";
+import { connectLivePg, mysqlUrl, pgUrl } from "./live-db.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CLI_BIN = resolve(HERE, "../../src/cli-bin.ts");
@@ -44,7 +44,7 @@ const ADDON_PATH = resolve(
   `../../../../crates/zeroship-migrate-node/zeroship-migrate-node.${process.platform}-${process.arch}${ABI}.node`,
 );
 const OWNER_APP = "app_rename_split";
-const MYSQL_URL = process.env.ZERO_MIGRATE_MYSQL_URL;
+const MYSQL_URL = mysqlUrl();
 
 function uniqueNamespace(prefix: string): string {
   return `${prefix}_${Date.now().toString(36)}_${Math.floor(Math.random() * 1e6).toString(36)}`;
@@ -239,7 +239,6 @@ test("PostgreSQL opens a window instead: both columns, values in both", async (c
 });
 
 test("MySQL refuses the rename at apply, leaving the table as it was", async (ctx) => {
-  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   const mysql = (await import("mysql2/promise")).default;
   const database = uniqueNamespace("renamesplitmy");
   const admin = await mysql.createConnection({ uri: MYSQL_URL, multipleStatements: true });

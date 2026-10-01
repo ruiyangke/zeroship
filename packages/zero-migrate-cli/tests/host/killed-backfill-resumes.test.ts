@@ -35,7 +35,7 @@ import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { MYSQL_URL_ENV, connectLivePg, pgUrl, requireLiveDb } from "./live-db.js";
+import { connectLivePg, mysqlUrl, pgUrl } from "./live-db.js";
 
 // The host suite builds and resolves its addon in one place.
 import "./addon.js";
@@ -245,8 +245,7 @@ test("MySQL: a backfill killed mid-flight resumes the same way", async (ctx) => 
   // Measured by hand first: 5,470 / 20,000 filled after SIGKILL, only the create
   // journaled, and NO inflight marker - then the retry finished all 20,000
   // correctly.
-  const url = process.env.ZERO_MIGRATE_MYSQL_URL;
-  requireLiveDb(url, MYSQL_URL_ENV, "MySQL");
+  const url = mysqlUrl();
   const mysql = (await import("mysql2/promise")).default;
   const admin = await mysql.createConnection({ uri: url, multipleStatements: true });
   const database = `killbf_${Date.now().toString(36)}`;

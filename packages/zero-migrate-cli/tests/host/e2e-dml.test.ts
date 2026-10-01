@@ -10,14 +10,14 @@ import {
 } from "zero-migrate-cli";
 import { buildEnvelope } from "@zeroship/migrate/internal/recorder";
 import { noInjectPolicy } from "./policy.js";
-import { MYSQL_URL_ENV, connectLivePg, pgUrl, requireLiveDb } from "./live-db.js";
+import { connectLivePg, mysqlUrl, pgUrl } from "./live-db.js";
 
 
 // The host suite builds and resolves its addon in one place.
 import "./addon.js";
 
 const PG_URL = pgUrl();
-const MYSQL_URL = process.env.ZERO_MIGRATE_MYSQL_URL;
+const MYSQL_URL = mysqlUrl();
 const OWNER_APP = "app_complete_dml_flow";
 const MIGRATION_NAMES = ["create_dml_flow_items", "complete_dml_flow"] as const;
 const TABLE = "dml_flow_items";
@@ -298,7 +298,6 @@ test("PostgreSQL: create, insert, update, delete, and backfill apply in order an
 });
 
 test("MySQL: create, insert, update, delete, and backfill apply in order and rerun safely", async (t) => {
-  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
 
   const mysql = (await import("mysql2/promise")).default;
   const admin = await mysql.createConnection({

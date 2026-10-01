@@ -12,7 +12,7 @@
 // promising about, and it is the one a debugging operator turns on while their
 // pipeline is still parsing the output.
 //
-// GATE: `ZERO_MIGRATE_TEST_PG_URL` for the live verbs; the refusal arms are
+// GATE: the run's PostgreSQL container for the live verbs; the refusal arms are
 // offline.
 
 import assert from "node:assert/strict";

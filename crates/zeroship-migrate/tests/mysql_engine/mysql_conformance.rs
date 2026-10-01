@@ -13,8 +13,9 @@
 //! different client with its own pooling, so "PostgreSQL pins correctly" says
 //! nothing about it.
 //!
-//! REQUIRES `ZERO_MIGRATE_MYSQL_URL`. An unset DSN FAILS these tests: a skipped
-//! live suite reports exactly like a passing one, so there is no skip.
+//! Runs against the MySQL server this binary owns (`support::mysql::mysql_url`). A
+//! server that cannot start FAILS these tests: a skipped live suite reports exactly
+//! like a passing one, so there is no skip.
 
 use crate::support::mysql::MysqlDevSession;
 use zeroship_migrate::driver::conformance::{self, SeamFixture};
@@ -76,7 +77,7 @@ fn scratch_ident(tag: &str) -> String {
 
 #[compio::test]
 async fn mysql_dev_session_passes_seam_conformance() {
-    let url = require_live_mysql!();
+    let url = crate::support::mysql::mysql_url();
     let session = MysqlDevSession::connect(&url);
     let scratch = scratch_ident("pin");
     conformance::run(&session, &scratch, &MYSQL_FIXTURE)

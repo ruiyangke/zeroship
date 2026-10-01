@@ -1319,7 +1319,7 @@ fn live_pg_token() -> String {
 
 #[compio::test]
 async fn live_postgres_composite_fk_introspection_and_policy_drift() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = support::PgDevSession::connect(&url);
     let schema = live_pg_token();
     // Dropped on an unwind that skips the explicit cleanup below.

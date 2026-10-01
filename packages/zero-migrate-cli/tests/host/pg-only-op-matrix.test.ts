@@ -27,8 +27,8 @@
 // of an exception cannot tell a working feature from one that silently did
 // nothing.
 //
-// GATE: PG arms need `ZERO_MIGRATE_TEST_PG_URL`, MySQL arms need
-// `ZERO_MIGRATE_MYSQL_URL`. SQLite arms always run.
+// GATE: PG arms need the run's PostgreSQL container, MySQL arms need
+// the run's MySQL container. SQLite arms need no server.
 
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -40,13 +40,13 @@ import { table, t, sequence, view } from "@zeroship/migrate";
 import { apply, type DriverConfig } from "zero-migrate-cli";
 import type { MigrationModule } from "@zeroship/migrate/internal/recorder";
 
-import { MYSQL_URL_ENV, connectLivePg, pgUrl, requireLiveDb } from "./live-db.js";
+import { connectLivePg, mysqlUrl, pgUrl } from "./live-db.js";
 
 // The host suite builds and resolves its addon in one place.
 import "./addon.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const MYSQL_URL = process.env.ZERO_MIGRATE_MYSQL_URL;
+const MYSQL_URL = mysqlUrl();
 const OWNER_APP = "app_pg_only_ops";
 
 function uniqueNamespace(prefix: string): string {
@@ -148,7 +148,6 @@ test("SQLite refuses the PostgreSQL-only ops, each in its own words", async () =
 });
 
 test("MySQL refuses the PostgreSQL-only ops, each in its own words", async (ctx) => {
-  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   const mysql = (await import("mysql2/promise")).default;
   const admin = await mysql.createConnection({ uri: MYSQL_URL, multipleStatements: true });
   try {

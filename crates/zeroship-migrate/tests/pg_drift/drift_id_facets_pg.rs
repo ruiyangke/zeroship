@@ -1,6 +1,7 @@
 //! Live PostgreSQL regressions for drift-comparable ID metadata and references.
 //!
-//! The suite is gated by `ZERO_MIGRATE_TEST_PG_URL`. Every mutation runs in a
+//! The suite runs in a database of its own on the PostgreSQL server this binary
+//! owns (`support::pg_database`). Every mutation runs in a
 //! transaction that is rolled back after introspection, so all assertions share
 //! one authoritative folded snapshot without mutation order coupling.
 
@@ -468,7 +469,7 @@ fn require_missing(drift: &StructuralDrift, object: &str) -> Result<(), String> 
 
 #[compio::test]
 async fn live_postgres_introspects_identity_default_format_and_reference_drift() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = support::PgDevSession::connect(&url);
     let schema = token();
     let quoted_schema = quote_ident(&schema);

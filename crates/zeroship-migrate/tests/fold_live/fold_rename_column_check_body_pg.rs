@@ -225,7 +225,7 @@ async fn apply_through_engine(
 /// PostgreSQL's own DDL, then read BOTH projections of the CHECK and drive the
 /// guarded re-add to whatever the existence guard decides.
 async fn measure() -> Measured {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
     let schema = token();
     let policy = support::no_inject(&schema);

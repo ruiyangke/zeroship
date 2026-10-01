@@ -1,15 +1,15 @@
-// The host extension claim is the SAME lock the Rust suites take, it excludes a
-// second run, and it says so when it loses.
+// The extension claim is keyed by the resource, it excludes a second claimant, and
+// it says so when it loses.
 //
 // `extension-claim.ts` is the reason `rollback-live.test.ts` and
 // `citext-prerequisite.test.ts` can install - or require the absence of - a
-// DATABASE-GLOBAL object while a sibling gate run does the same. Its Rust counterpart
-// is guarded by `crates/zeroship-migrate/tests/rollback/extension_claim_is_exclusive.rs`
-// and this file is the matching guard on this side:
+// DATABASE-GLOBAL object while another file of this suite, running concurrently
+// against the same database, does the same. This file guards the three properties
+// the claim rests on:
 //
-//   1. THE KEY NAMES THE RESOURCE. Not the suite, not the binary, not the pid. The
-//      first version of the Rust claim was keyed by the SUITE, which is how a
-//      neighbour's installation came to be reported as a defect.
+//   1. THE KEY NAMES THE RESOURCE. Not the file, not the pid: a key naming the
+//      claimant gives each claimant a private lock, and a neighbour's installation is
+//      then reported as a defect.
 //   2. IT ACTUALLY EXCLUDES. While one connection holds the claim a second cannot take
 //      it, and once the first releases, the second can. The contender uses a raw
 //      `pg_try_advisory_lock` rather than `claim`, because a WAIT and a REFUSAL are
@@ -22,13 +22,12 @@
 // WHY THE LIVE HALVES LOCK A NAME THAT IS NOT AN EXTENSION. The key is a string the
 // server hashes; nothing about `pg_advisory_lock` requires the name to resolve to an
 // installed extension, and `DROP EXTENSION IF EXISTS` on an unknown name is a notice.
-// Locking the real `citext` here would have this file contend with the two suites that
+// Locking the real `citext` here would have this file contend with the two files that
 // claim it for real, where the wedge in (3) - a `pg_try_advisory_lock` that MUST
 // succeed for the test to be about anything - would answer `false` whenever one of
 // them happened to hold it, and the guard would go red for a scheduling accident. The
-// probe carries this process's pid so two concurrent runs of this suite do not wedge
-// each other. The shared-key property those probes give up is what (0) and (1) assert
-// directly, on the real names.
+// probe carries this process's pid so it is this file's alone. The shared-key
+// property those probes give up is what (1) asserts directly, on the real names.
 //
 // GATE: `connectLivePg` (see `live-db.ts`) for the exclusion and timeout behavior.
 
@@ -57,9 +56,9 @@ test("the extension claim key names the extension and nothing else", () => {
   assert.equal(
     claimKey("citext"),
     "zero-migrate:pg-extension:citext",
-    "the key is the contract BETWEEN BINARIES, not a private detail: changing its " +
-      "shape unshares the claim, and an unshared claim is indistinguishable from no " +
-      "claim until two suites meet on one server",
+    "the key is the extension name under a fixed prefix and nothing else: every " +
+      "claimant derives its key through claimKey, so a shape that folded in anything " +
+      "more - a file, a pid - would hand each claimant a private lock",
   );
   assert.notEqual(
     claimKey("citext"),

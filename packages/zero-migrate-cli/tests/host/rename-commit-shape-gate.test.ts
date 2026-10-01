@@ -36,7 +36,7 @@
 // The control commits an untouched window, without which every refusal here holds
 // equally on a build where commits never work.
 //
-// GATE: `ZERO_MIGRATE_TEST_PG_URL`. PostgreSQL only - the online rename is
+// GATE: the run's PostgreSQL container. PostgreSQL only - the online rename is
 // PostgreSQL's.
 
 import assert from "node:assert/strict";

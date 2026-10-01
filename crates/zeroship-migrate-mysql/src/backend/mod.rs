@@ -1152,22 +1152,14 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
 /// A host-shaped [`RecordingSession`] records the SQL + binds of every verb and
 /// returns canned rows for the reads (`GET_LOCK -> 1`, trigger-existence -> empty),
 /// so a full lock + `ensure_journal` + apply sweep runs generically over a
-/// non-compio driver and every emitted statement is inspected. The live-MySQL e2e
-/// lives in the host CLI suite, gated on the `ZERO_MIGRATE_MYSQL_URL` env var.
+/// non-compio driver and every emitted statement is inspected.
 ///
-/// That the live coverage sits there rather than in `crates/zeroship-migrate/tests/`
-/// beside the live-PostgreSQL scenarios is a dependency fact, not an oversight, and
-/// the asymmetry is worth stating so it is not read as a hole. [`MysqlBackend`] has
-/// exactly one constructor - [`MysqlBackend::new_generic`], over the
-/// [`SqlSession`](zeroship_migrate_backend::driver::SqlSession) trait - and this crate depends on no
-/// MySQL client; `postgres` is a dev-dependency carried solely so `tests/support`'s
-/// `PgDevSession` can drive the PG scenarios. A Rust-side MySQL harness would have
-/// to add a client and a second `SqlSession` over it in order to re-prove what the
-/// host suite already proves through the SHIPPED one: `zeroship-migrate-node`'s bridge
-/// builds this same `MysqlBackend::new_generic` over the `mysql2` seam, so a live
-/// apply or rollback from the CLI runs the code in this file against a real server.
-/// The added driver would also sit between the test and the engine, where a bug in
-/// it is indistinguishable from a bug here.
+/// The live coverage is outside this crate, which depends on no MySQL client.
+/// `zeroship-migrate`'s live suites drive this backend against a MySQL server their
+/// test binary starts, through a test `SqlSession` over the `mysql` crate that mirrors
+/// the host driver's decode contract; the host CLI suite drives it through the
+/// SHIPPED `mysql2` seam, since `zeroship-migrate-node`'s bridge builds this same
+/// `MysqlBackend::new_generic`.
 #[cfg(test)]
 mod render_tests {
     use super::*;

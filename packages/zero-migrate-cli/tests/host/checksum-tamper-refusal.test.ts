@@ -39,7 +39,7 @@
 // rather than to a literal, so a legitimate IR change moves both and the test
 // keeps testing agreement instead of a frozen hash.
 //
-// GATES: `ZERO_MIGRATE_TEST_PG_URL`, `ZERO_MIGRATE_MYSQL_URL`.
+// GATES: the run's PostgreSQL container, the run's MySQL container.
 
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
@@ -48,7 +48,7 @@ import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { MYSQL_URL_ENV, PG_URL_ENV, pgUrl, requireLiveDb } from "./live-db.js";
+import { mysqlUrl, pgUrl } from "./live-db.js";
 
 // The host suite builds and resolves its addon in one place.
 import "./addon.js";
@@ -61,8 +61,8 @@ const ADDON_PATH = resolve(
   `../../../../crates/zeroship-migrate-node/zeroship-migrate-node.${process.platform}-${process.arch}${ABI}.node`,
 );
 
-const PG_URL = process.env.ZERO_MIGRATE_TEST_PG_URL;
-const MYSQL_URL = process.env.ZERO_MIGRATE_MYSQL_URL;
+const PG_URL = pgUrl();
+const MYSQL_URL = mysqlUrl();
 const OWNER_APP = "app_tamper";
 /** The identity. It is the FILENAME that fixes the version, so writing a different
  *  body to this same path is precisely "a reused identity with a different
@@ -331,7 +331,6 @@ async function tamperScenario(dialect: Dialect): Promise<{ journal: string; set:
 }
 
 test("PostgreSQL refuses an edited already-applied migration, and lands nothing", async (ctx) => {
-  requireLiveDb(PG_URL, PG_URL_ENV, "PostgreSQL");
   const dialect = await postgres();
   try {
     await tamperScenario(dialect);
@@ -341,7 +340,6 @@ test("PostgreSQL refuses an edited already-applied migration, and lands nothing"
 });
 
 test("MySQL refuses an edited already-applied migration, and lands nothing", async (ctx) => {
-  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   const dialect = await mysql();
   try {
     await tamperScenario(dialect);
@@ -356,8 +354,6 @@ test("MySQL refuses an edited already-applied migration, and lands nothing", asy
 // PostgreSQL configured would report the cross-dialect agreement as established
 // when it had never been asked.
 test("the recorded checksum is the same on both servers", async () => {
-  requireLiveDb(PG_URL, PG_URL_ENV, "PostgreSQL");
-  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   const pg = await postgres();
   const my = await mysql();
   try {
@@ -461,7 +457,6 @@ async function rollbackTamperScenario(dialect: Dialect): Promise<void> {
 }
 
 test("PostgreSQL refuses to roll back an edited migration, dropping nothing", async (ctx) => {
-  requireLiveDb(PG_URL, PG_URL_ENV, "PostgreSQL");
   const dialect = await postgres();
   try {
     await rollbackTamperScenario(dialect);
@@ -471,7 +466,6 @@ test("PostgreSQL refuses to roll back an edited migration, dropping nothing", as
 });
 
 test("MySQL refuses to roll back an edited migration, dropping nothing", async (ctx) => {
-  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   const dialect = await mysql();
   try {
     await rollbackTamperScenario(dialect);

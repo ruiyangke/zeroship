@@ -351,8 +351,8 @@ fn oracle(observations: &[Observed]) -> Result<Vec<String>, String> {
 // ---------------------------------------------------------------------------
 
 /// A per-process-unique name. `zmrowobs_` rather than layer 1's `zmconf_`, because
-/// that suite's leak census claims every `zmconf_%` name it can attribute to a dead
-/// pid, and these are not its to judge.
+/// that suite's leak census fails on any `zmconf_%` name it finds on the MySQL
+/// server the tests of this binary share, and these are not its to judge.
 fn token(suffix: &str) -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -609,8 +609,8 @@ fn the_oracle_separates_agreement_from_disagreement() {
 /// are required to be equal TO EACH OTHER.
 #[compio::test]
 async fn row_order_agrees_across_the_three_backends_when_the_column_pins_bytewise() {
-    let pg_url = require_live_pg!();
-    let mysql_url = require_live_mysql!();
+    let pg_url = crate::support::pg_database();
+    let mysql_url = crate::support::mysql::mysql_url();
     let pg_session = PgDevSession::connect(&pg_url);
     let mysql_session = MysqlDevSession::connect(&mysql_url);
     refuse_a_saturated_instrument(&pg_session, &mysql_session).await;
@@ -664,8 +664,8 @@ async fn row_order_agrees_across_the_three_backends_when_the_column_pins_bytewis
 /// agreement test above is measuring the harness rather than the servers.
 #[compio::test]
 async fn row_order_disagrees_across_the_three_backends_without_the_pin() {
-    let pg_url = require_live_pg!();
-    let mysql_url = require_live_mysql!();
+    let pg_url = crate::support::pg_database();
+    let mysql_url = crate::support::mysql::mysql_url();
     let pg_session = PgDevSession::connect(&pg_url);
     let mysql_session = MysqlDevSession::connect(&mysql_url);
     refuse_a_saturated_instrument(&pg_session, &mysql_session).await;

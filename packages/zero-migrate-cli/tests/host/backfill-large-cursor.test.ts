@@ -26,7 +26,7 @@
 // everywhere. A skipped row leaves 0 and a reprocessed row leaves 2, and neither
 // shows up in an exit code or a row count.
 //
-// GATES: SQLite always runs; the PostgreSQL arm needs `ZERO_MIGRATE_TEST_PG_URL`.
+// GATES: SQLite needs no server; the PostgreSQL arm needs the run's PostgreSQL container.
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -36,7 +36,7 @@ import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { PG_URL_ENV, pgUrl, requireLiveDb } from "./live-db.js";
+import { pgUrl } from "./live-db.js";
 
 // The host suite builds and resolves its addon in one place.
 import "./addon.js";
@@ -190,7 +190,6 @@ function assertVisitedExactlyOnce(rows: Array<{ id: string; n: number }>, where:
 }
 
 test("PostgreSQL backfills across a cursor far above u32::MAX", async (ctx) => {
-  requireLiveDb(process.env.ZERO_MIGRATE_TEST_PG_URL, PG_URL_ENV, "PostgreSQL");
   const pg = await import("pg");
   const client = new pg.Client({ connectionString: pgUrl() });
   await client.connect();

@@ -71,8 +71,8 @@
 //!   the target object exists and the seed row is present. A leg whose setup did not
 //!   reach the server cannot answer this observation and says so.
 //!
-//! There is no skip path anywhere here: a missing DSN panics in `require_live_pg!` /
-//! `require_live_mysql!`, for the reason `support::require_live_db_dsn` records.
+//! There is no skip path anywhere here: both servers are the ones this binary owns,
+//! and one that cannot start fails the observation rather than skipping it.
 //!
 //! # The live red, and the residual gap it pins
 //!
@@ -796,8 +796,8 @@ fn corroborate(subject: Subject, leg: &Leg) -> Result<(), String> {
 // ---------------------------------------------------------------------------
 
 /// A per-process-unique name. `zmoprefused_` rather than layer 1's `zmconf_`, because
-/// that suite's leak census claims every `zmconf_%` name it can attribute to a dead
-/// pid, and these are not its to judge.
+/// that suite's leak census fails on any `zmconf_%` name it finds on the MySQL
+/// server the tests of this binary share, and these are not its to judge.
 fn token(case: Case) -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -1218,8 +1218,8 @@ fn the_two_postures_this_file_contrasts_are_different() {
 /// ARM 1. The default posture refuses a drop, identically, on all three backends.
 #[compio::test]
 async fn a_drop_is_refused_under_the_default_posture_on_every_backend() {
-    let pg_url = require_live_pg!();
-    let mysql_url = require_live_mysql!();
+    let pg_url = crate::support::pg_database();
+    let mysql_url = crate::support::mysql::mysql_url();
     let case = Case {
         posture: Posture::Default,
         subject: Subject::DropTable,
@@ -1256,8 +1256,8 @@ async fn a_drop_is_refused_under_the_default_posture_on_every_backend() {
 /// a build that reports success without applying anything.
 #[compio::test]
 async fn a_bounded_update_applies_under_the_default_posture_on_every_backend() {
-    let pg_url = require_live_pg!();
-    let mysql_url = require_live_mysql!();
+    let pg_url = crate::support::pg_database();
+    let mysql_url = crate::support::mysql::mysql_url();
     let case = Case {
         posture: Posture::Default,
         subject: Subject::BoundedUpdate,
@@ -1280,8 +1280,8 @@ async fn a_bounded_update_applies_under_the_default_posture_on_every_backend() {
 /// about the POSTURE and not about drops being broken.
 #[compio::test]
 async fn the_same_drop_applies_under_an_explicit_allow_on_every_backend() {
-    let pg_url = require_live_pg!();
-    let mysql_url = require_live_mysql!();
+    let pg_url = crate::support::pg_database();
+    let mysql_url = crate::support::mysql::mysql_url();
     let case = Case {
         posture: Posture::Allow,
         subject: Subject::DropTable,
@@ -1311,8 +1311,8 @@ async fn the_same_drop_applies_under_an_explicit_allow_on_every_backend() {
 /// nothing to do with the servers.
 #[compio::test]
 async fn op_refused_still_disagrees_across_the_three_backends_on_an_unclassified_drop() {
-    let pg_url = require_live_pg!();
-    let mysql_url = require_live_mysql!();
+    let pg_url = crate::support::pg_database();
+    let mysql_url = crate::support::mysql::mysql_url();
     let case = Case {
         posture: Posture::Default,
         subject: Subject::DropTrigger,

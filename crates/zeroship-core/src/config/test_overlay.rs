@@ -1,9 +1,9 @@
 //! The test suites' view of the shared TOML overlay.
 //!
-//! WHAT THIS REPLACES. Test code named the one test PostgreSQL under eight
-//! different environment variables - `AUTH_DB_URL`, `CONTROL_TEST_DB`,
+//! WHAT THIS REPLACES. Test code named the one test PostgreSQL under a different
+//! environment variable per crate - `AUTH_DB_URL`, `CONTROL_TEST_DB`,
 //! `GATEWAY_ANCHORS_DB_URL`, `GATEWAY_POOL_SMOKE_URL`, `LIVE_DB_TEST_URL`,
-//! `MIGRATED_TEST_DB`, `ZERO_MIGRATE_TEST_PG_URL`, `ZEROSHIP_SCHEDULER_TEST_DB` -
+//! `MIGRATED_TEST_DB`, `ZEROSHIP_SCHEDULER_TEST_DB` -
 //! each read by one crate's tests and exported by whichever suite happened to
 //! remember it. Nothing related them, so a name that was never exported meant
 //! the tests behind it did not run, and a name pointed at the wrong server meant
@@ -98,9 +98,9 @@ fn load_opt() -> Option<FileConfig> {
 
 /// The one PostgreSQL every test in this workspace dials, or `None`.
 ///
-/// THIS IS THE DROP-IN for the eight `test_env!("...")` chains it replaced, and
+/// THIS IS THE DROP-IN for the per-crate `test_env!("...")` chains it replaced, and
 /// it returns an `Option` for exactly that reason: those call sites decide for
-/// themselves what an absent database means. Collapsing eight names into one is
+/// themselves what an absent database means. Collapsing those names into one is
 /// a naming change; deciding on their behalf what happens when there is no
 /// database is not, and belongs to whoever owns each test.
 ///

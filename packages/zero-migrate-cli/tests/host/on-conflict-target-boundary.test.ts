@@ -31,8 +31,8 @@
 // visible, and so the day PostgreSQL learns to refuse earlier, the arm that
 // changes says exactly what improved.
 //
-// GATE: PG arm needs `ZERO_MIGRATE_TEST_PG_URL`; MySQL arm needs
-// `ZERO_MIGRATE_MYSQL_URL`.
+// GATE: PG arm needs the run's PostgreSQL container; MySQL arm needs
+// the run's MySQL container.
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -41,13 +41,13 @@ import { table, t } from "@zeroship/migrate";
 import { apply, type DriverConfig } from "zero-migrate-cli";
 import type { MigrationModule } from "@zeroship/migrate/internal/recorder";
 
-import { MYSQL_URL_ENV, connectLivePg, pgUrl, requireLiveDb } from "./live-db.js";
+import { connectLivePg, mysqlUrl, pgUrl } from "./live-db.js";
 
 // The host suite builds and resolves its addon in one place.
 import "./addon.js";
 
 const OWNER_APP = "app_on_conflict_boundary";
-const MYSQL_URL = process.env.ZERO_MIGRATE_MYSQL_URL;
+const MYSQL_URL = mysqlUrl();
 
 function uniqueNamespace(prefix: string): string {
   return `${prefix}_${Date.now().toString(36)}_${Math.floor(Math.random() * 1e6).toString(36)}`;
@@ -183,7 +183,6 @@ test("PostgreSQL: a matched target upserts; an unmatched one fails in the data m
 });
 
 test("MySQL: the same unmatched target is refused before any data change", async (ctx) => {
-  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   const mysql = (await import("mysql2/promise")).default;
   const admin = await mysql.createConnection({ uri: MYSQL_URL, multipleStatements: true });
   const database = uniqueNamespace("on_conflict_my");

@@ -180,7 +180,7 @@ fn pg_token() -> String {
 
 #[compio::test]
 async fn postgres_exact_collation_is_introspected_drifted_and_rejected_for_composite_fk() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = support::PgDevSession::connect(&url);
     let schema = pg_token();
     // Dropped on an unwind that skips the explicit cleanup below.

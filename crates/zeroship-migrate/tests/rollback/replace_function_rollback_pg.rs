@@ -18,8 +18,8 @@
 //! with "function vendor primitives are PostgreSQL-only". A SQLite copy of this test would
 //! fail for a reason that has nothing to do with the defect.
 //!
-//! GATED behind `ZERO_MIGRATE_TEST_PG_URL` like every other live suite here. Every
-//! assertion reads `pg_proc` through the live session, never the plan the engine intended.
+//! Runs in a database of its own on the PostgreSQL server this binary owns
+//! (`support::pg_database`). Every assertion reads `pg_proc` through the live session, never the plan the engine intended.
 
 use crate::support;
 
@@ -198,7 +198,7 @@ async fn live_function_body(
 /// the harness is correct up to that gate and states what the measurement needs.
 #[compio::test]
 async fn rolling_back_a_function_replace_on_postgres() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
     let schema = token();
     let cfg = ExecutorConfig::new(

@@ -25,7 +25,7 @@
 // `varchar(n)` to `"text"` and would have refused every bounded key in the
 // project.
 //
-// GATE: `ZERO_MIGRATE_MYSQL_URL`.
+// GATE: the run's MySQL container.
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -36,9 +36,9 @@ import type { MigrationModule } from "@zeroship/migrate/internal/recorder";
 
 // The host suite builds and resolves its addon in one place.
 import "./addon.js";
-import { MYSQL_URL_ENV, requireLiveDb } from "./live-db.js";
+import { mysqlUrl } from "./live-db.js";
 
-const MYSQL_URL = process.env.ZERO_MIGRATE_MYSQL_URL;
+const MYSQL_URL = mysqlUrl();
 const OWNER_APP = "app_text_key";
 
 type NamedMigration = MigrationModule & { readonly name: string };
@@ -77,7 +77,6 @@ function authored(name: string, schema: () => void): NamedMigration {
 }
 
 test("MySQL: a key over a t.text() column declared in the SAME migration is refused before the deploy", async (ctx) => {
-  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   const mysql = (await import("mysql2/promise")).default;
   const admin = await mysql.createConnection({ uri: MYSQL_URL, multipleStatements: true });
   const database = uniqueNamespace("textkey_my");
@@ -155,7 +154,6 @@ test("MySQL: a key over a t.text() column declared in the SAME migration is refu
 });
 
 test("MySQL: a key over a column an EARLIER migration created is refused at lower time, and a bounded one still applies", async (ctx) => {
-  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   const mysql = (await import("mysql2/promise")).default;
   const admin = await mysql.createConnection({ uri: MYSQL_URL, multipleStatements: true });
   const database = uniqueNamespace("textkey_my2");

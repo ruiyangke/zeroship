@@ -163,7 +163,7 @@ fn pg_guard(cfg: &ExecutorConfig) -> Box<dyn zeroship_migrate::MigrationGuard> {
 
 #[compio::test]
 async fn rolling_back_a_consumed_dropped_sequence_is_refused() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
     let schema = token();
     let cfg = ExecutorConfig::new(

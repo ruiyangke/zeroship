@@ -24,7 +24,8 @@
 //
 // GATE: `connectLivePg` (see `live-db.ts`). This arm also holds the `citext` claim
 // (`extension-claim.ts`) for its whole body, because an absence is what it measures and
-// an extension is a database-wide object no sibling run can be renamed away from.
+// an extension is a database-wide object no other file of this suite can be renamed
+// away from.
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -77,9 +78,9 @@ test("the documented case-insensitive spelling fails at apply when citext is not
 
   try {
     // THIS ARM'S SUBJECT IS AN ABSENCE, which makes it the one shape a per-run name
-    // cannot protect: an extension is installed per DATABASE, so a sibling gate run
-    // that installs `citext` for its own case turns this arm's question into one it
-    // cannot ask. It takes the same claim the installers take (see
+    // cannot protect: an extension is installed per DATABASE, so another file of this
+    // suite that installs `citext` for its own case turns this arm's question into one
+    // it cannot ask. It takes the same claim the installers take (see
     // `extension-claim.ts`), which both excludes them for the duration AND drops any
     // leftover, so the absence below is established rather than hoped for.
     //

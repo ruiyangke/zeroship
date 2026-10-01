@@ -325,7 +325,7 @@ async fn apply_through_engine(
 /// column with PostgreSQL's own DDL, then read BOTH projections of each rendered body
 /// and run the differ over the stale pair and the two witnesses.
 async fn measure() -> Measured {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
     let schema = token();
     let policy = support::no_inject(&schema);

@@ -7,7 +7,8 @@
 //! conformance surface, so a driver that silently pools connections, swallows errors, or
 //! sends the wrong param format is caught here BEFORE any scenario relies on it.
 //!
-//! REQUIRES `ZERO_MIGRATE_TEST_PG_URL`. An unset DSN FAILS these tests: a skipped
+//! Runs in a database of its own on the PostgreSQL server this binary owns
+//! (`support::pg_database`). A server that cannot start FAILS these tests: a skipped
 //! live suite reports exactly like a passing one, so there is no skip.
 
 use crate::support::PgDevSession;
@@ -56,7 +57,7 @@ fn scratch_ident(tag: &str) -> String {
 
 #[compio::test]
 async fn pg_dev_session_passes_seam_conformance() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
     let scratch = scratch_ident("pin");
     conformance::run(&session, &scratch, &PG_FIXTURE)

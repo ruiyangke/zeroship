@@ -34,7 +34,7 @@ import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { MYSQL_URL_ENV, PG_URL_ENV, pgUrl, requireLiveDb } from "./live-db.js";
+import { mysqlUrl, pgUrl } from "./live-db.js";
 
 // The host suite builds and resolves its addon in one place.
 import "./addon.js";
@@ -47,8 +47,8 @@ const ADDON_PATH = resolve(
   `../../../../crates/zeroship-migrate-node/zeroship-migrate-node.${process.platform}-${process.arch}${ABI}.node`,
 );
 
-const PG_URL = process.env.ZERO_MIGRATE_TEST_PG_URL;
-const MYSQL_URL = process.env.ZERO_MIGRATE_MYSQL_URL;
+const PG_URL = pgUrl();
+const MYSQL_URL = mysqlUrl();
 const OWNER_APP = "app_partition_collapse";
 const TABLE = "pcollapse_rows";
 
@@ -137,7 +137,6 @@ function apply(
 }
 
 test("collapse leaves PostgreSQL genuinely partitioned", async (ctx) => {
-  requireLiveDb(PG_URL, PG_URL_ENV, "PostgreSQL");
   const pg = await import("pg");
   const client = new pg.Client({ connectionString: pgUrl() });
   await client.connect();
@@ -174,7 +173,6 @@ test("collapse leaves PostgreSQL genuinely partitioned", async (ctx) => {
 });
 
 test("collapse produces a single table on MySQL", async (ctx) => {
-  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   const driver = (await import("mysql2/promise")).default;
   const connection = await driver.createConnection({ uri: String(MYSQL_URL) });
   const namespace = uniqueNamespace("pcollapse_my");

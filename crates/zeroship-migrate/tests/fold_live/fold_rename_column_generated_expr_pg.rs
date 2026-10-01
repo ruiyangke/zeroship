@@ -200,7 +200,7 @@ async fn apply_create(
 }
 
 async fn measure() -> Measured {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
     let schema = token();
     let policy = support::no_inject(&schema);

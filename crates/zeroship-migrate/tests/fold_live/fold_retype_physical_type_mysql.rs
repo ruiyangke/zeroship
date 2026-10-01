@@ -37,8 +37,8 @@
 //! the same code is responsible for them and a fix that special-cased lengths would
 //! pass the width case alone.
 //!
-//! REQUIRES `ZERO_MIGRATE_MYSQL_URL` through `require_live_mysql!`: a missing DSN is
-//! a failure rather than a green run with no coverage.
+//! Runs against the MySQL server this binary owns (`support::mysql::mysql_url`): a
+//! server that cannot start is a failure rather than a green run with no coverage.
 
 use crate::support;
 
@@ -224,7 +224,7 @@ async fn live_column_types(
 /// and nothing but the physical contract can tell them apart.
 #[compio::test]
 async fn a_narrowing_retype_folds_the_contract_mysql_reports_for_the_target() {
-    let url = require_live_mysql!();
+    let url = crate::support::mysql::mysql_url();
     let session = MysqlDevSession::connect(&url);
     let database = support::mysql::database_token("retypew");
     let cfg = cfg_for(&database);
@@ -375,7 +375,7 @@ fn column_contract(
 /// stamped the physical contract, applied for real and drift-compared.
 #[compio::test]
 async fn folded_column_shapes_describe_the_physical_type_mysql_holds() {
-    let url = require_live_mysql!();
+    let url = crate::support::mysql::mysql_url();
     let session = MysqlDevSession::connect(&url);
     let database = support::mysql::database_token("shapes");
     let cfg = cfg_for(&database);
@@ -459,7 +459,7 @@ async fn folded_column_shapes_describe_the_physical_type_mysql_holds() {
 /// one that can see the ADDED column.
 #[compio::test]
 async fn folding_onto_a_live_mysql_base_keeps_the_contracts_the_server_reported() {
-    let url = require_live_mysql!();
+    let url = crate::support::mysql::mysql_url();
     let session = MysqlDevSession::connect(&url);
     let database = support::mysql::database_token("ontobase");
     let cfg = cfg_for(&database);

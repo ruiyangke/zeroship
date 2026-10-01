@@ -31,7 +31,7 @@
 // lock first; fixing only the deploy verbs would leave a reader able to break a
 // deploy.
 //
-// GATE: `ZERO_MIGRATE_TEST_PG_URL`.
+// GATE: the run's PostgreSQL container.
 
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";

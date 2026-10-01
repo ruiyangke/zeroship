@@ -23,8 +23,8 @@
 // arm authors the SAME two shapes, applies them, and then proves the constraints
 // are LIVE by making the database reject a duplicate and a negative.
 //
-// GATE: PG arm needs `ZERO_MIGRATE_TEST_PG_URL`, MySQL arm needs
-// `ZERO_MIGRATE_MYSQL_URL`. The SQLite arms are an in-process file and always run.
+// GATE: PG arm needs the run's PostgreSQL container, MySQL arm needs
+// the run's MySQL container. The SQLite arms are an in-process file and need no server.
 
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -37,13 +37,13 @@ import { table, t } from "@zeroship/migrate";
 import { apply, type DriverConfig } from "zero-migrate-cli";
 import type { MigrationModule } from "@zeroship/migrate/internal/recorder";
 
-import { MYSQL_URL_ENV, connectLivePg, pgUrl, requireLiveDb } from "./live-db.js";
+import { connectLivePg, mysqlUrl, pgUrl } from "./live-db.js";
 
 // The host suite builds and resolves its addon in one place.
 import "./addon.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const MYSQL_URL = process.env.ZERO_MIGRATE_MYSQL_URL;
+const MYSQL_URL = mysqlUrl();
 const OWNER_APP = "app_unsupported_constraints";
 
 type NamedMigration = MigrationModule & { readonly name: string };
@@ -164,7 +164,6 @@ test("SQLite refuses a table-level CHECK rather than emitting a table without it
 });
 
 test("MySQL refuses a table-level CHECK rather than emitting a table without it", async (ctx) => {
-  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   const mysql = (await import("mysql2/promise")).default;
   const admin = await mysql.createConnection({ uri: MYSQL_URL, multipleStatements: true });
   const database = uniqueNamespace("unsup_chk_my");

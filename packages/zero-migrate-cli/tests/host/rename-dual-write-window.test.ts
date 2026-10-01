@@ -29,7 +29,7 @@
 // on INSERT but not UPDATE, or in one direction only, fails a specific arm rather
 // than the whole file.
 //
-// GATE: `ZERO_MIGRATE_TEST_PG_URL`. PostgreSQL only - the online rename is
+// GATE: the run's PostgreSQL container. PostgreSQL only - the online rename is
 // PostgreSQL's.
 
 import assert from "node:assert/strict";

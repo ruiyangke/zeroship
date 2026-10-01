@@ -28,7 +28,7 @@
 // widens effective policy -- so the CLI warns. This asserts the warning reaches
 // STDERR, which is the only place it can do an operator any good.
 //
-// GATE: PG needs `ZERO_MIGRATE_TEST_PG_URL`. SQLite always runs.
+// GATE: PG needs the run's PostgreSQL container. SQLite needs no server.
 
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
@@ -37,7 +37,7 @@ import { delimiter, dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { PG_URL_ENV, pgUrl, requireLiveDb } from "./live-db.js";
+import { pgUrl } from "./live-db.js";
 
 // The host suite builds and resolves its addon in one place.
 import "./addon.js";
@@ -50,7 +50,7 @@ const ADDON_PATH = resolve(
   `../../../../crates/zeroship-migrate-node/zeroship-migrate-node.${process.platform}-${process.arch}${ABI}.node`,
 );
 
-const PG_URL = process.env.ZERO_MIGRATE_TEST_PG_URL;
+const PG_URL = pgUrl();
 const OWNER_APP = "app_policy_layers";
 const TABLE = "layered_rows";
 
@@ -200,7 +200,6 @@ test("both ZERO_MIGRATE_POLICY layers bind on SQLite", async () => {
 });
 
 test("both ZERO_MIGRATE_POLICY layers bind on PostgreSQL", async (ctx) => {
-  requireLiveDb(PG_URL, PG_URL_ENV, "PostgreSQL");
   const pg = await import("pg");
   const client = new pg.Client({ connectionString: pgUrl() });
   await client.connect();

@@ -30,7 +30,7 @@
 //     (arm 4). Without that arm the fix becomes a false-positive machine on
 //     every project whose tables predate the directory being linted.
 //
-// GATES: none for the lint arms; `ZERO_MIGRATE_TEST_PG_URL` for the apply arm.
+// GATES: none for the lint arms; the run's PostgreSQL container for the apply arm.
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -39,7 +39,7 @@ import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { PG_URL_ENV, pgUrl, requireLiveDb } from "./live-db.js";
+import { pgUrl } from "./live-db.js";
 
 // The host suite builds and resolves its addon in one place.
 import "./addon.js";
@@ -195,7 +195,6 @@ test("CONTROL: lint does NOT guess when the linted set never declares the column
 });
 
 test("apply still refuses the unsupported cursor, so lint is an earlier copy of one verdict", async (ctx) => {
-  requireLiveDb(process.env.ZERO_MIGRATE_TEST_PG_URL, PG_URL_ENV, "PostgreSQL");
   const pg = await import("pg");
   const client = new pg.Client({ connectionString: pgUrl() });
   await client.connect();

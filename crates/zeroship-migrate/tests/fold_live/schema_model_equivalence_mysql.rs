@@ -149,7 +149,7 @@ async fn measure(session: &MysqlDevSession, cfg: &ExecutorConfig) -> Result<Meas
 /// makes this leg different from the PostgreSQL one.
 #[compio::test]
 async fn the_neutral_model_preserves_mysql_behaviour_exactly() {
-    let url = require_live_mysql!();
+    let url = crate::support::mysql::mysql_url();
     let session = MysqlDevSession::connect(&url);
     let database = support::mysql::database_token("smeq");
     let cfg = cfg_for(&database);

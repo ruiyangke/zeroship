@@ -1,16 +1,14 @@
-//! Live-MySQL support for the in-crate Rust tests: [`MysqlDevSession`] plus the
-//! database guard and env gate that go with it.
+//! Live-MySQL support for the in-crate Rust tests: [`MysqlDevSession`], the
+//! database guard that goes with it, and [`mysql_url`], the DSN of the MySQL server
+//! this binary owns ([`super::server::mysql`]).
 //!
-//! **Why this file exists.** Before it, MySQL had NO live Rust coverage at all.
-//! `ZERO_MIGRATE_MYSQL_URL` appeared in 52 files under `packages/` and in exactly
-//! one file under `crates/` - then `apply/backend/mysql/mod.rs`, since moved to
-//! `zeroship-migrate-mysql/src/backend/mod.rs`, which is SOURCE, not a test. So the MySQL backend was exercised at RENDER level (unit tests over the
-//! emitted SQL text) and at CLI/HOST level (TypeScript over `mysql2`), and nowhere
-//! in between. No Rust test had ever asked a live MySQL server what the engine
-//! actually did, and the CI `rust` job was given a PostgreSQL service only.
+//! **Why this file exists.** It is where a Rust test asks a live MySQL server what the
+//! engine actually did. The MySQL backend's unit tests read the SQL text it emits, and
+//! the TypeScript host suite drives it over `mysql2` from the CLI; this layer drives
+//! the engine's own apply, journal and drift paths against the server in between.
 //!
-//! That gap was not hypothetical. The charter-injected column collation defect was
-//! wrong on PostgreSQL AND MySQL; the PostgreSQL half was caught by a live
+//! The middle layer is not redundant with the two ends. The charter-injected column
+//! collation defect was wrong on PostgreSQL AND MySQL; the PostgreSQL half was caught by a live
 //! row-ordering test and the MySQL half was pinned only at DDL-TEXT level.
 //!
 //! [`MysqlDevSession`] is the exact sibling of [`PgDevSession`](super::PgDevSession):
@@ -55,34 +53,19 @@ use mysql::{Conn, Opts, Value as MyValue};
 
 use zeroship_migrate::driver::{Bind, DbError, Row, SqlSession, Value};
 
-/// The env var carrying the live-MySQL DSN. It is REQUIRED: when unset, every test
-/// that needs MySQL fails rather than skipping into a green report.
+/// The `mysql://root:…@host:port/database` DSN of this binary's MySQL server,
+/// started on first use.
 ///
-/// The SAME name the TypeScript host suite and the CI `host` job already use, so a
-/// developer or a workflow that exports one DSN lights up both layers.
-pub const MYSQL_URL_ENV: &str = "ZERO_MIGRATE_MYSQL_URL";
-
-/// The live-MySQL DSN from [`MYSQL_URL_ENV`], or a panic naming it.
+/// The server is shared by every MySQL test in the binary. A test isolates itself the
+/// way MySQL allows, in a throwaway DATABASE named by [`database_token`] and dropped by
+/// a [`DatabaseGuard`].
 ///
-/// Expects the `mysql://user:password@host:port/database` URL form; the `mysql`
-/// crate's `Opts::from_url` parses it.
-///
-/// Routes through the SAME
-/// [`require_live_db_dsn`](crate::support::require_live_db_dsn) the PostgreSQL side
-/// uses, so a missing MySQL DSN is a FAILURE rather than a green run with no
-/// coverage. A skip must never read as a pass, so there is no skip.
-///
-/// The literal below MUST stay byte-identical to [`MYSQL_URL_ENV`]: `test_env!`
-/// requires a compile-time literal, so it cannot read the constant.
-#[macro_export]
-macro_rules! require_live_mysql {
-    () => {{
-        $crate::support::require_live_db_dsn(
-            ::zeroship_core::test_env!("ZERO_MIGRATE_MYSQL_URL"),
-            $crate::support::mysql::MYSQL_URL_ENV,
-            "MySQL",
-        )
-    }};
+/// # Panics
+/// When the server cannot be started (see [`super::server::mysql`]), which fails the
+/// calling test: a live test with no server has gathered no coverage.
+#[must_use]
+pub fn mysql_url() -> String {
+    super::server::mysql().mysql_url()
 }
 
 /// Quote a MySQL identifier with backticks, doubling any embedded backtick.
@@ -138,8 +121,7 @@ impl MysqlDevSession {
     ///
     /// # Panics
     /// Panics if the connection fails - a test-support harness, so a connect failure
-    /// is a setup error. It is a DIFFERENT failure from the absent-DSN case, which
-    /// [`require_live_mysql!`] has already reported by the time this runs.
+    /// is a setup error.
     #[must_use]
     pub fn connect(dsn: &str) -> Self {
         let opts =
@@ -180,13 +162,12 @@ impl MysqlDevSession {
 /// Drops the databases a live-MySQL test created, on the way out of scope, whether
 /// the test returned or unwound.
 ///
-/// The MySQL sibling of [`SchemaGuard`](super::SchemaGuard), and it exists for the
-/// same measured reason: a `DROP DATABASE` written as the last statement of a test
-/// only runs when the test reaches it, and every assert before it is a point where a
-/// failing run abandons a database on the server forever. The live MySQL container
-/// this was developed against had accumulated over 200 leaked
-/// `*_migrations` databases from the TypeScript host suite, which is what that leak
-/// looks like after a few months.
+/// The MySQL sibling of [`SchemaGuard`](super::SchemaGuard): a `DROP DATABASE`
+/// written as the last statement of a test only runs when the test reaches it, and
+/// every assert before it is a point where a failing test skips it. Every MySQL test
+/// of the binary shares one server, so a database a failed test leaves behind is in
+/// the catalog its siblings read - `information_schema.SCHEMATA` scans included -
+/// until the process ends and the server goes with it.
 ///
 /// `must_use` sits on the TYPE, not only on the constructor, so a caller that drops
 /// the guard on the spot does not slip past it.

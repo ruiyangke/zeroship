@@ -35,10 +35,10 @@ import { noInjectPolicy } from "./policy.js";
 
 // The host suite builds and resolves its addon in one place.
 import "./addon.js";
-import { MYSQL_URL_ENV, PG_URL_ENV, requireLiveDb } from "./live-db.js";
+import { mysqlUrl, pgUrl } from "./live-db.js";
 
-const PG_URL = process.env.ZERO_MIGRATE_TEST_PG_URL;
-const MYSQL_URL = process.env.ZERO_MIGRATE_MYSQL_URL;
+const PG_URL = pgUrl();
+const MYSQL_URL = mysqlUrl();
 const OWNER_APP = "app_guard_index_scope";
 const SHARED_INDEX = "idx_shared";
 const FREE_INDEX = "idx_free";
@@ -189,7 +189,6 @@ async function withPgSchema(
 }
 
 test("PostgreSQL: a guarded createIndex is refused, not skipped, when another table owns the name", async (ctx) => {
-  requireLiveDb(PG_URL, PG_URL_ENV, "PostgreSQL");
   await withPgSchema("guardidx_taken_pg", async (client, schema) => {
     const base = baseMigration();
     const driver = { kind: "postgres" as const, url: PG_URL };
@@ -222,7 +221,6 @@ test("PostgreSQL: a guarded createIndex is refused, not skipped, when another ta
 });
 
 test("PostgreSQL control: the same guarded createIndex still runs when the name is free", async (ctx) => {
-  requireLiveDb(PG_URL, PG_URL_ENV, "PostgreSQL");
   await withPgSchema("guardidx_free_pg", async (client, schema) => {
     const base = baseMigration();
     const driver = { kind: "postgres" as const, url: PG_URL };
@@ -243,7 +241,6 @@ test("PostgreSQL control: the same guarded createIndex still runs when the name 
 });
 
 test("MySQL: a guarded createIndex lands on its own table under a name another table also uses", async (ctx) => {
-  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   const mysql = (await import("mysql2/promise")).default;
   const admin = await mysql.createConnection({
     uri: MYSQL_URL,

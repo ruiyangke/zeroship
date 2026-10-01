@@ -22,7 +22,7 @@
 // where the completed step is replayed on retry and dies on its own object, so the
 // only way out is hand-editing the journal.
 //
-// GATE: `ZERO_MIGRATE_TEST_PG_URL`.
+// GATE: the run's PostgreSQL container.
 
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";

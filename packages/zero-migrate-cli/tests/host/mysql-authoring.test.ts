@@ -1,5 +1,5 @@
 // Live-MySQL host apply e2e — the MySQL analogue of
-// `authoring.test.ts`, REQUIRING `ZERO_MIGRATE_MYSQL_URL`.
+// `authoring.test.ts`, REQUIRING the run's MySQL container.
 //
 // Proves the V8-FREE authoring path end-to-end against a REAL MySQL server, using
 // the SAME `SqlSession` seam Postgres rides:
@@ -14,11 +14,9 @@
 // This is the structural proof that a `{ kind: "mysql" }` driver routes
 // into the MySQL backend, NOT the Postgres executor, and applies a real migration.
 //
-// GATING: `ZERO_MIGRATE_MYSQL_URL` is REQUIRED. Unset, wrong, or unreachable, the
-// test FAILS with the reason; it never skips, because a skip and a pass print the
-// same exit code and CI reads only the exit code. Set it to e.g.
-//   mysql://root:root@127.0.0.1:3310/zmtest
-// (a dedicated throwaway server).
+// GATING: the run's MySQL container is REQUIRED. Absent or unreachable, the test
+// FAILS with the reason; it never skips, because a skip and a pass print the same
+// exit code and CI reads only the exit code.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -30,9 +28,9 @@ import { noInjectPolicy } from "./policy.js";
 
 // The host suite builds and resolves its addon in one place.
 import "./addon.js";
-import { MYSQL_URL_ENV, requireLiveDb } from "./live-db.js";
+import { mysqlUrl } from "./live-db.js";
 
-const MYSQL_URL = process.env.ZERO_MIGRATE_MYSQL_URL;
+const MYSQL_URL = mysqlUrl();
 
 /** Import the shared sample migration (`createTable widgets` + `addColumn qty`). */
 async function loadMigration() {
@@ -87,10 +85,9 @@ const INVALID_OFFICIAL_TYPE_IDS = [
 // ---------------------------------------------------------------------------
 // Live-MySQL apply — the napi addon lowers for the `mysql` dialect + applies over
 // the real `mysql2` driver into a fresh throwaway database. FAILS (does not skip)
-// when `ZERO_MIGRATE_MYSQL_URL` is unset.
+// when the run's MySQL container is absent.
 // ---------------------------------------------------------------------------
 test("Live MySQL apply: napi addon lowers + applies the authored IR over the mysql2 driver", async (t) => {
-  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
 
   // The `mysql2` driver is an optionalDependency; fail the test loudly if the URL
   // is set but the driver is missing (a real misconfiguration, not a skip).
@@ -196,7 +193,6 @@ test("Live MySQL apply: napi addon lowers + applies the authored IR over the mys
 });
 
 test("Live MySQL TypeID CHECK enforces the official fixtures and empty-prefix form", async (ctx) => {
-  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
 
   const mysql = (await import("mysql2/promise")).default;
   const admin = await mysql.createConnection({
@@ -267,7 +263,6 @@ test("Live MySQL TypeID CHECK enforces the official fixtures and empty-prefix fo
 });
 
 test("Live MySQL UUIDv4 default generates canonical RFC 9562 version and variant bits", async (ctx) => {
-  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
 
   const mysql = (await import("mysql2/promise")).default;
   const admin = await mysql.createConnection({
@@ -342,7 +337,6 @@ test("Live MySQL UUIDv4 default generates canonical RFC 9562 version and variant
 });
 
 test("Live MySQL onConflict updates only the authored target and journals only committed steps", async (ctx) => {
-  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
 
   const mysql = (await import("mysql2/promise")).default;
   const admin = await mysql.createConnection({
@@ -500,7 +494,6 @@ test("Live MySQL onConflict updates only the authored target and journals only c
 });
 
 test("Live MySQL onConflict rejects a non-unique authored target before mutation", async (ctx) => {
-  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
 
   const mysql = (await import("mysql2/promise")).default;
   const admin = await mysql.createConnection({
@@ -618,7 +611,6 @@ test("Live MySQL onConflict rejects a non-unique authored target before mutation
 // failure on the second apply while the first succeeds attributes the failure to
 // the default and not to the harness, the database, or the authoring shape.
 test("Live MySQL applies an expression column default, with a literal default as the control", async (ctx) => {
-  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
 
   const mysql = (await import("mysql2/promise")).default;
   const admin = await mysql.createConnection({

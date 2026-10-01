@@ -23,7 +23,7 @@
 // went wrong on one engine and not the other is precisely what a portable
 // migration tool has to rule out.
 //
-// GATE: PostgreSQL needs `ZERO_MIGRATE_TEST_PG_URL`; SQLite always runs.
+// GATE: PostgreSQL needs the run's PostgreSQL container; SQLite needs no server.
 
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";

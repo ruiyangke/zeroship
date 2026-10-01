@@ -39,7 +39,7 @@
 // If `resolve` learns to take an orphaned `pendingVersion` directly, the last
 // assertion here starts failing. That is the improvement; update this file then.
 //
-// GATE: `ZERO_MIGRATE_TEST_PG_URL`. PostgreSQL only.
+// GATE: the run's PostgreSQL container. PostgreSQL only.
 
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";

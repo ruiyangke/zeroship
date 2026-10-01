@@ -27,7 +27,7 @@ import {
   loadZeroMigrateConfig,
   resolveCliConfig,
 } from "../../src/config.js";
-import { MYSQL_URL_ENV, connectLivePg, pgUrl, requireLiveDb } from "./live-db.js";
+import { connectLivePg, mysqlUrl, pgUrl } from "./live-db.js";
 import { noInjectPolicy } from "./policy.js";
 import {
   currentIrVersion,
@@ -66,7 +66,7 @@ const RELEASE_PROJECT_LOCK_SQL = `SELECT pg_advisory_unlock(
  * inject-shape versus ownership, and only the names make them look alike.
  */
 const NO_INJECT_POLICY = "policy_version = 1\n";
-const MYSQL_URL = process.env.ZERO_MIGRATE_MYSQL_URL;
+const MYSQL_URL = mysqlUrl();
 
 const CONFIG_ENV_KEYS = [
   "DATABASE_URL",
@@ -1880,7 +1880,6 @@ test("ZERO_MIGRATE_LOG shows a real cleanup failure on stderr", async (t) => {
 // `resolve` has no arm here: it refuses any non-PostgreSQL driver before it reads,
 // so there is no MySQL busy path to assert.
 test("MySQL: CLI status and plan answer while a peer holds the project lock", async (t) => {
-  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
 
   const mysql = (await import("mysql2/promise")).default;
   const holder = await mysql.createConnection({ uri: MYSQL_URL, multipleStatements: true });

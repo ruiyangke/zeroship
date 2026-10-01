@@ -17,7 +17,7 @@
 // unknown. Without it, the assertion that the message does not name that command
 // would also pass in a world where every verb was accepted.
 //
-// GATE: `ZERO_MIGRATE_TEST_PG_URL`. PostgreSQL only - the online rename is
+// GATE: the run's PostgreSQL container. PostgreSQL only - the online rename is
 // PostgreSQL's.
 
 import assert from "node:assert/strict";

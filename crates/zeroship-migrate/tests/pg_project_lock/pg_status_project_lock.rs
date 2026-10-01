@@ -12,7 +12,8 @@
 //! the only arrangement that reproduces a peer's deploy: a single session takes
 //! `pg_advisory_lock` re-entrantly and would never observe contention at all.
 //!
-//! GATED behind `ZERO_MIGRATE_TEST_PG_URL`, like every other live suite here.
+//! Runs in a database of its own on the PostgreSQL server this binary owns
+//! (`support::pg_database`).
 
 use crate::support;
 
@@ -101,7 +102,7 @@ fn read_within_deadline<T: Send + 'static>(
 #[test]
 #[allow(clippy::result_large_err)]
 fn plan_status_reports_a_busy_project_lock_instead_of_waiting_for_a_peer() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let holder = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -152,7 +153,7 @@ fn plan_status_reports_a_busy_project_lock_instead_of_waiting_for_a_peer() {
 #[test]
 #[allow(clippy::result_large_err)]
 fn plan_status_still_locks_reads_and_reconciles_when_no_peer_holds_the_lock() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let observer = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);

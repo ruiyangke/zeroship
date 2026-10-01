@@ -27,7 +27,7 @@
 // the check is live and that the alias swap passing it is a real result rather than
 // an absent check.
 //
-// GATE: `ZERO_MIGRATE_TEST_PG_URL`. Database-generated uuid defaults are
+// GATE: the run's PostgreSQL container. Database-generated uuid defaults are
 // PostgreSQL-only here.
 
 import assert from "node:assert/strict";
@@ -37,7 +37,7 @@ import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { PG_URL_ENV, pgUrl, requireLiveDb } from "./live-db.js";
+import { pgUrl } from "./live-db.js";
 
 // The host suite builds and resolves its addon in one place.
 import "./addon.js";
@@ -126,7 +126,6 @@ function apply(work: string, namespace: string): { code: number | null; text: st
 }
 
 test("a uuidV4 default is generated per row by the database", async (ctx) => {
-  requireLiveDb(process.env.ZERO_MIGRATE_TEST_PG_URL, PG_URL_ENV, "PostgreSQL");
   const pg = await import("pg");
   const client = new pg.Client({ connectionString: pgUrl() });
   await client.connect();
@@ -179,7 +178,6 @@ test("a uuidV4 default is generated per row by the database", async (ctx) => {
 });
 
 test("swapping the deprecated genRandomUuid alias for uuidV4 does not drift", async (ctx) => {
-  requireLiveDb(process.env.ZERO_MIGRATE_TEST_PG_URL, PG_URL_ENV, "PostgreSQL");
   const pg = await import("pg");
   const client = new pg.Client({ connectionString: pgUrl() });
   await client.connect();
@@ -219,7 +217,6 @@ test("swapping the deprecated genRandomUuid alias for uuidV4 does not drift", as
 /** Without this, the test above is equally consistent with a journal that never
  *  compares checksums at all. */
 test("CONTROL: a substantive edit to the same applied migration IS refused", async (ctx) => {
-  requireLiveDb(process.env.ZERO_MIGRATE_TEST_PG_URL, PG_URL_ENV, "PostgreSQL");
   const pg = await import("pg");
   const client = new pg.Client({ connectionString: pgUrl() });
   await client.connect();

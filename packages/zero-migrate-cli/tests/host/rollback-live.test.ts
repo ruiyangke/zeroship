@@ -21,7 +21,7 @@
 //      the schema is untouched.
 //
 // REQUIRES: PostgreSQL via `connectLivePg` (see `live-db.ts`); MySQL via
-// `ZERO_MIGRATE_MYSQL_URL`. Neither may be absent. Runs under `node --import tsx --test`.
+// the run's MySQL container. Neither may be absent. Runs under `tests/host/run.ts`.
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -31,7 +31,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { claim, release } from "./extension-claim.js";
-import { MYSQL_URL_ENV, connectLivePg, pgUrl, requireLiveDb } from "./live-db.js";
+import { connectLivePg, mysqlUrl, pgUrl } from "./live-db.js";
 import { createExtensionPolicy, createSchemaPolicy, noInjectPolicy } from "./policy.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -42,7 +42,7 @@ const ADDON_PATH = resolve(
   `../../../../crates/zeroship-migrate-node/zeroship-migrate-node.${process.platform}-${process.arch}${ABI}.node`,
 );
 
-const MYSQL_URL = process.env.ZERO_MIGRATE_MYSQL_URL;
+const MYSQL_URL = mysqlUrl();
 const TABLE = "rollback_notes";
 const SEQUENCE = "rollback_counter";
 
@@ -392,12 +392,12 @@ test("PostgreSQL: rolling back a dropExtension reinstalls the extension its crea
 
   let dir: string | undefined;
   try {
-    // An extension is database-wide, so no name this arm picks isolates it from a
-    // sibling gate run. The claim is how the claimants isolate in TIME instead, and it
-    // is the SAME lock the Rust suites take - `extension-claim.ts` explains why the key
-    // is copied from them rather than re-designed. Taken before anything else, so an
-    // arm that cannot get it has created nothing to reclaim, and LOUD: `claim` throws
-    // rather than skipping, because a lost claim means this arm never ran.
+    // An extension is database-wide, so no name this arm picks isolates it from
+    // another file of this suite. The claim is how the claimants isolate in TIME
+    // instead - `extension-claim.ts` explains why the key names the extension alone.
+    // Taken before anything else, so an arm that cannot get it has created nothing to
+    // reclaim, and LOUD: `claim` throws rather than skipping, because a lost claim
+    // means this arm never ran.
     //
     // It also establishes the precondition the assertion below reads: `claim` issues a
     // `DROP EXTENSION IF EXISTS` INSIDE the claim, so a leftover from a run killed
@@ -591,7 +591,6 @@ test("PostgreSQL: a rollback whose project lock is held waits instead of failing
 });
 
 test("MySQL: a rollback whose project lock is held fails with the holder named", async (t) => {
-  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   const mysql = (await import("mysql2/promise")).default;
   const schema = uniqueSchema("rb_lock_my");
   const metaSchema = `${schema}_migrations`;
@@ -649,7 +648,6 @@ test("MySQL: a rollback whose project lock is held fails with the holder named",
 });
 
 test("MySQL: the CLI rolls an applied migration back and leaves it pending", async (t) => {
-  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   const mysql = (await import("mysql2/promise")).default;
   const schema = uniqueSchema("rb_live_my");
   const metaSchema = `${schema}_migrations`;

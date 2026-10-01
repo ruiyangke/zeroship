@@ -19,7 +19,7 @@
 // The first arm is the control: a genuinely pending migration DOES exit 1, so
 // these zeroes are the gate's scope and not the gate being broken.
 //
-// GATE: `ZERO_MIGRATE_TEST_PG_URL`.
+// GATE: the run's PostgreSQL container.
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";

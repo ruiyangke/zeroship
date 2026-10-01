@@ -36,7 +36,7 @@
 // `apply` promises during a rename window, and it belongs to whoever owns that
 // promise.
 //
-// GATE: `ZERO_MIGRATE_TEST_PG_URL`. PostgreSQL only.
+// GATE: the run's PostgreSQL container. PostgreSQL only.
 
 // INTERACTS WITH AN ORPHANED CONTRACT, and the pair is worse than either alone.
 // `orphaned-contract-diagnosis.test.ts` pins that a contract whose creator file

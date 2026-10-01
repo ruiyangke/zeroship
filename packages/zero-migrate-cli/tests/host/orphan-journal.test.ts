@@ -15,7 +15,7 @@
 // deploy already raises for a pending migration, so it refuses rather than prints:
 // asserting a `tracing::warn!` with no subscriber installed would assert nothing.
 //
-// GATE: `connectLivePg` (see `live-db.ts`). Runs under `node --import tsx --test`.
+// GATE: `connectLivePg` (see `live-db.ts`). Runs under `tests/host/run.ts`.
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";

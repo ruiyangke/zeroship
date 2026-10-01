@@ -19,7 +19,7 @@
 // records-not-run `completed` event per authored step, and supersession edges over
 // the rows the migration set does not account for.
 //
-// GATE: `connectLivePg` (see `live-db.ts`). Runs under `node --import tsx --test`.
+// GATE: `connectLivePg` (see `live-db.ts`). Runs under `tests/host/run.ts`.
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";

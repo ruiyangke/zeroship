@@ -24,7 +24,7 @@ import { dialect, table, t } from "@zeroship/migrate";
 import { buildEnvelope } from "@zeroship/migrate/internal/recorder";
 import { apply, currentIrVersion } from "zero-migrate-cli";
 import { noInjectPolicy } from "./policy.js";
-import { MYSQL_URL_ENV, connectLivePg, pgUrl, requireLiveDb } from "./live-db.js";
+import { connectLivePg, mysqlUrl, pgUrl } from "./live-db.js";
 
 
 // The host suite builds and resolves its addon in one place.
@@ -53,7 +53,7 @@ const addon = createRequire(import.meta.url)(
 ) as GenArtifactsAddon;
 
 const PG_URL = pgUrl();
-const MYSQL_URL = process.env.ZERO_MIGRATE_MYSQL_URL;
+const MYSQL_URL = mysqlUrl();
 
 /** A fresh, unique name so parallel runs / reruns never collide. MySQL identifiers
  *  cap at 64 chars and `<db>_migrations` must also fit, so keep it short. */
@@ -116,7 +116,6 @@ function assertArtifactsMatchLive(projectSchema: string, target: string, live: S
 }
 
 test("genArtifacts folds the MySQL target's own dialectal leg (matches the live MySQL catalog)", async (ctx) => {
-  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
 
   const mysql = (await import("mysql2/promise")).default;
   const admin = await mysql.createConnection({ uri: MYSQL_URL, multipleStatements: true });

@@ -111,7 +111,7 @@ async fn drift_between_fold_and_live(
     native_sql: &[&str],
     folded: &str,
 ) -> StructuralDrift {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
     let schema = token();
     let policy = support::no_inject(&schema);

@@ -21,7 +21,7 @@
 // than a re-implementation of it. When it is absent the same predicate is evaluated
 // in JavaScript, because the property belongs to the JSON rather than to jq.
 //
-// GATE: `ZERO_MIGRATE_TEST_PG_URL`.
+// GATE: the run's PostgreSQL container.
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";

@@ -195,7 +195,7 @@ async fn prefixes(
     source: &str,
     policy_for: fn(&str) -> EffectivePolicy,
 ) -> Vec<Prefix> {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
     let schema = token();
     let cfg = ExecutorConfig::new(format!("project_{schema}"), &schema, policy_for(&schema));

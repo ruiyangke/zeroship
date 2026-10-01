@@ -27,8 +27,8 @@
 // the key, the predicate in a `WHERE` - which is what says the options are wired
 // and the refusals are a dialect decision rather than a dead feature.
 //
-// GATE: MySQL arm needs `ZERO_MIGRATE_MYSQL_URL`; the SQLite arms are an
-// in-process file and always run.
+// GATE: MySQL arm needs the run's MySQL container; the SQLite arms are an
+// in-process file and need no server.
 
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -43,10 +43,10 @@ import type { MigrationModule } from "@zeroship/migrate/internal/recorder";
 
 // The host suite builds and resolves its addon in one place.
 import "./addon.js";
-import { MYSQL_URL_ENV, requireLiveDb } from "./live-db.js";
+import { mysqlUrl } from "./live-db.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const MYSQL_URL = process.env.ZERO_MIGRATE_MYSQL_URL;
+const MYSQL_URL = mysqlUrl();
 const OWNER_APP = "app_index_facet_matrix";
 
 type IndexOptions = Parameters<ReturnType<ReturnType<typeof table>["index"]>["add"]>[0];
@@ -208,7 +208,6 @@ test("SQLite control: the two facets the matrix declares supported apply and rea
 });
 
 test("MySQL refuses every index facet the matrix declares unsupported, leaving nothing behind", async (ctx) => {
-  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   const mysql = (await import("mysql2/promise")).default;
   const admin = await mysql.createConnection({ uri: MYSQL_URL, multipleStatements: true });
   const database = uniqueNamespace("facet_my");

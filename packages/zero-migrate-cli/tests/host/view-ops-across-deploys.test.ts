@@ -44,10 +44,10 @@ import { noInjectPolicy } from "./policy.js";
 
 // The host suite builds and resolves its addon in one place.
 import "./addon.js";
-import { MYSQL_URL_ENV, PG_URL_ENV, requireLiveDb } from "./live-db.js";
+import { mysqlUrl, pgUrl } from "./live-db.js";
 
-const MYSQL_URL = process.env.ZERO_MIGRATE_MYSQL_URL;
-const PG_URL = process.env.ZERO_MIGRATE_TEST_PG_URL;
+const MYSQL_URL = mysqlUrl();
+const PG_URL = pgUrl();
 const OWNER_APP = "app_mysql_view_drop";
 const TABLE = "view_drop_items";
 const VIEW = "view_drop_active";
@@ -127,7 +127,6 @@ function applyOne(
 }
 
 test("MySQL: dropping a view an applied migration created reaches the database", async (ctx) => {
-  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   const mysql = (await import("mysql2/promise")).default;
   const admin = await mysql.createConnection({
     uri: MYSQL_URL,
@@ -174,7 +173,6 @@ test("MySQL: dropping a view an applied migration created reaches the database",
 });
 
 test("MySQL: creating and dropping a view within ONE migration succeeds, which is what makes the defect need two deploys", async (ctx) => {
-  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   const mysql = (await import("mysql2/promise")).default;
   const admin = await mysql.createConnection({
     uri: MYSQL_URL,
@@ -262,7 +260,6 @@ const OWNED = { [TABLE]: OWNER_APP, [VIEW]: OWNER_APP };
 const SQLITE_PROJECT = "public";
 
 test("PostgreSQL: replacing a view across two deploys applies the new body", async (ctx) => {
-  requireLiveDb(PG_URL, PG_URL_ENV, "PostgreSQL");
   const pg = (await import("pg")).default;
   const client = new pg.Client({ connectionString: PG_URL });
   await client.connect();
@@ -304,7 +301,6 @@ test("PostgreSQL: replacing a view across two deploys applies the new body", asy
 });
 
 test("MySQL: replacing a view across two deploys applies too, and did so even before the fold read `replace`", async (ctx) => {
-  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   const mysql = (await import("mysql2/promise")).default;
   const admin = await mysql.createConnection({
     uri: MYSQL_URL,
@@ -355,7 +351,6 @@ function dropTheViewIfExists(): NamedMigration {
 }
 
 test("MySQL: an ifExists drop across two deploys removes the view, like the unguarded one", async (ctx) => {
-  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   const mysql = (await import("mysql2/promise")).default;
   const admin = await mysql.createConnection({
     uri: MYSQL_URL,
@@ -418,7 +413,6 @@ test("MySQL: an ifExists drop across two deploys removes the view, like the ungu
  *  projection folds the drop, the fold reports the view absent, and MySQL's guard leg
  *  refuses. That is every real deployment. */
 test("MySQL: an ifExists drop of a view that never existed is refused", async (ctx) => {
-  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   const mysql = (await import("mysql2/promise")).default;
   const admin = await mysql.createConnection({
     uri: MYSQL_URL,
@@ -469,7 +463,6 @@ test("MySQL: an ifExists drop of a view that never existed is refused", async (c
  *  `fold-dropview name=view_drop_active present=false` followed by the refusal. A
  *  fixture with no priors measures a path no deployed application takes. */
 test("MySQL: the same ifExists drop succeeds when no prior migration was applied", async (ctx) => {
-  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   const mysql = (await import("mysql2/promise")).default;
   const admin = await mysql.createConnection({
     uri: MYSQL_URL,
@@ -503,7 +496,7 @@ test("MySQL: the same ifExists drop succeeds when no prior migration was applied
   }
 });
 
-// SQLite needs no server, so both arms always run. `dialect-table.ts:73` and `:96`
+// SQLite needs no server, so both arms run on it too. `dialect-table.ts:73` and `:96`
 // mark the base createView and dropView variants portable here too, so this is the
 // third cell of each row rather than a dialect that opts out.
 test("SQLite: both view operations across two deploys", async () => {
@@ -556,7 +549,6 @@ test("SQLite: both view operations across two deploys", async () => {
 });
 
 test("PostgreSQL: the same authored pair drops the view, the parity the MySQL arm is measured against", async (ctx) => {
-  requireLiveDb(PG_URL, PG_URL_ENV, "PostgreSQL");
   const pg = (await import("pg")).default;
   const client = new pg.Client({ connectionString: PG_URL });
   await client.connect();
@@ -667,7 +659,6 @@ test("SQLite: apply refuses an absent view at the database, with or without a pr
  *  Both histories fail, so the error TEXT carries the result: the fold names the envelope
  *  it was projecting, PostgreSQL names the relation. */
 test("PostgreSQL: an applied prior moves the refusal from the database into the fold", async (ctx) => {
-  requireLiveDb(PG_URL, PG_URL_ENV, "PostgreSQL");
   const pg = await import("pg");
   const client = new pg.Client({ connectionString: PG_URL });
   await client.connect();
@@ -742,7 +733,6 @@ test("PostgreSQL: an applied prior moves the refusal from the database into the 
  *  Both arms drop a view NO migration in the history ever created, so a pass cannot come
  *  from the snapshot resolving a known view without consulting the guard. */
 test("PostgreSQL: an ifExists drop of a view that never existed is absorbed, unlike MySQL", async (ctx) => {
-  requireLiveDb(PG_URL, PG_URL_ENV, "PostgreSQL");
   const pg = await import("pg");
   const client = new pg.Client({ connectionString: PG_URL });
   await client.connect();

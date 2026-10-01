@@ -7,8 +7,8 @@
 //! Sequences are PostgreSQL-only here (`Capability::Sequence`), so there is no
 //! SQLite sibling for this one.
 //!
-//! GATED behind `ZERO_MIGRATE_TEST_PG_URL`. Assertions read the live catalog
-//! through `snapshot_schema`, never the plan the engine intended to run.
+//! Runs in a database of its own on the PostgreSQL server this binary owns
+//! (`support::pg_database`). Assertions read the live catalog through `snapshot_schema`, never the plan the engine intended to run.
 
 use crate::support;
 
@@ -173,7 +173,7 @@ fn pg_guard(cfg: &ExecutorConfig) -> Box<dyn zeroship_migrate::MigrationGuard> {
 
 #[compio::test]
 async fn rolling_back_an_unconsumed_dropped_sequence_is_deliberately_refused() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
     let schema = token();
     let cfg = ExecutorConfig::new(
@@ -293,7 +293,7 @@ async fn rolling_back_an_unconsumed_dropped_sequence_is_deliberately_refused() {
 /// rollback would conjure a sequence that never existed here.
 #[compio::test]
 async fn a_guarded_sequence_drop_keeps_no_inverse() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
     let schema = token();
     let cfg = ExecutorConfig::new(

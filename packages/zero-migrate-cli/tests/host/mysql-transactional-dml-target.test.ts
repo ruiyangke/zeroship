@@ -21,7 +21,7 @@
 // build that refused EVERY MySQL data migration would pass both refusal arms, and
 // the file would be reporting a working gate while data migrations were dead.
 //
-// GATE: `ZERO_MIGRATE_MYSQL_URL`.
+// GATE: the run's MySQL container.
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -32,9 +32,9 @@ import type { MigrationModule } from "@zeroship/migrate/internal/recorder";
 
 // The host suite builds and resolves its addon in one place.
 import "./addon.js";
-import { MYSQL_URL_ENV, requireLiveDb } from "./live-db.js";
+import { mysqlUrl } from "./live-db.js";
 
-const MYSQL_URL = process.env.ZERO_MIGRATE_MYSQL_URL;
+const MYSQL_URL = mysqlUrl();
 const OWNER_APP = "app_dml_target";
 
 type NamedMigration = MigrationModule & { readonly name: string };
@@ -75,7 +75,6 @@ function authored(name: string, schema: () => void): NamedMigration {
 const TARGETS = ["plain_rows", "myisam_rows", "triggered_rows"] as const;
 
 test("MySQL refuses a data migration whose target is non-InnoDB or carries a user trigger", async (ctx) => {
-  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   const mysql = (await import("mysql2/promise")).default;
   const admin = await mysql.createConnection({ uri: MYSQL_URL, multipleStatements: true });
   const database = uniqueNamespace("dmltarget_my");

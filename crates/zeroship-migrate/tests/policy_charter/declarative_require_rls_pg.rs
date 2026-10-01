@@ -23,7 +23,8 @@
 //!    because the refusal is about a CREATE, not about the charter's presence;
 //! 4. a charter that never mentions `require_rls` -> unaffected.
 //!
-//! REQUIRES `ZERO_MIGRATE_TEST_PG_URL`. An unset DSN FAILS these tests: a skipped
+//! Runs in a database of its own on the PostgreSQL server this binary owns
+//! (`support::pg_database`). A server that cannot start FAILS these tests: a skipped
 //! live suite reports exactly like a passing one, so there is no skip.
 
 use crate::support;
@@ -228,7 +229,7 @@ fn descriptor_two_fields(name: &str) -> CollectionDescriptor {
 /// the table so an operator knows which one to move.
 #[compio::test]
 async fn require_rls_over_the_created_schema_refuses_the_declarative_create() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -302,7 +303,7 @@ async fn require_rls_over_the_created_schema_refuses_the_declarative_create() {
 /// anything".
 #[compio::test]
 async fn require_rls_names_only_the_covered_table_of_a_multi_table_create() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -364,7 +365,7 @@ scope = {{ include = [{:?}] }}
 /// touches. The identical CREATE must still plan.
 #[compio::test]
 async fn require_rls_over_another_schema_still_plans_the_create() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -411,7 +412,7 @@ async fn require_rls_over_another_schema_still_plans_the_create() {
 /// the no-op re-deploy that follows it.
 #[compio::test]
 async fn require_rls_admits_an_alter_only_and_a_no_op_diff() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -509,7 +510,7 @@ async fn require_rls_admits_an_alter_only_and_a_no_op_diff() {
 /// The charter every other declarative test runs under keeps planning its CREATE.
 #[compio::test]
 async fn a_charter_without_require_rls_plans_the_create() {
-    let url = require_live_pg!();
+    let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
