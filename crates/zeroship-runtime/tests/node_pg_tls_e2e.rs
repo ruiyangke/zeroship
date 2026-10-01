@@ -13,7 +13,11 @@ fn unmodified_pg_driver_uses_real_tls_with_ca_pin_against_live_postgres() {
     let _lock = lock_env();
     let _env = SettingsGuard::set_dev();
     let server = ensure_tls_postgres();
-    let host = "localhost";
+    // Dial the address and verify the name. An egress rule names a destination
+    // with at least two labels or as an address range, so a single-label
+    // `localhost` cannot be admitted at all; `servername: "localhost"` below
+    // still makes the handshake check the certificate against that name.
+    let host = server.host;
     let ca_pem = serde_json::to_string(&server.ca_pem).unwrap();
     let wrong_ca_pem = serde_json::to_string(&server.wrong_ca_pem).unwrap();
 
