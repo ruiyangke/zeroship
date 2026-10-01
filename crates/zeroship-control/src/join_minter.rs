@@ -104,29 +104,84 @@ pub enum RotationOutcome {
 /// Write `token` to `path` atomically, owner-readable only.
 ///
 /// Atomic because a worker may read at any instant and half a JWT is not a
-/// refusal a worker can act on. The temporary file is created beside the target
-/// so the rename stays within one filesystem, and the mode is set BEFORE the
-/// rename so the file is never briefly world-readable under its final name.
+/// refusal a worker can act on: the token goes into a new file beside `path`
+/// (so the rename stays within one filesystem), which then replaces `path` in
+/// one rename.
+///
+/// That file is created owner-only, so the token is never readable by anyone
+/// else under any name, the temporary one included. Its name is fresh for each
+/// write and it is opened with `create_new`, which refuses whatever is already
+/// at that name, a planted symlink included: someone who can write to the
+/// directory cannot have the token written anywhere else. The file is synced
+/// before the rename and the directory after it, so a crash leaves the old
+/// token or the new one.
 ///
 /// # Errors
 ///
-/// Returns a message naming the path when the write or the rename fails.
+/// Returns a message naming the path when the write or the rename fails. A
+/// failed write leaves the previous token in place and no temporary behind.
 pub fn write_token_file(path: &Path, token: &str) -> Result<(), String> {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    use std::io::Write as _;
+    write_private_file(path, |file| file.write_all(token.as_bytes()))
+}
+
+/// [`write_token_file`], with the step that writes the new file's contents handed in.
+fn write_private_file(
+    path: &Path,
+    write_contents: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
+) -> Result<(), String> {
+    /// The temporary until it is renamed into place; dropping it removes it.
+    struct Pending(PathBuf);
+    impl Drop for Pending {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    // A bare file name has an empty parent, which names no directory to open;
+    // the file then lives in the working directory, so that is the one synced.
+    let parent = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
     std::fs::create_dir_all(parent)
         .map_err(|error| format!("join token directory {}: {error}", parent.display()))?;
-    let temporary = path.with_extension("tmp");
-    std::fs::write(&temporary, token.as_bytes())
-        .map_err(|error| format!("join token file {}: write: {error}", temporary.display()))?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| format!("join token file {} names no file", path.display()))?;
+    let temporary = parent.join(format!(
+        ".{}.{}.tmp",
+        name.to_string_lossy(),
+        uuid::Uuid::new_v4().simple()
+    ));
+    let mut file = create_private(&temporary)
+        .map_err(|error| format!("join token file {}: create: {error}", temporary.display()))?;
+    let pending = Pending(temporary);
+    write_contents(&mut file)
+        .and_then(|()| file.sync_all())
+        .map_err(|error| format!("join token file {}: write: {error}", pending.0.display()))?;
+    drop(file);
+    std::fs::rename(&pending.0, path)
+        .map_err(|error| format!("join token file {}: rename: {error}", path.display()))?;
+    std::fs::File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| format!("join token directory {}: sync: {error}", parent.display()))
+}
+
+/// Create `path` as a new file that only its owner can read or write.
+///
+/// `create_new` refuses any name that exists, a symlink included, so the
+/// token is never written into a file someone else placed. The mode is part of
+/// the create, so there is no moment at which the file is readable by others.
+fn create_private(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o600)).map_err(
-            |error| format!("join token file {}: chmod: {error}", temporary.display()),
-        )?;
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
     }
-    std::fs::rename(&temporary, path)
-        .map_err(|error| format!("join token file {}: rename: {error}", path.display()))
+    options.open(path)
 }
 
 /// Mint one token and write it, if this replica holds the minter lease.
@@ -267,15 +322,22 @@ mod tests {
         assert_eq!(verified.signer_id, signer_id);
     }
 
+    /// The names in `dir`, sorted.
+    fn entries(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .expect("read the token directory")
+            .map(|entry| entry.expect("entry").file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
     /// The file lands complete and owner-only, and replacing it leaves no
     /// temporary behind for a worker to read instead.
     #[test]
     fn the_token_file_is_replaced_atomically_and_owner_only() {
-        let dir = std::env::temp_dir().join(format!(
-            "zeroship-join-minter-{}",
-            zeroship_core::typed_id::new_join_signer_id()
-        ));
-        let path = dir.join("nested").join("join-token");
+        let dir = tempfile::tempdir().expect("token directory");
+        let path = dir.path().join("nested").join("join-token");
         write_token_file(&path, "first.token.value").expect("writes");
         assert_eq!(
             std::fs::read_to_string(&path).expect("reads"),
@@ -286,13 +348,252 @@ mod tests {
             std::fs::read_to_string(&path).expect("reads"),
             "second.token.value"
         );
-        assert!(!path.with_extension("tmp").exists(), "a temporary was left behind");
+        assert_eq!(
+            entries(path.parent().expect("parent")),
+            vec!["join-token".to_string()],
+            "a temporary was left behind"
+        );
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
             let mode = std::fs::metadata(&path).expect("stat").permissions().mode();
             assert_eq!(mode & 0o777, 0o600, "the token must be owner-only");
         }
-        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The file the token is written into is owner-only from the moment it
+    /// exists, before any byte of the token is in it, so no other user can
+    /// read the token under any name at any point. Every file in the directory
+    /// is looked at while the token is being written.
+    #[cfg(unix)]
+    #[test]
+    fn the_token_is_only_ever_written_into_an_owner_only_file() {
+        use std::io::Write as _;
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().expect("token directory");
+        // The mode a plain create gets under this process's umask, printed so
+        // `the_owner_only_mode_holds_under_an_open_umask` can confirm the
+        // umask it ran this test under.
+        let witness = dir.path().join("umask-witness");
+        std::fs::File::create(&witness).expect("umask witness");
+        let default_mode = std::fs::metadata(&witness).expect("stat").permissions().mode() & 0o777;
+        std::fs::remove_file(&witness).expect("remove the witness");
+        println!("default file mode {default_mode:o}");
+
+        let path = dir.path().join("join-token");
+        write_token_file(&path, "previous.token.value").expect("writes the first token");
+        let mut seen = Vec::new();
+        write_private_file(&path, |file| {
+            let own = file.metadata()?.permissions().mode();
+            seen.push(("the file being written".to_string(), own));
+            for entry in std::fs::read_dir(dir.path())? {
+                let entry = entry?;
+                let mode = entry.metadata()?.permissions().mode();
+                seen.push((entry.file_name().to_string_lossy().into_owned(), mode));
+            }
+            file.write_all(b"next.token.value")
+        })
+        .expect("writes the next token");
+
+        assert!(seen.len() >= 3, "the write step saw its own file and the directory: {seen:?}");
+        for (name, mode) in &seen {
+            assert_eq!(
+                mode & 0o077,
+                0,
+                "{name} was readable by others (mode {mode:o}) while the token was written"
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("reads"),
+            "next.token.value"
+        );
+    }
+
+    /// Run one test of this binary in a child process, in `cwd`, optionally
+    /// under a `umask`; return whether it passed and its output. Every caller
+    /// asserts `1 passed`: a name that matches nothing runs zero tests and
+    /// still exits 0. The working directory and the umask are process-wide,
+    /// which is why these run in a child and not in this process.
+    fn run_one_test_in_child(
+        name: &str,
+        ignored: bool,
+        umask: Option<&str>,
+        cwd: &Path,
+    ) -> (bool, String) {
+        let test = format!(
+            "{}::{name}",
+            module_path!().split_once("::").expect("crate prefix").1
+        );
+        let exe = std::env::current_exe().expect("this test binary");
+        let mut args = vec![
+            "--exact".to_string(),
+            test,
+            "--nocapture".to_string(),
+            "--test-threads=1".to_string(),
+        ];
+        if ignored {
+            args.push("--ignored".to_string());
+        }
+        let mut command = umask.map_or_else(
+            || std::process::Command::new(&exe),
+            |mask| {
+                let mut shell = std::process::Command::new("sh");
+                shell
+                    .arg("-c")
+                    .arg(format!("umask {mask} && exec \"$0\" \"$@\""))
+                    .arg(&exe);
+                shell
+            },
+        );
+        let output = command
+            .args(&args)
+            .current_dir(cwd)
+            .output()
+            .expect("run a child copy of this test binary");
+        let mut combined = String::from_utf8_lossy(&output.stdout).into_owned();
+        combined.push_str(&String::from_utf8_lossy(&output.stderr));
+        (output.status.success(), combined)
+    }
+
+    /// The owner-only mode comes from the create, not from a umask that
+    /// happens to mask group and other bits: under an open umask, where a plain
+    /// create is readable by everyone, the file is still owner-only throughout.
+    #[cfg(unix)]
+    #[test]
+    fn the_owner_only_mode_holds_under_an_open_umask() {
+        let cwd = tempfile::tempdir().expect("child working directory");
+        let (passed, output) = run_one_test_in_child(
+            "the_token_is_only_ever_written_into_an_owner_only_file",
+            false,
+            Some("000"),
+            cwd.path(),
+        );
+        assert!(
+            output.contains("default file mode 666"),
+            "the child did not run under umask 000:\n{output}"
+        );
+        assert!(passed && output.contains("1 passed"), "{output}");
+    }
+
+    /// A token path given as a bare file name, relative to the working
+    /// directory, has an empty parent. The token lands in the working
+    /// directory and the write succeeds; the directory it syncs is the working
+    /// directory, not an empty path that names nothing.
+    #[test]
+    fn a_bare_token_file_name_is_written_in_the_working_directory() {
+        let cwd = tempfile::tempdir().expect("child working directory");
+        let (passed, output) = run_one_test_in_child(
+            "write_a_bare_token_file_name_here",
+            true,
+            None,
+            cwd.path(),
+        );
+        assert!(passed && output.contains("1 passed"), "{output}");
+        assert_eq!(
+            std::fs::read_to_string(cwd.path().join("join-token")).expect("the token landed"),
+            "bare.token.value"
+        );
+        assert_eq!(entries(cwd.path()), vec!["join-token".to_string()]);
+    }
+
+    /// The child half of `a_bare_token_file_name_is_written_in_the_working_directory`.
+    #[test]
+    #[ignore = "run by a_bare_token_file_name_is_written_in_the_working_directory, \
+                in a scratch working directory"]
+    fn write_a_bare_token_file_name_here() {
+        let here = std::env::current_dir().expect("working directory");
+        let scratch = std::env::temp_dir()
+            .canonicalize()
+            .expect("the temp directory");
+        assert!(
+            here.starts_with(&scratch),
+            "refusing to write a token outside a scratch directory: {}",
+            here.display()
+        );
+        write_token_file(Path::new("join-token"), "bare.token.value")
+            .expect("a bare file name writes");
+    }
+
+    /// The token's file is only ever created new. A name that already exists,
+    /// a symlink to someone else's file or a plain file, is refused, and what
+    /// it names keeps its bytes.
+    #[cfg(unix)]
+    #[test]
+    fn a_private_file_is_never_created_over_an_existing_name() {
+        let dir = tempfile::tempdir().expect("token directory");
+        let elsewhere = dir.path().join("elsewhere");
+        std::fs::write(&elsewhere, "sentinel").expect("someone else's file");
+        let symlink = dir.path().join(".join-token.planted.tmp");
+        std::os::unix::fs::symlink(&elsewhere, &symlink).expect("plant a symlink");
+        let plain = dir.path().join(".join-token.taken.tmp");
+        std::fs::write(&plain, "taken").expect("a file at the name");
+
+        for name in [&symlink, &plain] {
+            let refused = create_private(name).map(|_| ()).map_err(|e| e.kind());
+            assert_eq!(refused, Err(std::io::ErrorKind::AlreadyExists), "{}", name.display());
+        }
+        assert_eq!(std::fs::read_to_string(&elsewhere).expect("reads"), "sentinel");
+        assert_eq!(std::fs::read_to_string(&plain).expect("reads"), "taken");
+    }
+
+    /// Someone who can write to the token's directory plants a symlink where a
+    /// fixed temporary name would be. The token is not written through it, and
+    /// the token file is a regular file afterwards.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_planted_beside_the_token_file_is_not_followed() {
+        let dir = tempfile::tempdir().expect("token directory");
+        let elsewhere = tempfile::tempdir().expect("the planter's directory");
+        let stolen = elsewhere.path().join("stolen");
+        std::fs::write(&stolen, "sentinel").expect("the planter's file");
+        let path = dir.path().join("join-token");
+        let planted = [
+            path.with_extension("tmp"),
+            dir.path().join(".join-token.tmp"),
+        ];
+        for link in &planted {
+            std::os::unix::fs::symlink(&stolen, link).expect("plant a symlink");
+        }
+
+        write_token_file(&path, "secret.token.value").expect("writes");
+
+        assert_eq!(
+            std::fs::read_to_string(&stolen).expect("reads the planter's file"),
+            "sentinel",
+            "the token was written through a planted symlink"
+        );
+        let meta = std::fs::symlink_metadata(&path).expect("stat the token file");
+        assert!(meta.file_type().is_file(), "the token file is not a regular file");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("reads"),
+            "secret.token.value"
+        );
+    }
+
+    /// A write that fails leaves the previous token in place and no temporary.
+    #[test]
+    fn a_failed_write_keeps_the_previous_token_and_leaves_no_temporary() {
+        let dir = tempfile::tempdir().expect("token directory");
+        let path = dir.path().join("join-token");
+        write_token_file(&path, "previous.token.value").expect("writes the first token");
+
+        let refused = write_private_file(&path, |_| Err(std::io::Error::other("disk full")));
+        assert!(refused.is_err(), "a failed write is reported");
+
+        // A rename that fails: a non-empty directory where the token goes.
+        let blocked = dir.path().join("blocked");
+        std::fs::create_dir_all(blocked.join("occupant")).expect("block the name");
+        assert!(write_token_file(&blocked, "never.lands").is_err());
+
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("reads"),
+            "previous.token.value"
+        );
+        assert_eq!(
+            entries(dir.path()),
+            vec!["blocked".to_string(), "join-token".to_string()],
+            "a failed write left a temporary behind"
+        );
     }
 }
