@@ -4,8 +4,6 @@ import {
   type ViteBuilder,
   BuildEnvironment,
   build as viteBuild,
-  defaultClientConditions,
-  defaultClientMainFields,
 } from "vite";
 import { join, resolve, relative, isAbsolute } from "node:path";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
@@ -23,7 +21,11 @@ import {
   type DiscoveredSchedule,
 } from "./manifest.js";
 import { zeroshipModulePlugin } from "./zeroship-module.js";
-import { ZEROSHIP_ENVIRONMENT } from "./environment.js";
+import {
+  ZEROSHIP_ENVIRONMENT,
+  ZEROSHIP_MAIN_FIELDS,
+  ZEROSHIP_RESOLVE_CONDITIONS,
+} from "./environment.js";
 import { genTypesFromMigrations } from "./gen-types/index.js";
 import {
   defaultProjectConfig,
@@ -502,28 +504,33 @@ export function findServerEntry(root: string, explicit?: string): string | null 
  * `configEnvironment`: a returned partial would be deep-merged, which unions an
  * object `input` with the app's and concatenates `resolve.conditions`.
  *
- * Resolution, platform, chunking and `process.env` handling are the values
- * Vite gives an `ssr` environment built with `ssr.target: "webworker"` and
- * `noExternal: true`, which is how the worker was built before it moved into
- * the app builder.
+ * Resolution is the dev environment's own (`ZEROSHIP_RESOLVE_CONDITIONS`,
+ * `ZEROSHIP_MAIN_FIELDS`, and Vite's server `builtins`), so dev and the built
+ * worker resolve every package to the same build. `builtins` only decides a
+ * Node built-in `nodeCompatPlugin` does not know: it maps or keeps every one it
+ * knows before resolution, and an unknown one becomes an external the graph
+ * check refuses by name.
  */
 export function applyWorkerBuildOptions(environment: EnvironmentOptions, clientOutDir: string): void {
   environment.consumer = "server";
   environment.resolve = {
     ...environment.resolve,
-    conditions: [...defaultClientConditions],
-    mainFields: [...defaultClientMainFields],
-    builtins: [],
+    conditions: [...ZEROSHIP_RESOLVE_CONDITIONS],
+    mainFields: [...ZEROSHIP_MAIN_FIELDS],
     noExternal: true,
   };
   // The runtime supplies a real `process.env` (from `worker_env` and the
-  // app's exposed secrets), so references to it stay live. `NODE_ENV` is
-  // replaced statically, which is what removes development branches.
-  environment.keepProcessEnv = false;
+  // app's exposed secrets), so every spelling of it stays live: Vite's own
+  // replacement would turn `globalThis.process.env` into `{}`. `NODE_ENV` is
+  // replaced statically in each spelling, which is what removes development
+  // branches, and never with the value of the shell that runs the build.
+  environment.keepProcessEnv = true;
+  const production = JSON.stringify("production");
   environment.define = {
     ...environment.define,
-    "process.env": "process.env",
-    "process.env.NODE_ENV": JSON.stringify("production"),
+    "process.env.NODE_ENV": production,
+    "global.process.env.NODE_ENV": production,
+    "globalThis.process.env.NODE_ENV": production,
   };
   const {
     rollupOptions: legacyRollupOptions,
@@ -554,6 +561,8 @@ export function applyWorkerBuildOptions(environment: EnvironmentOptions, clientO
       // Rolldown's `node` platform imports `node:module` for its CommonJS
       // helpers, which the runtime does not provide.
       platform: "browser",
+      // One module. A lazy procedure's module still initialises on its first
+      // call inside it, and `stripUseServer` post-processes `index.js` only.
       output: { format: "esm", entryFileNames: "index.js", codeSplitting: false },
     },
   };

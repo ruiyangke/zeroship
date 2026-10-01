@@ -236,7 +236,7 @@ Every `node:` import is classified at build time:
 - **Left bare** — `node:async_hooks`, `node:buffer`, `node:crypto`, `node:path`,
   `node:util`. The runtime resolves these natively.
 - **Purpose-built replacement** — `node:timers/promises`, `node:module`,
-  `node:process`.
+  `node:process`, `node:worker_threads`.
 - **General polyfill, over the runtime's own native implementation** —
   `node:events`, `node:net`, `node:os`, `node:tls`, `node:zlib`.
 - **General polyfill** — everything else, when one exists.
@@ -256,8 +256,8 @@ The general polyfill is what makes imports like `node:url`, `node:querystring`
 and `node:string_decoder` work. A function it does not implement throws an
 `Error` whose message names the function and ends `is not implemented yet!`, at
 call time — the import itself can succeed. That is the failure you see for most
-of the Node standard library (`node:fs`, `node:http`, `node:worker_threads`,
-`node:child_process`, and so on). Do not import them; use `fetch`, the Web
+of the Node standard library (`node:fs`, `node:http`, `node:child_process`,
+and so on). Do not import them; use `fetch`, the Web
 streams API, and the modules above.
 
 The purpose-built replacements are:
@@ -265,16 +265,27 @@ The purpose-built replacements are:
 - **`node:timers/promises`** — `setTimeout(ms, value)`, `setImmediate(value)` and
   `setInterval(ms, value)`, where `setInterval` is an async generator you can
   `for await` over. There is no `scheduler` object. None of them takes an
-  `AbortSignal`: passing `{ signal }` throws a `TypeError` with code
-  `ERR_ZEROSHIP_UNSUPPORTED_OPTION` rather than a timer that never aborts.
+  `AbortSignal`: passing `{ signal }` fails with a `TypeError` with code
+  `ERR_ZEROSHIP_UNSUPPORTED_OPTION` rather than a timer that never aborts. As
+  with Node's own option errors, the failure is asynchronous: `setTimeout`
+  and `setImmediate` return a rejected promise, and `setInterval`'s first
+  `next()` rejects.
 - **`node:module`** — `createRequire()` returns a require that answers the five
   runtime-native modules, by either name, with their native namespaces, and
   throws an `Error` with code `MODULE_NOT_FOUND`, naming the module, for any
-  other specifier: there is no CommonJS loader behind it. `createRequire()`
-  itself never throws, so an optional `require` in `try`/`catch` takes its
-  fallback, in the built worker and in `pnpm dev` alike. `builtinModules`
-  lists the five runtime-native modules, `isBuiltin` answers for them, and
-  `syncBuiltinESMExports` does nothing.
+  other specifier: there is no CommonJS loader behind it. Its
+  `require.resolve` answers the same five modules with the name it was given,
+  as Node does for a built-in, and throws the same error for any other
+  specifier. `createRequire()` itself never throws, so an optional `require`
+  in `try`/`catch` takes its fallback, in the built worker and in `pnpm dev`
+  alike. `builtinModules` lists the five runtime-native modules, `isBuiltin`
+  answers for them, and `syncBuiltinESMExports` does nothing.
+- **`node:worker_threads`**: the general polyfill, except `Worker`. There are
+  no worker threads, so `new Worker()` throws an `Error` with code
+  `ERR_ZEROSHIP_UNSUPPORTED_API` rather than returning a worker that never runs
+  and never answers a message. A library that can work without a worker
+  catches the error and does the work on the calling thread; langsmith's
+  serializer is one.
 - **`node:process`** — re-exports the runtime's `process` global, so bare
   `process`, the module default and `globalThis.process` are one object, and adds
   named fallbacks so code that destructures `cwd`, `chdir`, `exit`, `nextTick`,

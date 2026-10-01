@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createBuilder } from "vite";
 import { readZship, workerModules } from "../helpers/zship-archive.js";
+import { OFF_THREAD_SERIALIZER_PACKAGE, OFF_THREAD_SERIALIZER_SOURCE } from "../helpers/off-thread-serializer.js";
 
 const source = fileURLToPath(new URL("./runtime-server-entry/", import.meta.url));
 const plugins = fileURLToPath(new URL("../../src/plugins.ts", import.meta.url));
@@ -32,6 +33,7 @@ const zeroship = require("zeroship");
 const process = require("process");
 const timers = require("timers/promises");
 const { createRequire } = require("module");
+const { Worker } = require("worker_threads");
 // An optional dependency that is not installed: the require throws and the
 // fallback is taken.
 let optional;
@@ -47,6 +49,14 @@ exports.kernel = () => typeof zeroship.env.probe.kind;
 exports.processEnv = () => typeof process.env;
 exports.slept = () => timers.setTimeout(1, "slept");
 exports.requiredByCreateRequire = () => createRequire("/")("path").join("i", "j");
+exports.constructedWorker = () => {
+  try {
+    new Worker("", { eval: true });
+    return "constructed";
+  } catch (error) {
+    return error.code;
+  }
+};
 `;
 
 const root = await mkdtemp(join(tmpdir(), "zs-runtime-server-entry-"));
@@ -57,6 +67,9 @@ try {
   await writeFile(join(root, "node_modules", "requires-path", "package.json"),
     JSON.stringify({ name: "requires-path", main: "index.js" }));
   await writeFile(join(root, "node_modules", "requires-path", "index.js"), REQUIRES_BUILTINS);
+  await mkdir(join(root, "node_modules", "serializes-off-thread"), { recursive: true });
+  await writeFile(join(root, "node_modules", "serializes-off-thread", "package.json"), OFF_THREAD_SERIALIZER_PACKAGE);
+  await writeFile(join(root, "node_modules", "serializes-off-thread", "index.js"), OFF_THREAD_SERIALIZER_SOURCE);
   await writeFile(join(root, "vite.config.mjs"), `import { zeroshipPlugins } from ${JSON.stringify(plugins)};
 
 function greeting() {

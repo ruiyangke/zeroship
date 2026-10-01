@@ -18,9 +18,10 @@ import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { createBuilder, build as viteBuild, type InlineConfig, type Plugin } from "vite";
+import { createBuilder, createServer, build as viteBuild, type InlineConfig, type Plugin } from "vite";
 
 import { zeroshipPlugins } from "../src/plugins.js";
+import { createZeroshipEnvironmentOptions } from "../src/environment.js";
 import { readZship, workerModules } from "./helpers/zship-archive.js";
 
 const PLUGINS = fileURLToPath(new URL("../src/plugins.ts", import.meta.url));
@@ -30,7 +31,8 @@ const PLUGINS = fileURLToPath(new URL("../src/plugins.ts", import.meta.url));
 // alias, a `process.env` value the runtime supplies when it runs, and the dead
 // branch of a `process.env.NODE_ENV` check. A second procedure reports which
 // build the worker bundled of a package with conditional exports, and of one
-// with only entry fields.
+// with only entry fields. A third reads `NODE_ENV` and a runtime-supplied value
+// through each spelling of `process` a package uses.
 const SERVER_TS = `
 "use server";
 import { query } from "@zeroship/rpc/server";
@@ -45,6 +47,14 @@ export const greet = query(async () => {
 }, { id: "probe.greet" });
 
 export const resolved = query(async () => [picked, field], { id: "probe.resolved" });
+
+export const environment = query(async () => [
+  process.env.NODE_ENV,
+  globalThis.process.env.NODE_ENV,
+  global.process.env.NODE_ENV,
+  String(globalThis.process.env.PROBE_KEY),
+  String(global.process.env.PROBE_KEY),
+], { id: "probe.environment" });
 
 export default {
   fetch() {
@@ -359,16 +369,45 @@ describe("vite build compiles the worker from the app's config", () => {
     });
   }
 
-  test("the worker resolves packages to their browser builds", async () => {
-    // The worker resolves packages as an `ssr` environment built for
-    // `ssr.target: "webworker"`: the `browser` export condition and no
-    // `worker`, and the `browser` entry field ahead of `module`.
+  test("the worker resolves packages by the documented conditions", async () => {
+    // `zeroship`, `worker`, `module`, `import`, `default`: the `worker` export
+    // ahead of `browser` and `default`, and the `module` entry field, never
+    // `browser`.
     const root = await makeApp();
     try {
       await viteBuildCli(root);
       const { entryPath } = await unpackWorker(root);
-      assert.deepEqual(callPacked(root, entryPath, "probe.resolved"), ["browser", "browser"]);
+      assert.deepEqual(callPacked(root, entryPath, "probe.resolved"), ["worker", "module"]);
     } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("dev resolves packages to the same builds as the worker", async () => {
+    const root = await makeApp();
+    const entry = resolve(root, "src/server.ts");
+    const server = await createServer({
+      root,
+      configFile: false,
+      logLevel: "silent",
+      server: { middlewareMode: true, watch: null },
+      environments: {
+        zeroship: {
+          ...createZeroshipEnvironmentOptions(entry),
+          // Resolve the packages themselves rather than their pre-bundled
+          // copies; the optimizer resolves with these same options.
+          optimizeDeps: { noDiscovery: true, include: [] },
+        },
+      },
+    });
+    try {
+      const container = server.environments.zeroship!.pluginContainer;
+      const exported = await container.resolveId("pick-me", entry);
+      const field = await container.resolveId("pick-by-field", entry);
+      assert.ok(exported?.id.endsWith("/pick-me/worker.js"), exported?.id);
+      assert.ok(field?.id.endsWith("/pick-by-field/module.js"), field?.id);
+    } finally {
+      await server.close();
       await fs.rm(root, { recursive: true, force: true });
     }
   });
@@ -387,6 +426,15 @@ describe("vite build compiles the worker from the app's config", () => {
       assert.equal(run.status, 0, run.stderr + run.stdout);
       const { entryPath } = await unpackWorker(root);
       assert.equal(callPacked(root, entryPath, "probe.greet"), EXPECTED);
+      // Every spelling reads `production` for `NODE_ENV`, and the live
+      // environment for anything else.
+      assert.deepEqual(callPacked(root, entryPath, "probe.environment"), [
+        "production",
+        "production",
+        "production",
+        "from the runtime env",
+        "from the runtime env",
+      ]);
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }
@@ -454,7 +502,7 @@ describe("vite build compiles the worker from the app's config", () => {
     try {
       await viteBuildCli(root);
       const { entryPath } = await unpackWorker(root);
-      assert.deepEqual(callPacked(root, entryPath, "probe.resolved"), ["browser", "browser"]);
+      assert.deepEqual(callPacked(root, entryPath, "probe.resolved"), ["worker", "module"]);
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }

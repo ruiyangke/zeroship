@@ -7,8 +7,10 @@ import greeting from "./hello.greeting";
 // `require`.
 import path from "path";
 import process from "node:process";
-import { setTimeout as sleep } from "node:timers/promises";
+import { setTimeout as sleep, setImmediate as immediate, setInterval as every } from "node:timers/promises";
 import { createRequire, isBuiltin } from "node:module";
+import { Worker } from "node:worker_threads";
+import { probe as offThread } from "serializes-off-thread";
 import {
   optional,
   joined,
@@ -17,6 +19,7 @@ import {
   processEnv,
   slept,
   requiredByCreateRequire,
+  constructedWorker,
 } from "requires-path";
 
 const code = (probe: () => unknown) => {
@@ -25,6 +28,22 @@ const code = (probe: () => unknown) => {
     return "accepted";
   } catch (error) {
     return (error as { code?: string }).code;
+  }
+};
+
+// How a call fails: by throwing, or through the promise it returns.
+const failure = async (call: () => Promise<unknown>) => {
+  let pending: Promise<unknown>;
+  try {
+    pending = call();
+  } catch (error) {
+    return `threw ${(error as { code?: string }).code}`;
+  }
+  try {
+    await pending;
+    return "fulfilled";
+  } catch (error) {
+    return `rejected ${(error as { code?: string }).code}`;
   }
 };
 
@@ -44,12 +63,19 @@ export default {
       cjsProcess: processEnv(),
       cjsSlept: await slept(),
       cjsCreateRequire: requiredByCreateRequire(),
+      cjsWorker: constructedWorker(),
       esmProcess: process === globalThis.process,
       esmSlept: await sleep(1, "slept"),
       esmCreateRequire: createRequire("/")("node:path").join("k", "l"),
       esmIsBuiltin: isBuiltin("crypto"),
       esmCreateRequireMissing: code(() => createRequire("/")("fs")),
-      esmTimersSignal: code(() => sleep(1, "x", { signal: new AbortController().signal })),
+      esmCreateRequireResolve: [createRequire("/").resolve("util"), createRequire("/").resolve("node:buffer")],
+      esmCreateRequireResolveMissing: code(() => createRequire("/").resolve("fs")),
+      esmTimersSignal: await failure(() => sleep(1, "x", { signal: new AbortController().signal })),
+      esmImmediateSignal: await failure(() => immediate("x", { signal: new AbortController().signal })),
+      esmIntervalSignal: await failure(() => every(1, "x", { signal: new AbortController().signal }).next()),
+      esmWorker: code(() => new Worker("", { eval: true })),
+      offThread: await offThread(),
       optional: optional(),
     }),
   },

@@ -4,19 +4,20 @@ import assert from "node:assert/strict";
 import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import * as asyncHooks from "node:async_hooks";
 import * as buffer from "node:buffer";
 import * as crypto from "node:crypto";
 import * as path from "node:path";
 import * as util from "node:util";
 import { ModuleRunner } from "vite/module-runner";
-import { build, createServer, parseAst, type DevEnvironment, type Plugin } from "vite";
+import { build, createServer, parseAst, searchForWorkspaceRoot, type DevEnvironment, type Plugin } from "vite";
 
 import { zeroshipModulePlugin } from "../src/zeroship-module.js";
 import { nodeCompatPlugin } from "../src/node-compat.js";
 import { createZeroshipEnvironmentOptions } from "../src/environment.js";
 import { zeroshipEvaluator } from "../src/dev-bootstrap/evaluator.js";
+import { OFF_THREAD_SERIALIZER_PACKAGE, OFF_THREAD_SERIALIZER_SOURCE } from "./helpers/off-thread-serializer.js";
 
 const ENTRY = `
 import { env } from "zeroship";
@@ -105,12 +106,15 @@ const path_1 = __importDefault(require("path"));
 const process = require("process");
 const timers = require("timers/promises");
 const { createRequire } = require("module");
+const { Worker } = require("worker_threads");
 const zeroship = require("zeroship");
+const constructed = () => { try { new Worker("", { eval: true }); return "constructed"; } catch (error) { return error.code; } };
 exports.probe = async () => ({
   tsDefault: path_1.default.join("g", "h"),
   processEnv: typeof process.env,
   slept: await timers.setTimeout(1, "slept"),
   createRequire: createRequire("/")("path").join("i", "j"),
+  worker: constructed(),
   kernel: zeroship.env.kind,
 });
 `);
@@ -121,11 +125,18 @@ exports.probe = async () => ({
   await fs.writeFile(join(kernel, "index.js"), `export const env = { kind: "host" };\n`);
   const entry = join(root, "server.js");
   await fs.writeFile(entry, `import { probe } from "requires-builtins";\nexport default probe;\n`);
+  // Vite runs from the app's root, whose node_modules does not carry the
+  // plugin's own dependencies.
+  const cwd = process.cwd();
+  process.chdir(root);
   const server = await createServer({
     root, configFile: false, logLevel: "silent",
     server: { middlewareMode: true, watch: null },
     plugins: [nodeCompatPlugin(), zeroshipModulePlugin()],
     environments: { zeroship: createZeroshipEnvironmentOptions(entry) },
+  }).catch((error) => {
+    process.chdir(cwd);
+    throw error;
   });
   try {
     const environment = server.environments.zeroship as DevEnvironment;
@@ -148,9 +159,11 @@ exports.probe = async () => ({
       processEnv: "object",
       slept: "slept",
       createRequire: "i/j",
+      worker: "ERR_ZEROSHIP_UNSUPPORTED_API",
       kernel: "host",
     });
   } finally {
+    process.chdir(cwd);
     await server.close();
     await fs.rm(root, { recursive: true, force: true });
   }
@@ -174,25 +187,46 @@ try {
 }
 exports.optional = () => optional instanceof Error ? "fallback" : "present";
 `);
+  const serializer = join(root, "node_modules/serializes-off-thread");
+  await fs.mkdir(serializer, { recursive: true });
+  await fs.writeFile(join(serializer, "package.json"), OFF_THREAD_SERIALIZER_PACKAGE);
+  await fs.writeFile(join(serializer, "index.js"), OFF_THREAD_SERIALIZER_SOURCE);
   const entry = join(root, "entry.js");
   await fs.writeFile(entry, `import process from "node:process";
-import { setTimeout as sleep } from "node:timers/promises";
+import { setTimeout as sleep, setImmediate as immediate, setInterval as every } from "node:timers/promises";
 import { createRequire, isBuiltin } from "node:module";
+import { Worker } from "node:worker_threads";
 import { optional } from "optional-require";
+import { probe as offThread } from "serializes-off-thread";
 const code = (probe) => { try { probe(); return "accepted"; } catch (error) { return error.code; } };
+// How a call fails: by throwing, or through the promise it returns.
+const failure = async (call) => {
+  let pending;
+  try { pending = call(); } catch (error) { return "threw " + error.code; }
+  try { await pending; return "fulfilled"; } catch (error) { return "rejected " + error.code; }
+};
+const signal = new AbortController().signal;
 export const probe = async () => ({
   process: process === globalThis.process,
   slept: await sleep(1, "slept"),
   createRequire: createRequire("/")("path").join("i", "j"),
   createRequireMissing: code(() => createRequire("/")("fs")),
+  createRequireResolve: [createRequire("/").resolve("path"), createRequire("/").resolve("node:crypto")],
+  createRequireResolveMissing: code(() => createRequire("/").resolve("fs")),
   isBuiltin: isBuiltin("node:crypto"),
-  timersSignal: code(() => sleep(1, "x", { signal: new AbortController().signal })),
+  timersSignal: await failure(() => sleep(1, "x", { signal })),
+  immediateSignal: await failure(() => immediate("x", { signal })),
+  intervalSignal: await failure(() => every(1, "x", { signal }).next()),
+  worker: code(() => new Worker("", { eval: true })),
+  offThread: await offThread(),
   optional: optional(),
 });
 `);
   const server = await createServer({
     root, configFile: false, logLevel: "silent",
-    server: { middlewareMode: true, watch: null },
+    // An app in the workspace may load files from the workspace root, where
+    // the plugin's own unenv lives. This temporary root is outside it.
+    server: { middlewareMode: true, watch: null, fs: { allow: [root, searchForWorkspaceRoot(fileURLToPath(import.meta.url))] } },
     plugins: [nodeCompatPlugin(), zeroshipModulePlugin()],
     environments: { zeroship: createZeroshipEnvironmentOptions(entry) },
   });
@@ -225,15 +259,23 @@ export const probe = async () => ({
     const optimizer = environment.depsOptimizer;
     assert.ok(optimizer, "the dev environment pre-bundles dependencies");
     await optimizer.metadata.discovered["optional-require"]?.processing;
+    await optimizer.metadata.discovered["serializes-off-thread"]?.processing;
     assert.ok(optimizer.metadata.optimized["optional-require"], "the dependency was pre-bundled");
+    assert.ok(optimizer.metadata.optimized["serializes-off-thread"], "the dependency was pre-bundled");
     const module = await runner.import(entry);
     assert.deepEqual(await module.probe(), {
       process: true,
       slept: "slept",
       createRequire: "i/j",
       createRequireMissing: "MODULE_NOT_FOUND",
+      createRequireResolve: ["path", "node:crypto"],
+      createRequireResolveMissing: "MODULE_NOT_FOUND",
       isBuiltin: true,
-      timersSignal: "ERR_ZEROSHIP_UNSUPPORTED_OPTION",
+      timersSignal: "rejected ERR_ZEROSHIP_UNSUPPORTED_OPTION",
+      immediateSignal: "rejected ERR_ZEROSHIP_UNSUPPORTED_OPTION",
+      intervalSignal: "rejected ERR_ZEROSHIP_UNSUPPORTED_OPTION",
+      worker: "ERR_ZEROSHIP_UNSUPPORTED_API",
+      offThread: "inline",
       optional: "fallback",
     });
   } finally {

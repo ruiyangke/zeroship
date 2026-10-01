@@ -92,32 +92,31 @@ const customPolyfills: Record<string, string> = {
   // generator. The latter is what `for await` consumers (tRPC, langchain
   // streaming) expect.
   // The timers take no AbortSignal: one passed in options is refused by name
-  // rather than silently never aborting.
+  // rather than silently never aborting, and asynchronously, where Node
+  // reports its own option errors: a rejected promise, and for setInterval a
+  // rejection of the iterator's first next().
   "node:timers/promises": `
-function _refuseSignal(name, options) {
-  if (options?.signal == null) return;
+function _unsupportedSignal(name) {
   const error = new TypeError(
     \`node:timers/promises \${name}(): the signal option is not supported in the zeroship runtime\`,
   );
   error.code = "ERR_ZEROSHIP_UNSUPPORTED_OPTION";
-  throw error;
+  return error;
 }
 export function setTimeout(ms, value, options) {
-  _refuseSignal("setTimeout", options);
+  if (options?.signal != null) return Promise.reject(_unsupportedSignal("setTimeout"));
   return new Promise((resolve) => globalThis.setTimeout(() => resolve(value), ms || 0));
 }
 export function setImmediate(value, options) {
-  _refuseSignal("setImmediate", options);
+  if (options?.signal != null) return Promise.reject(_unsupportedSignal("setImmediate"));
   return Promise.resolve(value);
 }
-export function setInterval(ms, value, options) {
-  _refuseSignal("setInterval", options);
-  return (async function* () {
-    while (true) {
-      await new Promise((resolve) => globalThis.setTimeout(resolve, ms || 0));
-      yield value;
-    }
-  })();
+export async function* setInterval(ms, value, options) {
+  if (options?.signal != null) throw _unsupportedSignal("setInterval");
+  while (true) {
+    await new Promise((resolve) => globalThis.setTimeout(resolve, ms || 0));
+    yield value;
+  }
 }
 export default { setTimeout, setImmediate, setInterval };
 `,
@@ -125,9 +124,11 @@ export default { setTimeout, setImmediate, setInterval };
   // node:module — the isolate has no CommonJS loader. createRequire() returns
   // a require that answers the modules the runtime implements, by either name,
   // from their native namespaces, and throws MODULE_NOT_FOUND for anything
-  // else, as Node does for a module that is not there. createRequire() itself
-  // never throws, so a bundler helper that calls it at module init loads, and
-  // an optional require in try/catch takes its fallback.
+  // else, as Node does for a module that is not there. Its require.resolve
+  // answers the same modules, with the name it was given, as Node does for a
+  // built-in. createRequire() itself never throws, so a bundler helper that
+  // calls it at module init loads, and an optional require in try/catch takes
+  // its fallback.
   "node:module": `
 ${[...RUNTIME_NATIVE_MODULES].map((specifier, index) => `import * as _runtime${index} from ${JSON.stringify(specifier)};`).join("\n")}
 const _runtimeModules = {
@@ -137,17 +138,25 @@ function _runtimeModule(id) {
   const name = String(id).startsWith("node:") ? String(id).slice(5) : String(id);
   return Object.hasOwn(_runtimeModules, name) ? _runtimeModules[name] : undefined;
 }
+function _moduleNotFound(id) {
+  const error = new Error(
+    \`Cannot find module '\${id}': the zeroship runtime has no CommonJS loader, and require \` +
+      \`answers only its own modules (\${Object.keys(_runtimeModules).join(", ")})\`,
+  );
+  error.code = "MODULE_NOT_FOUND";
+  return error;
+}
 export function createRequire() {
-  return function require(id) {
+  function require(id) {
     const module = _runtimeModule(id);
     if (module !== undefined) return module;
-    const error = new Error(
-      \`Cannot find module '\${id}': the zeroship runtime has no CommonJS loader, and require \` +
-        \`answers only its own modules (\${Object.keys(_runtimeModules).join(", ")})\`,
-    );
-    error.code = "MODULE_NOT_FOUND";
-    throw error;
+    throw _moduleNotFound(id);
+  }
+  require.resolve = function resolve(id) {
+    if (_runtimeModule(id) !== undefined) return String(id);
+    throw _moduleNotFound(id);
   };
+  return require;
 }
 export const builtinModules = Object.keys(_runtimeModules);
 export function isBuiltin(id) {
@@ -156,6 +165,26 @@ export function isBuiltin(id) {
 export function syncBuiltinESMExports() {}
 export function Module() {}
 export default { createRequire, builtinModules, isBuiltin, syncBuiltinESMExports, Module };
+`,
+
+  // node:worker_threads: unenv's module, but its Worker constructs a worker
+  // that never runs, so a caller awaiting a reply waits forever. The isolate
+  // has no threads: the constructor throws, which is how a library that can
+  // work without one learns to (langsmith's serializer falls back to
+  // serializing inline on the calling thread).
+  "node:worker_threads": `
+import workerThreads from "unenv/node/worker_threads";
+export * from "unenv/node/worker_threads";
+export class Worker {
+  constructor() {
+    const error = new Error(
+      "node:worker_threads Worker: the zeroship runtime has no worker threads; do the work on the calling thread",
+    );
+    error.code = "ERR_ZEROSHIP_UNSUPPORTED_API";
+    throw error;
+  }
+}
+export default { ...workerThreads, Worker };
 `,
 
   // node:process — re-export the Rust-set globalThis.process so bare
@@ -315,6 +344,8 @@ function loadNodeBuiltin(id: string): string | null {
  *   `node:module`, which the isolate has not got.
  * - An ES import of a built-in stays an external, which the dev environment
  *   answers.
+ * - A polyfill's import of `unenv/*` resolves to the plugin's own unenv, as
+ *   it does in the worker build: the app's root cannot resolve it.
  */
 export function nodeCompatOptimizerPlugin(): Rolldown.Plugin {
   return {
@@ -325,6 +356,8 @@ export function nodeCompatOptimizerPlugin(): Rolldown.Plugin {
           ? RUNTIME_REQUIRE_PREFIX + id
           : { id, external: true };
       }
+      // A polyfill's own import of unenv, which the app does not depend on.
+      if (id.startsWith("unenv/")) return { id: unenvModule(id.slice("unenv/".length)) };
       if (options?.kind !== "require-call") return null;
       const resolved = resolveNodeBuiltin(id, options.kind);
       if (resolved == null) return null;

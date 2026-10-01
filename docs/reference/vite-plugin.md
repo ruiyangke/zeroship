@@ -285,8 +285,10 @@ opts the build into. It builds the client environment, then the worker in the
   files from `writeBundle`, scopes itself with Vite's `applyToEnvironment`.
 - The plugin owns the worker's shape: one minified ES module,
   `server/index.js` under `build.dist`, with no public files and no build
-  manifest. `process.env.NODE_ENV` is replaced with `"production"` whatever
-  the shell sets; every other `process.env` reference stays live for the
+  manifest. `NODE_ENV`, read as `process.env.NODE_ENV`,
+  `global.process.env.NODE_ENV` or `globalThis.process.env.NODE_ENV`, is
+  replaced with `"production"` whatever the shell sets; every other
+  `process.env` reference, in any of those spellings, stays live for the
   runtime to answer.
 - A tool that calls `vite.build()` with the app's config, such as a test
   harness or a deploy script, is refused before the client writes anything:

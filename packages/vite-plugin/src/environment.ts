@@ -22,6 +22,16 @@ import {
  */
 export const ZEROSHIP_ENVIRONMENT = "zeroship";
 
+/**
+ * How server code resolves packages, in dev and in the built worker alike:
+ * the export conditions `docs/reference/vite-environment-api.md` documents,
+ * and Vite's server entry fields. `browser` is in neither: the isolate is not
+ * a browser, and a package names its build for it with the `worker`
+ * condition.
+ */
+export const ZEROSHIP_RESOLVE_CONDITIONS = ["zeroship", "worker", "module", "import", "default"];
+export const ZEROSHIP_MAIN_FIELDS = [...vite.defaultServerMainFields];
+
 const NODEISH_IMPORT_RE = /^(crypto|buffer|path|util|events|stream|os|url|http|https|fs|assert|process|async_hooks|timers|string_decoder|querystring|punycode|net|tls|dns|zlib|worker_threads|diagnostics_channel|perf_hooks|module)(\/.+)?$/;
 
 // ── DevEnvironment ─────────────────────────────────────────────────────────
@@ -153,7 +163,8 @@ export function createZeroshipEnvironmentOptions(
   return {
     consumer: "server",
     resolve: {
-      conditions: ["zeroship", "worker", "module", "import", "default"],
+      conditions: [...ZEROSHIP_RESOLVE_CONDITIONS],
+      mainFields: [...ZEROSHIP_MAIN_FIELDS],
       noExternal: true,
     },
     dev: {
