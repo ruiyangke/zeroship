@@ -214,7 +214,7 @@ async fn write_sidecar(
     content_type: &str,
 ) -> Result<(), StorageError> {
     let payload = encode_sidecar(fingerprint, content_type);
-    let mut file = fs::File::create(path)
+    let mut file = create_temp(path)
         .await
         .map_err(|e| format!("storage: create metadata temp '{}': {e}", path.display()))?;
     let (res, _buf): (std::io::Result<()>, Vec<u8>) = file.write_all_at(payload, 0).await.into();
@@ -271,7 +271,7 @@ impl Backend for LocalFs {
         // A crash or mid-stream error leaves only the temp file (cleaned up
         // on the error path), never a torn object at `full`.
         let tmp = temp_sibling(&full);
-        let mut f = fs::File::create(&tmp)
+        let mut f = create_temp(&tmp)
             .await
             .map_err(|e| format!("storage: create temp '{}': {e}", tmp.display()))?;
 
@@ -479,23 +479,33 @@ impl ChunkSource for FileChunks {
     }
 }
 
-/// A unique temp sibling path next to the target object. The PID + a
-/// monotonic counter keep concurrent writers to the same key from
-/// colliding on the temp file before the atomic rename.
+/// A temp sibling path next to the target object, named for this write alone.
+///
+/// Worker replicas share one storage root and each runs in its own container,
+/// where process ids start over, so nothing derived from the process tells two
+/// writers apart. The random part does, and [`create_temp`] opens the path with
+/// `create_new`, so even a name that did collide would be refused rather than
+/// taken over. The `.{name}.tmp.` shape is what `list` skips.
 fn temp_sibling(full: &Path) -> PathBuf {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let pid = std::process::id();
     let file_name = full
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "obj".to_string());
-    let tmp_name = format!(".{file_name}.tmp.{pid}.{n}");
+    let tmp_name = format!(".{file_name}.tmp.{}", uuid::Uuid::new_v4().simple());
     match full.parent() {
         Some(parent) => parent.join(tmp_name),
         None => PathBuf::from(tmp_name),
     }
+}
+
+/// Create `path` as a new file for writing, refusing a name that exists
+/// instead of truncating whatever another writer has there.
+async fn create_temp(path: &Path) -> std::io::Result<fs::File> {
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .await
 }
 
 /// Test-only probe recording which OS thread the most recent directory walk
@@ -1054,5 +1064,77 @@ mod tests {
                 );
             }
         });
+    }
+
+    /// Two writers of one key at once each publish intact bytes: afterwards
+    /// the object is one writer's bytes whole, never a mix of the two, its
+    /// content type is never the other writer's, and no temp file is left.
+    #[test]
+    fn concurrent_writers_of_one_key_never_tear_it() {
+        let root = TempRoot::new("concurrent");
+        compio::runtime::Runtime::new().unwrap().block_on(async {
+            let be = LocalFs::new(&root.0);
+            let key = "shared.bin";
+            let chunk = usize::try_from(READ_CHUNK).unwrap();
+            let first = vec![b'a'; 3 * chunk + 17];
+            let second = vec![b'b'; 2 * chunk + 5];
+            let writers = [
+                (first.clone(), "application/x-first"),
+                (second.clone(), "application/x-second"),
+            ]
+            .map(|(body, content_type)| {
+                let be = be.clone();
+                compio::runtime::spawn(async move {
+                    be.put(APP, BUCKET, key, &body, Some(content_type)).await
+                })
+            });
+            for writer in writers {
+                writer.await.expect("writer task").expect("put");
+            }
+
+            let (bytes, meta) = be
+                .get(APP, BUCKET, key, u64::MAX)
+                .await
+                .expect("get")
+                .expect("the object exists");
+            let own_type = if bytes == first {
+                "application/x-first"
+            } else if bytes == second {
+                "application/x-second"
+            } else {
+                panic!("the object is torn: {} bytes, neither writer's", bytes.len());
+            };
+            let content_type = meta.content_type.expect("a content type");
+            assert!(
+                content_type == own_type || content_type == DEFAULT_CONTENT_TYPE,
+                "the object carries another writer's type: {content_type}"
+            );
+            for dir in [be.object_path(APP, BUCKET, key), be.meta_path(APP, BUCKET, key)] {
+                let parent = dir.parent().expect("parent").to_path_buf();
+                let names: Vec<String> = std::fs::read_dir(&parent)
+                    .expect("read dir")
+                    .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                    .collect();
+                assert_eq!(names, vec![key.to_string()], "a temp file was left in {}", parent.display());
+            }
+        });
+    }
+
+    /// A temp file is only ever created new: a name that already holds a file
+    /// is refused, and that file keeps its bytes.
+    #[test]
+    fn a_temp_file_never_takes_over_an_existing_name() {
+        let root = TempRoot::new("create-temp");
+        std::fs::create_dir_all(&root.0).unwrap();
+        let taken = root.0.join(".report.bin.tmp.taken");
+        std::fs::write(&taken, b"another writer's bytes").unwrap();
+        compio::runtime::Runtime::new().unwrap().block_on(async {
+            let refused = create_temp(&taken).await;
+            assert_eq!(
+                refused.map(|_| ()).map_err(|e| e.kind()),
+                Err(std::io::ErrorKind::AlreadyExists)
+            );
+        });
+        assert_eq!(std::fs::read(&taken).unwrap(), b"another writer's bytes");
     }
 }
