@@ -77,8 +77,6 @@ fn init_v8_platform(single_threaded: bool) {
             if single_threaded { 2 } else { 1 },
             std::sync::atomic::Ordering::SeqCst,
         );
-        // Install the TLS crypto provider (rustls needs this for HTTPS fetch).
-        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
         // Load ICU data so Intl.NumberFormat / .DateTimeFormat / .Collator
         // work — npm packages bundled by deepagents (Anthropic SDK, etc.)

@@ -25,12 +25,27 @@ license = "MIT"
 [workspace.dependencies]
 # Async / I/O
 compio = { version = "0.18", features = ["io", "net", "runtime", "macros", "time"] }
-# Single TLS crypto provider end-to-end: rustls 0.23 + aws-lc-rs (FIPS-validated).
+# Single TLS crypto provider end-to-end: rustls 0.23 + aws-lc-rs. The runtime's
+# WebCrypto already builds on aws-lc-rs (and links aws-lc-sys directly), and
+# compio-postgres wraps aws-lc-rs's key provider to zeroize decrypted client keys.
+# `ring` is still linked for `jsonwebtoken`; what may not happen is rustls
+# compiling it as a provider.
+#
+# EXACTLY ONE provider feature may reach rustls in any build. When no process
+# installed a default, rustls picks one from its own features, and `ring` beside
+# `aws_lc_rs` leaves it nothing to pick: the first `ClientConfig::builder()` in a
+# client that builds its own config (cyper, compio-ws) panics.
+# Every member names rustls through this entry, and the
+# `xtask/tests/repository/tls_provider.rs` tests fail when any build, on any
+# target, would enable another provider, including through a dependency's
+# default features. Each binary still installs aws-lc-rs at boot
+# (`zeroship_core::tls::install_process_crypto_provider`), and our own
+# connectors build from an explicit provider rather than the default.
+rustls = { version = "0.23", default-features = false, features = ["std", "aws-lc-rs"] }
 # `compio-tls`'s `rustls` feature only toggles the dep + futures-rustls + futures-util;
-# the crypto provider (aws-lc-rs) is selected via `rustls/aws-lc-rs` directly in
-# `crates/runtime/Cargo.toml`, which is the unified provider for the workspace.
-# `default-features = false` is critical — compio-tls's default feature is
-# `native-tls`, which would otherwise pull OpenSSL into the tree alongside rustls.
+# it selects no crypto provider. `default-features = false` is critical —
+# compio-tls's default feature is `native-tls`, which would otherwise pull OpenSSL
+# into the tree alongside rustls.
 compio-tls = { version = "0.9", default-features = false, features = ["rustls"] }
 # WebSocket framer — wraps tungstenite over compio. Default features off
 # to keep `permessage-deflate` disabled (RSV1=1 frames hard-fail at the

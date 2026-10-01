@@ -41,6 +41,11 @@ jsonwebtoken = { workspace = true }
 parking_lot = "0.12"
 ipnet = { workspace = true }
 cyper = { workspace = true }
+# `tls::install_process_crypto_provider`, the boot step every binary runs before
+# any client exists. Declaring it here is also what puts the aws-lc-rs provider
+# into a binary whose only path to rustls is cyper or compio-tls, neither of
+# which selects one.
+rustls = { workspace = true }
 # JWKS refresh bounds its outbound OP fetch with `compio::time::timeout`
 # (zero-tokio). The workspace `compio` carries the `time` feature; the
 # dev-dependency below additionally enables `polling` for sandboxed tests

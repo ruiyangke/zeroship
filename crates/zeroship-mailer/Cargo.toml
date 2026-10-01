@@ -34,8 +34,10 @@ x509-parser = "0.18"
 # SMTP mailer driver — BLOCKING `SmtpTransport` wrapped in
 # `compio::runtime::spawn_blocking` (no tokio in the event loop). Features
 # chosen explicitly to AVOID `tokio1*` (which would pull tokio in) and
-# `native-tls` (we standardize on rustls).
-lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "rustls-tls", "builder", "pool", "hostname"] }
+# `native-tls` (we standardize on rustls). The TLS stack is named piece by piece
+# rather than through `rustls-tls`, which bundles `ring`: rustls with `aws-lc-rs`
+# as its one provider, and the Mozilla `webpki-roots` trust anchors.
+lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "rustls", "aws-lc-rs", "webpki-roots", "builder", "pool", "hostname"] }
 # Compile-time-checked HTML/text email templates. Template-directory override
 # lives in `askama.toml` next to this file (askama 0.12 reads its config from
 # that file, not from `[package.metadata.askama]` — that mechanism only landed

@@ -36,6 +36,7 @@ pub mod service_assertion;
 pub mod service_identity;
 pub mod service_peers;
 pub mod superjson;
+pub mod tls;
 pub mod types;
 pub mod usage_event;
 pub mod user_envelope;

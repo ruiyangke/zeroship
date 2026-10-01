@@ -31,11 +31,11 @@ with-jiff-0_2 = ["postgres-types/with-jiff-0_2"]
 with-smol_str-01 = ["postgres-types/with-smol_str-01"]
 with-cidr-0_3 = ["postgres-types/with-cidr-0_3"]
 # rustls-backed TLS: `MakeRustlsConnect` (src/tls_rustls.rs) plus the pool's
-# ability to open encrypted connections. rustls is pinned to `aws-lc-rs`, the
-# workspace's single crypto provider (see the root Cargo.toml comment on
-# `compio-tls`); the connector installs that provider explicitly rather than
-# relying on a process-global default, so a binary that never calls
-# `install_default` still works.
+# ability to open encrypted connections. rustls comes from the root Cargo.toml
+# `rustls` entry, which pins the workspace's single crypto provider, aws-lc-rs;
+# the connector builds its config from that provider explicitly rather than
+# from a process-global default, so a binary that never calls `install_default`
+# still works.
 tls = [
     "dep:compio-tls",
     "dep:futures-rustls",
@@ -139,9 +139,8 @@ features = ["logging", "tls12"]
 optional = true
 
 [dependencies.rustls]
-version = "0.23"
-default-features = false
-features = ["std", "logging", "tls12", "aws-lc-rs"]
+workspace = true
+features = ["logging", "tls12"]
 optional = true
 
 [dependencies.rustls-native-certs]

@@ -3,6 +3,8 @@ mod build_inputs;
 #[allow(dead_code)]
 #[path = "architecture/repo.rs"]
 mod repo;
+#[path = "repository/tls_provider.rs"]
+mod tls_provider;
 #[path = "repository/tokio_boundary.rs"]
 mod tokio_boundary;
 

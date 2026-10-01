@@ -3,16 +3,35 @@
 #![cfg(feature = "runtime_tls")]
 
 use std::io;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, LazyLock, RwLock};
 
 use base64::Engine;
 use compio_tls::TlsConnector;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::crypto::CryptoProvider;
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::server::ParsedCertificate;
 use rustls::{
-    ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme,
+    ClientConfig, ConfigBuilder, DigitallySignedStruct, RootCertStore, SignatureScheme,
+    WantsVerifier,
 };
+
+/// The crypto provider every connector in this module is built from.
+///
+/// Named, never read from the process default. When no process installed a
+/// default, rustls infers one from its crate features, so a connector that read
+/// it would work or panic according to how the embedding binary happened to
+/// unify features - `ring` beside `aws-lc-rs` leaves nothing to infer.
+static PROVIDER: LazyLock<Arc<CryptoProvider>> =
+    LazyLock::new(|| Arc::new(rustls::crypto::aws_lc_rs::default_provider()));
+
+/// A client config builder over [`PROVIDER`] with rustls' default protocol
+/// versions - what `ClientConfig::builder()` gives, minus the process default.
+fn client_config() -> io::Result<ConfigBuilder<ClientConfig, WantsVerifier>> {
+    ClientConfig::builder_with_provider(PROVIDER.clone())
+        .with_safe_default_protocol_versions()
+        .map_err(io::Error::other)
+}
 
 /// Process-level override for the platform trust anchors, as PEM.
 ///
@@ -63,7 +82,7 @@ impl Default for TlsConnectorOptions {
 
 pub fn build_tls_connector(opts: &TlsConnectorOptions) -> io::Result<TlsConnector> {
     if !opts.reject_unauthorized {
-        let cfg = ClientConfig::builder()
+        let cfg = client_config()?
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(NoCertificateVerification))
             .with_no_client_auth();
@@ -114,16 +133,15 @@ pub fn build_tls_connector(opts: &TlsConnectorOptions) -> io::Result<TlsConnecto
     }
 
     let cfg = if opts.verify_identity {
-        ClientConfig::builder()
+        client_config()?
             .with_root_certificates(root_store)
             .with_no_client_auth()
     } else {
-        let provider = rustls::crypto::aws_lc_rs::default_provider();
-        ClientConfig::builder()
+        client_config()?
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(ChainOnlyVerification {
                 roots: Arc::new(root_store),
-                supported: provider.signature_verification_algorithms,
+                supported: PROVIDER.signature_verification_algorithms,
             }))
             .with_no_client_auth()
     };
@@ -252,7 +270,7 @@ impl ServerCertVerifier for NoCertificateVerification {
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        rustls::crypto::aws_lc_rs::default_provider()
+        PROVIDER
             .signature_verification_algorithms
             .supported_schemes()
     }

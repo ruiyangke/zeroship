@@ -54,6 +54,11 @@ fn main() {
     // server that spawned it. See `parent_death` for what happened when it did.
     parent_death::arm_from_env();
 
+    // The CLI does not boot through `bootstrap_or_exit`, so it installs the
+    // process's rustls provider itself, before `deploy`, `login` or the dev
+    // server can build an outbound client.
+    zeroship_core::tls::install_process_crypto_provider();
+
     // CLI's stdout/stderr is the user's product (e.g. `zeroship deploy`
     // prints the deploy hash for scripts to capture). Library tracing
     // emissions (runtime, plugin crates) are kept quiet by default —

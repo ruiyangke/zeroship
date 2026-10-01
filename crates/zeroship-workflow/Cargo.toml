@@ -30,7 +30,7 @@ uuid = { workspace = true }
 [dev-dependencies]
 zeroship-workflow-manager = { workspace = true }
 compio-s3 = { workspace = true }
-testcontainers = { version = "0.28", features = ["blocking"] }
+testcontainers = { version = "0.28", default-features = false, features = ["blocking"] }
 bytes = { workspace = true }
 compio-postgres = { workspace = true, features = ["with-chrono-0_4", "with-serde_json-1", "with-uuid-1"] }
 tempfile = { workspace = true }

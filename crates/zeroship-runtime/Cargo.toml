@@ -80,6 +80,14 @@ path = "tests/node_pg_e2e.rs"
 name = "node_tls"
 path = "tests/node_tls.rs"
 
+# Installs an unusable rustls process default before anything else runs, so
+# every connector it builds must name its own provider. The default is
+# process-global and can be installed once, which is why no neighbour may share
+# this binary.
+[[test]]
+name = "tls_provider"
+path = "tests/tls_provider.rs"
+
 # Sets `--allow-natives-syntax --turbofan` via `V8::set_flags_from_string` and
 # depends on winning the race with `init_v8()`'s `Once`. V8 flags are
 # process-global and silently ignored after `V8::initialize()`, so any
@@ -114,8 +122,9 @@ encoding_rs = { workspace = true }
 flate2 = { workspace = true }
 brotli = { workspace = true }
 
-# TLS (for fetch HTTPS — need to install CryptoProvider at init)
-rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
+# TLS for `node:tls` and wss://. `transport::tls` builds every connector from an
+# explicit aws-lc-rs provider, never from the process default.
+rustls = { workspace = true }
 
 # URL
 url = { workspace = true }

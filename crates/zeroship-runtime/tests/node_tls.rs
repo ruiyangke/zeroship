@@ -91,7 +91,7 @@ fn test_cert() -> TestCert {
     let ca_pem = certified.cert.pem();
     let cert_der = certified.cert.der().clone();
     let key_der = certified.signing_key.serialize_der();
-    let provider = rustls::crypto::aws_lc_rs::default_provider();
+    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
     let key = CertifiedKey::from_der(
         vec![CertificateDer::from(cert_der.to_vec())],
         PrivateKeyDer::Pkcs8(key_der.clone().into()),
@@ -103,7 +103,9 @@ fn test_cert() -> TestCert {
         key: Arc::new(key),
         seen_sni: seen_sni.clone(),
     };
-    let cfg = rustls::ServerConfig::builder()
+    let cfg = rustls::ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .unwrap()
         .with_no_client_auth()
         .with_cert_resolver(Arc::new(resolver));
     TestCert {
@@ -137,7 +139,7 @@ fn ca_signed_test_cert() -> TestCert {
     leaf_params.key_usages.push(KeyUsagePurpose::DigitalSignature);
     leaf_params.use_authority_key_identifier_extension = true;
     let leaf_cert = leaf_params.signed_by(&leaf_key, &issuer).unwrap();
-    let provider = rustls::crypto::aws_lc_rs::default_provider();
+    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
     let key = CertifiedKey::from_der(
         vec![CertificateDer::from(leaf_cert.der().to_vec())],
         PrivateKeyDer::Pkcs8(leaf_key.serialize_der().into()),
@@ -149,7 +151,9 @@ fn ca_signed_test_cert() -> TestCert {
         key: Arc::new(key),
         seen_sni: seen_sni.clone(),
     };
-    let cfg = rustls::ServerConfig::builder()
+    let cfg = rustls::ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .unwrap()
         .with_no_client_auth()
         .with_cert_resolver(Arc::new(resolver));
     TestCert {

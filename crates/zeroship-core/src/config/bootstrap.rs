@@ -135,11 +135,20 @@ where
     ))
 }
 
-/// [`bootstrap`] for the binary boundary: on error, print `{binary}: ...` to
-/// stderr + tracing and `process::exit(1)`.
+/// [`bootstrap`] for the binary boundary: install the process's rustls crypto
+/// provider, then boot; on error, print `{binary}: ...` to stderr + tracing and
+/// `process::exit(1)`.
 ///
 /// This is the SINGLE `process::exit` in `core`; its name signals that it is the
-/// binary-boundary helper, not a library primitive.
+/// binary-boundary helper, not a library primitive. The provider is installed
+/// here rather than in [`bootstrap`] for the same reason: it is process state,
+/// set once, and every outbound client the service builds afterwards reads it.
+/// See [`crate::tls`].
+///
+/// # Panics
+///
+/// When a rustls provider was installed before this call; see
+/// [`crate::tls::install_process_crypto_provider`].
 #[must_use]
 pub fn bootstrap_or_exit<C>(
     sources: C::Sources,
@@ -150,6 +159,7 @@ where
     C: GeneratedConfig + ObservabilityControls,
     C::Sources: OverlaySelector,
 {
+    crate::tls::install_process_crypto_provider();
     match bootstrap::<C>(sources, default_filter, binary) {
         Ok(resolved) => resolved,
         Err(err) => {

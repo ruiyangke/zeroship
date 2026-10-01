@@ -30,7 +30,7 @@ flume = { workspace = true }
 futures = { workspace = true }
 compio-ws = { workspace = true }
 compio-tls = { workspace = true }
-rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std"] }
+rustls = { workspace = true }
 # `zeroship_config`, the bootstrap/overlay resolver, `CheckConfigReport`, and the
 # tracing subscriber every platform service installs the same way.
 zeroship-core = { workspace = true }

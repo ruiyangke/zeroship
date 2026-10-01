@@ -18,7 +18,7 @@ zeroship-core = { workspace = true }
 
 [dev-dependencies]
 compio-tls = { workspace = true }
-rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
+rustls = { workspace = true }
 rcgen = "0.14"
 
 [lints]

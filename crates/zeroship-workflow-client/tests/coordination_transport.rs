@@ -141,8 +141,6 @@ fn response(body: &[u8]) -> Vec<u8> {
 
 #[compio::test]
 async fn untrusted_tls_certificate_is_rejected_before_http_authorization() {
-    // Match worker runtime bootstrap when test dependencies enable another provider.
-    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let certificate = rcgen::generate_simple_self_signed(vec!["127.0.0.1".into()]).unwrap();
     let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
     let server = rustls::ServerConfig::builder_with_provider(provider.clone())

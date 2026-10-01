@@ -413,11 +413,6 @@ fn empty_string_as_none(value: &str) -> Option<String> {
 }
 
 fn main() -> std::io::Result<()> {
-    // Control uses cyper for provider/admin calls (Stripe reconciliation,
-    // OpenMeter, workflow dispatch). Install the workspace's selected rustls provider
-    // before any outbound client can be constructed.
-    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-
     // ONE declaration, one parser. There is no second hand-written struct
     // holding the credentials any more, so there is no second place a flag, an
     // environment name or an overlay path can be spelled.

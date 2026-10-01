@@ -12,7 +12,7 @@ url = { workspace = true }
 serde = { workspace = true }
 percent-encoding = "2"
 compio-tls = { workspace = true }
-rustls = { version = "0.23", default-features = false, features = ["std", "aws_lc_rs"] }
+rustls = { workspace = true }
 rustls-native-certs = { version = "0.8" }
 rustls-pemfile = { version = "2" }
 

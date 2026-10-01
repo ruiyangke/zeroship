@@ -23,6 +23,10 @@ fn server_modules() -> Vec<ModuleEntry> {
 }
 
 fn main() {
+    // The hosted JS can `fetch` over HTTPS, and this binary does not boot
+    // through `bootstrap_or_exit`, so it installs the rustls provider itself.
+    zeroship_core::tls::install_process_crypto_provider();
+
     // Bench server is perf-sensitive — quiet by default unless the
     // operator overrides via RUST_LOG.
     zeroship_core::observability::init_tracing("warn");

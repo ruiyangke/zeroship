@@ -9,9 +9,11 @@
 //!
 //! ## Features
 //!
-//! We enable `smtp-transport + rustls-tls + builder + pool + hostname`
-//! and crucially DROP `tokio1*` — without `tokio1`, lettre's optional
-//! `tokio1_crate` dependency stays out of the build graph.
+//! We enable `smtp-transport + rustls + aws-lc-rs + webpki-roots + builder +
+//! pool + hostname` and crucially DROP `tokio1*` — without `tokio1`,
+//! lettre's optional `tokio1_crate` dependency stays out of the build graph.
+//! `rustls-tls` is not used: it bundles lettre's `ring` feature, which puts a
+//! second crypto provider on the workspace's rustls.
 //!
 //! `pool` keeps a small connection pool so successive sends don't
 //! reopen the SMTP/STARTTLS handshake; the pool itself is internal to
@@ -296,8 +298,8 @@ mod tests {
     /// `SmtpMailer::new` builds without error against a plausible
     /// STARTTLS relay config — no SMTP server is contacted, this only
     /// exercises the lettre relay-builder + rustls server-name parser
-    /// path. Catches the "wrong feature set" regression where
-    /// `rustls-tls` is dropped (then `relay()` returns an Err here).
+    /// path. Catches the "wrong feature set" regression where lettre's
+    /// `rustls` TLS stack is dropped (then `relay()` returns an Err here).
     #[test]
     fn smtp_mailer_builds_for_starttls_relay() {
         let m = SmtpMailer::new(&SmtpConfig {

@@ -103,7 +103,6 @@ ed25519-dalek = { workspace = true, features = ["pkcs8", "pem", "rand_core"] }
 jsonwebtoken = { workspace = true }
 rand = "0.8"
 cyper = { workspace = true }
-rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
 url = { workspace = true }
 http = { workspace = true }
 # The worker-enrolment envelope is a CIDR list. Same crate `zeroship-core`
@@ -123,7 +122,7 @@ zeroship-workflow-server = { path = "../zeroship-workflow-server" }
 # backend it is rooted at.
 zeroship-storage = { workspace = true }
 rcgen = "0.14"
-testcontainers = { version = "0.28", features = ["blocking"] }
+testcontainers = { version = "0.28", default-features = false, features = ["blocking"] }
 toml = { workspace = true }
 # `deploy_test.rs` builds a synthetic `.zship` payload (tar+zstd) and
 # feeds it through `zeroship_bundle::ingest`. The runtime path no longer

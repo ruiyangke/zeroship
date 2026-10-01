@@ -193,9 +193,13 @@ async fn relay_process_authenticates_workers_and_streams_commits_without_worker_
     let mut roots = rustls::RootCertStore::empty();
     roots.add(certificate.cert.der().clone()).unwrap();
     let connector = TlsConnector::from(Arc::new(
-        rustls::ClientConfig::builder()
-            .with_root_certificates(roots)
-            .with_no_client_auth(),
+        rustls::ClientConfig::builder_with_provider(Arc::new(
+            rustls::crypto::aws_lc_rs::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_root_certificates(roots)
+        .with_no_client_auth(),
     ));
     let port = free_port();
     let log = temp.path().join("relay.log");

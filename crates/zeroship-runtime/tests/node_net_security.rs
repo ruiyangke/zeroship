@@ -165,14 +165,16 @@ async fn spawn_self_signed_tls_server() -> SocketAddr {
         rcgen::generate_simple_self_signed(vec!["db.local.test".to_string()]).unwrap();
     let cert_der = certified.cert.der().clone();
     let key_der = certified.signing_key.serialize_der();
-    let provider = rustls::crypto::aws_lc_rs::default_provider();
+    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
     let key = CertifiedKey::from_der(
         vec![CertificateDer::from(cert_der.to_vec())],
         PrivateKeyDer::Pkcs8(key_der.into()),
         &provider,
     )
     .unwrap();
-    let cfg = rustls::ServerConfig::builder()
+    let cfg = rustls::ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .unwrap()
         .with_no_client_auth()
         .with_cert_resolver(Arc::new(StaticResolver { key: Arc::new(key) }));
     let acceptor = TlsAcceptor::from(Arc::new(cfg));
