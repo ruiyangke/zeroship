@@ -35,6 +35,16 @@
 //! The `docker` program is a value rather than an environment lookup:
 //! [`DockerCli::system`] runs `docker` from `PATH`, and a test hands [`DockerCli::at`]
 //! a program of its own.
+//!
+//! [`lifetime`] holds the two measurements a fixture adopting this owes.
+
+#![allow(
+    dead_code,
+    reason = "each crate that includes this fixture uses its own subset of it"
+)]
+
+#[path = "container_lifetime.rs"]
+pub mod lifetime;
 
 use std::ffi::OsString;
 use std::os::unix::process::CommandExt as _;

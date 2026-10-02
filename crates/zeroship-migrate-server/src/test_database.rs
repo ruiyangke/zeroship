@@ -1,18 +1,30 @@
+//! The PostgreSQL server the migration server's unit tests share.
+//!
+//! One server per test binary, kept in a `static`, which libtest never drops, so it
+//! is started through the shared [`container_reaper`]: a reaper spawned before the
+//! container exists removes it once this process has ended.
+
 use std::sync::OnceLock;
 use std::time::Duration;
 
 use compio_postgres::{Client, NoTls};
 use testcontainers::core::{IntoContainerPort, WaitFor};
-use testcontainers::{runners::SyncRunner, Container, GenericImage, ImageExt};
+use testcontainers::{GenericImage, ImageExt};
+
+/// Containers a test process owns, removed when that process ends.
+#[path = "../../../tests/fixtures/container_reaper.rs"]
+mod container_reaper;
+
+use container_reaper::{start_owned, DockerCli, OwnedContainer, Ownership};
 
 struct Postgres {
-    _container: Container<GenericImage>,
+    owned: OwnedContainer,
     url: String,
 }
 
 impl Postgres {
     fn start() -> Self {
-        let container = GenericImage::new("postgres", "17")
+        let request = GenericImage::new("postgres", "17")
             .with_exposed_port(5432.tcp())
             .with_wait_for(WaitFor::message_on_stdout(
                 "PostgreSQL init process complete; ready for start up.",
@@ -23,16 +35,15 @@ impl Postgres {
             .with_env_var("POSTGRES_PASSWORD", "fixture")
             .with_env_var("POSTGRES_DB", "migrate_server_unit_tests")
             .with_cmd(["postgres", "-c", "wal_level=logical", "-c", "fsync=off"])
-            .with_startup_timeout(Duration::from_secs(120))
-            .start()
-            .expect("migration-server unit tests require Docker and PostgreSQL");
+            .with_startup_timeout(Duration::from_secs(120));
+        let owned = start_owned(&DockerCli::system(), &Ownership::mint(), request).unwrap_or_else(
+            |error| panic!("migration-server unit tests require Docker and PostgreSQL: {error}"),
+        );
+        let container = owned.container();
         let host = container.get_host().expect("database host");
         let port = container.get_host_port_ipv4(5432).expect("database port");
         let url = format!("postgresql://postgres:fixture@{host}:{port}/migrate_server_unit_tests");
-        Self {
-            _container: container,
-            url,
-        }
+        Self { owned, url }
     }
 }
 
@@ -54,4 +65,39 @@ pub(crate) async fn connect() -> Client {
     })
     .detach();
     client
+}
+
+/// This binary's server is removed once the process that started it has ended -
+/// after a normal exit, and after a SIGKILL while it is still starting. Both run
+/// [`server_lifetime::the_unit_test_server_reports_its_container`] alone in a child
+/// process; see `container_reaper::lifetime`.
+mod server_lifetime {
+    use super::container_reaper::lifetime;
+    use super::{Postgres, POSTGRES};
+
+    /// The child test, by its full path in this binary.
+    const CHILD_TEST: &str =
+        "test_database::server_lifetime::the_unit_test_server_reports_its_container";
+
+    #[test]
+    fn the_unit_test_server_reports_its_container() {
+        lifetime::report_owner();
+        let server = POSTGRES.get_or_init(Postgres::start);
+        assert!(
+            server.url.ends_with("/migrate_server_unit_tests"),
+            "{}",
+            server.url
+        );
+        lifetime::report_container(server.owned.container().id());
+    }
+
+    #[test]
+    fn the_unit_test_server_is_removed_when_its_process_ends() {
+        lifetime::assert_removed_after_the_child_exits(CHILD_TEST);
+    }
+
+    #[test]
+    fn the_unit_test_server_is_removed_when_its_process_is_killed_while_starting() {
+        lifetime::assert_removed_after_a_kill_during_startup(CHILD_TEST);
+    }
 }

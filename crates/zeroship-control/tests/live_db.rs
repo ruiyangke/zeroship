@@ -58,3 +58,4 @@ mod stripe_webhook_test;
 mod join_signer_import_test;
 mod worker_join_test;
 mod worker_health_test;
+mod test_database_lifetime;

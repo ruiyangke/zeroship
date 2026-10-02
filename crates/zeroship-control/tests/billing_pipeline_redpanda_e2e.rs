@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use compio_postgres::{connect, NoTls};
 use testcontainers::core::{IntoContainerPort, WaitFor};
-use testcontainers::{runners::SyncRunner, Container, GenericImage, ImageExt};
+use testcontainers::{GenericImage, ImageExt};
 use uuid::Uuid;
 
 use zeroship_control::cron::billing_reconcile::DEFAULT_SETTLE_WINDOW_SECS;
@@ -30,13 +30,18 @@ use zeroship_metering::{Meter, UsageOutbox};
 use zeroship_stream::{adapters, StreamConfig, StreamRegistry};
 
 use crate::common;
+use crate::common::container_reaper::lifetime;
+use crate::common::container_reaper::{start_owned, DockerCli, OwnedContainer, Ownership};
 
 fn db_url() -> String {
     crate::common::require_control_db()
 }
 
+/// The broker this binary owns. It lives in a `static`, which libtest never drops, so
+/// it is started through the shared container reaper, which removes it once this
+/// process has ended.
 struct Redpanda {
-    _container: Container<GenericImage>,
+    owned: OwnedContainer,
     brokers: String,
 }
 
@@ -44,7 +49,7 @@ impl Redpanda {
     fn start() -> Self {
         let port = available_port();
         let advertised = format!("external://127.0.0.1:{port}");
-        let container = GenericImage::new("docker.redpanda.com/redpandadata/redpanda", "v26.2.2")
+        let request = GenericImage::new("docker.redpanda.com/redpandadata/redpanda", "v26.2.2")
             .with_wait_for(WaitFor::message_on_stderr("Successfully started Redpanda!"))
             .with_mapped_port(port, 19092.tcp())
             .with_cmd([
@@ -67,11 +72,11 @@ impl Redpanda {
                 "--set".to_owned(),
                 "redpanda.auto_create_topics_enabled=true".to_owned(),
             ])
-            .with_startup_timeout(Duration::from_secs(120))
-            .start()
-            .expect("control tests require Docker and Redpanda");
+            .with_startup_timeout(Duration::from_secs(120));
+        let owned = start_owned(&DockerCli::system(), &Ownership::mint(), request)
+            .unwrap_or_else(|error| panic!("control tests require Docker and Redpanda: {error}"));
         Self {
-            _container: container,
+            owned,
             brokers: format!("127.0.0.1:{port}"),
         }
     }
@@ -89,6 +94,32 @@ static REDPANDA: OnceLock<Redpanda> = OnceLock::new();
 
 fn brokers() -> String {
     REDPANDA.get_or_init(Redpanda::start).brokers.to_owned()
+}
+
+/// The child test the broker's lifetime measurements run, by its full path in this
+/// binary.
+const CHILD_TEST: &str = "billing_pipeline_redpanda_e2e::the_redpanda_broker_reports_its_container";
+
+#[test]
+fn the_redpanda_broker_reports_its_container() {
+    lifetime::report_owner();
+    let broker = REDPANDA.get_or_init(Redpanda::start);
+    assert!(
+        broker.brokers.starts_with("127.0.0.1:"),
+        "{}",
+        broker.brokers
+    );
+    lifetime::report_container(broker.owned.container().id());
+}
+
+#[test]
+fn the_redpanda_broker_is_removed_when_its_process_ends() {
+    lifetime::assert_removed_after_the_child_exits(CHILD_TEST);
+}
+
+#[test]
+fn the_redpanda_broker_is_removed_when_its_process_is_killed_while_starting() {
+    lifetime::assert_removed_after_a_kill_during_startup(CHILD_TEST);
 }
 
 async fn pg(url: &str) -> compio_postgres::Client {

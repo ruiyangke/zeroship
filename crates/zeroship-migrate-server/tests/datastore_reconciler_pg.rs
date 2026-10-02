@@ -1499,3 +1499,39 @@ async fn two_services_on_one_cluster_converge_on_one_row_and_a_zone_change_is_re
         "and the standing row is not moved"
     );
 }
+
+/// The binary's shared migrated server is removed once the process that started it
+/// has ended - after a normal exit, and after a SIGKILL while it is still starting or
+/// migrating. Both run
+/// [`migrated_server_lifetime::the_migrated_server_reports_its_container`] alone in a
+/// child process; see `container_reaper::lifetime`.
+mod migrated_server_lifetime {
+    use crate::fixture;
+    use crate::fixture::container_reaper::lifetime;
+
+    /// The child test, by its full path in this binary.
+    const CHILD_TEST: &str =
+        "migrated_server_lifetime::the_migrated_server_reports_its_container";
+
+    #[test]
+    fn the_migrated_server_reports_its_container() {
+        lifetime::report_owner();
+        let server = fixture::migrated();
+        assert!(
+            server.url().ends_with("/migrate_server_tests"),
+            "{}",
+            server.url()
+        );
+        lifetime::report_container(server.container_id());
+    }
+
+    #[test]
+    fn the_migrated_server_is_removed_when_its_process_ends() {
+        lifetime::assert_removed_after_the_child_exits(CHILD_TEST);
+    }
+
+    #[test]
+    fn the_migrated_server_is_removed_when_its_process_is_killed_while_starting() {
+        lifetime::assert_removed_after_a_kill_during_startup(CHILD_TEST);
+    }
+}

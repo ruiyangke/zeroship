@@ -979,4 +979,8 @@ pub fn lite_billing_stack(
 }
 
 #[path = "../../src/test_database/mod.rs"]
-mod test_database;
+pub(crate) mod test_database;
+
+/// The shared container reaper, through the one inclusion `test_database` makes of
+/// it, so every fixture of this binary labels its containers with the same owner.
+pub(crate) use test_database::container_reaper;
