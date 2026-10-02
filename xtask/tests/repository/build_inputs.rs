@@ -17,6 +17,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::SystemTime;
+use xtask::build_chain::BUILD_CHAIN;
 
 /// The ordered chain that rebuilds every artifact below in one command.
 const WHOLE_CHAIN: &str = "pnpm build";
@@ -363,6 +364,52 @@ fn every_declared_build_input_names_a_rebuild_command_and_resolvable_sources() {
             );
         }
     }
+}
+
+/// `build_host` rewrites the schema bundle, and the freshness gate pairs every
+/// declared artifact against its newest source. A build-input rule that names a
+/// bundle the chain rewrites is therefore left stale by a chain that stops
+/// before rebuilding it. Binding the chain's output to the table keeps the two
+/// producers of these inputs in the same order.
+#[test]
+fn the_host_chain_rebuilds_every_consumer_of_the_artifacts_it_writes() {
+    let produced: BTreeSet<&str> = BUILD_CHAIN
+        .iter()
+        .flat_map(|step| step.artifacts.iter().copied())
+        .collect();
+    assert!(
+        !produced.is_empty(),
+        "the host chain declares no artifacts, so this check compares nothing"
+    );
+
+    let mut consumers = 0;
+    for input in build_inputs() {
+        let consumed: Vec<&str> = input
+            .sources
+            .iter()
+            .filter(|source| produced.contains(source.as_str()))
+            .map(String::as_str)
+            .collect();
+        if consumed.is_empty() {
+            continue;
+        }
+        consumers += 1;
+        for artifact in &input.artifacts {
+            assert!(
+                produced.contains(artifact.as_str()),
+                "`{}` reads {} - a bundle the host chain rewrites - but the \
+                 chain does not rebuild its artifact {artifact}, so running it \
+                 leaves {artifact} older than that source",
+                input.rebuild,
+                consumed.join(", "),
+            );
+        }
+    }
+    assert!(
+        consumers > 0,
+        "no build-input rule reads a host-chain artifact, so the closure \
+         check has no subjects"
+    );
 }
 
 /// The WPT tree under `crates/zeroship-runtime/tests/wpt` is FETCHED, not

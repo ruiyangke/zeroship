@@ -27,6 +27,7 @@
   },
   "scripts": {
     "build": "tsup",
+    "build:adapter": "tsup --config tsup.adapter.config.ts",
     "typecheck": "tsc --noEmit",
     "typecheck:tests": "tsc --noEmit -p tsconfig.tests.json",
     "check": "npm run typecheck && npm run typecheck:tests",
