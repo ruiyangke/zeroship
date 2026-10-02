@@ -15,11 +15,11 @@
 #   differential_tokio::both_drivers_agree_on_binary_copy_roundtrip
 #   differential_tokio::both_drivers_agree_on_copy_in_results
 #   differential_tokio::both_drivers_agree_on_copy_out_bytes
-#       These four move AS A GROUP - all four fail or all four pass - across
-#       runs at the same commit. A run where all four pass is not a fix: a
-#       rerun brings them back. Each also passes on its own every time, which
-#       proves nothing: running alone is the case pgbouncer handles, so
-#       isolation cannot rank a pooling flapper.
+#       These entries move AS A GROUP - all fail or all pass - across runs at
+#       the same commit. A run where all pass is not a fix: a rerun brings them
+#       back. Each also passes on its own every time, which proves nothing:
+#       running alone is the case pgbouncer handles, so isolation cannot rank a
+#       pooling flapper.
 #
 # Growth rule: a name joins this list as a newly added test meeting the
 # pooler for the first time, never as an existing test starting to fail; an

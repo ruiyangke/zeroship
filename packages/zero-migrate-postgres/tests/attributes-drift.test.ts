@@ -27,7 +27,7 @@ test("the committed typings match the Rust-exported vocabulary", () => {
     after,
     before,
     "src/generated/attributes.ts is stale. Regenerate with:\n" +
-      "  UPDATE_VOCABULARY=1 cargo test -p zeroship-migrate-postgres --test attribute_vocabulary_export\n" +
+      "  cargo test -p zeroship-migrate-postgres --test attribute_vocabulary_export -- --ignored update_attribute_vocabulary\n" +
       "  node packages/zero-migrate-postgres/scripts/gen-attributes.mjs\n" +
       "and commit both.",
   );

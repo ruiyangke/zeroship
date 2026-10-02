@@ -103,21 +103,21 @@ function rangeParagraph(shape) {
 
 /** The header every generated file carries. */
 function banner(dialect) {
-  return `// GENERATED FILE — DO NOT EDIT.
+  return `// GENERATED FILE - DO NOT EDIT.
 //
 // Source: the \`attribute-vocabulary.json\` exported by this backend's Rust crate from
 // its own \`static DEFS\`. Regenerate with:
 //
-//     UPDATE_VOCABULARY=1 cargo test -p zeroship-migrate-${dialect} --test attribute_vocabulary_export
+//     cargo test -p zeroship-migrate-${dialect} --test attribute_vocabulary_export -- --ignored update_attribute_vocabulary
 //     node packages/zero-migrate-${dialect}/scripts/gen-attributes.mjs
 //
 // A drift test asserts this file matches the artifact, so an edit here is reverted by
 // the next regeneration rather than silently kept.
 //
 // This module augments the neutral \`@zeroship/migrate\` package's \`VendorAttributeNamespaces\`
-// interface. Importing this package is what makes \`${dialect}: { … }\` typecheck on the
+// interface. Importing this package is what makes \`${dialect}: { ... }\` typecheck on the
 // authoring surface; without it the key is a type error. The namespace key is the
-// backend's DIALECT ID — there is no hand-picked alias anywhere in the chain.`;
+// backend's DIALECT ID - there is no hand-picked alias anywhere in the chain.`;
 }
 
 /** Render the whole generated module. */

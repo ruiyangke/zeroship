@@ -4,7 +4,7 @@
 // `data: {json}` frames followed by `data: [DONE]`. This server speaks that
 // wire, records every request it receives for the spec to inspect, and
 // refuses a request that does not carry the model, messages or key the app is
-// configured to send — so a suite that passes proves the app actually called
+// configured to send - so a suite that passes proves the app actually called
 // the provider, not that a reply was cached somewhere.
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";

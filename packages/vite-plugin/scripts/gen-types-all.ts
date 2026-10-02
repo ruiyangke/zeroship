@@ -6,10 +6,10 @@
  * package (`src/gen-types/confined-ceiling.ts`, `src/gen-types/render-env-db.ts`,
  * the `zeroship-migrate-node` fold). Changing one of them stales EVERY committed
  * artifact in the repo at once, as adding `default = "1"` to the injected
- * `version` column does. Only two of those
- * artifact sets are gated by a test (`test/gen-types/generated-source.test.ts`),
- * so the rest drift silently. A per-app script would just wait for the next
- * input change; this walks them all.
+ * `version` column does. Only the artifact sets
+ * `test/gen-types/generated-source.test.ts` gates are covered, so the rest
+ * drift silently. A per-app script would just wait for the next input change;
+ * this walks them all.
  *
  * WHY IT LIVES HERE. The artifacts are produced by the in-process `gen-types`
  * library (no CLI, no subprocess), so the regenerator must run from a package

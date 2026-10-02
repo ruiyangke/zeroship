@@ -1,5 +1,5 @@
 // Regenerate this package's typings from the `sqlite` crate's exported vocabulary.
-// The logic is shared — see ../../zero-migrate/scripts/vendor-attribute-codegen.mjs — because three copies
+// The logic is shared - see ../../zero-migrate/scripts/vendor-attribute-codegen.mjs - because three copies
 // would be three chances for the vendor packages to disagree about how a declared shape
 // becomes a TypeScript type.
 import { dirname, resolve } from "node:path";

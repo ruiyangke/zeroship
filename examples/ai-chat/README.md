@@ -50,8 +50,8 @@ Open http://localhost:3000/ to chat.
 
 `pnpm test:e2e` runs hermetically. The Playwright web-server fixture starts a
 local OpenAI-compatible stub and points the app at it with
-`ZS_VAR_OPENAI_BASE_URL` / `ZS_VAR_OPENAI_API_KEY` — the same configuration
-surface a creator uses — so no real key and no network to OpenAI are needed.
+`ZS_VAR_OPENAI_BASE_URL` / `ZS_VAR_OPENAI_API_KEY` - the same configuration
+surface a creator uses - so no real key and no network to OpenAI are needed.
 The stub streams several deltas in the chat-completions SSE wire and records
 every request; the suite asserts the app sent the expected model, messages and
 key, and that a provider error surfaces in the chat UI.
@@ -106,7 +106,7 @@ work without modification:
   against any class implementing the spec ReadableStream surface;
   no reach into private fields.
 
-- **`env` for provider configuration** — the app builds its provider from
+- **`env` for provider configuration** - the app builds its provider from
   `env.OPENAI_API_KEY` and `env.OPENAI_BASE_URL`. Those are app values the
   runtime seeds before the worker evaluates creator code, so a deployment and
   a local dev server supply the provider the same way; the app never depends
