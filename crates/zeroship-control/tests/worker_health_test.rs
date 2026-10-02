@@ -41,19 +41,19 @@ async fn start_healthy_worker() -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind healthy worker");
-    let port = listener.local_addr().expect("local_addr").port();
-    compio::runtime::spawn(async move {
+    let address = listener.local_addr().expect("local_addr");
+    crate::common::live::register_listener(address);
+    let port = address.port();
+    crate::common::live::spawn(async move {
         loop {
             let Ok((stream, _peer)) = listener.accept().await else {
                 break;
             };
-            compio::runtime::spawn(async move {
+            crate::common::live::spawn(async move {
                 serve_ok(stream).await;
-            })
-            .detach();
+            });
         }
-    })
-    .detach();
+    });
     port
 }
 
@@ -88,10 +88,9 @@ async fn connect_pg() -> Arc<compio_postgres::Client> {
     let (client, connection) = compio_postgres::connect(&db_url, compio_postgres::NoTls)
         .await
         .expect("control-pg connect");
-    compio::runtime::spawn(async move {
+    crate::common::live::spawn(async move {
         let _ = connection.run().await;
-    })
-    .detach();
+    });
     Arc::new(client)
 }
 
@@ -178,7 +177,7 @@ async fn delete_instance(pg: &compio_postgres::Client, id: &str) {
     }
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn the_monitor_observes_liveness_without_writing_it_into_status() {
     let pg = connect_pg().await;
 

@@ -28,8 +28,6 @@ use zeroship_core::device_grant::{
 };
 use zeroship_core::{AppId, UserId};
 
-use crate::common;
-
 #[path = "authz_guard_oauth/organizations.rs"]
 mod organization_routes;
 
@@ -155,10 +153,9 @@ async fn fixture_with_auth_provider(
 
     let (control_pg_client, control_pg_conn) =
         connect(&db_url, NoTls).await.expect("control-pg connect");
-    compio::runtime::spawn(async move {
+    crate::common::live::spawn(async move {
         let _ = control_pg_conn.run().await;
-    })
-    .detach();
+    });
 
     let blob_root = tmpdir(&format!("blob-{label}"));
     let deploy_tmp_dir = tmpdir(&format!("deploy-{label}"));
@@ -487,10 +484,13 @@ impl PlatformJwksMock {
                     let server = web::test::server(move || {
                         let body = factory_body.clone();
                         async move {
-                            web::App::new().state(body).service(
-                                web::resource("/.well-known/jwks.json")
-                                    .route(web::get().to(platform_jwks_handler)),
-                            )
+                            web::App::new()
+                                .middleware(crate::common::live::CloseConnections)
+                                .state(body)
+                                .service(
+                                    web::resource("/.well-known/jwks.json")
+                                        .route(web::get().to(platform_jwks_handler)),
+                                )
                         }
                     })
                     .await;
@@ -501,6 +501,7 @@ impl PlatformJwksMock {
                 });
         });
         let addr = started_rx.recv().expect("platform jwks mock starts");
+        crate::common::live::register_listener(addr);
         Self {
             base: format!("http://{addr}"),
             shutdown: Some(shutdown_tx),
@@ -550,10 +551,9 @@ impl PlatformOp {
                     let (pg_client, pg_connection) = connect(&database_url, NoTls)
                         .await
                         .expect("platform OP pg connect");
-                    compio::runtime::spawn(async move {
+                    let driver = compio::runtime::spawn(async move {
                         let _ = pg_connection.run().await;
-                    })
-                    .detach();
+                    });
                     let pg = Arc::new(pg_client);
 
                     zeroship_auth::oidc::device_token::reconcile_platform_cli_client(pg.as_ref())
@@ -641,6 +641,7 @@ impl PlatformOp {
                         let orm_url = orm_url.clone();
                         async move {
                             web::App::new()
+                                .middleware(crate::common::live::CloseConnections)
                                 .state_factory(async move || {
                                     zeroship_auth::store::native::connect(&orm_url).await
                                 })
@@ -668,11 +669,17 @@ impl PlatformOp {
                     )
                     .await
                     .expect("remove isolated platform OP key");
+                    // The driver runs on this thread's runtime. Cancel it before
+                    // that runtime goes, so it is not left parked on the socket
+                    // holding the runtime's ring.
+                    drop(pg);
+                    let _ = driver.cancel().await;
                 });
         });
         let (addr, issuer) = started_rx
             .recv_timeout(StdDuration::from_secs(15))
             .expect("platform OP starts within 15 seconds");
+        crate::common::live::register_listener(addr);
         Self {
             base: format!("http://{addr}"),
             issuer,
@@ -736,7 +743,7 @@ async fn assert_platform_cli_registration(pg: &compio_postgres::Client) {
     assert!(row.get::<_, bool>("has_no_app_extension"));
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn op_cli_device_token_authorizes_control_endpoint() {
     let user_id = UserId::mint();
     let database_url = db_url();
@@ -916,10 +923,6 @@ async fn op_cli_device_token_authorizes_control_endpoint() {
     let app_body_text = String::from_utf8_lossy(&app_body).to_string();
 
     fx.cleanup().await;
-    drop(control);
-    drop(http);
-    drop(fx);
-    common::drain_pg().await;
 
     assert_eq!(
         deploy_status,
@@ -952,7 +955,7 @@ async fn op_cli_device_token_authorizes_control_endpoint() {
     assert_eq!(token["scope"], "apps:deploy apps:read");
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn platform_issuer_accepts_valid_token_and_rejects_unknown_issuer() {
     let user_id = UserId::mint();
     let mut fx = fixture_with_platform("platform-issuer", &user_id).await;
@@ -981,17 +984,9 @@ async fn platform_issuer_accepts_valid_token_and_rejects_unknown_issuer() {
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 
     fx.cleanup().await;
-
-    // Teardown: the service and the fixture both hold connections, and locals
-    // are dropped only after the body returns - by which point the runtime is
-    // gone and the sockets can no longer be closed. Drop them explicitly, then
-    // wait for the close to land.
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn platform_access_token_revocation_marker_rejects_within_cache_ttl() {
     let user_id = UserId::mint();
     let mut fx = fixture_with_platform("platform-revoked", &user_id).await;
@@ -1027,13 +1022,9 @@ async fn platform_access_token_revocation_marker_rejects_within_cache_ttl() {
         .await
         .expect("cleanup platform token revocation marker");
     fx.cleanup().await;
-
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn bearer_verifier_directly_accepts_oauth_and_rejects_revoked_platform_token() {
     let user_id = UserId::mint();
     let fx = fixture_with_platform("bearer-verifier", &user_id).await;
@@ -1096,14 +1087,9 @@ async fn bearer_verifier_directly_accepts_oauth_and_rejects_revoked_platform_tok
         )
         .await;
     fx.cleanup().await;
-
-    // No `app`/ntex test service in this test - it drives `bearer_verifier()`
-    // directly. Only the fixture's Postgres client needs to be dropped.
-    drop(fx);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn oauth_token_with_apps_read_can_list_apps() {
     let user_id = UserId::mint();
     let fx = fixture_with_platform("apps-read", &user_id).await;
@@ -1141,13 +1127,9 @@ async fn oauth_token_with_apps_read_can_list_apps() {
     );
 
     fx.cleanup().await;
-
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn oauth_token_owned_by_anonymized_user_returns_401() {
     let user_id = UserId::mint();
     let fx = fixture_with_platform("anonymized-owner", &user_id).await;
@@ -1171,14 +1153,11 @@ async fn oauth_token_owned_by_anonymized_user_returns_401() {
     let status = test::call_service(&app, req).await.status();
 
     fx.cleanup().await;
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn oauth_token_ignores_standard_oidc_scopes() {
     let user_id = UserId::mint();
     let fx = fixture_with_platform("oidc-scopes", &user_id).await;
@@ -1201,10 +1180,6 @@ async fn oauth_token_ignores_standard_oidc_scopes() {
     assert_eq!(status, StatusCode::OK);
 
     fx.cleanup().await;
-
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// F3 - drives the REAL self-service path end to end with NO pre-seeded
@@ -1220,7 +1195,7 @@ async fn oauth_token_ignores_standard_oidc_scopes() {
 ///
 /// This test must NOT pre-seed any membership row for the principal - the
 /// owner seat has to come from the production create path.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn creator_self_service_creates_and_lists_only_own_apps() {
     let user_id = UserId::mint();
     let mut fx = fixture_with_platform("self-service", &user_id).await;
@@ -1323,13 +1298,9 @@ async fn creator_self_service_creates_and_lists_only_own_apps() {
         )
         .await;
     fx.cleanup().await;
-
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn oauth_token_without_required_scope_returns_403() {
     let user_id = UserId::mint();
     let mut fx = fixture_with_platform("missing-deploy", &user_id).await;
@@ -1344,13 +1315,9 @@ async fn oauth_token_without_required_scope_returns_403() {
     assert_eq!(status, StatusCode::FORBIDDEN);
 
     fx.cleanup().await;
-
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn invalid_oauth_token_returns_401() {
     let user_id = UserId::mint();
     let fx = fixture_with_platform("invalid-token", &user_id).await;
@@ -1369,13 +1336,9 @@ async fn invalid_oauth_token_returns_401() {
     );
 
     fx.cleanup().await;
-
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn oauth_token_wrong_audience_returns_401() {
     let user_id = UserId::mint();
     let fx = fixture_with_platform("wrong-audience", &user_id).await;
@@ -1396,13 +1359,9 @@ async fn oauth_token_wrong_audience_returns_401() {
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 
     fx.cleanup().await;
-
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn invalid_oauth_sub_returns_401() {
     let user_id = UserId::mint();
     let fx = fixture_with_platform("invalid-sub", &user_id).await;
@@ -1419,13 +1378,9 @@ async fn invalid_oauth_sub_returns_401() {
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 
     fx.cleanup().await;
-
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn unknown_scope_returns_401_not_silently_dropped() {
     let user_id = UserId::mint();
     let fx = fixture_with_platform("unknown-scope", &user_id).await;
@@ -1442,13 +1397,9 @@ async fn unknown_scope_returns_401_not_silently_dropped() {
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 
     fx.cleanup().await;
-
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn invalid_app_resource_id_returns_400_before_cedar() {
     let user_id = UserId::mint();
     let fx = fixture_with_platform("invalid-resource-id", &user_id).await;
@@ -1462,13 +1413,9 @@ async fn invalid_app_resource_id_returns_400_before_cedar() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
 
     fx.cleanup().await;
-
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn oauth_token_subset_of_user_two_call_enforcement() {
     let user_id = UserId::mint();
     let mut fx = fixture_with_platform("token-subset", &user_id).await;
@@ -1490,10 +1437,6 @@ async fn oauth_token_subset_of_user_two_call_enforcement() {
     assert_eq!(status, StatusCode::FORBIDDEN);
 
     fx.cleanup().await;
-
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// Seed the `zeroship.identity_links` marker WITHOUT granting anything
@@ -1592,7 +1535,7 @@ async fn seeding_marker_count(state: &AppState, principal_id: &UserId) -> i64 {
 /// to delete (so `an_operator_deleting_a_grant_row_narrows_the_next_cli_request`
 /// below would have nothing to narrow), and materializing without authorizing
 /// is the 403 this exists to prevent.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn a_first_cli_request_is_authorized_and_materializes_the_default_grants() {
     let user_id = UserId::mint();
     let mut fx = fixture_with_platform("first-cli", &user_id).await;
@@ -1645,10 +1588,6 @@ async fn a_first_cli_request_is_authorized_and_materializes_the_default_grants()
 
     clear_grants(&fx.state, &user_id).await;
     fx.cleanup().await;
-
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// The capability this whole change exists to restore: an operator DELETE
@@ -1664,7 +1603,7 @@ async fn a_first_cli_request_is_authorized_and_materializes_the_default_grants()
 /// entitlement check is control's, at request time. `crates/auth`'s
 /// `the_cli_device_grant_caps_scope_to_the_client_registration_only` pins the
 /// other half.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn an_operator_deleting_a_grant_row_narrows_the_next_cli_request() {
     let user_id = UserId::mint();
     let mut fx = fixture_with_platform("narrowed-cli", &user_id).await;
@@ -1711,13 +1650,9 @@ async fn an_operator_deleting_a_grant_row_narrows_the_next_cli_request() {
 
     clear_grants(&fx.state, &user_id).await;
     fx.cleanup().await;
-
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn viewer_role_cannot_use_granted_apps_archive_scope() {
     let user_id = UserId::mint();
     let mut fx = fixture_with_platform("user-subset", &user_id).await;
@@ -1751,10 +1686,6 @@ async fn viewer_role_cannot_use_granted_apps_archive_scope() {
             &[&owner_id.as_str()],
         )
         .await;
-
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 fn unix_now_secs() -> u64 {

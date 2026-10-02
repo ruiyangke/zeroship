@@ -58,10 +58,9 @@ impl Drop for Fixture {
 async fn build_test_state(db_url: &str, label: &str) -> Fixture {
     let (control_pg_client, control_pg_conn) =
         connect(db_url, NoTls).await.expect("control-pg connect");
-    compio::runtime::spawn(async move {
+    crate::common::live::spawn(async move {
         let _ = control_pg_conn.run().await;
-    })
-    .detach();
+    });
 
     let blob_root = tmpdir(&format!("blob-{label}"));
     let deploy_tmp_dir = tmpdir(&format!("dtmp-{label}"));
@@ -165,7 +164,7 @@ fn bearer(user: &UserId) -> String {
 /// One test rather than six, because the fixture is a full `AppState` and the
 /// question each route answers is the same one. What varies between the two
 /// callers is ONE thing: a seat in the organization behind the project.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn the_database_routes_are_mounted_and_gate_on_the_database_resource() {
     let url = common::require_control_db();
     let fx = build_test_state(&url, "routes").await;
@@ -387,10 +386,6 @@ async fn the_database_routes_are_mounted_and_gate_on_the_database_resource() {
             .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.as_str()])
             .await;
     }
-    drop(service);
-    drop(pg);
-    drop(fx);
-    common::drain_pg().await;
 
     assert_eq!(
         create_status,

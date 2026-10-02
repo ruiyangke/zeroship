@@ -2,8 +2,10 @@
 
 pub mod authz_fixture;
 pub mod deployments;
+pub mod live;
 pub mod stripe_mock;
 
+use std::net::SocketAddr;
 use std::sync::mpsc;
 use std::sync::OnceLock;
 use std::sync::{Arc, RwLock};
@@ -27,39 +29,6 @@ pub const PLATFORM_ISSUER: &str = "https://auth.zeroship.test/oauth2";
 pub const DEFAULT_EXECUTION_ZONE_ID: &str = "ezn_default000000000000000000";
 const PLATFORM_KID: &str = "platform-control-test-kid";
 const PLATFORM_KEY_SEED: u8 = 47;
-
-/// Wait for every Postgres connection this test opened to actually close, then
-/// report if any is still live.
-///
-/// Every `#[compio::test]` builds a private compio runtime and tears it down the
-/// instant the test body returns. A connection's socket is owned by a detached
-/// driver task, and dropping the `Client` only *asks* that task to shut down -
-/// the `Terminate` write and the socket drop still have to be driven. If the
-/// runtime goes away first the socket is orphaned: an io_uring submission
-/// co-owns the descriptor and it is never reclaimed, so the descriptor and the
-/// server-side backend survive for the whole process. Connections then
-/// accumulate across a binary's tests until `max_connections` is the ceiling
-/// the suite trips on.
-///
-/// Contract for callers: drop every handle that owns a connection FIRST - the
-/// fixture holding `AppState` (its `control_pg` client) and the ntex test
-/// service holding a cloned `Arc<AppState>` are both still alive at the end of
-/// a test body, because Rust drops locals in reverse declaration order only
-/// once the scope ends. A handle that is still alive keeps its connection
-/// counted and makes this wait out its whole budget.
-///
-/// Timeouts print rather than fail: the leak this guards against is precisely
-/// the kind nothing reported, so a silent teardown would repeat the defect.
-/// Run with `--nocapture` to see the message.
-#[allow(dead_code)]
-pub async fn drain_pg() {
-    if !compio_postgres::drain_connections(std::time::Duration::from_secs(2)).await {
-        eprintln!(
-            "DRAIN-TIMEOUT: {} connection(s) still live",
-            compio_postgres::live_connections()
-        );
-    }
-}
 
 /// The migrated PostgreSQL instance owned by this test binary.
 pub fn require_control_db() -> String {
@@ -92,6 +61,7 @@ pub fn refuse_missing_backend(backend: &str, problem: &str, remedy: &str) -> ! {
 }
 
 pub struct PlatformJwks {
+    address: SocketAddr,
     base: String,
     shutdown: Option<mpsc::Sender<()>>,
     thread: Option<thread::JoinHandle<()>>,
@@ -112,10 +82,13 @@ impl PlatformJwks {
                     let server = web::test::server(move || {
                         let body = factory_body.clone();
                         async move {
-                            web::App::new().state(body).service(
-                                web::resource("/.well-known/jwks.json")
-                                    .route(web::get().to(platform_jwks_handler)),
-                            )
+                            web::App::new()
+                                .middleware(live::CloseConnections)
+                                .state(body)
+                                .service(
+                                    web::resource("/.well-known/jwks.json")
+                                        .route(web::get().to(platform_jwks_handler)),
+                                )
                         }
                     })
                     .await;
@@ -127,10 +100,15 @@ impl PlatformJwks {
         });
         let addr = started_rx.recv().expect("platform jwks mock starts");
         Self {
+            address: addr,
             base: format!("http://{addr}"),
             shutdown: Some(shutdown_tx),
             thread: Some(thread),
         }
+    }
+
+    pub fn address(&self) -> SocketAddr {
+        self.address
     }
 
     pub fn jwks_url(&self) -> String {
@@ -169,7 +147,9 @@ async fn platform_jwks_handler(body: web::types::State<Arc<RwLock<String>>>) -> 
 /// authenticated with a locally-signed PAT and never reached the OAuth arm.
 pub fn platform_jwks_url() -> String {
     static JWKS: OnceLock<PlatformJwks> = OnceLock::new();
-    JWKS.get_or_init(PlatformJwks::start).jwks_url()
+    let jwks = JWKS.get_or_init(PlatformJwks::start);
+    live::register_listener(jwks.address());
+    jwks.jwks_url()
 }
 
 pub fn platform_auth_provider(jwks_url: String) -> Arc<AuthProvider> {
@@ -816,10 +796,9 @@ pub async fn resolve_run_band_base() -> u32 {
     let (client, connection) = compio_postgres::connect(&db_url, compio_postgres::NoTls)
         .await
         .expect("connect to resolve the isolated billing period band base");
-    compio::runtime::spawn(async move {
+    crate::common::live::spawn(async move {
         let _ = connection.run().await;
-    })
-    .detach();
+    });
 
     let columns = client
         .query(
@@ -980,7 +959,3 @@ pub fn lite_billing_stack(
 
 #[path = "../../src/test_database/mod.rs"]
 pub(crate) mod test_database;
-
-/// The shared container reaper, through the one inclusion `test_database` makes of
-/// it, so every fixture of this binary labels its containers with the same owner.
-pub(crate) use test_database::container_reaper;

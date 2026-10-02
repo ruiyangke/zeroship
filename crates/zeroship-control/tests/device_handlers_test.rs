@@ -78,12 +78,11 @@ impl Fixture {
         let db_url = db_url();
         let (control_pg_client, control_pg_conn) =
             connect(&db_url, NoTls).await.expect("control-pg connect");
-        compio::runtime::spawn(async move {
+        crate::common::live::spawn(async move {
             if let Err(err) = control_pg_conn.run().await {
                 eprintln!("[device_handlers_test] pg connection error: {err}");
             }
-        })
-        .detach();
+        });
 
         let registry = Registry::new(&db_url).await.expect("registry");
         zeroship_control::plan_catalog::seed_plans(&registry)
@@ -175,7 +174,7 @@ impl Drop for Fixture {
 /// from this document. The value it must carry is therefore not "an issuer"
 /// but THE issuer `zeroship_authn::BearerVerifier` pins `iss` to, because a
 /// token minted anywhere else is a token control refuses.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn protected_resource_metadata_names_the_issuer_control_verifies_against() {
     let fx = Fixture::new(FixtureProvider::Platform).await;
 
@@ -213,17 +212,13 @@ async fn protected_resource_metadata_names_the_issuer_control_verifies_against()
         configured.ends_with(device_grant::OP_PATH_PREFIX),
         "advertised issuer is not an OP protocol root: {configured}"
     );
-
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// The one-variable control for the case above: same request, same route, and
 /// the single difference is whether a platform OP is configured at all. A
 /// deployment with none has no authorization server to advertise, and naming
 /// one anyway would send the CLI somewhere control would refuse tokens from.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn protected_resource_metadata_is_absent_without_a_platform_op() {
     let fx = Fixture::new(FixtureProvider::SupabaseOnly).await;
 
@@ -239,8 +234,4 @@ async fn protected_resource_metadata_is_absent_without_a_platform_op() {
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }

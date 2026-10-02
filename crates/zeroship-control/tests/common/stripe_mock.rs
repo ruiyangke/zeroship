@@ -100,6 +100,7 @@ pub async fn start_mock_stripe() -> MockStripe {
         .await
         .expect("bind mock stripe");
     let addr = listener.local_addr().expect("mock stripe local addr");
+    crate::common::live::register_listener(addr);
     let base_url = format!("http://{addr}");
     let state = Arc::new(Mutex::new(MockState {
         dedupe_by_key: true,
@@ -107,19 +108,17 @@ pub async fn start_mock_stripe() -> MockStripe {
     }));
     let accept_state = Arc::clone(&state);
 
-    compio::runtime::spawn(async move {
+    crate::common::live::spawn(async move {
         loop {
             let Ok((stream, _peer)) = listener.accept().await else {
                 break;
             };
             let conn_state = Arc::clone(&accept_state);
-            compio::runtime::spawn(async move {
+            crate::common::live::spawn(async move {
                 serve_conn(stream, conn_state).await;
-            })
-            .detach();
+            });
         }
-    })
-    .detach();
+    });
 
     MockStripe { state, base_url }
 }
@@ -383,7 +382,7 @@ fn percent_decode(s: &str) -> String {
 fn http_200_json(json: &str) -> Vec<u8> {
     let body = json.to_string().into_bytes();
     let mut resp = format!(
-        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: keep-alive\r\n\r\n",
+        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
         body.len()
     )
     .into_bytes();

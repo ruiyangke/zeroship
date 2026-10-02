@@ -63,10 +63,9 @@ impl Drop for Fixture {
 async fn build_test_state(db_url: &str, label: &str) -> Fixture {
     let (control_pg_client, control_pg_conn) =
         connect(db_url, NoTls).await.expect("control-pg connect");
-    compio::runtime::spawn(async move {
+    crate::common::live::spawn(async move {
         let _ = control_pg_conn.run().await;
-    })
-    .detach();
+    });
 
     let blob_root = tmpdir(&format!("blob-{label}"));
     let deploy_tmp_dir = tmpdir(&format!("dtmp-{label}"));
@@ -210,7 +209,7 @@ async fn app_plan_id(pg: &Client, app_id: &AppId) -> String {
     .get("plan_id")
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn creator_cannot_self_assign_non_assignable_plan_operator_can() {
     let url = db_url();
     let fx = build_test_state(&url, "major4").await;
@@ -356,17 +355,6 @@ async fn creator_cannot_self_assign_non_assignable_plan_operator_can() {
             &[&owner.as_str()],
         )
         .await;
-
-    // Teardown: the service, the plan catalog, the cloned `pg` handle, and the
-    // fixture all hold (or share) a Postgres connection, and locals are dropped
-    // only after the body returns - by which point the runtime is gone and the
-    // sockets can no longer be closed. Drop them explicitly, then wait for the
-    // close to land.
-    drop(app_svc);
-    drop(catalog);
-    drop(pg);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// An ARCHIVED plan must be refused with a reason, not reported as a missing app.
@@ -385,7 +373,7 @@ async fn creator_cannot_self_assign_non_assignable_plan_operator_can() {
 /// Uses the app OWNER, and the archived plan is seeded `assignable_by_creator`
 /// deliberately: the caller must get PAST the assignability gate so the archived
 /// check is what answers, rather than a 403 hiding the defect.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn assigning_an_archived_plan_is_refused_and_not_reported_as_a_missing_app() {
     let url = db_url();
     let fx = build_test_state(&url, "archived-plan").await;
@@ -469,10 +457,4 @@ async fn assigning_an_archived_plan_is_refused_and_not_reported_as_a_missing_app
             &[&owner.as_str()],
         )
         .await;
-
-    drop(app_svc);
-    drop(catalog);
-    drop(pg);
-    drop(fx);
-    common::drain_pg().await;
 }

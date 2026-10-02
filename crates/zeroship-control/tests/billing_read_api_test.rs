@@ -78,10 +78,9 @@ impl Drop for Fixture {
 async fn build_test_state(db_url: &str, label: &str) -> Fixture {
     let (control_pg_client, control_pg_conn) =
         connect(db_url, NoTls).await.expect("control-pg connect");
-    compio::runtime::spawn(async move {
+    crate::common::live::spawn(async move {
         let _ = control_pg_conn.run().await;
-    })
-    .detach();
+    });
 
     let blob_root = tmpdir(&format!("blob-{label}"));
     let deploy_tmp_dir = tmpdir(&format!("dtmp-{label}"));
@@ -554,7 +553,7 @@ fn full_router() -> impl Fn(&mut web::ServiceConfig) + Clone {
 //            operator (Resource::Any) reads any.
 // ==========================================================================
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn invoice_history_is_creator_scoped_with_no_operator_exception() {
     let url = db_url();
     let fx = build_test_state(&url, "history").await;
@@ -691,23 +690,13 @@ async fn invoice_history_is_creator_scoped_with_no_operator_exception() {
         &[&pat_a, &pat_b, &pat_outsider],
     )
     .await;
-
-    // Teardown: the ntex test service holds a cloned Arc<AppState>, and the
-    // fixture holds the fixture's own Postgres connection; both locals are
-    // dropped only after the body returns - by which point the runtime is gone
-    // and the sockets can no longer be closed. Drop them explicitly, then wait
-    // for the close to land.
-    drop(svc);
-    drop(pg);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ==========================================================================
 // (b): an app/unauthorized token → 403 on the billing reads.
 // ==========================================================================
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn unauthorized_token_is_forbidden_on_billing_reads() {
     let url = db_url();
     let fx = build_test_state(&url, "unauth").await;
@@ -765,18 +754,13 @@ async fn unauthorized_token_is_forbidden_on_billing_reads() {
     }
 
     cleanup(&pg, &[&user, &stranger], &[app], &[&pat_none]).await;
-
-    drop(svc);
-    drop(pg);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ==========================================================================
 // (d): invoice line detail returns the FROZEN snapshot that reproduces amount.
 // ==========================================================================
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn invoice_line_detail_reproduces_amount_from_frozen_snapshot() {
     let url = db_url();
     let fx = build_test_state(&url, "linedetail").await;
@@ -883,11 +867,6 @@ async fn invoice_line_detail_reproduces_amount_from_frozen_snapshot() {
     );
 
     cleanup(&pg, &[&user], &[app], &[&pat]).await;
-
-    drop(svc);
-    drop(pg);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ==========================================================================
@@ -895,7 +874,7 @@ async fn invoice_line_detail_reproduces_amount_from_frozen_snapshot() {
 //      holds (a 2nd call within the TTL does NOT re-price).
 // ==========================================================================
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn projected_charge_is_non_authoritative_and_cache_budget_holds() {
     let url = db_url();
     let fx = build_test_state(&url, "projected").await;
@@ -961,11 +940,6 @@ async fn projected_charge_is_non_authoritative_and_cache_budget_holds() {
     );
 
     cleanup(&pg, &[&user], &[app], &[&pat]).await;
-
-    drop(svc);
-    drop(pg);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ==========================================================================
@@ -973,7 +947,7 @@ async fn projected_charge_is_non_authoritative_and_cache_budget_holds() {
 //      payment-method status; plan/spend-state.
 // ==========================================================================
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn credit_balance_pm_and_billing_status_are_creator_scoped() {
     let url = db_url();
     let fx = build_test_state(&url, "credit").await;
@@ -1228,11 +1202,6 @@ async fn credit_balance_pm_and_billing_status_are_creator_scoped() {
         &[&pat_a, &pat_b, &pat_outsider],
     )
     .await;
-
-    drop(svc);
-    drop(pg);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ==========================================================================
@@ -1240,7 +1209,7 @@ async fn credit_balance_pm_and_billing_status_are_creator_scoped() {
 //            a different organization cannot read it.
 // ==========================================================================
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn invoice_detail_denies_a_different_creator() {
     let url = db_url();
     let fx = build_test_state(&url, "invdetail-authz").await;
@@ -1336,11 +1305,6 @@ async fn invoice_detail_denies_a_different_creator() {
         &[&pat_a, &pat_b, &pat_outsider],
     )
     .await;
-
-    drop(svc);
-    drop(pg);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ==========================================================================
@@ -1353,7 +1317,7 @@ async fn invoice_detail_denies_a_different_creator() {
 // leaking C's ENTIRE invoice to A. A -> 403.
 // ==========================================================================
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn invoice_read_denied_via_shared_membership() {
     let url = db_url();
     let fx = build_test_state(&url, "shared-membership").await;
@@ -1421,11 +1385,6 @@ async fn invoice_read_denied_via_shared_membership() {
     );
 
     cleanup(&pg, &[&attacker_a, &victim_c], &[app_z, app_c], &[&pat_a]).await;
-
-    drop(svc);
-    drop(pg);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ==========================================================================
@@ -1447,7 +1406,7 @@ async fn invoice_read_denied_via_shared_membership() {
 //   * someone with no seat at all does NOT.
 // ==========================================================================
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn app_invoice_history_follows_money_authority_not_app_authority() {
     let url = db_url();
     let fx = build_test_state(&url, "history-nonowner").await;
@@ -1582,9 +1541,4 @@ async fn app_invoice_history_follows_money_authority_not_app_authority() {
         &[&pat_owner, &pat_bookkeeper, &pat_developer, &pat_outsider],
     )
     .await;
-
-    drop(svc);
-    drop(pg);
-    drop(fx);
-    common::drain_pg().await;
 }

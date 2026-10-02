@@ -41,10 +41,9 @@ async fn admin() -> compio_postgres::Client {
         compio_postgres::connect(&common::require_control_db(), compio_postgres::NoTls)
             .await
             .expect("admin connect");
-    compio::runtime::spawn(async move {
+    crate::common::live::spawn(async move {
         let _ = connection.run().await;
-    })
-    .detach();
+    });
     client
 }
 
@@ -134,7 +133,7 @@ async fn forget(pg: &compio_postgres::Client, ids: &[&str]) {
     }
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn an_unset_file_imports_nothing() {
     assert_eq!(import(Path::new("")).await, Ok(None));
 }
@@ -142,7 +141,7 @@ async fn an_unset_file_imports_nothing() {
 /// The inserting arm and its idempotent re-run: an unknown signer is inserted
 /// active for the zones its NAMES resolve to, and a second import of the same
 /// file changes nothing - which is what every Control restart does.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn unknown_signers_are_inserted_active_and_a_rerun_changes_nothing() {
     let pg = admin().await;
     let file = ImportFile::new();
@@ -202,7 +201,7 @@ async fn unknown_signers_are_inserted_active_and_a_rerun_changes_nothing() {
 /// The paired control is the sibling entry in the SAME file and the SAME
 /// import, which stays active - so "stays revoked" is about the one row the
 /// operator rotated, not an import that never writes anything.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn a_revoked_signer_left_in_the_file_stays_revoked() {
     let pg = admin().await;
     let file = ImportFile::new();
@@ -248,7 +247,7 @@ async fn a_revoked_signer_left_in_the_file_stays_revoked() {
 /// zones, and its id naming a zone the deployment does not declare. Every
 /// refusal carries an admissible new entry beside it, and that entry's absence
 /// afterwards is what shows the import wrote nothing.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn a_file_conflicting_with_a_recorded_signer_writes_nothing() {
     let pg = admin().await;
     let file = ImportFile::new();
@@ -349,7 +348,7 @@ async fn a_file_conflicting_with_a_recorded_signer_writes_nothing() {
 ///
 /// "Writes nothing" is measured on the ids the refused files name, never on a
 /// table-wide count: sibling modules join concurrently in the same database.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn a_malformed_file_is_refused_and_writes_nothing() {
     let pg = admin().await;
     let file = ImportFile::new();
@@ -439,7 +438,7 @@ async fn a_malformed_file_is_refused_and_writes_nothing() {
 /// inserts, the other finds the winner's rows and judges them unchanged. The
 /// second import's insert waits on the first's uncommitted row rather than
 /// failing, which is why the outcome is two successes and not a refused boot.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn two_replicas_importing_the_same_file_at_once_converge() {
     let pg = admin().await;
     let file = ImportFile::new();

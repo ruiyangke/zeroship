@@ -303,10 +303,9 @@ async fn build_fixture() -> Fixture {
         compio_postgres::connect(&db_url, compio_postgres::NoTls)
             .await
             .expect("control-pg connect");
-    compio::runtime::spawn(async move {
+    crate::common::live::spawn(async move {
         let _ = control_pg_conn.run().await;
-    })
-    .detach();
+    });
     let control_pg = Arc::new(control_pg_client);
 
     // The REAL verifier over the REAL table: `service_authn.service_assertion_replay`
@@ -423,7 +422,7 @@ macro_rules! internal_app {
     };
 }
 
-#[ntex::test]
+#[compio::test(crate = "crate::common::live::system")]
 async fn the_shared_control_key_no_longer_opens_the_app_environment() {
     let fixture = build_fixture().await;
     let app = internal_app!(Arc::clone(&fixture.state));
@@ -465,7 +464,7 @@ async fn the_shared_control_key_no_longer_opens_the_app_environment() {
     );
 }
 
-#[ntex::test]
+#[compio::test(crate = "crate::common::live::system")]
 async fn the_shared_control_key_no_longer_opens_the_app_version_read() {
     let fixture = build_fixture().await;
     let app = internal_app!(Arc::clone(&fixture.state));
@@ -492,7 +491,7 @@ async fn the_shared_control_key_no_longer_opens_the_app_version_read() {
     assert_eq!(admitted.status(), StatusCode::BAD_REQUEST);
 }
 
-#[ntex::test]
+#[compio::test(crate = "crate::common::live::system")]
 async fn an_absent_credential_is_refused() {
     let fixture = build_fixture().await;
     let app = internal_app!(Arc::clone(&fixture.state));
@@ -511,7 +510,7 @@ async fn an_absent_credential_is_refused() {
     }
 }
 
-#[ntex::test]
+#[compio::test(crate = "crate::common::live::system")]
 async fn a_captured_assertion_cannot_be_presented_twice() {
     let fixture = build_fixture().await;
     let app = internal_app!(Arc::clone(&fixture.state));
@@ -557,7 +556,7 @@ async fn a_captured_assertion_cannot_be_presented_twice() {
     assert_eq!(fresh.status(), StatusCode::BAD_REQUEST);
 }
 
-#[ntex::test]
+#[compio::test(crate = "crate::common::live::system")]
 async fn a_valid_assertion_from_the_wrong_service_is_refused() {
     let fixture = build_fixture().await;
     let app = internal_app!(Arc::clone(&fixture.state));
@@ -720,7 +719,7 @@ async fn forget(pg: &compio_postgres::Client, instance_id: &str) {
 /// back 401 as a REPLAY whatever the status filter did - the arm would pass
 /// against a control plane with no revocation at all, which is the exact shape
 /// of failure this pair exists to rule out.
-#[ntex::test]
+#[compio::test(crate = "crate::common::live::system")]
 async fn marking_an_instance_draining_or_gone_stops_its_assertions_verifying() {
     let fixture = build_fixture().await;
     let app = internal_app!(Arc::clone(&fixture.state));
@@ -794,7 +793,7 @@ async fn marking_an_instance_draining_or_gone_stops_its_assertions_verifying() {
 /// the one that matters: a document entry carries no status, so a path that
 /// fell back to it would hold a credential nothing can ever revoke, and the
 /// registry lookup would be decoration.
-#[ntex::test]
+#[compio::test(crate = "crate::common::live::system")]
 async fn an_instance_with_no_active_row_is_refused_and_never_resolved_from_the_peer_file() {
     let fixture = build_fixture().await;
     let app = internal_app!(Arc::clone(&fixture.state));
@@ -867,7 +866,7 @@ async fn an_instance_with_no_active_row_is_refused_and_never_resolved_from_the_p
 /// itself: a role that does authenticate at role arity still verifies against
 /// the SAME document (and is refused only by its missing grant), so the
 /// refusals are about the worker role and not about role arity in general.
-#[ntex::test]
+#[compio::test(crate = "crate::common::live::system")]
 async fn a_bare_worker_role_assertion_is_refused_although_the_peer_file_publishes_its_key() {
     let fixture = build_fixture().await;
     let app = internal_app!(Arc::clone(&fixture.state));
@@ -937,7 +936,7 @@ async fn a_bare_worker_role_assertion_is_refused_although_the_peer_file_publishe
 /// join token under its own `typ`. That makes two refusals worth binding: a
 /// verified service assertion presented as a token, and the shared control key.
 /// The control is the same route admitting a real token.
-#[ntex::test]
+#[compio::test(crate = "crate::common::live::system")]
 async fn the_join_route_takes_a_token_and_never_a_service_assertion() {
     let fixture = build_fixture().await;
     let app = internal_app!(Arc::clone(&fixture.state));
@@ -1040,7 +1039,7 @@ async fn instance_status(pg: &compio_postgres::Client, instance_id: &str) -> Opt
 /// signer, joined beside it, is the paired control and must be untouched, which
 /// is what shows the endpoint retires the caller rather than the signer's whole
 /// fleet.
-#[ntex::test]
+#[compio::test(crate = "crate::common::live::system")]
 async fn an_instance_retires_itself_and_only_itself() {
     let fixture = build_fixture().await;
     let app = internal_app!(Arc::clone(&fixture.state));
@@ -1125,7 +1124,7 @@ async fn an_instance_retires_itself_and_only_itself() {
 /// is untouched. The control is the fixture's own instance retiring
 /// successfully at the end, so the refusals are about the credentials and not
 /// a route that refuses everyone.
-#[ntex::test]
+#[compio::test(crate = "crate::common::live::system")]
 async fn no_other_credential_can_retire_an_instance() {
     let fixture = build_fixture().await;
     let app = internal_app!(Arc::clone(&fixture.state));
@@ -1188,7 +1187,7 @@ async fn no_other_credential_can_retire_an_instance() {
 /// Signer F is the paired control throughout - untouched, and unaffected by
 /// either verb - which is what shows each refusal is about the signer acted on
 /// rather than a fault that would refuse everyone.
-#[ntex::test]
+#[compio::test(crate = "crate::common::live::system")]
 async fn rotating_a_signer_spares_its_fleet_and_purging_one_retires_it() {
     let fixture = build_fixture().await;
     let app = internal_app!(Arc::clone(&fixture.state));
@@ -1299,7 +1298,7 @@ async fn rotating_a_signer_spares_its_fleet_and_purging_one_retires_it() {
 /// its decrypted secrets and its project data key is a decryption capability,
 /// so a read that crossed zones would hand both to a fleet that must never
 /// reach them.
-#[ntex::test]
+#[compio::test(crate = "crate::common::live::system")]
 async fn host_app_reads_are_narrowed_to_the_callers_execution_zone() {
     let fixture = build_fixture().await;
     let service = internal_app!(Arc::clone(&fixture.state));

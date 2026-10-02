@@ -48,10 +48,9 @@ impl Fx {
     async fn new() -> Self {
         let url = common::require_control_db();
         let (pg, conn) = connect(&url, NoTls).await.expect("control-pg connect");
-        compio::runtime::spawn(async move {
+        crate::common::live::spawn(async move {
             let _ = conn.run().await;
-        })
-        .detach();
+        });
         let registry = Registry::new(&url).await.expect("registry");
         Self { registry, pg }
     }
@@ -131,7 +130,7 @@ impl Fx {
 
 /// The sole owner of a live organization is a blocker, and the blocker names
 /// the organization and the first thing that has to happen.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn a_sole_owner_is_blocked_and_told_what_to_do() {
     let fx = Fx::new().await;
     let owner = fx.seed_user("erasure-sole").await;
@@ -167,7 +166,7 @@ async fn a_sole_owner_is_blocked_and_told_what_to_do() {
 /// Transfer is the remedy, so it has to actually clear the blocker: after it,
 /// the person who asked to be deleted is no longer anybody's last owner and the
 /// successor is.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn transferring_ownership_moves_the_blocker_to_the_successor() {
     let fx = Fx::new().await;
     let owner = fx.seed_user("erasure-xfer").await;
@@ -228,7 +227,7 @@ async fn transferring_ownership_moves_the_blocker_to_the_successor() {
 /// unique index on `(organization_id) WHERE role = 'owner'`, only a partial
 /// btree - so the row is seeded directly here rather than through an API that
 /// refuses it. Without this case the clause would be an unbound guard.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn a_second_owner_row_clears_the_blocker_for_both() {
     let fx = Fx::new().await;
     let owner = fx.seed_user("erasure-co").await;
@@ -262,7 +261,7 @@ async fn a_second_owner_row_clears_the_blocker_for_both() {
 /// A member below `owner` is never a blocker - and this is the control for the
 /// case above: an organization with exactly one owner still blocks THAT owner
 /// while clearing everyone else on it.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn a_non_owner_seat_is_never_a_blocker_and_the_owner_still_is() {
     let fx = Fx::new().await;
     let owner = fx.seed_user("erasure-owner").await;
@@ -305,7 +304,7 @@ async fn a_non_owner_seat_is_never_a_blocker_and_the_owner_still_is() {
 /// A DISSOLVED organization is not a blocker. It is closed, its ledger is
 /// retained by design, and nobody needs to administer it again - so demanding
 /// a successor for it would be a refusal with no remedy.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn a_dissolved_organization_is_not_a_blocker() {
     let fx = Fx::new().await;
     let owner = fx.seed_user("erasure-closed").await;
@@ -332,7 +331,7 @@ async fn a_dissolved_organization_is_not_a_blocker() {
 
 /// A principal with no seat anywhere is clear. Without this the suite could
 /// pass on a preflight that blocked everybody.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn a_principal_with_no_seat_is_clear() {
     let fx = Fx::new().await;
     let nobody = fx.seed_user("erasure-nobody").await;

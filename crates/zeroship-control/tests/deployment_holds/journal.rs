@@ -109,7 +109,7 @@ async fn workers(fixture: &Fixture) -> i64 {
         .get(0)
 }
 
-#[ntex::test]
+#[compio::test(crate = "crate::common::live::system")]
 async fn journal_holds_are_taken_by_the_service_role_without_any_placement() {
     let fixture = Fixture::new().await;
     let (app, deployment, hash) = fixture.deployment("journal-asserted").await;
@@ -214,7 +214,7 @@ async fn journal_holds_are_taken_by_the_service_role_without_any_placement() {
 /// the release under `HoldScope::for_app`, and the catalog row is the proof that
 /// Control accepted the holder the journal names. The lane holds no artifact
 /// store, and this operation needs none - it writes no `deploys` row.
-#[ntex::test]
+#[compio::test(crate = "crate::common::live::system")]
 async fn the_lane_settles_a_hold_release_control_accepted() {
     let fixture = Fixture::new().await;
     let app = AppId::mint();
@@ -398,7 +398,7 @@ fn activation(app: &AppId, deployment: &str) -> Delivered {
 /// refuse by name rather than activate from nothing. The lane is deliberately
 /// not used - its queue requires a manager-minted activation row, which is a
 /// dispatch precondition rather than anything this exchange decides.
-#[ntex::test]
+#[compio::test(crate = "crate::common::live::system")]
 async fn the_activation_sweep_records_controls_asserted_registration() {
     let fixture = Fixture::new().await;
     let app = AppId::mint();
@@ -543,7 +543,7 @@ async fn the_activation_sweep_records_controls_asserted_registration() {
 /// Three refusals, each differing from the accepted call in one variable: the
 /// credential, the app the deployment belongs to, and the deployment's
 /// existence. Without them a green above would only be saying the route exists.
-#[ntex::test]
+#[compio::test(crate = "crate::common::live::system")]
 async fn the_registration_endpoint_answers_only_the_workflow_role_about_its_own_app() {
     let fixture = Fixture::new().await;
     let app = AppId::mint();

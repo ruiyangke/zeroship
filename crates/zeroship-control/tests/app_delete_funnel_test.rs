@@ -55,10 +55,9 @@ impl Fx {
     async fn new() -> Self {
         let url = common::require_control_db();
         let (pg, conn) = connect(&url, NoTls).await.expect("control-pg connect");
-        compio::runtime::spawn(async move {
+        crate::common::live::spawn(async move {
             let _ = conn.run().await;
-        })
-        .detach();
+        });
         let registry = Registry::new(&url).await.expect("registry");
         Self { registry, pg }
     }
@@ -188,7 +187,7 @@ fn first_of_this_month() -> chrono::NaiveDate {
 /// The CONTROL is the second half: the SAME call on the SAME app succeeds once
 /// it is archived. Without it an implementation that refused every deletion
 /// would pass the first assertion.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn a_live_app_is_not_deleted_and_an_archived_one_is() {
     let fx = Fx::new().await;
     let d = fx.first_deploy("livedel").await;
@@ -222,8 +221,6 @@ async fn a_live_app_is_not_deleted_and_an_archived_one_is() {
         project.is_none(),
         "a deleted app leaves its project, which is what lets the project go"
     );
-
-    common::drain_pg().await;
 }
 
 /// Restore must not undo the terminal step.
@@ -232,7 +229,7 @@ async fn a_live_app_is_not_deleted_and_an_archived_one_is() {
 /// because it reaches an app's organization through the project the delete
 /// detaches. This binds the registry statement's OWN guard, which is the one
 /// that holds if that ever stops being true.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn a_deleted_app_is_not_restored() {
     let fx = Fx::new().await;
     let d = fx.first_deploy("restoredel").await;
@@ -268,14 +265,12 @@ async fn a_deleted_app_is_not_restored() {
     );
     let (_, deleted, _) = fx.app_state(&d.app).await;
     assert!(deleted, "the marker did not move");
-
-    common::drain_pg().await;
 }
 
 /// Ending an app needs `admin` in the organization, the same floor
 /// `delete_project` carries, and the floor rides in the effect statement rather
 /// than in Cedar.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn deleting_an_app_needs_admin_authority() {
     let fx = Fx::new().await;
     let d = fx.first_deploy("rankdel").await;
@@ -309,8 +304,6 @@ async fn deleting_an_app_needs_admin_authority() {
     organizations::delete_app(&fx.registry, &d.owner, &d.app, None)
         .await
         .expect("the owner deletes it");
-
-    common::drain_pg().await;
 }
 
 /// Deletion keeps the ledger and destroys the capability.
@@ -320,7 +313,7 @@ async fn deleting_an_app_needs_admin_authority() {
 /// erasure preflight actually refuse on. A row that survived but had become
 /// unreachable to that read would be evidence nobody can bill from, and only
 /// the second assertion can tell the difference.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn deletion_keeps_the_billing_evidence_and_destroys_the_environment() {
     let fx = Fx::new().await;
     let d = fx.first_deploy("evidence").await;
@@ -447,8 +440,6 @@ async fn deletion_keeps_the_billing_evidence_and_destroys_the_environment() {
     outstanding_billing(&fx.pg, &d.organization, LocalInvoicing::Yes)
         .await
         .expect("the debt predicate still runs over a deleted app");
-
-    common::drain_pg().await;
 }
 
 /// THE WHOLE FUNNEL, in order, on one creator.
@@ -457,7 +448,7 @@ async fn deletion_keeps_the_billing_evidence_and_destroys_the_environment() {
 /// the reason that names the next one, and then to SUCCEED once that step has
 /// been taken - so a green here is "the chain terminates", not "four calls
 /// returned Ok".
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn the_closure_funnel_terminates_for_a_sole_creator_who_deployed() {
     let fx = Fx::new().await;
     let d = fx.first_deploy("funnel").await;
@@ -542,8 +533,6 @@ async fn the_closure_funnel_terminates_for_a_sole_creator_who_deployed() {
         report.blockers,
         report.billing_blockers
     );
-
-    common::drain_pg().await;
 }
 
 /// Every write that could resurrect a deleted app refuses it - enumerated,
@@ -559,7 +548,7 @@ async fn the_closure_funnel_terminates_for_a_sole_creator_who_deployed() {
 ///
 /// Each refusal is PAIRED with the same call on a live app, because a surface
 /// that refused everything would satisfy the first half alone.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn a_deleted_app_refuses_every_write_that_would_resurrect_it() {
     let fx = Fx::new().await;
     let dead = fx.first_deploy("resurrect").await;
@@ -661,8 +650,6 @@ async fn a_deleted_app_refuses_every_write_that_would_resurrect_it() {
     env.set_expose(&live.app, &["ORDINARY".to_string()])
         .await
         .expect("an exposure on a live app");
-
-    common::drain_pg().await;
 }
 
 /// The plan a deleted app would be moved to, seeded live so the refusal under

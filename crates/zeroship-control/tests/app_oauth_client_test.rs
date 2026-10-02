@@ -23,10 +23,9 @@ fn db_url() -> String {
 
 async fn pg(db_url: &str) -> Client {
     let (client, conn) = connect(db_url, NoTls).await.expect("pg connect");
-    compio::runtime::spawn(async move {
+    crate::common::live::spawn(async move {
         let _ = conn.run().await;
-    })
-    .detach();
+    });
     client
 }
 
@@ -75,7 +74,7 @@ async fn scopes(pg: &Client, client_id: &str) -> Vec<String> {
         .get("scopes")
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn provision_asserts_native_db_scopes_routes_and_redirect_sync() {
     let url = db_url();
 
@@ -283,15 +282,6 @@ async fn provision_asserts_native_db_scopes_routes_and_redirect_sync() {
     assert!(preserved.iter().any(|uri| uri.contains(&custom)));
 
     registry.archive_app(&app_id).await.expect("archive app");
-
-    // Teardown: `raw`, `conn`, and `registry` each hold a Postgres connection,
-    // and locals are dropped only after the body returns - by which point the
-    // runtime is gone and the sockets can no longer be closed. Drop them
-    // explicitly, then wait for the close to land.
-    drop(conn);
-    drop(raw);
-    drop(registry);
-    common::drain_pg().await;
 }
 
 async fn build_state(db_url: &str, app_base_domain: &str) -> Arc<AppState> {
@@ -354,7 +344,7 @@ async fn build_state(db_url: &str, app_base_domain: &str) -> Arc<AppState> {
     })
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn appstate_origin_scheme_provisions_urls_then_archive_preserves_oauth_rows() {
     let url = db_url();
 
@@ -436,7 +426,4 @@ async fn appstate_origin_scheme_provisions_urls_then_archive_preserves_oauth_row
         .await
         .expect("routes")
         .contains_key(&app_id));
-
-    drop(state);
-    common::drain_pg().await;
 }

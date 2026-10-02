@@ -103,15 +103,14 @@ impl Fixture {
                 &format!("the database preflighted clean but refused this connection: {err}"),
                 "If the server is up, this is usually its connection ceiling; look\n\
                  \x20   for a test in this binary holding clients open across bodies\n\
-                 \x20   (`common::drain_pg` is what waits for them to close). If it is\n\
+                 \x20   (a live case fails naming any it could not close). If it is\n\
                  \x20   down, bring the backends up and rewrite the overlay from them:\n\
                  \x20     tests/provision_test_backends.sh",
             ),
         };
-        compio::runtime::spawn(async move {
+        crate::common::live::spawn(async move {
             let _ = control_pg_conn.run().await;
-        })
-        .detach();
+        });
 
         let registry = match Registry::new(&db_url).await {
             Ok(registry) => registry,
@@ -120,7 +119,7 @@ impl Fixture {
                 &format!("the registry could not open its pool: {err}"),
                 "If the server is up, this is usually its connection ceiling; look\n\
                  \x20   for a test in this binary holding clients open across bodies\n\
-                 \x20   (`common::drain_pg` is what waits for them to close). If it is\n\
+                 \x20   (a live case fails naming any it could not close). If it is\n\
                  \x20   down, bring the backends up and rewrite the overlay from them:\n\
                  \x20     tests/provision_test_backends.sh",
             ),
@@ -357,7 +356,7 @@ async fn raw_app_deploy_check(
     }
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn gotrue_authenticated_token_resolves_linked_principal_and_deploy_grant() {
     let mut fx = Fixture::new("positive").await;
     let subject = Uuid::new_v4().to_string();
@@ -380,17 +379,9 @@ async fn gotrue_authenticated_token_resolves_linked_principal_and_deploy_grant()
     assert_eq!(body["principal_id"], principal_id.as_str());
 
     fx.cleanup().await;
-
-    // Teardown: the service and the fixture both hold connections, and locals
-    // are dropped only after the body returns - by which point the runtime is
-    // gone and the sockets can no longer be closed. Drop them explicitly, then
-    // wait for the close to land.
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn gotrue_token_linked_to_anonymized_user_returns_401() {
     let mut fx = Fixture::new("anonymized-owner").await;
     let subject = Uuid::new_v4().to_string();
@@ -419,14 +410,11 @@ async fn gotrue_token_linked_to_anonymized_user_returns_401() {
     let status = test::call_service(&app, req).await.status();
 
     fx.cleanup().await;
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn gotrue_unlinked_subject_is_unauthorized() {
     let fx = Fixture::new("unlinked").await;
     let app = init_control!(fx);
@@ -442,13 +430,9 @@ async fn gotrue_unlinked_subject_is_unauthorized() {
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 
     fx.cleanup().await;
-
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn gotrue_non_authenticated_role_is_unauthorized() {
     let mut fx = Fixture::new("role").await;
     let subject = Uuid::new_v4().to_string();
@@ -464,13 +448,9 @@ async fn gotrue_non_authenticated_role_is_unauthorized() {
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 
     fx.cleanup().await;
-
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn gotrue_principal_without_deploy_grant_is_forbidden() {
     let mut fx = Fixture::new("no-deploy").await;
     let subject = Uuid::new_v4().to_string();
@@ -489,13 +469,9 @@ async fn gotrue_principal_without_deploy_grant_is_forbidden() {
     assert_eq!(status, StatusCode::FORBIDDEN);
 
     fx.cleanup().await;
-
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn gotrue_expired_or_wrong_issuer_token_is_unauthorized() {
     let mut fx = Fixture::new("verify-rejects").await;
     let subject = Uuid::new_v4().to_string();
@@ -525,8 +501,4 @@ async fn gotrue_expired_or_wrong_issuer_token_is_unauthorized() {
     }
 
     fx.cleanup().await;
-
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }

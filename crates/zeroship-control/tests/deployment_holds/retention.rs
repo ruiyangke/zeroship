@@ -107,7 +107,7 @@ async fn gate_hold_inserts(fixture: &Fixture) -> (compio_postgres::Client, i32) 
 /// Asserted holds on more deployments than the executor has lanes all
 /// succeed. While they wait at the gate, every session they occupy is a
 /// retention session, and never more of them than the bound.
-#[ntex::test]
+#[compio::test(crate = "crate::common::live::system")]
 async fn concurrent_holds_occupy_only_retention_sessions() {
     const BOUND: usize = 2;
     let fixture = Fixture::new().await;
@@ -218,7 +218,7 @@ async fn concurrent_holds_occupy_only_retention_sessions() {
 /// another is never built, so it never begins a transaction. The same
 /// operation awaited to completion is built, which is what makes its absence
 /// above a result.
-#[ntex::test]
+#[compio::test(crate = "crate::common::live::system")]
 async fn an_operation_abandoned_in_the_queue_never_starts() {
     let fixture = Fixture::new().await;
     let executor = executor(&fixture, 1).await;
@@ -281,7 +281,7 @@ async fn an_operation_abandoned_in_the_queue_never_starts() {
 /// neither for an operation nor for a background task to start, which is the
 /// order that keeps a lane from waiting on a session whose owner waits for
 /// that lane. The same calls off a lane succeed.
-#[ntex::test]
+#[compio::test(crate = "crate::common::live::system")]
 async fn a_lane_waits_for_no_request_connection_and_no_lane() {
     const REFUSED: &str =
         "invalid control catalog metadata: a catalog lane may not wait for a catalog lane";
@@ -400,7 +400,7 @@ async fn expiring_authority(
 /// transaction before COMMIT. That holds whether the first check, made on the
 /// serving thread, or the second, made inside the transaction, shortened it.
 /// The same hold with authority that does not run out commits.
-#[ntex::test]
+#[compio::test(crate = "crate::common::live::system")]
 async fn authority_that_expires_before_commit_commits_nothing() {
     let fixture = Fixture::new().await;
     let authority = Arc::new(ExpiringAuthority {
@@ -420,6 +420,7 @@ async fn authority_that_expires_before_commit_commits_nothing() {
         }
     })
     .await;
+    crate::common::live::register_listener(server.addr());
     let executor = executor(&fixture, 1).await;
     let api = DeploymentHoldApi::new(
         executor.clone(),
@@ -507,7 +508,7 @@ async fn refusing_authority(
 /// serving thread, without waiting for or occupying a retention lane: with
 /// every lane busy, its refusal still arrives. The same worker, placed, holds
 /// once the lane is free.
-#[ntex::test]
+#[compio::test(crate = "crate::common::live::system")]
 async fn an_unplaced_worker_is_refused_without_a_lane() {
     let fixture = Fixture::new().await;
     let (app, deploy, _) = fixture.deployment("retention-unplaced").await;
@@ -526,6 +527,7 @@ async fn an_unplaced_worker_is_refused_without_a_lane() {
         }
     })
     .await;
+    crate::common::live::register_listener(server.addr());
     let executor = executor(&fixture, 1).await;
     let api = DeploymentHoldApi::new(
         executor.clone(),

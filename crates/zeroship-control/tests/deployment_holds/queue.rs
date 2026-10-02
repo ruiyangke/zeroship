@@ -3,7 +3,7 @@ use zeroship_core::{workflow_deployments::QueueHoldRequest, workflow_jobs::Deplo
 use zeroship_workflow_client::QueueDeploymentHolds;
 use zeroship_workflow_manager::deployments::{self, DeploymentHolds};
 
-#[ntex::test]
+#[compio::test(crate = "crate::common::live::system")]
 async fn queue_holds_work_without_workers_and_cannot_release_journal_holds() {
     let fixture = Fixture::new().await;
     let (app, deployment, hash) = fixture.deployment("queue-retention").await;
@@ -112,7 +112,7 @@ async fn queue_holds_work_without_workers_and_cannot_release_journal_holds() {
     assert_eq!(workers, 0);
 }
 
-#[ntex::test]
+#[compio::test(crate = "crate::common::live::system")]
 async fn queue_hold_http_authenticates_before_decoding_and_closes_scope() {
     let fixture = Fixture::new().await;
     let (app, deployment, _) = fixture.deployment("queue-hold-auth").await;

@@ -103,6 +103,7 @@ impl MockStripe {
 async fn start_mock_stripe() -> MockStripe {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind mock");
     let addr = listener.local_addr().expect("local_addr");
+    crate::common::live::register_listener(addr);
     let base_url = format!("http://{addr}");
     let state = Arc::new(Mutex::new(MockState {
         charges_enabled: true,
@@ -112,19 +113,17 @@ async fn start_mock_stripe() -> MockStripe {
     }));
     let accept_state = Arc::clone(&state);
 
-    compio::runtime::spawn(async move {
+    crate::common::live::spawn(async move {
         loop {
             let Ok((stream, _peer)) = listener.accept().await else {
                 break;
             };
             let conn_state = Arc::clone(&accept_state);
-            compio::runtime::spawn(async move {
+            crate::common::live::spawn(async move {
                 serve_conn(stream, conn_state).await;
-            })
-            .detach();
+            });
         }
-    })
-    .detach();
+    });
 
     MockStripe { state, base_url }
 }
@@ -278,7 +277,7 @@ fn percent_decode(s: &str) -> String {
 fn http_200_json(json: &str) -> Vec<u8> {
     let body = json.to_string().into_bytes();
     let mut resp = format!(
-        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: keep-alive\r\n\r\n",
+        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
         body.len()
     )
     .into_bytes();
@@ -323,10 +322,9 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
         compio_postgres::connect(db_url, compio_postgres::NoTls)
             .await
             .expect("control-pg connect");
-    compio::runtime::spawn(async move {
+    crate::common::live::spawn(async move {
         let _ = control_pg_conn.run().await;
-    })
-    .detach();
+    });
 
     let state = Arc::new(AppState {
         service_auth: std::sync::Arc::new(zeroship_core::service_peers::ServiceAuth::unconfigured()),
@@ -509,7 +507,7 @@ async fn cleanup(state: &AppState, subjects: &[&str], callers: &[&Caller]) {
 // Tests.
 // ===========================================================================
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn onboard_returns_real_account_link() {
     let url = db_url();
     let fx = build_fixture(&url, "onboard").await;
@@ -560,17 +558,9 @@ async fn onboard_returns_real_account_link() {
     );
 
     cleanup(&fx.state, &[organization], &[&caller]).await;
-
-    // Teardown: `svc` holds a cloned `Arc<AppState>` and `fx.state` holds the
-    // original, and both are dropped only after the body returns - by which
-    // point the runtime is gone and the sockets can no longer be closed. Drop
-    // them explicitly, then wait for the close to land.
-    drop(svc);
-    drop(fx);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn callback_rejects_acct_not_owned_by_creator() {
     let url = db_url();
     let fx = build_fixture(&url, "callback-forge").await;
@@ -637,13 +627,9 @@ async fn callback_rejects_acct_not_owned_by_creator() {
     );
 
     cleanup(&fx.state, &[organization], &[&caller]).await;
-
-    drop(svc);
-    drop(fx);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn callback_accepts_owned_account_and_persists_flags() {
     let url = db_url();
     let fx = build_fixture(&url, "callback-ok").await;
@@ -711,13 +697,9 @@ async fn callback_accepts_owned_account_and_persists_flags() {
     assert!(row.get::<_, bool>("details_submitted"));
 
     cleanup(&fx.state, &[organization], &[&caller]).await;
-
-    drop(svc);
-    drop(fx);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn checkout_stamps_server_fee_not_client_value() {
     let url = db_url();
     let fx = build_fixture(&url, "checkout-fee").await;
@@ -818,13 +800,9 @@ async fn checkout_stamps_server_fee_not_client_value() {
     );
 
     cleanup(&fx.state, &[organization], &[&caller]).await;
-
-    drop(svc);
-    drop(fx);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn checkout_stamps_the_stored_fee_policy_with_its_cap() {
     let url = db_url();
     let fx = build_fixture(&url, "checkout-policy").await;
@@ -912,16 +890,12 @@ async fn checkout_stamps_the_stored_fee_policy_with_its_cap() {
     );
 
     cleanup(&fx.state, &[organization], &[&creator_caller, &op_caller]).await;
-
-    drop(svc);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// M1 (RED→GREEN): a organization who ran `onboard` but whose Stripe account is NOT
 /// yet `charges_enabled` MUST NOT reach the charge path. `connect_checkout`
 /// returns 400 and posts NO PaymentIntent.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn checkout_rejected_when_charges_not_enabled() {
     let url = db_url();
     let fx = build_fixture(&url, "checkout-not-ready").await;
@@ -1013,10 +987,6 @@ async fn checkout_rejected_when_charges_not_enabled() {
     );
 
     cleanup(&fx.state, &[organization], &[&caller]).await;
-
-    drop(svc);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// An empty `cart_id` must be rejected: it would collapse every checkout for an
@@ -1024,7 +994,7 @@ async fn checkout_rejected_when_charges_not_enabled() {
 /// amount. Two checkouts with an empty cart_id and different amounts must NOT
 /// return the same PaymentIntent, and the request is a 400 - no PI is created at
 /// all, so no stale replay.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn checkout_rejects_empty_cart_id_no_stale_replay() {
     let url = db_url();
     let fx = build_fixture(&url, "checkout-cartid").await;
@@ -1151,15 +1121,11 @@ async fn checkout_rejects_empty_cart_id_no_stale_replay() {
     );
 
     cleanup(&fx.state, &[organization], &[&caller]).await;
-
-    drop(svc);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// m1 (RED→GREEN): a malformed currency is rejected with 400 before any Stripe
 /// call.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn checkout_rejects_bad_currency() {
     let url = db_url();
     let fx = build_fixture(&url, "checkout-currency").await;
@@ -1224,10 +1190,6 @@ async fn checkout_rejects_bad_currency() {
     );
 
     cleanup(&fx.state, &[organization], &[&caller]).await;
-
-    drop(svc);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// `earnings` and `unlink` are gated by a SEAT at the organization in the path.
@@ -1240,7 +1202,7 @@ async fn checkout_rejects_bad_currency() {
 /// The assertions run in BOTH directions on the same request shape, so the pair
 /// distinguishes "bound to the principal" from "allows everyone" - a test that
 /// only checked the owner's 200 would pass just as happily with no gate at all.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn earnings_and_unlink_require_a_seat_at_the_path_organization() {
     let url = db_url();
     let fx = build_fixture(&url, "self-serve").await;
@@ -1342,8 +1304,4 @@ async fn earnings_and_unlink_require_a_seat_at_the_path_organization() {
     );
 
     cleanup(&fx.state, &[organization], &[&owner_caller, &other_caller]).await;
-
-    drop(svc);
-    drop(fx);
-    common::drain_pg().await;
 }

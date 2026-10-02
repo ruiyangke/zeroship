@@ -89,10 +89,9 @@ async fn build_fixture_with_provider(
         compio_postgres::connect(db_url, compio_postgres::NoTls)
             .await
             .expect("control-pg connect");
-    compio::runtime::spawn(async move {
+    crate::common::live::spawn(async move {
         let _ = control_pg_conn.run().await;
-    })
-    .detach();
+    });
     let control_pg = Arc::new(control_pg_client);
 
     let tax_provider = zeroship_control::tax::build_tax_provider(
@@ -232,7 +231,7 @@ impl MeteringProvider for DbAdjustmentProvider {
     }
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn reconcile_pass_writes_invoice_credit_adjustment_idempotently() {
     let url = db_url();
     let fx = build_fixture(&url, "invoice-credit").await;
@@ -269,16 +268,9 @@ async fn reconcile_pass_writes_invoice_credit_adjustment_idempotently() {
     assert_eq!(line_count, 1);
     assert_eq!(amount_sum, 25);
     assert_eq!(finding_count(&fx.state, &app, period).await, 1);
-
-    // Teardown: the fixture holds a Postgres connection, and locals are dropped
-    // only after the body returns - by which point the runtime is gone and the
-    // socket can no longer be closed. Drop it explicitly, then wait for the
-    // close to land.
-    drop(fx);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn stripe_meters_self_invoicing_drift_issues_invoice_credit_not_provider_reject() {
     let url = db_url();
     let fx =
@@ -312,12 +304,9 @@ async fn stripe_meters_self_invoicing_drift_issues_invoice_credit_not_provider_r
         0,
         "stripe_meters InvoiceCredit drift must not be recorded as provider_reject"
     );
-
-    drop(fx);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn stripe_meters_self_invoicing_unpriceable_drift_flags_not_credits() {
     // A self-invoicing provider (stripe_meters) prices the meter at the provider
     // and writes NO local invoice lines, so there is no monetary basis. A drift
@@ -356,12 +345,9 @@ async fn stripe_meters_self_invoicing_unpriceable_drift_flags_not_credits() {
         1,
         "the drift must be flagged correction_unpriceable for operator repricing"
     );
-
-    drop(fx);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn reconcile_pass_corrects_multi_metric_app_per_metric() {
     let url = db_url();
     let fx = build_fixture(&url, "multi-metric").await;
@@ -430,9 +416,6 @@ async fn reconcile_pass_corrects_multi_metric_app_per_metric() {
         .expect("second multi-metric reconcile pass");
     assert_eq!(second.corrections_issued, 0);
     assert_eq!(second.findings_recorded, 0);
-
-    drop(fx);
-    common::drain_pg().await;
 }
 
 async fn make_organization(state: &AppState) -> String {
@@ -731,7 +714,7 @@ async fn finding_count_for_meter(
 ///
 /// Both directions are needed, which is why this seeds BETWEEN two readings
 /// rather than taking one.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn a_later_run_starts_above_every_period_this_run_seeded() {
     let url = db_url();
     let fx = build_fixture(&url, "band-base").await;
@@ -761,14 +744,6 @@ async fn a_later_run_starts_above_every_period_this_run_seeded() {
          of these rows, and a fleet-wide period sweep would count both runs' \
          subjects."
     );
-
-    // Teardown, as every case in this module does it - and this one owns MORE
-    // connections than its neighbours, because each `resolve_run_band_base`
-    // opens its own. They are dropped when that function returns; the drain is
-    // what waits for the sockets to actually close, before the runtime that
-    // owns them goes away.
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// The resolved base must reach the WINDOW ADDRESS, not just be resolved.

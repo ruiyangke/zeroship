@@ -32,10 +32,9 @@ fn db_url() -> String {
 
 async fn pg(db_url: &str) -> compio_postgres::Client {
     let (client, conn) = connect(db_url, NoTls).await.expect("pg connect");
-    compio::runtime::spawn(async move {
+    crate::common::live::spawn(async move {
         let _ = conn.run().await;
-    })
-    .detach();
+    });
     client
 }
 
@@ -101,7 +100,7 @@ async fn finalize(client: &compio_postgres::Client, inv: &str, total: i64) {
 // (a) invoice_payments is append-only: the immutability trigger rejects UPDATE/DELETE.
 // ---------------------------------------------------------------------------
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn invoice_payments_is_append_only() {
     let url = db_url();
     let client = pg(&url).await;
@@ -137,13 +136,6 @@ async fn invoice_payments_is_append_only() {
         .expect("read back")[0]
         .get("amount_cents");
     assert_eq!(amt, 6000, "the row must survive the rejected mutations unchanged");
-
-    // Teardown: `client` is the only handle to this test's Postgres connection,
-    // and locals are dropped only after the body returns - by which point the
-    // runtime is gone and the socket can no longer be closed. Drop it
-    // explicitly, then wait for the close to land.
-    drop(client);
-    common::drain_pg().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -151,7 +143,7 @@ async fn invoice_payments_is_append_only() {
 //     but two NON-void invoices for the same (organization, period) are still blocked.
 // ---------------------------------------------------------------------------
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn partial_unique_index_releases_period_only_on_void() {
     let url = db_url();
     let client = pg(&url).await;
@@ -220,9 +212,6 @@ async fn partial_unique_index_releases_period_only_on_void() {
         .clone();
     assert_eq!(counts.get::<_, i64>("active"), 1, "exactly one active claim");
     assert_eq!(counts.get::<_, i64>("voided"), 1, "the void row is retained as audit");
-
-    drop(client);
-    common::drain_pg().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -230,7 +219,7 @@ async fn partial_unique_index_releases_period_only_on_void() {
 //     finalized invoice (a direct finalized→finalized UPDATE still RAISEs).
 // ---------------------------------------------------------------------------
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn cash_collected_sums_payments_without_touching_finalized_invoice() {
     let url = db_url();
     let client = pg(&url).await;
@@ -281,9 +270,6 @@ async fn cash_collected_sums_payments_without_touching_finalized_invoice() {
     // append_charge rejects a non-positive amount (a $0 invoice records no row).
     assert!(append_charge(&client, &inv, 0, "usd", None).await.is_err());
     assert!(append_charge(&client, &inv, -1, "usd", None).await.is_err());
-
-    drop(client);
-    common::drain_pg().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -291,7 +277,7 @@ async fn cash_collected_sums_payments_without_touching_finalized_invoice() {
 //     the full changelog migrated clean through the new changesets).
 // ---------------------------------------------------------------------------
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn pr1_schema_objects_present() {
     let url = db_url();
     let client = pg(&url).await;
@@ -353,7 +339,4 @@ async fn pr1_schema_objects_present() {
         .expect("trigger")[0]
         .get("n");
     assert_eq!(trg, 1, "invoice_payments immutability trigger must exist");
-
-    drop(client);
-    common::drain_pg().await;
 }

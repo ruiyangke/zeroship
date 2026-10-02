@@ -72,10 +72,9 @@ impl Drop for Fixture {
 async fn build_test_state(db_url: &str, label: &str) -> Fixture {
     let (control_pg_client, control_pg_conn) =
         connect(db_url, NoTls).await.expect("control-pg connect");
-    compio::runtime::spawn(async move {
+    crate::common::live::spawn(async move {
         let _ = control_pg_conn.run().await;
-    })
-    .detach();
+    });
 
     let blob_root = tmpdir(&format!("blob-{label}"));
     let deploy_tmp_dir = tmpdir(&format!("dtmp-{label}"));
@@ -201,7 +200,7 @@ fn post(app_id: &AppId, bearer: &str, body: serde_json::Value) -> test::TestRequ
         .set_json(&body)
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn owner_can_write_list_and_delete_rules_of_both_forms() {
     let db_url = db_url();
     let fx = build_test_state(&db_url, "owner").await;
@@ -339,12 +338,9 @@ async fn owner_can_write_list_and_delete_rules_of_both_forms() {
 
     cleanup_app(&fx.state.control_pg, &app_record.id).await;
     owner.cleanup(&fx.state).await;
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn a_creator_cannot_touch_another_creators_app() {
     let db_url = db_url();
     let fx = build_test_state(&db_url, "stranger").await;
@@ -433,9 +429,6 @@ async fn a_creator_cannot_touch_another_creators_app() {
     cleanup_app(&fx.state.control_pg, &app_record.id).await;
     owner.cleanup(&fx.state).await;
     stranger.cleanup(&fx.state).await;
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// Every refusal below is PAIRED with the nearest legal thing to it, sent
@@ -446,7 +439,7 @@ async fn a_creator_cannot_touch_another_creators_app() {
 /// suite made only of acceptances. Each pair differs in ONE thing - the `*`,
 /// one bit of prefix length, the verdict - so a green result says that one
 /// thing is what decided it.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn the_grammar_refuses_and_accepts_in_pairs() {
     let db_url = db_url();
     let fx = build_test_state(&db_url, "grammar").await;
@@ -563,12 +556,9 @@ async fn the_grammar_refuses_and_accepts_in_pairs() {
 
     cleanup_app(&fx.state.control_pg, &app_record.id).await;
     owner.cleanup(&fx.state).await;
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn the_plan_cap_counts_accept_rules_and_not_reject_rules() {
     let db_url = db_url();
     let fx = build_test_state(&db_url, "cap").await;
@@ -662,10 +652,6 @@ async fn the_plan_cap_counts_accept_rules_and_not_reject_rules() {
 
     cleanup_app(&fx.state.control_pg, &app_record.id).await;
     owner.cleanup(&fx.state).await;
-    drop(app);
-    drop(catalog);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// The FIRST range accept rule moves an app out of the class that refuses an
@@ -677,7 +663,7 @@ async fn the_plan_cap_counts_accept_rules_and_not_reject_rules() {
 /// the notice is not simply on every write), then the first range rule (the
 /// notice), then a second range rule (no notice, so it is a one-time statement
 /// about the app rather than a label on range rules).
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn the_first_range_accept_rule_says_the_app_now_resolves_before_refusing() {
     let db_url = db_url();
     let fx = build_test_state(&db_url, "notice").await;
@@ -776,15 +762,12 @@ async fn the_first_range_accept_rule_says_the_app_now_resolves_before_refusing()
 
     cleanup_app(&fx.state.control_pg, &app_record.id).await;
     owner.cleanup(&fx.state).await;
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// Rules are an unordered SET under deny-overrides, so an accept range inside
 /// a reject range at the same port is dead. The list says so, because a rule
 /// that does nothing and a rule that works look identical otherwise.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn a_dead_accept_reports_the_effective_verdict() {
     let db_url = db_url();
     let fx = build_test_state(&db_url, "effective").await;
@@ -858,7 +841,4 @@ async fn a_dead_accept_reports_the_effective_verdict() {
 
     cleanup_app(&fx.state.control_pg, &app_record.id).await;
     owner.cleanup(&fx.state).await;
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }

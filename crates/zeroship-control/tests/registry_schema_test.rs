@@ -9,22 +9,19 @@ use uuid::Uuid;
 use zeroship_control::Registry;
 use zeroship_core::UserId;
 
-use crate::common;
-
 fn db_url() -> String {
     crate::common::require_control_db()
 }
 
 async fn pg(db_url: &str) -> Client {
     let (client, conn) = connect(db_url, NoTls).await.expect("pg connect");
-    compio::runtime::spawn(async move {
+    crate::common::live::spawn(async move {
         let _ = conn.run().await;
-    })
-    .detach();
+    });
     client
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn registry_core_tables_live_in_zeroship_schema() {
     let url = db_url();
     Registry::new(&url).await.expect("registry");
@@ -71,13 +68,6 @@ async fn registry_core_tables_live_in_zeroship_schema() {
             "{qualified} should live in the zeroship schema"
         );
     }
-
-    // Teardown: `pg` holds this test's Postgres connection, and locals are
-    // dropped only after the body returns - by which point the runtime is gone
-    // and the socket can no longer be closed. Drop it explicitly, then wait for
-    // the close to land.
-    drop(pg);
-    common::drain_pg().await;
 }
 
 /// There is no app-level API key, and the create path proves it in BOTH
@@ -95,7 +85,7 @@ async fn registry_core_tables_live_in_zeroship_schema() {
 /// a field: withholding is exactly what makes the round-trip fail. Asserting
 /// only "no field named api_key" would pass against a struct that kept the
 /// secret and renamed the field.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn create_app_neither_returns_nor_stores_an_app_level_key() {
     let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
@@ -181,7 +171,4 @@ async fn create_app_neither_returns_nor_stores_an_app_level_key() {
     }
     serde_json::from_value::<zeroship_core::types::AppRecord>(body)
         .expect("the create-app response must round-trip: nothing is withheld from it");
-
-    drop(pg);
-    common::drain_pg().await;
 }

@@ -12,8 +12,6 @@ use zeroship_control::audit::{self, Action, AuditEntry};
 use zeroship_control::{EnvStore, Registry};
 use zeroship_core::{AppId, UserId};
 
-use crate::common;
-
 fn db_url() -> String {
     crate::common::require_control_db()
 }
@@ -57,10 +55,9 @@ async fn create_test_app(registry: &Registry) -> AppId {
 
 async fn pg_connect(dsn: &str) -> compio_postgres::Client {
     let (client, conn) = connect(dsn, NoTls).await.expect("connect");
-    compio::runtime::spawn(async move {
+    crate::common::live::spawn(async move {
         let _ = conn.run().await;
-    })
-    .detach();
+    });
     client
 }
 
@@ -68,7 +65,7 @@ async fn raw_conn(dsn: &str) -> compio_postgres::Client {
     pg_connect(dsn).await
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn var_crud_roundtrip() {
     let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
@@ -96,17 +93,9 @@ async fn var_crud_roundtrip() {
 
     // Cleanup.
     registry.archive_app(&app).await.ok();
-
-    // Teardown: `store` and `registry` each cycle their own connections per
-    // call, and the last one opened has no later await in this test to let
-    // the runtime drive its shutdown before the runtime itself is torn down.
-    // Drop the handles, then wait for the close to land.
-    drop(store);
-    drop(registry);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn secret_roundtrip_encrypted() {
     let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
@@ -153,13 +142,9 @@ async fn secret_roundtrip_encrypted() {
 
     // Cleanup.
     registry.archive_app(&app).await.ok();
-
-    drop(store);
-    drop(registry);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn merged_env_secret_overrides_var() {
     let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
@@ -180,13 +165,9 @@ async fn merged_env_secret_overrides_var() {
     );
 
     registry.archive_app(&app).await.ok();
-
-    drop(store);
-    drop(registry);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn invalid_key_rejected_client_side() {
     let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
@@ -214,13 +195,9 @@ async fn invalid_key_rejected_client_side() {
     }
 
     registry.archive_app(&app).await.ok();
-
-    drop(store);
-    drop(registry);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn per_app_isolation() {
     let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
@@ -254,13 +231,9 @@ async fn per_app_isolation() {
 
     registry.archive_app(&app_a).await.ok();
     registry.archive_app(&app_b).await.ok();
-
-    drop(store);
-    drop(registry);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn wrong_master_key_fails_decrypt() {
     let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
@@ -283,14 +256,9 @@ async fn wrong_master_key_fails_decrypt() {
     ));
 
     registry.archive_app(&app).await.ok();
-
-    drop(writer);
-    drop(reader);
-    drop(registry);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn ciphertext_transplant_fails_across_app_and_key() {
     let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
@@ -360,14 +328,9 @@ async fn ciphertext_transplant_fails_across_app_and_key() {
 
     registry.archive_app(&app_a).await.ok();
     registry.archive_app(&app_b).await.ok();
-
-    drop(client);
-    drop(store);
-    drop(registry);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn archive_preserves_app_environment() {
     let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
@@ -384,13 +347,9 @@ async fn archive_preserves_app_environment() {
         vec![("V1".to_string(), "x".to_string())]
     );
     assert_eq!(store.list_secret_names(&app).await.unwrap(), vec!["S1"]);
-
-    drop(store);
-    drop(registry);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn env_version_bumps_on_every_mutation() {
     let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
@@ -428,10 +387,6 @@ async fn env_version_bumps_on_every_mutation() {
     assert_eq!(v5.get(&app).unwrap().env_version, 4);
 
     registry.archive_app(&app).await.ok();
-
-    drop(store);
-    drop(registry);
-    common::drain_pg().await;
 }
 
 /// The two mutations the test above does not reach.
@@ -447,7 +402,7 @@ async fn env_version_bumps_on_every_mutation() {
 /// a bump that is dropped while the mutation commits needs fault injection to
 /// reproduce. What they pin is that the merged statements still report the
 /// same answers the split ones did.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn delete_secret_and_set_expose_bump_exactly_once() {
     let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
@@ -488,13 +443,9 @@ async fn delete_secret_and_set_expose_bump_exactly_once() {
     );
 
     registry.archive_app(&app).await.ok();
-
-    drop(store);
-    drop(registry);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn rotation_decrypts_old_secrets_and_rewrites_to_new_key() {
     let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
@@ -549,15 +500,9 @@ async fn rotation_decrypts_old_secrets_and_rewrites_to_new_key() {
     );
 
     registry.archive_app(&app).await.ok();
-
-    drop(store_v1);
-    drop(store_v2);
-    drop(store_v3);
-    drop(registry);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn audit_log_roundtrip() {
     let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
@@ -608,12 +553,9 @@ async fn audit_log_roundtrip() {
     assert_eq!(rows[1].actor_user_id.as_ref(), Some(&first_actor));
 
     registry.archive_app(&app).await.ok();
-
-    drop(registry);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn app_audit_is_append_only() {
     let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
@@ -657,13 +599,9 @@ async fn app_audit_is_append_only() {
     );
 
     registry.archive_app(&app).await.ok();
-
-    drop(conn);
-    drop(registry);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn merged_env_404s_on_missing_app() {
     let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
@@ -675,13 +613,9 @@ async fn merged_env_404s_on_missing_app() {
         matches!(err, zeroship_control::env_store::EnvError::AppNotFound),
         "expected AppNotFound for missing app, got {err:?}",
     );
-
-    drop(store);
-    drop(registry);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn empty_master_key_is_always_rejected() {
     let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
@@ -690,11 +624,9 @@ async fn empty_master_key_is_always_rejected() {
         err,
         zeroship_control::env_store::EnvError::MasterKeyRequired
     ));
-
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn set_value_over_cap_rejected() {
     let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
@@ -714,13 +646,9 @@ async fn set_value_over_cap_rejected() {
     ));
 
     registry.archive_app(&app).await.ok();
-
-    drop(store);
-    drop(registry);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn merged_env_for_worker_emits_split_shape() {
     let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
@@ -818,13 +746,9 @@ async fn merged_env_for_worker_emits_split_shape() {
     ));
 
     registry.archive_app(&app).await.ok();
-
-    drop(store);
-    drop(registry);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn long_value_roundtrip() {
     let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
@@ -843,10 +767,6 @@ async fn long_value_roundtrip() {
     );
 
     registry.archive_app(&app).await.ok();
-
-    drop(store);
-    drop(registry);
-    common::drain_pg().await;
 }
 
 /// A secret that cannot be decrypted must name itself in the error.
@@ -860,7 +780,7 @@ async fn long_value_roundtrip() {
 ///
 /// Reachable through operator error rather than attack: a key dropped from the
 /// rotation set before `rotate_app` drained it, or storage corruption.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn undecryptable_secret_names_the_key_in_the_error() {
     let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
@@ -899,9 +819,4 @@ async fn undecryptable_secret_names_the_key_in_the_error() {
     );
 
     registry.archive_app(&app).await.ok();
-
-    drop(conn);
-    drop(store);
-    drop(registry);
-    common::drain_pg().await;
 }

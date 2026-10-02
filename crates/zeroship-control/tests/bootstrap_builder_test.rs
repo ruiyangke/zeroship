@@ -12,8 +12,6 @@ use zeroship_control::bootstrap_builder::{
     BUILDER_CLIENT_ID, BUILDER_CLIENT_NAME, DEFAULT_BUILDER_REDIRECT_URI,
 };
 
-use crate::common;
-
 fn db_url() -> String {
     crate::common::require_control_db()
 }
@@ -43,10 +41,9 @@ fn tmpdir(label: &str) -> PathBuf {
 
 async fn pg(db_url: &str) -> Client {
     let (client, conn) = connect(db_url, NoTls).await.expect("pg connect");
-    compio::runtime::spawn(async move {
+    crate::common::live::spawn(async move {
         let _ = conn.run().await;
-    })
-    .detach();
+    });
     cleanup_builder_client(&client).await;
     client
 }
@@ -86,7 +83,7 @@ async fn count_builder_rows(pg: &Client) -> i64 {
 // single-threaded runtime, so the held guard cannot deadlock another
 // task's poll the way it could under a work-stealing executor.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn bootstrap_inserts_builder_client_first_run() {
     let db_url = db_url();
     let _serial = bootstrap_guard();
@@ -151,18 +148,11 @@ async fn bootstrap_inserts_builder_client_first_run() {
 
     cleanup_builder_client(&pg).await;
     let _ = std::fs::remove_dir_all(root);
-
-    // Teardown: `pg` is the only handle to this test's Postgres connection, and
-    // locals are dropped only after the body returns - by which point the
-    // runtime is gone and the socket can no longer be closed. Drop it
-    // explicitly, then wait for the close to land.
-    drop(pg);
-    common::drain_pg().await;
 }
 
 // See the allow on `bootstrap_inserts_builder_client_first_run` above.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn bootstrap_is_idempotent_on_second_run() {
     let db_url = db_url();
     let _serial = bootstrap_guard();
@@ -187,14 +177,11 @@ async fn bootstrap_is_idempotent_on_second_run() {
 
     cleanup_builder_client(&pg).await;
     let _ = std::fs::remove_dir_all(root);
-
-    drop(pg);
-    common::drain_pg().await;
 }
 
 // See the allow on `bootstrap_inserts_builder_client_first_run` above.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn bootstrap_disabled_does_nothing() {
     let db_url = db_url();
     let _serial = bootstrap_guard();
@@ -213,7 +200,4 @@ async fn bootstrap_disabled_does_nothing() {
 
     cleanup_builder_client(&pg).await;
     let _ = std::fs::remove_dir_all(root);
-
-    drop(pg);
-    common::drain_pg().await;
 }

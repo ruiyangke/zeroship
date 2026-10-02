@@ -152,20 +152,19 @@ impl MockStripe {
 async fn start_mock_stripe() -> MockStripe {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind mock");
     let addr = listener.local_addr().expect("local_addr");
+    crate::common::live::register_listener(addr);
     let base_url = format!("http://{addr}");
     let state = Arc::new(Mutex::new(MockState::default()));
     let accept_state = Arc::clone(&state);
-    compio::runtime::spawn(async move {
+    crate::common::live::spawn(async move {
         loop {
             let Ok((stream, _peer)) = listener.accept().await else { break };
             let conn_state = Arc::clone(&accept_state);
-            compio::runtime::spawn(async move {
+            crate::common::live::spawn(async move {
                 serve_conn(stream, conn_state).await;
-            })
-            .detach();
+            });
         }
-    })
-    .detach();
+    });
     MockStripe { state, base_url }
 }
 
@@ -299,7 +298,7 @@ fn http_json(status: u16, json: &str) -> Vec<u8> {
     };
     let body = json.as_bytes();
     let mut resp = format!(
-        "HTTP/1.1 {status} {reason}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: keep-alive\r\n\r\n",
+        "HTTP/1.1 {status} {reason}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
         body.len()
     )
     .into_bytes();
@@ -336,10 +335,9 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
         Arc::new(LocalDiskBlobStore::new(blob_root.clone()).expect("blob store"));
     let (control_pg_client, control_pg_conn) =
         compio_postgres::connect(db_url, compio_postgres::NoTls).await.expect("control-pg");
-    compio::runtime::spawn(async move {
+    crate::common::live::spawn(async move {
         let _ = control_pg_conn.run().await;
-    })
-    .detach();
+    });
 
     let state = Arc::new(AppState {
         service_auth: std::sync::Arc::new(zeroship_core::service_peers::ServiceAuth::unconfigured()),
@@ -509,7 +507,7 @@ fn now() -> i64 {
 // single-threaded runtime, so the held guard cannot deadlock another
 // task's poll the way it could under a work-stealing executor.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn missed_invoice_payment_is_flagged() {
     let url = db_url();
     let _sweep_guard = serialize_sweeps();
@@ -532,13 +530,6 @@ async fn missed_invoice_payment_is_flagged() {
         finding_count(&fx.state, "missed_invoice_payment", &stripe_in).await, 1,
         "Stripe-paid invoice with no charge row → exactly one missed_invoice_payment finding"
     );
-
-    // Teardown: `fx.state` holds the live connection, and it is dropped only
-    // after the body returns - by which point the runtime is gone and the
-    // socket can no longer be closed. Drop it explicitly, then wait for the
-    // close to land.
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -547,7 +538,7 @@ async fn missed_invoice_payment_is_flagged() {
 
 // See the allow on `missed_invoice_payment_is_flagged` above.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn refund_failed_at_stripe_but_issued_locally_is_flagged() {
     let url = db_url();
     let _sweep_guard = serialize_sweeps();
@@ -568,9 +559,6 @@ async fn refund_failed_at_stripe_but_issued_locally_is_flagged() {
         finding_count(&fx.state, "refund_status_drift", &stripe_re).await, 1,
         "Stripe-failed refund we hold issued → exactly one refund_status_drift finding"
     );
-
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -579,7 +567,7 @@ async fn refund_failed_at_stripe_but_issued_locally_is_flagged() {
 
 // See the allow on `missed_invoice_payment_is_flagged` above.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn stripe_dispute_with_no_internal_row_is_flagged() {
     let url = db_url();
     let _sweep_guard = serialize_sweeps();
@@ -607,9 +595,6 @@ async fn stripe_dispute_with_no_internal_row_is_flagged() {
         .query("SELECT COUNT(*)::bigint AS n FROM zeroship.pending_disputes WHERE provider_dispute_id=$1", &[&du])
         .await.expect("count parked")[0].get("n");
     assert_eq!(parked, 0, "default is FLAG-only — no auto-heal park");
-
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // C2: a missed `charge.dispute.created` on an ALREADY-LINKED, already-paid invoice must be
@@ -624,7 +609,7 @@ async fn stripe_dispute_with_no_internal_row_is_flagged() {
 // `dispute_debit` fails every assert below.
 // See the allow on `missed_invoice_payment_is_flagged` above.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn missing_dispute_backstop_applies_when_enabled_and_linkage_exists() {
     let url = db_url();
     let _sweep_guard = serialize_sweeps();
@@ -699,9 +684,6 @@ async fn missing_dispute_backstop_applies_when_enabled_and_linkage_exists() {
         )
         .await.expect("sum cash2")[0].get("c");
     assert_eq!(cash2, 5000, "no double-debit on re-sweep");
-
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -716,7 +698,7 @@ async fn missing_dispute_backstop_applies_when_enabled_and_linkage_exists() {
 
 // See the allow on `missed_invoice_payment_is_flagged` above.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn missing_dispute_backstop_does_not_park_when_unresolved() {
     let url = db_url();
     let _sweep_guard = serialize_sweeps();
@@ -749,9 +731,6 @@ async fn missing_dispute_backstop_does_not_park_when_unresolved() {
         .query("SELECT COUNT(*)::bigint AS n FROM zeroship.billing_disputes WHERE provider_dispute_id=$1", &[&du])
         .await.expect("count disputes")[0].get("n");
     assert_eq!(rows, 0, "no billing_disputes row invented for an unresolved dispute");
-
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -767,7 +746,7 @@ async fn missing_dispute_backstop_does_not_park_when_unresolved() {
 
 // See the allow on `missed_invoice_payment_is_flagged` above.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn backstop_then_live_webhook_does_not_double_apply() {
     let url = db_url();
     let _sweep_guard = serialize_sweeps();
@@ -835,17 +814,15 @@ async fn backstop_then_live_webhook_does_not_double_apply() {
         .query("SELECT COUNT(*)::bigint AS n FROM zeroship.billing_disputes WHERE provider_dispute_id=$1", &[&du])
         .await.expect("dispute rows")[0].get("n");
     assert_eq!(rows, 1, "exactly one billing_disputes row across both rails");
-
-    drop(conn);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 async fn side_conn(url: &str) -> compio_postgres::Client {
     let (conn, driver) = compio_postgres::connect(url, compio_postgres::NoTls)
         .await
         .expect("side connect");
-    compio::runtime::spawn(async move { let _ = driver.run().await; }).detach();
+    crate::common::live::spawn(async move {
+        let _ = driver.run().await;
+    });
     conn
 }
 
@@ -858,7 +835,7 @@ async fn side_conn(url: &str) -> compio_postgres::Client {
 
 // See the allow on `missed_invoice_payment_is_flagged` above.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn open_dispute_resolved_at_stripe_is_flagged_status_drift() {
     let url = db_url();
     let _sweep_guard = serialize_sweeps();
@@ -892,9 +869,6 @@ async fn open_dispute_resolved_at_stripe_is_flagged_status_drift() {
         finding_count(&fx.state, "dispute_status_drift", &du).await, 1,
         "a Stripe-resolved dispute we still hold open → exactly one dispute_status_drift finding"
     );
-
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -903,7 +877,7 @@ async fn open_dispute_resolved_at_stripe_is_flagged_status_drift() {
 
 // See the allow on `missed_invoice_payment_is_flagged` above.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn fully_consistent_state_produces_no_findings() {
     let url = db_url();
     let _sweep_guard = serialize_sweeps();
@@ -944,9 +918,6 @@ async fn fully_consistent_state_produces_no_findings() {
     assert_eq!(finding_count(&fx.state, "missing_dispute", &du).await, 0, "known dispute not flagged missing");
     // Scoped: this organization's entities contributed zero findings.
     let _ = summary;
-
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -955,7 +926,7 @@ async fn fully_consistent_state_produces_no_findings() {
 
 // See the allow on `missed_invoice_payment_is_flagged` above.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn second_sweep_does_not_duplicate_findings() {
     let url = db_url();
     let _sweep_guard = serialize_sweeps();
@@ -977,9 +948,6 @@ async fn second_sweep_does_not_duplicate_findings() {
     );
     assert!(s1.findings_recorded >= 1, "first sweep recorded the finding");
     assert_eq!(s2.findings_recorded, 0, "second sweep recorded nothing new (deduped)");
-
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -988,7 +956,7 @@ async fn second_sweep_does_not_duplicate_findings() {
 
 // See the allow on `missed_invoice_payment_is_flagged` above.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn concurrent_tick_single_flights_under_advisory_lock() {
     let url = db_url();
     let _sweep_guard = serialize_sweeps();
@@ -996,7 +964,9 @@ async fn concurrent_tick_single_flights_under_advisory_lock() {
     // Hold the reconcile advisory lock on a SEPARATE session (simulating another instance
     // mid-sweep), then drive a tick: it must find the lock held and no-op.
     let (holder, holder_conn) = compio_postgres::connect(&url, compio_postgres::NoTls).await.expect("holder conn");
-    compio::runtime::spawn(async move { let _ = holder_conn.run().await; }).detach();
+    crate::common::live::spawn(async move {
+        let _ = holder_conn.run().await;
+    });
     // The key MUST match stripe_reconcile's constant (0x7a73_7265_636f_0001).
     let lock_key: i64 = 0x7a73_7265_636f_0001;
     let got = holder.query("SELECT pg_try_advisory_lock($1) AS l", &[&lock_key]).await.expect("lock");
@@ -1009,10 +979,6 @@ async fn concurrent_tick_single_flights_under_advisory_lock() {
 
     // Release so the session is clean.
     let _ = holder.execute("SELECT pg_advisory_unlock($1)", &[&lock_key]).await;
-
-    drop(holder);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// Build the REAL `StripeClient` pointed at the mock (no shim on the wire path).

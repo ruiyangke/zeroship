@@ -60,10 +60,9 @@ async fn build_test_state(db_url: &str, worker_urls: Vec<String>) -> Fixture {
         compio_postgres::connect(db_url, compio_postgres::NoTls)
             .await
             .expect("control-pg connect");
-    compio::runtime::spawn(async move {
+    crate::common::live::spawn(async move {
         let _ = control_pg_conn.run().await;
-    })
-    .detach();
+    });
     let control_pg = Arc::new(control_pg_client);
 
     Fixture {
@@ -117,7 +116,7 @@ async fn worker_logs(path: web::types::Path<String>) -> web::HttpResponse {
     web::HttpResponse::Ok().json(&vec![format!("b2-control-route-log {}", path.into_inner())])
 }
 
-#[ntex::test]
+#[compio::test(crate = "crate::common::live::system")]
 async fn app_logs_route_proxies_worker_lines() {
     let db_url = db_url();
 
@@ -127,6 +126,7 @@ async fn app_logs_route_proxies_worker_lines() {
         )
     })
     .await;
+    crate::common::live::register_listener(worker.addr());
     let fixture = build_test_state(&db_url, vec![worker.url("/")]).await;
     // A REAL app the caller owns. This used to be a bare `Uuid::new_v4()` with
     // no app row and no membership, which reached the worker proxy only because
@@ -160,6 +160,7 @@ async fn app_logs_route_proxies_worker_lines() {
         }
     })
     .await;
+    crate::common::live::register_listener(control.addr());
 
     let response = control
         .get(format!("/api/apps/{}/logs", app_id.as_str()))
@@ -188,15 +189,4 @@ async fn app_logs_route_proxies_worker_lines() {
         vec![format!("b2-control-route-log {}", app_id.as_str())]
     );
     pat.cleanup(&fixture.state).await;
-
-    // Teardown: `control` runs its app factory (holding a cloned `Arc<AppState>`)
-    // on its own dedicated system/thread, and `fixture` owns the state's real
-    // Postgres connection. Neither is released until both are dropped - and
-    // locals are dropped only after the body returns, by which point this
-    // test's compio runtime is gone and the socket can no longer be closed.
-    // Drop them explicitly, then wait for the close to land.
-    drop(control);
-    drop(worker);
-    drop(fixture);
-    common::drain_pg().await;
 }

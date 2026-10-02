@@ -59,10 +59,9 @@ impl Fx {
     async fn new() -> Self {
         let url = common::require_control_db();
         let (pg, conn) = connect(&url, NoTls).await.expect("control-pg connect");
-        compio::runtime::spawn(async move {
+        crate::common::live::spawn(async move {
             let _ = conn.run().await;
-        })
-        .detach();
+        });
         let registry = Registry::new(&url).await.expect("registry");
         common::ensure_builtin_plans(&registry).await;
         Self { registry, pg }
@@ -430,7 +429,7 @@ fn bind_body(app: &AppId, capability: &str) -> BindDatabaseBody {
 /// cluster now holds a database, so the other must win - and the third returns
 /// to the smaller id with the counts level again, which no single arm produces
 /// on its own.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn placement_fills_the_emptiest_cluster_and_breaks_ties_by_id() {
     let fx = Fx::new().await;
     let world = World::new(&fx, "place-balance").await;
@@ -463,8 +462,6 @@ async fn placement_fills_the_emptiest_cluster_and_breaks_ties_by_id() {
     }
 
     world.cleanup(&fx).await;
-    drop(fx);
-    common::drain_pg().await;
 
     assert_eq!(
         landed,
@@ -475,7 +472,7 @@ async fn placement_fills_the_emptiest_cluster_and_breaks_ties_by_id() {
 
 /// A zone whose clusters are all `pending` or `draining` refuses, and the
 /// control is the SAME call once one of them is `active`.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn placement_refuses_a_zone_with_no_active_cluster() {
     let fx = Fx::new().await;
     let world = World::new(&fx, "place-nocap").await;
@@ -507,8 +504,6 @@ async fn placement_refuses_a_zone_with_no_active_cluster() {
     .await;
 
     world.cleanup(&fx).await;
-    drop(fx);
-    common::drain_pg().await;
 
     match refused {
         Err(DatabaseError::NoDatastoreInZone { execution_zone_id }) => {
@@ -534,7 +529,7 @@ async fn placement_refuses_a_zone_with_no_active_cluster() {
 /// a database is placed on a cluster in its project's zone, structurally. The
 /// refusal here proves placement never offers the key a pair it would have to
 /// reject.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn placement_never_reaches_a_cluster_in_another_zone() {
     let fx = Fx::new().await;
     let world = World::new(&fx, "place-zone").await;
@@ -573,8 +568,6 @@ async fn placement_never_reaches_a_cluster_in_another_zone() {
 
     world.cleanup(&fx).await;
     world.drop_zone(&fx, &elsewhere_id).await;
-    drop(fx);
-    common::drain_pg().await;
 
     assert!(
         matches!(refused, Err(DatabaseError::NoDatastoreInZone { .. })),
@@ -596,7 +589,7 @@ async fn placement_never_reaches_a_cluster_in_another_zone() {
 ///
 /// Read back from `PostgreSQL` rather than from the returned records: the record
 /// is what the module says, the row is what it did.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn a_created_database_and_its_binding_stop_short_of_convergence() {
     let fx = Fx::new().await;
     let mut world = World::new(&fx, "ceiling").await;
@@ -627,8 +620,6 @@ async fn a_created_database_and_its_binding_stop_short_of_convergence() {
     let stored_binding = world.binding_status(&fx, &database_id, &app).await;
 
     world.cleanup(&fx).await;
-    drop(fx);
-    common::drain_pg().await;
 
     assert_eq!(stored_database.as_deref(), Some("provisioning"));
     assert_eq!(stored_binding.as_deref(), Some("pending"));
@@ -651,7 +642,7 @@ async fn a_created_database_and_its_binding_stop_short_of_convergence() {
 /// statement: after every refusal the world is read back, so an arm that
 /// "refused" while writing its row fails here rather than passing on the error
 /// type alone.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn every_mutation_refuses_a_viewer_and_admits_a_developer() {
     let fx = Fx::new().await;
     let mut world = World::new(&fx, "authority").await;
@@ -728,8 +719,6 @@ async fn every_mutation_refuses_a_viewer_and_admits_a_developer() {
     let after_delete = world.database_status(&fx, &database_id).await;
 
     world.cleanup(&fx).await;
-    drop(fx);
-    common::drain_pg().await;
 
     for (label, outcome) in [
         ("create", &create_refused.map(|record| record.id)),
@@ -782,7 +771,7 @@ async fn every_mutation_refuses_a_viewer_and_admits_a_developer() {
 
 /// A bound database refuses deletion, and the refusal names every app to
 /// unbind. The control is the SAME call once the bindings are gone.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn deleting_a_bound_database_is_refused_and_names_the_apps() {
     let fx = Fx::new().await;
     let mut world = World::new(&fx, "delete-bound").await;
@@ -831,8 +820,6 @@ async fn deleting_a_bound_database_is_refused_and_names_the_apps() {
     let after_delete = world.database_status(&fx, &database_id).await;
 
     world.cleanup(&fx).await;
-    drop(fx);
-    common::drain_pg().await;
 
     let Err(DatabaseError::DatabaseHasBindings(bound)) = refused else {
         panic!("a bound database must refuse deletion, got {refused:?}");
@@ -874,7 +861,7 @@ async fn deleting_a_bound_database_is_refused_and_names_the_apps() {
 /// DELETED app are both `AppNotInProject`, because a deleted app has left its
 /// project and there is nothing left to tell "gone" from "elsewhere" apart. The
 /// control is an app in the database's own project, which binds.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn binding_refuses_an_app_outside_the_databases_project() {
     let fx = Fx::new().await;
     let mut world = World::new(&fx, "fence").await;
@@ -950,8 +937,6 @@ async fn binding_refuses_an_app_outside_the_databases_project() {
     .await;
 
     world.cleanup(&fx).await;
-    drop(fx);
-    common::drain_pg().await;
 
     for (label, outcome) in [
         ("an app in a sibling project", &cross_project),
@@ -980,7 +965,7 @@ async fn binding_refuses_an_app_outside_the_databases_project() {
 /// A second binding of the same app is refused and names the live capability,
 /// because a grant is explicit and is never silently replaced. The control is a
 /// different app, which binds.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn a_second_binding_of_one_app_is_refused_with_its_live_capability() {
     let fx = Fx::new().await;
     let mut world = World::new(&fx, "rebind").await;
@@ -1039,8 +1024,6 @@ async fn a_second_binding_of_one_app_is_refused_with_its_live_capability() {
     .await;
 
     world.cleanup(&fx).await;
-    drop(fx);
-    common::drain_pg().await;
 
     match refused {
         Err(DatabaseError::AlreadyBound { app_id, capability }) => {
@@ -1066,7 +1049,7 @@ async fn a_second_binding_of_one_app_is_refused_with_its_live_capability() {
 /// A display name is unique inside a project and free outside it, because
 /// `databases_project_name_key` is the whole claim a name makes - a database is
 /// addressed by its id everywhere else.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn a_name_is_taken_in_one_project_and_free_in_the_next() {
     let fx = Fx::new().await;
     let mut world = World::new(&fx, "names").await;
@@ -1104,8 +1087,6 @@ async fn a_name_is_taken_in_one_project_and_free_in_the_next() {
     .await;
 
     world.cleanup(&fx).await;
-    drop(fx);
-    common::drain_pg().await;
 
     match refused {
         Err(DatabaseError::NameTaken(name)) => assert_eq!(name, "main"),
@@ -1121,7 +1102,7 @@ async fn a_name_is_taken_in_one_project_and_free_in_the_next() {
 /// The two listings: a project's databases, and a database's bindings with
 /// their capability. Each is checked against a row that must NOT appear, so
 /// neither can pass by returning everything.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn the_listings_are_scoped_to_their_project_and_their_database() {
     let fx = Fx::new().await;
     let mut world = World::new(&fx, "listing").await;
@@ -1186,8 +1167,6 @@ async fn the_listings_are_scoped_to_their_project_and_their_database() {
     let bindings = databases::list_bindings(&fx.pg, &subject).await;
 
     world.cleanup(&fx).await;
-    drop(fx);
-    common::drain_pg().await;
 
     let listed = listed.expect("list databases");
     assert_eq!(
@@ -1236,7 +1215,7 @@ async fn the_listings_are_scoped_to_their_project_and_their_database() {
 /// the creator was handed a 500 for an ordinary ordering mistake. The path was
 /// unreachable until a binding row could exist at all, which is what this
 /// surface added.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn deleting_an_app_that_still_binds_a_database_is_refused_and_names_it() {
     let fx = Fx::new().await;
     let mut world = World::new(&fx, "delete-app").await;
@@ -1301,8 +1280,6 @@ async fn deleting_an_app_that_still_binds_a_database_is_refused_and_names_it() {
         .get("project_id");
 
     world.cleanup(&fx).await;
-    drop(fx);
-    common::drain_pg().await;
 
     match refused {
         Err(organizations::OrganizationError::AppHasDatabaseBindings(databases)) => {
@@ -1335,7 +1312,7 @@ async fn deleting_an_app_that_still_binds_a_database_is_refused_and_names_it() {
 /// succeed, leaving a binding whose schema the reconciler is already dropping.
 /// What proves the guard is the pair: remove it and the refused arm turns into
 /// a second `Ok`, not into a different error.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn binding_a_database_in_a_non_bindable_status_is_refused() {
     let fx = Fx::new().await;
     let mut world = World::new(&fx, "bind-deleting").await;
@@ -1406,8 +1383,6 @@ async fn binding_a_database_in_a_non_bindable_status_is_refused() {
     .await;
 
     world.cleanup(&fx).await;
-    drop(fx);
-    common::drain_pg().await;
 
     admitted.expect("a live database takes a binding");
     assert_eq!(

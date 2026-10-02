@@ -152,7 +152,7 @@ fn build_zship(
 // Round-trip
 // ---------------------------------------------------------------------------
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn deploy_round_trip() {
     let root = tmpdir();
     let bs = store(&root);
@@ -216,10 +216,9 @@ async fn deploy_round_trip() {
     let (pg, pg_conn) = compio_postgres::connect(&url, compio_postgres::NoTls)
         .await
         .expect("owner-seed connect");
-    compio::runtime::spawn(async move {
+    crate::common::live::spawn(async move {
         let _ = pg_conn.run().await;
-    })
-    .detach();
+    });
     pg.execute(
         "INSERT INTO zeroship.users (id, email, name) VALUES ($1, $2::citext, $3)",
         &[
@@ -268,21 +267,13 @@ async fn deploy_round_trip() {
     registry.archive_app(&app_id2).await.ok();
 
     let _ = std::fs::remove_dir_all(&root);
-
-    // Teardown: `registry` and the raw owner-seed `pg` client each hold a
-    // connection, and locals are dropped only after the body returns - by
-    // which point the runtime is gone and the sockets can no longer be
-    // closed. Drop them explicitly, then wait for the close to land.
-    drop(pg);
-    drop(registry);
-    common::drain_pg().await;
 }
 
 // ---------------------------------------------------------------------------
 // Reject paths — DB-free
 // ---------------------------------------------------------------------------
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn deploy_rejects_hash_mismatch() {
     let root = tmpdir();
     let bs = store(&root);
@@ -309,7 +300,7 @@ async fn deploy_rejects_hash_mismatch() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn deploy_rejects_missing_blob() {
     let root = tmpdir();
     let bs = store(&root);
@@ -331,7 +322,7 @@ async fn deploy_rejects_missing_blob() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn deploy_rejects_manifest_not_first() {
     let root = tmpdir();
     let bs = store(&root);
@@ -358,7 +349,7 @@ async fn deploy_rejects_manifest_not_first() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn deploy_rejects_unsupported_version() {
     let root = tmpdir();
     let bs = store(&root);
@@ -391,7 +382,7 @@ async fn deploy_rejects_unsupported_version() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn deploy_dedup_internal() {
     let root = tmpdir();
     let bs = store(&root);

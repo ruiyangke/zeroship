@@ -74,10 +74,9 @@ async fn build_state(db_url: &str, label: &str) -> Fixture {
         compio_postgres::connect(db_url, compio_postgres::NoTls)
             .await
             .expect("control-pg connect");
-    compio::runtime::spawn(async move {
+    crate::common::live::spawn(async move {
         let _ = control_pg_conn.run().await;
-    })
-    .detach();
+    });
     let control_pg = Arc::new(control_pg_client);
 
     let state = Arc::new(AppState {
@@ -175,7 +174,7 @@ async fn make_over_limit_app(state: &AppState, limit: i64) -> AppId {
 // deadlock another task's poll the way it could under a work-stealing
 // executor.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn reconcile_tick_writes_enriched_spend_audit() {
     let url = db_url();
     let fx = build_state(&url, "audit").await;
@@ -221,13 +220,6 @@ async fn reconcile_tick_writes_enriched_spend_audit() {
         v["limit_cents"], 100,
         "audit detail carries limit_cents"
     );
-
-    // Teardown: the fixture holds the only handle to this test's Postgres
-    // connection, and locals are dropped only after the body returns - by which
-    // point the runtime is gone and the socket can no longer be closed. Drop it
-    // explicitly, then wait for the close to land.
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// The advisory lock is single-flight. While one connection holds
@@ -237,7 +229,7 @@ async fn reconcile_tick_writes_enriched_spend_audit() {
 /// no-ops even though an over-limit app is present.
 // See the allow on `reconcile_tick_writes_enriched_spend_audit` above.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn reconcile_tick_skips_when_advisory_lock_held() {
     let url = db_url();
     let fx = build_state(&url, "lock").await;
@@ -261,10 +253,9 @@ async fn reconcile_tick_skips_when_advisory_lock_held() {
     let (holder, holder_conn) = compio_postgres::connect(&url, compio_postgres::NoTls)
         .await
         .expect("holder connect");
-    compio::runtime::spawn(async move {
+    crate::common::live::spawn(async move {
         let _ = holder_conn.run().await;
-    })
-    .detach();
+    });
     let key: i64 = 0x7a73_7370_6e64_0001;
     let got = holder
         .query("SELECT pg_try_advisory_lock($1) AS locked", &[&key])
@@ -307,10 +298,6 @@ async fn reconcile_tick_skips_when_advisory_lock_held() {
         n2 >= 1,
         "after release, the sweep runs and transitions our app"
     );
-
-    drop(holder);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// Spend band walk: drive a single app through Allow→Warn→Degrade→Block AND a
@@ -325,7 +312,7 @@ async fn reconcile_tick_skips_when_advisory_lock_held() {
 /// then tick and assert the persisted state advanced + the history row was appended.
 // See the allow on `reconcile_tick_writes_enriched_spend_audit` above.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn reconcile_walks_spend_bands_and_holds_deadband() {
     let url = db_url();
     let fx = build_state(&url, "band-walk").await;
@@ -438,7 +425,4 @@ async fn reconcile_walks_spend_bands_and_holds_deadband() {
         1,
         "exactly one →block transition"
     );
-
-    drop(fx);
-    common::drain_pg().await;
 }

@@ -20,16 +20,15 @@ fn db_url() -> String {
 
 async fn pg(db_url: &str) -> Client {
     let (client, conn) = connect(db_url, NoTls).await.expect("pg connect");
-    compio::runtime::spawn(async move {
+    crate::common::live::spawn(async move {
         let _ = conn.run().await;
-    })
-    .detach();
+    });
     client
 }
 
 const FX_SCALE: i64 = 1_000_000_000_000;
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn archive_migration_removes_hard_delete_capability_and_keeps_the_worker_out_of_the_catalog() {
     let url = db_url();
     let client = pg(&url).await;
@@ -57,9 +56,6 @@ async fn archive_migration_removes_hard_delete_capability_and_keeps_the_worker_o
     // login that can see the platform schema. A worker that could still read
     // this column would mean that revocation had been undone.
     assert!(!row.get::<_, bool>("worker_can_read_archive"));
-
-    drop(client);
-    common::drain_pg().await;
 }
 
 async fn seed_owner_and_plan(client: &Client) -> (UserId, String) {
@@ -87,7 +83,7 @@ async fn seed_owner_and_plan(client: &Client) -> (UserId, String) {
     (owner, plan_id)
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn archive_preserves_finalized_invoice_history() {
     let url = db_url();
     let client = pg(&url).await;
@@ -163,13 +159,9 @@ async fn archive_preserves_finalized_invoice_history() {
         count(&client, "zeroship.invoice_lines", "app_id", &app.id).await,
         1
     );
-
-    drop(client);
-    drop(registry);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn archive_preserves_custom_metric_and_usage() {
     let url = db_url();
     let client = pg(&url).await;
@@ -216,13 +208,9 @@ async fn archive_preserves_custom_metric_and_usage() {
         count(&client, "zeroship.usage_aggregates", "app_id", &app.id).await,
         1
     );
-
-    drop(client);
-    drop(registry);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn archive_with_plan_change_history_is_idempotent_and_reversible() {
     let url = db_url();
     let client = pg(&url).await;
@@ -299,13 +287,9 @@ async fn archive_with_plan_change_history_is_idempotent_and_reversible() {
         .await
         .expect("routes")
         .contains_key(&app.id));
-
-    drop(client);
-    drop(registry);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn archived_app_can_stage_a_deploy_without_becoming_routable() {
     let url = db_url();
     let client = pg(&url).await;
@@ -400,13 +384,9 @@ async fn archived_app_can_stage_a_deploy_without_becoming_routable() {
         Some("staged-while-archived"),
         "restore must publish the staged manifest rather than the pre-archive deploy"
     );
-
-    drop(client);
-    drop(registry);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn restore_admits_a_staged_deploy_on_its_bindings_not_on_an_applied_schema() {
     let url = db_url();
     let client = pg(&url).await;
@@ -497,10 +477,6 @@ async fn restore_admits_a_staged_deploy_on_its_bindings_not_on_an_applied_schema
             .map(|entry| entry.hash.as_str()),
         Some(descriptor_hash.as_str())
     );
-
-    drop(client);
-    drop(registry);
-    common::drain_pg().await;
 }
 
 async fn count(client: &Client, table: &str, column: &str, app_id: &zeroship_core::AppId) -> i64 {

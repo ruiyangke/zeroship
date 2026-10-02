@@ -323,10 +323,9 @@ async fn build_fixture(envelope: EnrolmentEnvelope) -> Fixture {
         compio_postgres::connect(&db_url, compio_postgres::NoTls)
             .await
             .expect("control-pg connect");
-    compio::runtime::spawn(async move {
+    crate::common::live::spawn(async move {
         let _ = control_pg_conn.run().await;
-    })
-    .detach();
+    });
     let control_pg = Arc::new(control_pg_client);
 
     let mut control_keyring = keyring_for(CONTROL_SERVICE_NAME, &key_dir, &peers);
@@ -484,7 +483,7 @@ async fn instance_expiry(
 
 /// THE CONTROL. Without an arm that succeeds, every refusal below passes
 /// against an endpoint that refuses everything.
-#[ntex::test]
+#[compio::test(crate = "crate::common::live::system")]
 async fn an_admitted_join_records_the_address_the_signer_and_the_token() {
     let fixture = build_fixture(declared_envelope()).await;
     let pg = &fixture.state.control_pg;
@@ -555,13 +554,10 @@ async fn an_admitted_join_records_the_address_the_signer_and_the_token() {
     // THE LEASE. An identity admitted without one would never stop working on
     // its own, which is the whole reason the column exists.
     assert!(row.get::<_, bool>(8), "an admitted instance must be live");
-
-    drop(fixture);
-    common::drain_pg().await;
 }
 
 /// The end-to-end form of "the registrant contributes nothing to the ring key".
-#[ntex::test]
+#[compio::test(crate = "crate::common::live::system")]
 async fn two_joins_with_identical_input_land_different_ring_keys() {
     let fixture = build_fixture(declared_envelope()).await;
     let pg = &fixture.state.control_pg;
@@ -607,12 +603,9 @@ async fn two_joins_with_identical_input_land_different_ring_keys() {
         "the ring key must not be derivable from the request"
     );
     assert_ne!(ids[0], ids[1]);
-
-    drop(fixture);
-    common::drain_pg().await;
 }
 
-#[ntex::test]
+#[compio::test(crate = "crate::common::live::system")]
 async fn a_refused_join_writes_no_row() {
     let fixture = build_fixture(declared_envelope()).await;
     let pg = &fixture.state.control_pg;
@@ -653,11 +646,9 @@ async fn a_refused_join_writes_no_row() {
         "a refused join must leave the registry untouched"
     );
     forget_signer(pg, &signer.id).await;
-    drop(fixture);
-    common::drain_pg().await;
 }
 
-#[ntex::test]
+#[compio::test(crate = "crate::common::live::system")]
 async fn an_undeclared_envelope_refuses_every_join() {
     // ABSENCE REFUSES. This is the deployment-state arm, so it answers 503 and
     // points an operator at the configuration rather than at a credential.
@@ -680,8 +671,6 @@ async fn an_undeclared_envelope_refuses_every_join() {
     assert_eq!(instances_of(pg, &signer.id).await, before);
 
     forget_signer(pg, &signer.id).await;
-    drop(fixture);
-    common::drain_pg().await;
 }
 
 /// EVERY TOKEN REFUSAL, each one variable away from a control that is admitted.
@@ -691,7 +680,7 @@ async fn an_undeclared_envelope_refuses_every_join() {
 /// unknown signer resolves to no key, a rotated one resolves to nothing at all,
 /// and a zone outside the signer's recorded set is refused even though the
 /// token verifies perfectly.
-#[ntex::test]
+#[compio::test(crate = "crate::common::live::system")]
 async fn a_token_control_cannot_trust_is_refused_and_writes_no_row() {
     let fixture = build_fixture(declared_envelope()).await;
     let pg = &fixture.state.control_pg;
@@ -830,9 +819,6 @@ async fn a_token_control_cannot_trust_is_refused_and_writes_no_row() {
     }
     assert_eq!(admitted_status, StatusCode::CREATED, "{admitted_body}");
     assert_eq!(written, 1, "only the control may have written a row");
-
-    drop(fixture);
-    common::drain_pg().await;
 }
 
 /// PROOF OF POSSESSION, which is what bounds a captured token.
@@ -842,7 +828,7 @@ async fn a_token_control_cannot_trust_is_refused_and_writes_no_row() {
 /// Each refusal breaks exactly one of the three things the proof binds - the
 /// token, the key, the port - and the paired `cnf` arms say a token minted for
 /// a KNOWN key admits that key and no other.
-#[ntex::test]
+#[compio::test(crate = "crate::common::live::system")]
 async fn a_join_not_signed_by_the_presented_key_is_refused() {
     let fixture = build_fixture(declared_envelope()).await;
     let pg = &fixture.state.control_pg;
@@ -940,9 +926,6 @@ async fn a_join_not_signed_by_the_presented_key_is_refused() {
         "the confirmed thumbprint is the joining key's own"
     );
     assert_eq!(written, 1, "only the confirmed key wrote a row");
-
-    drop(fixture);
-    common::drain_pg().await;
 }
 
 /// A TOKEN'S USES ARE EXACT, AND A RETRY COSTS NONE.
@@ -951,7 +934,7 @@ async fn a_join_not_signed_by_the_presented_key_is_refused() {
 /// worker that retries after a lost reply gets its own instance id back without
 /// spending a second use - otherwise a single-use token could not survive one
 /// dropped response.
-#[ntex::test]
+#[compio::test(crate = "crate::common::live::system")]
 async fn a_token_admits_exactly_its_uses_and_a_retry_costs_none() {
     let fixture = build_fixture(declared_envelope()).await;
     let pg = &fixture.state.control_pg;
@@ -1037,14 +1020,11 @@ async fn a_token_admits_exactly_its_uses_and_a_retry_costs_none() {
     assert_eq!(exhausted_status, StatusCode::FORBIDDEN, "{exhausted_body}");
     assert_eq!(exhausted_body["reason"], "token_exhausted");
     assert_eq!(admitted_status, StatusCode::CREATED);
-
-    drop(fixture);
-    common::drain_pg().await;
 }
 
 /// The SAME key presented under a DIFFERENT signer is a conflict, refused
 /// rather than silently reassigned.
-#[ntex::test]
+#[compio::test(crate = "crate::common::live::system")]
 async fn one_key_joined_under_another_signer_conflicts() {
     let fixture = build_fixture(declared_envelope()).await;
     let pg = &fixture.state.control_pg;
@@ -1095,9 +1075,6 @@ async fn one_key_joined_under_another_signer_conflicts() {
         "a conflicting attempt must not reassign the row"
     );
     assert_eq!(status.as_deref(), Some("active"));
-
-    drop(fixture);
-    common::drain_pg().await;
 }
 
 /// THE LEASE. An instance identity expires, the worker renews it, and renewal
@@ -1107,7 +1084,7 @@ async fn one_key_joined_under_another_signer_conflicts() {
 /// replica's in-flight renewal cannot shorten a window a newer one already
 /// extended. That is measured by pushing the expiry far into the future behind
 /// the renewal's back and requiring it to stay there.
-#[ntex::test]
+#[compio::test(crate = "crate::common::live::system")]
 async fn an_instance_renews_its_own_lease_monotonically_until_it_lapses() {
     let fixture = build_fixture(declared_envelope()).await;
     let pg = &fixture.state.control_pg;
@@ -1178,9 +1155,6 @@ async fn an_instance_renews_its_own_lease_monotonically_until_it_lapses() {
     assert_eq!(lapsed_status, StatusCode::FORBIDDEN, "{lapsed_body}");
     assert_eq!(lapsed_body["reason"], "instance_not_live");
     assert_eq!(unknown_status, StatusCode::FORBIDDEN);
-
-    drop(fixture);
-    common::drain_pg().await;
 }
 
 /// A LAPSED INSTANCE STOPS AUTHENTICATING, with nobody acting.
@@ -1189,7 +1163,7 @@ async fn an_instance_renews_its_own_lease_monotonically_until_it_lapses() {
 /// otherwise": the key resolution Control does before verifying any instance
 /// assertion filters on the lease as well as on the status, so a crashed or
 /// abandoned worker's credential dies on its own.
-#[ntex::test]
+#[compio::test(crate = "crate::common::live::system")]
 async fn a_lapsed_instance_key_no_longer_resolves() {
     let fixture = build_fixture(declared_envelope()).await;
     let pg = &fixture.state.control_pg;
@@ -1246,9 +1220,6 @@ async fn a_lapsed_instance_key_no_longer_resolves() {
         None,
         "a retired instance must stop resolving"
     );
-
-    drop(fixture);
-    common::drain_pg().await;
 }
 
 /// The join endpoint is NOT behind the service-assertion allowlist, and the
@@ -1263,7 +1234,7 @@ async fn a_lapsed_instance_key_no_longer_resolves() {
 /// the successful join needs `req.peer_addr()` to be a real observed loopback
 /// address - `test::call_service`'s request has none, so it can only ever reach
 /// `peer_address_unobservable`.
-#[ntex::test]
+#[compio::test(crate = "crate::common::live::system")]
 async fn joining_needs_a_token_and_renewing_needs_an_instance_identity() {
     let fixture = build_fixture(loopback_envelope()).await;
     let pg = &fixture.state.control_pg;
@@ -1287,6 +1258,7 @@ async fn joining_needs_a_token_and_renewing_needs_an_instance_identity() {
         }
     })
     .await;
+    crate::common::live::register_listener(server.addr());
 
     // NO BEARER AT ALL: 401, naming the missing token rather than an address.
     let anonymous = server
@@ -1366,10 +1338,6 @@ async fn joining_needs_a_token_and_renewing_needs_an_instance_identity() {
     forget_signer(pg, &signer.id).await;
 
     assert_eq!(host, "127.0.0.1".parse::<std::net::IpAddr>().expect("host"));
-
-    drop(server);
-    drop(fixture);
-    common::drain_pg().await;
 }
 
 /// The handler's read of the transport, bound over a REAL socket.
@@ -1381,7 +1349,7 @@ async fn joining_needs_a_token_and_renewing_needs_an_instance_identity() {
 /// and nothing else - together they say the rule consults the declaration
 /// rather than carrying a verdict of its own, which a suite of refusals alone
 /// cannot show.
-#[ntex::test]
+#[compio::test(crate = "crate::common::live::system")]
 async fn a_real_loopback_connection_is_refused_as_outside_the_envelope() {
     let fixture = build_fixture(declared_envelope()).await;
     let pg = &fixture.state.control_pg;
@@ -1399,6 +1367,7 @@ async fn a_real_loopback_connection_is_refused_as_outside_the_envelope() {
         }
     })
     .await;
+    crate::common::live::register_listener(server.addr());
 
     let response = server
         .post("/internal/workers/join")
@@ -1416,12 +1385,9 @@ async fn a_real_loopback_connection_is_refused_as_outside_the_envelope() {
     assert_eq!(instances_of(pg, &signer.id).await, 0);
 
     forget_signer(pg, &signer.id).await;
-    drop(server);
-    drop(fixture);
-    common::drain_pg().await;
 }
 
-#[ntex::test]
+#[compio::test(crate = "crate::common::live::system")]
 async fn a_malformed_body_is_refused_before_any_derivation() {
     // Refused with 400 rather than 403: the body is malformed, which is a
     // different fact from the address being inadmissible, and an operator
@@ -1450,8 +1416,6 @@ async fn a_malformed_body_is_refused_before_any_derivation() {
     assert_eq!(instances_of(pg, &signer.id).await, 0);
 
     forget_signer(pg, &signer.id).await;
-    drop(fixture);
-    common::drain_pg().await;
 }
 
 /// The frozen-column trigger, which is the ONLY thing making the registry's
@@ -1463,7 +1427,7 @@ async fn a_malformed_body_is_refused_before_any_derivation() {
 /// its public key, or move it into another zone. The admitting signer, the
 /// admitting token and the zone joined the frozen set with the join contract:
 /// an instance's provenance is fixed at join exactly like its key and address.
-#[ntex::test]
+#[compio::test(crate = "crate::common::live::system")]
 async fn identity_zone_and_provenance_are_frozen_after_joining() {
     let fixture = build_fixture(declared_envelope()).await;
     let pg = &fixture.state.control_pg;
@@ -1595,9 +1559,6 @@ async fn identity_zone_and_provenance_are_frozen_after_joining() {
             "{what} is documented as frozen at join but the UPDATE succeeded"
         );
     }
-
-    drop(fixture);
-    common::drain_pg().await;
 }
 
 /// PURGE retires what ROTATE leaves running, and the difference is the whole
@@ -1607,7 +1568,7 @@ async fn identity_zone_and_provenance_are_frozen_after_joining() {
 /// it and the fleet it admitted keeps serving. Purging is the incident path,
 /// for a key believed to have leaked, where an operator must not be retiring
 /// instances one at a time while an attacker's workers keep serving.
-#[ntex::test]
+#[compio::test(crate = "crate::common::live::system")]
 async fn rotate_leaves_the_fleet_running_and_purge_retires_it() {
     let fixture = build_fixture(declared_envelope()).await;
     let pg = &fixture.state.control_pg;
@@ -1669,9 +1630,6 @@ async fn rotate_leaves_the_fleet_running_and_purge_retires_it() {
         Some("active"),
         "neither verb may reach another signer's instances"
     );
-
-    drop(fixture);
-    common::drain_pg().await;
 }
 
 /// The blocking chain rooted at `blocker_pid`, in the pattern
@@ -1741,7 +1699,7 @@ async fn wait_until_blocked_on(
 /// are exhaustive: either the join committed first and the purge's second
 /// statement retires what it finds, or the purge committed first and the join's
 /// guarded lock finds no active signer and refuses.
-#[ntex::test]
+#[compio::test(crate = "crate::common::live::system")]
 async fn purging_a_signer_while_a_join_holds_its_lock_leaves_no_active_instance() {
     let outcome = run_the_join_purge_race().await;
     assert!(
@@ -1955,7 +1913,7 @@ async fn run_the_join_purge_race() -> RaceOutcome {
 /// so one use admits exactly one worker even when two replicas present two
 /// different keys against it simultaneously. A read-then-write would let both
 /// read "unused" and both admit.
-#[ntex::test]
+#[compio::test(crate = "crate::common::live::system")]
 async fn two_replicas_racing_one_use_admit_exactly_one_worker() {
     let left = build_fixture(declared_envelope()).await;
     let right = build_fixture(declared_envelope()).await;
@@ -1999,10 +1957,6 @@ async fn two_replicas_racing_one_use_admit_exactly_one_worker() {
     );
     let refused = if a_status == StatusCode::CREATED { &b_body } else { &a_body };
     assert_eq!(refused["reason"], "token_exhausted", "{refused}");
-
-    drop(left);
-    drop(right);
-    common::drain_pg().await;
 }
 
 /// A LOST-REPLY RETRY THAT LANDS ON A DIFFERENT REPLICA CONVERGES ON ONE ROW.
@@ -2014,7 +1968,7 @@ async fn two_replicas_racing_one_use_admit_exactly_one_worker() {
 ///
 /// The retry also costs no second use, which is what makes a single-use token
 /// survive a dropped response.
-#[ntex::test]
+#[compio::test(crate = "crate::common::live::system")]
 async fn two_replicas_racing_one_key_converge_on_one_instance() {
     let left = build_fixture(declared_envelope()).await;
     let right = build_fixture(declared_envelope()).await;
@@ -2080,10 +2034,6 @@ async fn two_replicas_racing_one_key_converge_on_one_instance() {
         StatusCode::CREATED,
         "the retry must not have spent the second use: {second_body}"
     );
-
-    drop(left);
-    drop(right);
-    common::drain_pg().await;
 }
 
 /// THE MINTER IS A LEASED ROLE, AND ONLY THE HOLDER WRITES.
@@ -2096,7 +2046,7 @@ async fn two_replicas_racing_one_key_converge_on_one_instance() {
 /// is measured by closing the holder's connection and requiring the next asker
 /// to succeed, which is what makes a dead minter recoverable without anyone
 /// acting.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn only_one_control_replica_holds_the_join_token_minter_lease() {
     use zeroship_control::join_minter::claim_minter_lease;
 
@@ -2152,6 +2102,4 @@ async fn only_one_control_replica_holds_the_join_token_minter_lease() {
         succeeded,
         "a minter that dies must drop its lease with its session"
     );
-
-    common::drain_pg().await;
 }

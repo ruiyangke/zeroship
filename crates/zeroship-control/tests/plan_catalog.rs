@@ -48,10 +48,9 @@ fn lock_fx() -> std::sync::MutexGuard<'static, ()> {
 
 async fn pg(db_url: &str) -> compio_postgres::Client {
     let (client, conn) = connect(db_url, NoTls).await.expect("pg connect");
-    compio::runtime::spawn(async move {
+    crate::common::live::spawn(async move {
         let _ = conn.run().await;
-    })
-    .detach();
+    });
     client
 }
 
@@ -102,7 +101,7 @@ async fn make_user(client: &compio_postgres::Client) -> UserId {
     id
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn upsert_and_get_round_trips_pure_types() {
     let url = db_url();
     let _client = pg(&url).await;
@@ -129,17 +128,9 @@ async fn upsert_and_get_round_trips_pure_types() {
         .expect("get2")
         .expect("present2");
     assert_eq!(again.name, "round-trip-2");
-
-    // Teardown: `catalog`/`registry`/the raw `_client` each cycle their own
-    // connections, and the last one opened has no later await in this test to
-    // let the runtime drive its shutdown before the runtime itself is torn
-    // down. Drop the handles, then wait for the close to land.
-    drop(catalog);
-    drop(_client);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn create_app_with_unknown_plan_id_is_rejected() {
     // CT-A1: an app can no longer pick a plan that is not in the catalog. The
     // server-side gate returns a clean InvalidInput (NOT a raw FK violation),
@@ -171,13 +162,9 @@ async fn create_app_with_unknown_plan_id_is_rejected() {
         .await
         .expect("query apps");
     assert!(rows.is_empty(), "rejected create must leave no app row");
-
-    drop(client);
-    drop(registry);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn create_app_with_real_plan_id_succeeds() {
     let url = db_url();
     let client = pg(&url).await;
@@ -192,13 +179,9 @@ async fn create_app_with_real_plan_id_succeeds() {
         .await
         .expect("create with a real plan succeeds");
     assert_eq!(record.plan_id, plan.id);
-
-    drop(catalog);
-    drop(client);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn set_plan_to_archived_plan_is_rejected() {
     // An archived plan stays resolvable (historical FKs) but cannot be ASSIGNED
     // to an app via set_plan.
@@ -245,13 +228,9 @@ async fn set_plan_to_archived_plan_is_rejected() {
         .set_plan(&app.id, &live.id)
         .await
         .expect("set live"));
-
-    drop(catalog);
-    drop(client);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn get_versions_derives_limits_from_catalog_not_hardcode() {
     // The deleted `runtime_limits_for_plan` hardcoded limits by plan NAME. Now
     // limits come from the plan ROW's runtime_limits_json. Seed a plan with a
@@ -291,10 +270,6 @@ async fn get_versions_derives_limits_from_catalog_not_hardcode() {
     );
     assert_eq!(info.runtime.wall_timeout_ms, Some(23_456));
     assert_eq!(info.runtime.heap_limit_mb, Some(177));
-
-    drop(catalog);
-    drop(client);
-    common::drain_pg().await;
 }
 
 /// The registry projection, driven through the CREATOR authoring path rather
@@ -305,7 +280,7 @@ async fn get_versions_derives_limits_from_catalog_not_hardcode() {
 /// What this does NOT cover: authorization. Whether the CALLER may reach those
 /// functions for this app is the guard's job and is tested over HTTP in
 /// `egress_rules_test.rs`; here they are called directly.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn get_versions_projects_app_egress_rules_with_plan_caps() {
     let url = db_url();
     let client = pg(&url).await;
@@ -481,13 +456,9 @@ async fn get_versions_projects_app_egress_rules_with_plan_caps() {
         zeroship_core::types::AppNetPolicy::default(),
         "deleting the last rule returns to default-deny on the next version read"
     );
-
-    drop(catalog);
-    drop(client);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn upsert_with_none_archived_preserves_existing_archived() {
     // An archived plan, re-upserted with `archived = None` (the PUT-without-archived
     // case), MUST STAY archived: `None` ⇒ COALESCE-preserve.
@@ -534,13 +505,9 @@ async fn upsert_with_none_archived_preserves_existing_archived() {
         .await
         .expect("explicit un-archive");
     assert!(!unarchived.archived, "Some(false) explicitly un-archives");
-
-    drop(catalog);
-    drop(_client);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn set_plan_guards_archive_in_one_statement() {
     // #8: set_plan is race-free in a single guarded UPDATE. Assigning a plan
     // archived just before the call is rejected with a typed InvalidInput, and
@@ -593,13 +560,9 @@ async fn set_plan_guards_archive_in_one_statement() {
             .expect("no such app -> Ok(false)"),
         "no such app yields Ok(false)"
     );
-
-    drop(catalog);
-    drop(client);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn poison_runtime_limits_still_prices_via_both_list_and_get() {
     // MAJOR-2 REGRESSION: a plan row with un-parseable `runtime_limits_json` must
     // STILL be priced by BOTH paths — `list()` (spend enforcement) AND `get()`
@@ -661,10 +624,6 @@ async fn poison_runtime_limits_still_prices_via_both_list_and_get() {
         zeroship_core::types::FREE_TIER_RUNTIME_LIMITS,
         "poison runtime_limits_json falls back to the conservative free-tier limits",
     );
-
-    drop(catalog);
-    drop(client);
-    common::drain_pg().await;
 }
 
 // `lock_fx()` returns a `MutexGuard` over a `Mutex<()>` - a pure
@@ -673,7 +632,7 @@ async fn poison_runtime_limits_still_prices_via_both_list_and_get() {
 // so the held guard cannot deadlock another task's poll the way it could
 // under a work-stealing executor.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn charge_from_real_aggregates_uses_weight_table() {
     // End-to-end of the CU pricing path against REAL usage_aggregates rows +
     // the REAL global `metric_weights` table: write usage for an app, fetch the
@@ -736,17 +695,11 @@ async fn charge_from_real_aggregates_uses_weight_table() {
     assert_eq!(breakdown.total_units, 1_500_000);
     assert_eq!(breakdown.billable_units, 500_000);
     assert_eq!(breakdown.total_cents, 500_500);
-
-    drop(metering);
-    drop(pricing);
-    drop(catalog);
-    drop(client);
-    common::drain_pg().await;
 }
 
 // See the allow on `charge_from_real_aggregates_uses_weight_table` above.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn charge_uses_only_db_weight_table_and_default_fx() {
     // Prove the global weight table + default FX are actually loaded from the DB
     // (not a hardcoded const): a metric with NO weight row contributes 0 CU, and
@@ -778,14 +731,9 @@ async fn charge_uses_only_db_weight_table_and_default_fx() {
         weights.contains_key("requests"),
         "platform-counter weight is seeded"
     );
-
-    drop(pricing);
-    drop(registry);
-    drop(client);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn upsert_hard_errors_on_out_of_range_price_not_silent_clamp() {
     // MINOR (write-path i64 clamps) REGRESSION: a plan write with an
     // out-of-range price (here included_units = u64::MAX, above the i64 BIGINT
@@ -805,15 +753,11 @@ async fn upsert_hard_errors_on_out_of_range_price_not_silent_clamp() {
         res.is_err(),
         "an out-of-range included_units must be a hard error at upsert, not a silent i64 clamp",
     );
-
-    drop(catalog);
-    drop(_client);
-    common::drain_pg().await;
 }
 
 // See the allow on `charge_from_real_aggregates_uses_weight_table` above.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn below_floor_global_fx_rejected_by_check_and_loader_fails_closed() {
     // MAJOR-3 REGRESSION. Two arms:
     //   (a) the DB CHECK on `pricing_config.fx_pico_cents_per_unit >= 1000`
@@ -904,14 +848,9 @@ async fn below_floor_global_fx_rejected_by_check_and_loader_fails_closed() {
         "a below-floor global FX must resolve to None (unresolved → sweep fails closed), \
          NOT Some(0) which would silently bill all overage at $0",
     );
-
-    drop(pricing);
-    drop(registry);
-    drop(client);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn metric_weights_rejects_negative_units_per_op() {
     // MINOR-2 REGRESSION: the 0041 CHECK (units_per_op >= 0) makes a negative
     // weight unrepresentable at the source — a negative weight would credit CU
@@ -937,7 +876,4 @@ async fn metric_weights_rejects_negative_units_per_op() {
             &[&metric],
         )
         .await;
-
-    drop(client);
-    common::drain_pg().await;
 }

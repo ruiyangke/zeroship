@@ -62,10 +62,9 @@ impl Fx {
     async fn new() -> Self {
         let url = common::require_control_db();
         let (pg, conn) = connect(&url, NoTls).await.expect("control-pg connect");
-        compio::runtime::spawn(async move {
+        crate::common::live::spawn(async move {
             let _ = conn.run().await;
-        })
-        .detach();
+        });
         let registry = Registry::new(&url).await.expect("registry");
         Self { registry, pg }
     }
@@ -225,7 +224,7 @@ async fn email_of(pg: &Client, user: &UserId) -> String {
 /// below-admin member holds no project seat - the exact case where
 /// `LEAST(rank, NULL)` returns `rank` and hands them authority they were never
 /// granted.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn organization_project_rank_matches_the_authz_narrowing() {
     let fx = Fx::new().await;
     let pg = &fx.pg;
@@ -285,7 +284,6 @@ async fn organization_project_rank_matches_the_authz_narrowing() {
             }),
         "the case table must include a case the narrowing actually narrows"
     );
-    common::drain_pg().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -296,7 +294,7 @@ async fn organization_project_rank_matches_the_authz_narrowing() {
 ///
 /// The pair differs in ONE variable - the role being granted - so the refusal
 /// is attributable to the rank comparison and not to the actor's seat.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn an_admin_seats_below_itself_and_never_at_its_own_rank() {
     let fx = Fx::new().await;
     let mut org = Org::new(&fx, "rankorg").await;
@@ -369,7 +367,7 @@ async fn an_admin_seats_below_itself_and_never_at_its_own_rank() {
 ///
 /// The two calls differ in ONE variable, the actor's rank, so the refusal is
 /// attributable to the floor and not to the role being granted.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn a_developer_seats_nobody_where_an_admin_seats_a_viewer() {
     let fx = Fx::new().await;
     let mut org = Org::new(&fx, "floororg").await;
@@ -423,7 +421,7 @@ async fn a_developer_seats_nobody_where_an_admin_seats_a_viewer() {
 /// Without it a developer issues an invitation that redemption will honour, and
 /// the escalation lands later and from a different route than the call that
 /// authorized it.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn a_developer_invites_nobody_where_an_admin_invites_a_viewer() {
     let fx = Fx::new().await;
     let mut org = Org::new(&fx, "invfloor").await;
@@ -500,7 +498,7 @@ async fn pending_invites(fx: &Fx, organization_id: &str, email: &str) -> i64 {
 /// The strict inequality alone lets any member unseat anyone below them, so
 /// without the floor a developer evicts a viewer and only Cedar's band refuses
 /// it.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn a_developer_removes_nobody_where_an_admin_removes_a_viewer() {
     let fx = Fx::new().await;
     let mut org = Org::new(&fx, "rmfloor").await;
@@ -539,7 +537,7 @@ async fn a_developer_removes_nobody_where_an_admin_removes_a_viewer() {
 /// target position, so every other target is refused by an axis rather than by
 /// the floor and would leave the floor unmeasured. What the floor adds is that
 /// a developer may not write to a seat row at all.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn a_developer_reroles_nobody_where_an_admin_reroles_a_viewer() {
     let fx = Fx::new().await;
     let mut org = Org::new(&fx, "rolefloor").await;
@@ -599,7 +597,7 @@ async fn a_developer_reroles_nobody_where_an_admin_reroles_a_viewer() {
 /// `actor.billing_rank >= target.billing_rank` is the whole reason the seating
 /// is refused. Without the billing conjunct this case passes and only this one
 /// does - which is what makes the ladder two integers rather than one.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn the_billing_axis_refuses_where_the_rank_axis_would_allow() {
     let fx = Fx::new().await;
     let mut org = Org::new(&fx, "billorg").await;
@@ -650,7 +648,7 @@ async fn the_billing_axis_refuses_where_the_rank_axis_would_allow() {
 /// This is the whole point of putting the comparison in the effect statement.
 /// The test drives the STORE function directly - past Cedar - which is the only
 /// way to observe that the statement itself refuses rather than the band.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn a_revoked_member_is_refused_by_the_statement_not_by_cedar() {
     let fx = Fx::new().await;
     let mut org = Org::new(&fx, "revorg").await;
@@ -702,7 +700,7 @@ async fn a_revoked_member_is_refused_by_the_statement_not_by_cedar() {
 
 /// Nothing may leave an organization ownerless, and the refusal names the
 /// remedy rather than reporting a constraint.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn the_last_owner_can_be_neither_removed_nor_demoted() {
     let fx = Fx::new().await;
     let mut org = Org::new(&fx, "lastorg").await;
@@ -781,7 +779,7 @@ async fn the_last_owner_can_be_neither_removed_nor_demoted() {
 
 /// Ownership transfer is the one operation that reshapes the owner set: it
 /// grants rank 40 while giving up rank 40 in the same transaction.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn transfer_moves_ownership_and_steps_the_previous_owner_down() {
     let fx = Fx::new().await;
     let mut org = Org::new(&fx, "xferorg").await;
@@ -828,7 +826,7 @@ async fn transfer_moves_ownership_and_steps_the_previous_owner_down() {
 /// Transferring a PERSONAL organization clears `personal_owner_id`. That
 /// pointer means "this organization was minted for exactly this person", and
 /// once somebody else owns it the statement is false.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn transferring_a_personal_organization_converts_it_to_shared() {
     let fx = Fx::new().await;
     let creator = seed_user(&fx.pg, "solo").await;
@@ -935,7 +933,7 @@ async fn transferring_a_personal_organization_converts_it_to_shared() {
 /// The migration's own comment says this: "The CHECK closes escalation at ISSUE
 /// time structurally; redemption must re-derive the inviter's live rank." This
 /// is that sentence, made a test.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn a_demoted_inviter_cannot_seat_by_a_pending_invite() {
     let fx = Fx::new().await;
     let mut org = Org::new(&fx, "invorg").await;
@@ -1031,7 +1029,7 @@ async fn a_demoted_inviter_cannot_seat_by_a_pending_invite() {
 
 /// The token is a secret, so a wrong one is indistinguishable from a used one -
 /// and a redemption by the wrong ACCOUNT is refused even with the right token.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn an_invite_seats_only_the_address_it_names() {
     let fx = Fx::new().await;
     let mut org = Org::new(&fx, "addrorg").await;
@@ -1103,7 +1101,7 @@ async fn an_invite_seats_only_the_address_it_names() {
 
 /// A developer holds authority ONLY where a `project_members` row exists, and
 /// the row grants at most their organization rank.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn a_project_seat_grants_and_ceilings_but_never_widens() {
     let fx = Fx::new().await;
     let mut org = Org::new(&fx, "prjorg").await;
@@ -1196,7 +1194,7 @@ async fn a_project_seat_grants_and_ceilings_but_never_widens() {
 /// A project membership naming a user with no organization seat is unspellable
 /// - the composite foreign key refuses it - and the control plane reports that
 /// as the caller's mistake rather than as a database failure.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn a_project_seat_requires_an_organization_seat() {
     let fx = Fx::new().await;
     let org = Org::new(&fx, "fkorg").await;
@@ -1231,7 +1229,7 @@ async fn a_project_seat_requires_an_organization_seat() {
 }
 
 /// An organization update is owner-only, and the predicate is in the UPDATE.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn renaming_an_organization_is_reserved_to_its_owners() {
     let fx = Fx::new().await;
     let mut org = Org::new(&fx, "updorg").await;
@@ -1273,7 +1271,7 @@ async fn renaming_an_organization_is_reserved_to_its_owners() {
 
 /// Creating a project needs admin authority, and a fresh organization already
 /// carries one so the zero-config path never needs it.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn creating_a_project_needs_admin_authority() {
     let fx = Fx::new().await;
     let mut org = Org::new(&fx, "mkorg").await;
@@ -1314,7 +1312,7 @@ async fn creating_a_project_needs_admin_authority() {
 
 /// The redemption body and the invite listing must not carry the token. The
 /// create response is the ONE place it exists.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn a_listed_invite_never_carries_its_token() {
     let fx = Fx::new().await;
     let org = Org::new(&fx, "listorg").await;
@@ -1388,7 +1386,7 @@ fn the_redeem_body_names_the_token_field() {
 /// second is `remove_member` with the general inequality untouched, and it
 /// refuses. If the carve-out had been implemented by relaxing that inequality,
 /// the second half of this test would pass and an admin could demote a peer.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn a_member_may_leave_and_still_may_not_remove_anyone_else() {
     let fx = Fx::new().await;
     let mut org = Org::new(&fx, "leaveorg").await;
@@ -1442,7 +1440,7 @@ async fn a_member_may_leave_and_still_may_not_remove_anyone_else() {
 /// control that makes the first half a result rather than "leaving never
 /// works": after `transfer_ownership` the previous owner is an admin and walks
 /// out without argument.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn the_last_owner_cannot_walk_out_and_is_told_the_remedy() {
     let fx = Fx::new().await;
     let mut org = Org::new(&fx, "soleowner").await;
@@ -1485,7 +1483,7 @@ async fn the_last_owner_cannot_walk_out_and_is_told_the_remedy() {
 }
 
 /// Leaving an organization you hold no seat in is a 404, not a silent success.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn leaving_without_a_seat_is_not_found() {
     let fx = Fx::new().await;
     let org = Org::new(&fx, "strangerorg").await;
@@ -1511,7 +1509,7 @@ async fn leaving_without_a_seat_is_not_found() {
 // ---------------------------------------------------------------------------
 
 /// A project is renamed and re-slugged in one call, and a developer cannot.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn renaming_a_project_needs_admin_authority() {
     let fx = Fx::new().await;
     let mut org = Org::new(&fx, "renameprj").await;
@@ -1571,7 +1569,7 @@ async fn renaming_a_project_needs_admin_authority() {
 /// The predicate rides in the DELETE, so this binds the refusal rather than the
 /// `apps_project_id_fkey` backstop: what a caller reads is a count and a
 /// remedy, not a constraint name.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn a_project_owning_an_app_is_not_deleted() {
     let fx = Fx::new().await;
     let org = Org::new(&fx, "prjapps").await;
@@ -1619,7 +1617,7 @@ async fn a_project_owning_an_app_is_not_deleted() {
 }
 
 /// Deleting a project takes its project seats with it, and refuses a developer.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn deleting_a_project_needs_admin_and_takes_its_seats() {
     let fx = Fx::new().await;
     let mut org = Org::new(&fx, "prjdelete").await;
@@ -1663,7 +1661,7 @@ async fn deleting_a_project_needs_admin_and_takes_its_seats() {
 }
 
 /// A project seat NARROWS in one statement, never by delete-then-add.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn a_project_seat_is_narrowed_atomically() {
     let fx = Fx::new().await;
     let mut org = Org::new(&fx, "prjrole").await;
@@ -1756,7 +1754,7 @@ async fn a_project_seat_is_narrowed_atomically() {
 
 /// An organization is closed only once it owns no projects, and the refusal
 /// names how many remain.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn an_organization_with_projects_is_not_dissolved() {
     let fx = Fx::new().await;
     let org = Org::new(&fx, "dissolveorg").await;
@@ -1801,7 +1799,7 @@ async fn an_organization_with_projects_is_not_dissolved() {
 /// Every mutation goes through `lock_organization`, so this drives one of each
 /// KIND - a rename, a membership write, a project create, a departure and a
 /// second dissolve - rather than trusting that they all share the fence.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn a_dissolved_organization_reads_and_refuses_every_change() {
     let fx = Fx::new().await;
     let mut org = Org::new(&fx, "closedorg").await;
@@ -1920,7 +1918,7 @@ async fn a_dissolved_organization_reads_and_refuses_every_change() {
 }
 
 /// Only an owner closes an organization.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn closing_an_organization_is_reserved_to_its_owners() {
     let fx = Fx::new().await;
     let mut org = Org::new(&fx, "adminclose").await;
@@ -1970,7 +1968,7 @@ async fn closing_an_organization_is_reserved_to_its_owners() {
 /// resolves through `personal_owner_id`, and a closed row still holding it
 /// would answer every deploy with a refusal the creator could not clear -- the
 /// partial unique index would stop them minting a replacement.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn closing_a_personal_organization_frees_the_creator_to_start_again() {
     let fx = Fx::new().await;
     let owner = seed_user(&fx.pg, "solo").await;
@@ -2063,7 +2061,7 @@ async fn closing_a_personal_organization_frees_the_creator_to_start_again() {
 
 /// The invitation is mailed, the outcome is recorded, and the mail carries the
 /// token that only this one message and the create response ever hold.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn an_invitation_is_mailed_and_the_outcome_recorded() {
     let fx = Fx::new().await;
     let org = Org::new(&fx, "mailorg").await;
@@ -2160,7 +2158,7 @@ async fn an_invitation_is_mailed_and_the_outcome_recorded() {
 /// The whole reason the row is committed before the attempt: a transport error
 /// must cost the platform an email, not an invitation. The control is that the
 /// same token still redeems.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn a_failed_send_records_failure_and_keeps_the_invitation_usable() {
     let fx = Fx::new().await;
     let org = Org::new(&fx, "failmail").await;
@@ -2221,7 +2219,7 @@ async fn a_failed_send_records_failure_and_keeps_the_invitation_usable() {
 /// `zeroship.email_suppressions` table, so this test inserts a row rather than
 /// configuring a fake. The paired control - the same mailer, an address that is
 /// not suppressed - is what makes the refusal attributable to the suppression.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn a_suppressed_address_is_not_mailed_and_says_so() {
     let fx = Fx::new().await;
     let org = Org::new(&fx, "suppressed").await;
@@ -2321,7 +2319,7 @@ async fn delivery_of(fx: &Fx, invite_id: &str) -> Option<String> {
 /// A fourth variant, or a renamed one, would be refused by
 /// `organization_invites_delivery_check` at UPDATE time - which is a warning
 /// logged and swallowed, not a failed request, so nothing else would notice.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn the_delivery_vocabulary_is_the_one_the_check_admits() {
     let fx = Fx::new().await;
     let org = Org::new(&fx, "deliveryvocab").await;
@@ -2378,7 +2376,7 @@ async fn the_delivery_vocabulary_is_the_one_the_check_admits() {
 /// The pair is what makes this a statement about `dissolved_at` rather than
 /// about uniqueness in general: the SAME slug is refused while the first
 /// organization is open and accepted once it is closed.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn a_closed_organization_releases_its_slug() {
     let fx = Fx::new().await;
     let owner = seed_user(&fx.pg, "slugowner").await;
@@ -2478,11 +2476,7 @@ async fn a_closed_organization_releases_its_slug() {
 ///
 /// The app id is freshly minted, so the failure is the one being bound rather
 /// than a foreign key on some other column: no row is examined at all.
-///
-/// No `drain_pg` teardown, and it cannot have one: the body is expected to
-/// PANIC, so nothing after the call runs. Its one connection outlives the test
-/// the way every other case in this file's does.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 #[should_panic(expected = "affected 0 row(s)")]
 async fn seating_an_app_that_does_not_exist_refuses_instead_of_seating_nobody() {
     let fx = Fx::new().await;

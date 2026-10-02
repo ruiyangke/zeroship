@@ -259,10 +259,9 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
         compio_postgres::connect(db_url, compio_postgres::NoTls)
             .await
             .expect("control-pg connect");
-    compio::runtime::spawn(async move {
+    crate::common::live::spawn(async move {
         let _ = control_pg_conn.run().await;
-    })
-    .detach();
+    });
     let control_pg = Arc::new(control_pg_client);
 
     let state = Arc::new(AppState {
@@ -521,10 +520,9 @@ async fn new_conn(url: &str) -> compio_postgres::Client {
     let (client, conn) = compio_postgres::connect(url, compio_postgres::NoTls)
         .await
         .expect("test conn connect");
-    compio::runtime::spawn(async move {
+    crate::common::live::spawn(async move {
         let _ = conn.run().await;
-    })
-    .detach();
+    });
     client
 }
 
@@ -550,7 +548,7 @@ async fn set_customer(state: &AppState, organization: &str) {
 // deadlock another task's poll the way it could under a work-stealing
 // executor.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn over_refund_three_way_bound_blocks_credit_laundering() {
     let url = db_url();
     let fx = build_fixture(&url, "launder").await;
@@ -670,14 +668,6 @@ async fn over_refund_three_way_bound_blocks_credit_laundering() {
         direct.is_err(),
         "the over-refund trigger must RAISE on a direct over-cap INSERT"
     );
-
-    // Teardown: the fixture and the dedicated refund connection both hold
-    // Postgres connections, and locals are dropped only after the body returns -
-    // by which point the runtime is gone and the sockets can no longer be
-    // closed. Drop them explicitly, then wait for the close to land.
-    drop(conn);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// D2 (refund-target resolution): a cash refund must target the SETTLING `pi_…`
@@ -686,7 +676,7 @@ async fn over_refund_three_way_bound_blocks_credit_laundering() {
 /// `charge` row. Refunding the `in_…` against a real invoice with no inline settlement
 /// fails; the recorded `pi_…` always works. This exercises the resolver directly (no
 /// reconcile precondition) so it's deterministic.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn cash_refund_targets_recorded_payment_intent_not_invoice() {
     let url = db_url();
     let fx = build_fixture(&url, "refund-target").await;
@@ -755,11 +745,6 @@ async fn cash_refund_targets_recorded_payment_intent_not_invoice() {
         recorded_target, pi,
         "create_refund received the pi_ as its target"
     );
-
-    drop(link_conn);
-    drop(conn);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -769,7 +754,7 @@ async fn cash_refund_targets_recorded_payment_intent_not_invoice() {
 
 // See the allow on `over_refund_three_way_bound_blocks_credit_laundering` above.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn cash_refund_issues_re_credit_refund_appends_grant() {
     let url = db_url();
     let fx = build_fixture(&url, "cashcredit").await;
@@ -927,10 +912,6 @@ async fn cash_refund_issues_re_credit_refund_appends_grant() {
         grant[0].get::<_, Option<String>>("note").as_deref(),
         Some(refund::refund_to_credit_note(&credit_refund_id).as_str())
     );
-
-    drop(conn);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -940,7 +921,7 @@ async fn cash_refund_issues_re_credit_refund_appends_grant() {
 
 // See the allow on `over_refund_three_way_bound_blocks_credit_laundering` above.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn refund_replay_is_idempotent_exactly_one() {
     let url = db_url();
     let fx = build_fixture(&url, "replay").await;
@@ -1046,10 +1027,6 @@ async fn refund_replay_is_idempotent_exactly_one() {
         matches!(conflict, RefundOutcome::Conflict),
         "same key + different body → Conflict"
     );
-
-    drop(conn);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -1057,7 +1034,7 @@ async fn refund_replay_is_idempotent_exactly_one() {
 //     We stamp a tax_cents directly (the tax seam is PR-5) to prove the split.
 // ===========================================================================
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn tax_split_refund_returns_proportional_tax() {
     let url = db_url();
     let fx = build_fixture(&url, "taxsplit").await;
@@ -1147,10 +1124,6 @@ async fn tax_split_refund_returns_proportional_tax() {
         bad.is_err(),
         "a split where subtotal+tax != amount is rejected"
     );
-
-    drop(conn);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -1170,7 +1143,7 @@ async fn tax_split_refund_returns_proportional_tax() {
 
 // See the allow on `over_refund_three_way_bound_blocks_credit_laundering` above.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn void_reversal_conserves_credit_balance() {
     let url = db_url();
     let fx = build_fixture(&url, "voidrev").await;
@@ -1257,9 +1230,6 @@ async fn void_reversal_conserves_credit_balance() {
         vr, 600,
         "the void_reversal restores exactly the $6 the voided invoice consumed"
     );
-
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -1270,7 +1240,7 @@ async fn void_reversal_conserves_credit_balance() {
 
 // See the allow on `over_refund_three_way_bound_blocks_credit_laundering` above.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn true_up_subtracts_already_issued_cash_refunds() {
     let url = db_url();
     let fx = build_fixture(&url, "trueup").await;
@@ -1387,10 +1357,6 @@ async fn true_up_subtracts_already_issued_cash_refunds() {
         total_cash_refunds, 5000,
         "Σ cash refunds on B = $50 ≤ cash $60 (cap held)"
     );
-
-    drop(conn);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -1409,7 +1375,7 @@ async fn true_up_subtracts_already_issued_cash_refunds() {
 
 // See the allow on `over_refund_three_way_bound_blocks_credit_laundering` above.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn true_up_recomputes_over_collection_under_the_lock() {
     let url = db_url();
     let fx = build_fixture(&url, "trueup-lock").await;
@@ -1555,10 +1521,6 @@ async fn true_up_recomputes_over_collection_under_the_lock() {
         .await
         .expect("cash");
     assert_eq!(cash, 4000, "cash anchor = $60 − $20 dispute_debit = $40");
-
-    drop(obs);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -1568,7 +1530,7 @@ async fn true_up_recomputes_over_collection_under_the_lock() {
 
 // See the allow on `over_refund_three_way_bound_blocks_credit_laundering` above.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn one_active_invoice_per_period_void_releases_claim() {
     let url = db_url();
     let fx = build_fixture(&url, "claim").await;
@@ -1637,9 +1599,6 @@ async fn one_active_invoice_per_period_void_releases_claim() {
         active, 1,
         "exactly one active invoice; the void is an audit row"
     );
-
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -1652,7 +1611,7 @@ async fn one_active_invoice_per_period_void_releases_claim() {
 
 // See the allow on `over_refund_three_way_bound_blocks_credit_laundering` above.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn issue_refund_takes_per_organization_advisory_lock() {
     let url = db_url();
     let fx = build_fixture(&url, "rlock").await;
@@ -1683,10 +1642,9 @@ async fn issue_refund_takes_per_organization_advisory_lock() {
     let (obs_client, obs_conn) = compio_postgres::connect(&url, compio_postgres::NoTls)
         .await
         .expect("observer connect");
-    compio::runtime::spawn(async move {
+    crate::common::live::spawn(async move {
         let _ = obs_conn.run().await;
-    })
-    .detach();
+    });
 
     // Drive the locked claim on a DEDICATED connection inside a caller-held tx (as the
     // PR-2 consume test drives `consume_at_finalize`); the xact-scoped lock is held until
@@ -1742,11 +1700,6 @@ async fn issue_refund_takes_per_organization_advisory_lock() {
         .ok();
 
     tx.commit().await.expect("commit claim");
-
-    drop(obs_client);
-    drop(conn);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -1758,7 +1711,7 @@ async fn issue_refund_takes_per_organization_advisory_lock() {
 
 // See the allow on `over_refund_three_way_bound_blocks_credit_laundering` above.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn two_refunds_summing_over_cash_second_is_rejected() {
     let url = db_url();
     let fx = build_fixture(&url, "sumcap").await;
@@ -1829,10 +1782,6 @@ async fn two_refunds_summing_over_cash_second_is_rejected() {
         total, 4000,
         "only the first $40 stuck; Σ cash refunds ≤ cash $50"
     );
-
-    drop(conn);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -1847,7 +1796,7 @@ async fn two_refunds_summing_over_cash_second_is_rejected() {
 
 // See the allow on `over_refund_three_way_bound_blocks_credit_laundering` above.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn refund_to_credit_double_drive_appends_exactly_one_grant() {
     let url = db_url();
     let fx = build_fixture(&url, "rtcdup").await;
@@ -1942,10 +1891,6 @@ async fn refund_to_credit_double_drive_appends_exactly_one_grant() {
         1,
         "still exactly one grant — no double credit"
     );
-
-    drop(conn);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -1957,7 +1902,7 @@ async fn refund_to_credit_double_drive_appends_exactly_one_grant() {
 
 // See the allow on `over_refund_three_way_bound_blocks_credit_laundering` above.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn void_reissue_is_redrivable_after_phase1_crash() {
     let url = db_url();
     let fx = build_fixture(&url, "redrive").await;
@@ -2110,9 +2055,6 @@ async fn void_reissue_is_redrivable_after_phase1_crash() {
         400,
         "balance still $4 after a third drive",
     );
-
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -2126,7 +2068,7 @@ async fn void_reissue_is_redrivable_after_phase1_crash() {
 //     returning InvalidInvoice, and the "zero refund rows" assertion would flip.
 // ===========================================================================
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn operator_refund_on_draft_or_void_invoice_is_invalid() {
     let url = db_url();
     let fx = build_fixture(&url, "gap5-nonfinal").await;
@@ -2219,10 +2161,6 @@ async fn operator_refund_on_draft_or_void_invoice_is_invalid() {
             "a non-finalized invoice never gets a refund row claimed (invoice {inv})"
         );
     }
-
-    drop(conn);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -2231,7 +2169,7 @@ async fn operator_refund_on_draft_or_void_invoice_is_invalid() {
 //     provider is never called.
 // ===========================================================================
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn refund_on_nonexistent_invoice_is_invalid() {
     let url = db_url();
     let fx = build_fixture(&url, "gap6-missing").await;
@@ -2275,10 +2213,6 @@ async fn refund_on_nonexistent_invoice_is_invalid() {
         .expect("count")[0]
         .get("n");
     assert_eq!(n, 0, "no refund row for a non-existent invoice");
-
-    drop(conn);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -2296,7 +2230,7 @@ async fn refund_on_nonexistent_invoice_is_invalid() {
 //     the status-progression guard (added in 0054) is removed.
 // ===========================================================================
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn refunds_immutable_trigger_freezes_money_and_status_lifecycle() {
     let url = db_url();
     let fx = build_fixture(&url, "gap7-immut").await;
@@ -2434,9 +2368,6 @@ async fn refunds_immutable_trigger_freezes_money_and_status_lifecycle() {
         "failed",
         "status legally progressed to failed"
     );
-
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -2451,7 +2382,7 @@ async fn refunds_immutable_trigger_freezes_money_and_status_lifecycle() {
 
 // See the allow on `over_refund_three_way_bound_blocks_credit_laundering` above.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn true_up_noop_when_over_collection_not_positive() {
     let url = db_url();
     let fx = build_fixture(&url, "gap23-noop").await;
@@ -2556,10 +2487,6 @@ async fn true_up_noop_when_over_collection_not_positive() {
         outcome.true_up_cents, 0,
         "true_up_cents == 0 on the no-op path"
     );
-
-    drop(conn);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -2592,7 +2519,7 @@ async fn true_up_noop_when_over_collection_not_positive() {
 
 // See the allow on `over_refund_three_way_bound_blocks_credit_laundering` above.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn true_up_redrive_converges_noop_after_issue() {
     let url = db_url();
     let fx = build_fixture(&url, "gap4-redrive").await;
@@ -2680,15 +2607,11 @@ async fn true_up_redrive_converges_noop_after_issue() {
         st, "issued",
         "the original true-up stayed issued; the re-drive added nothing"
     );
-
-    drop(conn);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // See the allow on `over_refund_three_way_bound_blocks_credit_laundering` above.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn true_up_claim_key_conflict_on_moved_anchor() {
     let url = db_url();
     let fx = build_fixture(&url, "gap4-conflict").await;
@@ -2787,8 +2710,4 @@ async fn true_up_claim_key_conflict_on_moved_anchor() {
         n, 1,
         "the moved-anchor conflict never appended a second refund row"
     );
-
-    drop(conn);
-    drop(fx);
-    common::drain_pg().await;
 }

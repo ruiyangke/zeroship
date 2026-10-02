@@ -231,7 +231,7 @@ async fn revisions(fixture: &Fixture, app: &AppId) -> Vec<i64> {
 
 /// Deploys to more apps than the bound all succeed, and the catalog never
 /// holds more sessions than the bound while the surplus waits for one.
-#[ntex::test]
+#[compio::test(crate = "crate::common::live::system")]
 async fn concurrent_deploys_to_many_apps_share_the_session_bound() {
     const BOUND: usize = 2;
     let fixture = Fixture::new().await;
@@ -302,7 +302,7 @@ async fn concurrent_deploys_to_many_apps_share_the_session_bound() {
 
 /// Concurrent deploys to one app still serialize on the app row lock when the
 /// catalog has a session for each of them, and receive consecutive revisions.
-#[ntex::test]
+#[compio::test(crate = "crate::common::live::system")]
 async fn concurrent_deploys_to_one_app_serialize_on_its_row_lock() {
     const DEPLOYS: usize = 3;
     let fixture = Fixture::new().await;
@@ -370,7 +370,7 @@ async fn concurrent_deploys_to_one_app_serialize_on_its_row_lock() {
 
 /// A caller that stops waiting cancels its catalog transaction, as it did when
 /// the transaction ran on the caller's own thread: nothing it staged commits.
-#[ntex::test]
+#[compio::test(crate = "crate::common::live::system")]
 async fn a_dropped_caller_rolls_back_its_catalog_transaction() {
     let fixture = Fixture::new().await;
     let actor = fixture.actor().await;

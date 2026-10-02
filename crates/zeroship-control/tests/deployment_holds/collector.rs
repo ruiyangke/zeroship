@@ -151,7 +151,7 @@ fn collector(fixture: &Fixture, blobs: Arc<dyn BlobStore>, batch: i64) -> Collec
     .unwrap()
 }
 
-#[ntex::test]
+#[compio::test(crate = "crate::common::live::system")]
 async fn collection_obeys_independent_holds_without_journal_access() {
     let fixture = Fixture::new().await;
     let versions = seed_versions(&fixture, "collector-private").await;
@@ -345,7 +345,7 @@ impl BlobStore for FaultStore {
     }
 }
 
-#[ntex::test]
+#[compio::test(crate = "crate::common::live::system")]
 async fn collection_rotates_past_failures_and_recovers_manifest_deletion() {
     let fixture = Fixture::new().await;
     let first = seed_versions(&fixture, "collector-retry").await;
@@ -446,7 +446,7 @@ async fn collection_rotates_past_failures_and_recovers_manifest_deletion() {
     assert_eq!(state(&fixture, &lost_finish.old).await, "deleted");
 }
 
-#[ntex::test]
+#[compio::test(crate = "crate::common::live::system")]
 async fn committed_reclamation_refuses_activation_and_survives_cancellation() {
     let fixture = Fixture::new().await;
     let versions = seed_versions(&fixture, "collector-cancel").await;
@@ -511,7 +511,7 @@ async fn waiter(observer: &compio_postgres::Client, blocker: i32) -> i32 {
     .expect("expected database lock was not observed")
 }
 
-#[ntex::test]
+#[compio::test(crate = "crate::common::live::system")]
 async fn activation_holds_app_lock_before_collector_rechecks_current_deployment() {
     let fixture = Fixture::new().await;
     let versions = seed_versions(&fixture, "collector-activation").await;

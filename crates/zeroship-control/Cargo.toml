@@ -171,6 +171,12 @@ path = "tests/main.rs"
 name = "live_db"
 path = "tests/live_db.rs"
 
+# The controls here deliberately strand an io_uring ring and count every ring
+# the process holds, so they must run in a process no other test shares.
+[[test]]
+name = "live_case_rings"
+path = "tests/live_case_rings.rs"
+
 [[test]]
 name = "workflow_e2e"
 path = "tests/workflow_e2e.rs"

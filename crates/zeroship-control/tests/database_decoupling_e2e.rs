@@ -151,10 +151,9 @@ async fn connect(url: &str) -> Client {
     let (client, connection) = compio_postgres::connect(url, NoTls)
         .await
         .unwrap_or_else(|error| panic!("connect to {url}: {error}"));
-    compio::runtime::spawn(async move {
+    crate::common::live::spawn(async move {
         let _ = connection.run().await;
-    })
-    .detach();
+    });
     client
 }
 
@@ -1051,7 +1050,7 @@ async fn pass(reconciler: &Reconciler) -> (String, PassReport) {
     (datastore.as_str().to_owned(), report)
 }
 
-#[ntex::test]
+#[compio::test(crate = "crate::common::live::system")]
 async fn the_whole_decoupled_path_runs_in_one_exercise() {
     let cluster_fixture = tenant::Cluster::start();
     let mut cluster = connect(cluster_fixture.url()).await;
@@ -1741,11 +1740,6 @@ async fn the_whole_decoupled_path_runs_in_one_exercise() {
         1,
         "revoking one binding must not disturb the same app's other database"
     );
-
-    drop(reconciler);
-    drop(cluster);
-    drop(world);
-    common::drain_pg().await;
 }
 
 /// One app's side of a shared database: the app, and the binding it holds to

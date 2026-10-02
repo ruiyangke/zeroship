@@ -257,11 +257,13 @@ impl MockStripe {
 
 /// Stand up a localhost HTTP/1.1 server that answers Stripe's create endpoints
 /// with minimal Stripe-shaped JSON, recording every request. Each accepted
-/// connection is served in its own detached task with a keep-alive loop (cyper
-/// reuses connections). Returns a handle exposing the base URL + recorded calls.
+/// connection is served in a task the live case owns, and every response closes
+/// its connection, so no client pool keeps one parked past the case. Returns a
+/// handle exposing the base URL + recorded calls.
 async fn start_mock_stripe() -> MockStripe {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind mock");
     let addr = listener.local_addr().expect("local_addr");
+    crate::common::live::register_listener(addr);
     let base_url = format!("http://{addr}");
     let state = Arc::new(Mutex::new(MockState {
         dedupe_by_key: true, // faithful default: replay by Idempotency-Key like real Stripe
@@ -269,26 +271,22 @@ async fn start_mock_stripe() -> MockStripe {
     }));
     let accept_state = Arc::clone(&state);
 
-    compio::runtime::spawn(async move {
+    crate::common::live::spawn(async move {
         loop {
             let Ok((stream, _peer)) = listener.accept().await else {
                 break;
             };
             let conn_state = Arc::clone(&accept_state);
-            compio::runtime::spawn(async move {
+            crate::common::live::spawn(async move {
                 serve_conn(stream, conn_state).await;
-            })
-            .detach();
+            });
         }
-    })
-    .detach();
+    });
 
     MockStripe { state, base_url }
 }
 
-/// Serve a single connection: read request(s), record them, respond. Loops to
-/// honor HTTP keep-alive so a reused cyper connection's later requests are also
-/// answered and recorded.
+/// Serve a single connection: read request(s), record them, respond.
 async fn serve_conn(mut stream: TcpStream, state: Arc<Mutex<MockState>>) {
     let mut acc: Vec<u8> = Vec::new();
     loop {
@@ -719,7 +717,7 @@ fn http_json(status: u16, json: &str) -> Vec<u8> {
     };
     let body = json.to_string().into_bytes();
     let mut resp = format!(
-        "HTTP/1.1 {status} {reason}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: keep-alive\r\n\r\n",
+        "HTTP/1.1 {status} {reason}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
         body.len()
     )
     .into_bytes();
@@ -775,10 +773,9 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
         compio_postgres::connect(db_url, compio_postgres::NoTls)
             .await
             .expect("control-pg connect");
-    compio::runtime::spawn(async move {
+    crate::common::live::spawn(async move {
         let _ = control_pg_conn.run().await;
-    })
-    .detach();
+    });
     let control_pg = Arc::new(control_pg_client);
 
     let state = Arc::new(AppState {
@@ -1131,7 +1128,7 @@ async fn read_line_snapshot(
 // deadlock another task's poll the way it could under a work-stealing
 // executor.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn reconcile_creates_invoice_items_per_app_from_real_aggregates() {
     let url = db_url();
     let fx = build_fixture(&url, "items").await;
@@ -1189,13 +1186,6 @@ async fn reconcile_creates_invoice_items_per_app_from_real_aggregates() {
             .is_some(),
         "provider invoice id recorded after finalize",
     );
-
-    // Teardown: the fixture holds a Postgres connection, and locals are dropped
-    // only after the body returns - by which point the runtime is gone and the
-    // socket can no longer be closed. Drop it explicitly, then wait for the
-    // close to land.
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// A single-segment invoice → the `create_invoice_item`
@@ -1207,7 +1197,7 @@ async fn reconcile_creates_invoice_items_per_app_from_real_aggregates() {
 /// 750 billable, amount 750c.
 // See the allow on `reconcile_creates_invoice_items_per_app_from_real_aggregates` above.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn single_segment_item_carries_cu_and_full_metadata_amount_unchanged() {
     let url = db_url();
     let fx = build_fixture(&url, "cu1seg").await;
@@ -1315,9 +1305,6 @@ async fn single_segment_item_carries_cu_and_full_metadata_amount_unchanged() {
         amount, 750,
         "amount is the authoritative ChargeBreakdown.total_cents, untouched"
     );
-
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// A MANY-metric app drives the REAL reconcile, and the
@@ -1331,7 +1318,7 @@ async fn single_segment_item_carries_cu_and_full_metadata_amount_unchanged() {
 /// exceeds one 500-char metadata value, forcing the split + the truncation flag.
 // See the allow on `reconcile_creates_invoice_items_per_app_from_real_aggregates` above.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn many_metric_item_respects_description_and_metadata_length_caps() {
     let url = db_url();
     let fx = build_fixture(&url, "cucap").await;
@@ -1425,9 +1412,6 @@ async fn many_metric_item_respects_description_and_metadata_length_caps() {
         Some(expected_cu),
         "gross compute_units is exact even when the per-metric blob is truncated",
     );
-
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// EVERY outbound Stripe call — POST, GET, DELETE — carries the pinned
@@ -1440,7 +1424,7 @@ async fn many_metric_item_respects_description_and_metadata_length_caps() {
 /// under parallel load. Exercises a POST (`create_customer`), a GET
 /// (`find_invoice_item_by_key`), and a DELETE (`delete_invoice_item`) so all three
 /// request builders are covered.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn every_stripe_call_pins_the_api_version() {
     let mock = start_mock_stripe().await;
     let client = StripeClient::new(SecretString::new("sk_test_mock".to_string()))
@@ -1508,7 +1492,7 @@ async fn every_stripe_call_pins_the_api_version() {
 /// the mock server sees the invoice-item creates EXACTLY ONCE.
 // See the allow on `reconcile_creates_invoice_items_per_app_from_real_aggregates` above.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn reconcile_is_idempotent_per_period() {
     let url = db_url();
     let fx = build_fixture(&url, "idem").await;
@@ -1564,15 +1548,12 @@ async fn reconcile_is_idempotent_per_period() {
         .await
         .expect("count invoices");
     assert_eq!(rows[0].get::<_, i64>("n"), 1, "exactly one invoice row");
-
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// The REAL cyper client sends a non-empty `Idempotency-Key` + the
 /// `Authorization: Bearer` header on every mutating call. Asserted on the mock
 /// server's recorded requests — proving the wire path, not a stubbed client.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn stripe_client_uses_cyper_and_sends_idempotency_key() {
     let url = db_url();
     let fx = build_fixture(&url, "hdr").await;
@@ -1658,9 +1639,6 @@ async fn stripe_client_uses_cyper_and_sends_idempotency_key() {
         Some(format!("finalize:{draft}").as_str()),
         "finalize idempotency key keyed on draft id"
     );
-
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// `create_invoice` MUST send
@@ -1670,7 +1648,7 @@ async fn stripe_client_uses_cyper_and_sends_idempotency_key() {
 /// mock models the real default: it sweeps the customer's pending items onto a
 /// draft create ONLY when `include` is sent. We assert (a) the wire body carries
 /// the param AND (b) the swept invoice total equals the items' sum (not $0).
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn create_invoice_sweeps_pending_items_via_include_behavior() {
     let url = db_url();
     let fx = build_fixture(&url, "d1-sweep").await;
@@ -1718,9 +1696,6 @@ async fn create_invoice_sweeps_pending_items_via_include_behavior() {
         Some(2000),
         "the pending items must be swept onto the draft (D1); a $0 sweep means the organization is not billed",
     );
-
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// A paid infra invoice's settling pi_/ch_ live ONLY
@@ -1729,7 +1704,7 @@ async fn create_invoice_sweeps_pending_items_via_include_behavior() {
 /// EXPANDED fetch and read them from the expanded PaymentIntent object
 /// (`id`=pi_, `latest_charge`=ch_). The mock surfaces them ONLY under that expand:
 /// the un-expanded GET returns nothing, so the expand is load-bearing.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn invoice_settlement_ids_requires_expand_and_reads_pi_ch() {
     let url = db_url();
     let fx = build_fixture(&url, "d2-expand").await;
@@ -1774,16 +1749,13 @@ async fn invoice_settlement_ids_requires_expand_and_reads_pi_ch() {
         "the settlement fetch must EXPAND payments.data.payment.payment_intent; path={}",
         get.path
     );
-
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// `POST /v1/refunds` does NOT accept a
 /// `currency` parameter — sending it is a 400 `parameter_unknown`. `create_refund`
 /// must NOT send `currency`. It also refunds a `pi_…`/`ch_…` DIRECTLY and resolves an
 /// `in_…` via the expanded fetch. The mock 400s a refund body that carries `currency`.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn create_refund_omits_currency_and_targets_pi_directly() {
     let url = db_url();
     let fx = build_fixture(&url, "d2-refund").await;
@@ -1839,15 +1811,12 @@ async fn create_refund_omits_currency_and_targets_pi_directly() {
         last.body
     );
     assert!(!last.body.contains("currency="), "still no currency param");
-
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// `billing/setup` ensures a Customer exists, and a SECOND setup reuses the same
 /// `cus_…` (only one `POST /v1/customers` ever fires). Drives the real client
 /// through the store + mock; asserts the store persisted one customer id.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn setup_session_creates_customer_once() {
     let url = db_url();
     let fx = build_fixture(&url, "setup").await;
@@ -1906,9 +1875,6 @@ async fn setup_session_creates_customer_once() {
         stored.is_some(),
         "customer id persisted to billing_customer_refs"
     );
-
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// Two apps owned by the SAME user_id roll into ONE organization invoice spanning
@@ -1916,7 +1882,7 @@ async fn setup_session_creates_customer_once() {
 /// skipped (an unowned app gets no invoice).
 // See the allow on `reconcile_creates_invoice_items_per_app_from_real_aggregates` above.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn reconcile_groups_apps_by_owner_via_the_organization() {
     let url = db_url();
     let fx = build_fixture(&url, "owner").await;
@@ -1976,9 +1942,6 @@ async fn reconcile_groups_apps_by_owner_via_the_organization() {
         Some(("finalized".to_string(), 300)),
         "owned apps summed; unowned excluded",
     );
-
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// Commit-then-crash recovery: a `billing_runs` row pre-exists with
@@ -1987,7 +1950,7 @@ async fn reconcile_groups_apps_by_owner_via_the_organization() {
 /// the SAME deterministic idempotency key and the row is completed.
 // See the allow on `reconcile_creates_invoice_items_per_app_from_real_aggregates` above.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn crashed_run_with_null_invoice_id_is_redriven() {
     let url = db_url();
     let fx = build_fixture(&url, "crash").await;
@@ -2061,9 +2024,6 @@ async fn crashed_run_with_null_invoice_id_is_redriven() {
             .is_some(),
         "provider invoice id filled in",
     );
-
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// Weights present, a plan that INHERITS the
@@ -2073,7 +2033,7 @@ async fn crashed_run_with_null_invoice_id_is_redriven() {
 /// base-only $0 invoice, which would leak revenue.
 // See the allow on `reconcile_creates_invoice_items_per_app_from_real_aggregates` above.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn missing_default_fx_aborts_sweep_and_bills_no_one() {
     let url = db_url();
     let fx = build_fixture(&url, "nofx").await;
@@ -2191,9 +2151,6 @@ async fn missing_default_fx_aborts_sweep_and_bills_no_one() {
         runs.is_empty(),
         "no invoice row — bill no one when the platform can't price"
     );
-
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// Build the real `StripeClient` pointed at the fixture's mock — used by the
@@ -2211,7 +2168,7 @@ fn dummy_passthrough(fx: &Fixture) -> StripeClient {
 /// ONCE; the re-drive posts ONLY app B.
 // See the allow on `reconcile_creates_invoice_items_per_app_from_real_aggregates` above.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn partial_post_then_crash_does_not_double_bill_app_a() {
     let url = db_url();
     let fx = build_fixture(&url, "partial").await;
@@ -2297,9 +2254,6 @@ async fn partial_post_then_crash_does_not_double_bill_app_a() {
             .is_some(),
         "invoice finalized",
     );
-
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// The item POSTS to Stripe, then the process
@@ -2309,7 +2263,7 @@ async fn partial_post_then_crash_does_not_double_bill_app_a() {
 /// already-posted item. The app's invoice item is created EXACTLY ONCE.
 // See the allow on `reconcile_creates_invoice_items_per_app_from_real_aggregates` above.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn post_then_crash_before_ledger_does_not_double_bill_after_24h() {
     let url = db_url();
     let fx = build_fixture(&url, "c1crash").await;
@@ -2407,9 +2361,6 @@ async fn post_then_crash_before_ledger_does_not_double_bill_after_24h() {
         1,
         "the post is now confirmed (one line provider-ref)",
     );
-
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// A normal (≤24h) re-drive of the same crash window is STILL idempotent: with
@@ -2417,7 +2368,7 @@ async fn post_then_crash_before_ledger_does_not_double_bill_after_24h() {
 /// so the deterministic Idempotency-Key path also yields exactly one created item.
 // See the allow on `reconcile_creates_invoice_items_per_app_from_real_aggregates` above.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn post_then_crash_redrive_within_24h_is_idempotent() {
     let url = db_url();
     let fx = build_fixture(&url, "c1within").await;
@@ -2471,9 +2422,6 @@ async fn post_then_crash_redrive_within_24h_is_idempotent() {
             .is_some(),
         "provider invoice id recorded",
     );
-
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// Create draft (sweeping the real items) → crash before
@@ -2485,7 +2433,7 @@ async fn post_then_crash_redrive_within_24h_is_idempotent() {
 /// THAT draft on re-drive makes the finalized invoice carry the real amount.
 // See the allow on `reconcile_creates_invoice_items_per_app_from_real_aggregates` above.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn archived_app_open_invoice_finalizes_original_draft_after_24h() {
     let url = db_url();
     let fx = build_fixture(&url, "c2crash").await;
@@ -2603,9 +2551,6 @@ async fn archived_app_open_invoice_finalizes_original_draft_after_24h() {
             .is_some(),
         "completed with the finalized provider invoice id",
     );
-
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -2628,7 +2573,7 @@ fn billing_setup_route(cfg: &mut web::ServiceConfig) {
 /// A may set up A's card, and the same principal, holding the same token, is
 /// refused at B - where it has no seat. B's customer must not exist afterwards,
 /// which is what makes the refusal a refusal rather than a slow success.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn billing_setup_requires_money_authority_at_the_named_organization() {
     let url = db_url();
     let fx = build_fixture(&url, "authz").await;
@@ -2692,10 +2637,6 @@ async fn billing_setup_requires_money_authority_at_the_named_organization() {
     );
 
     principal.cleanup(&fx.state).await;
-
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -2724,7 +2665,7 @@ fn force_reconcile_route(cfg: &mut web::ServiceConfig) {
 /// no-bearer request would 200 + bill — a privilege bypass.
 // See the allow on `reconcile_creates_invoice_items_per_app_from_real_aggregates` above.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn force_reconcile_endpoint_is_operator_gated_and_drives_a_chosen_period() {
     let url = db_url();
     let fx = build_fixture(&url, "force").await;
@@ -2806,10 +2747,6 @@ async fn force_reconcile_endpoint_is_operator_gated_and_drives_a_chosen_period()
             .is_some(),
         "the reconciled invoice carries a finalized provider invoice id",
     );
-
-    drop(svc);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -2825,7 +2762,7 @@ async fn force_reconcile_endpoint_is_operator_gated_and_drives_a_chosen_period()
 
 // See the allow on `reconcile_creates_invoice_items_per_app_from_real_aggregates` above.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn finalized_line_replays_persisted_amount_bit_for_bit_via_bill_organization() {
     let url = db_url();
     let fx = build_fixture(&url, "c1replay").await;
@@ -2916,9 +2853,6 @@ async fn finalized_line_replays_persisted_amount_bit_for_bit_via_bill_organizati
         "re-running charge_cents over the PERSISTED frozen snapshot reproduces the stored \
          amount_cents bit-for-bit (the snapshot equals the real charge input)",
     );
-
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -2931,7 +2865,7 @@ async fn finalized_line_replays_persisted_amount_bit_for_bit_via_bill_organizati
 
 // See the allow on `reconcile_creates_invoice_items_per_app_from_real_aggregates` above.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn refinalize_already_finalized_converges_locally() {
     let url = db_url();
     let fx = build_fixture(&url, "m2converge").await;
@@ -2990,9 +2924,6 @@ async fn refinalize_already_finalized_converges_locally() {
         finalized, persisted_draft,
         "the recorded finalized id is the draft id (Stripe finalize does not change the id)",
     );
-
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -3012,7 +2943,7 @@ async fn refinalize_already_finalized_converges_locally() {
 
 // See the allow on `reconcile_creates_invoice_items_per_app_from_real_aggregates` above.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn finalize_and_invoice_ref_commit_atomically() {
     let url = db_url();
     let fx = build_fixture(&url, "m1atomic").await;
@@ -3103,9 +3034,6 @@ async fn finalize_and_invoice_ref_commit_atomically() {
         "no finalized invoice ref — and since the invoice is not finalized, the partial \
          'finalized-without-ref' state never occurs (lookup_invoice_id can't strand at None)",
     );
-
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// Customer and Connect-account creation must carry a DETERMINISTIC
@@ -3125,7 +3053,7 @@ async fn finalize_and_invoice_ref_commit_atomically() {
 /// Bounded honestly: Stripe's Idempotency-Key window is 24h. Beyond that a
 /// replay can still create a second object; the local row check is what covers
 /// the sequential case. The two together, not either alone.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn customer_and_connect_account_creation_carry_a_deterministic_idempotency_key() {
     let mock = start_mock_stripe().await;
     let client = StripeClient::new(SecretString::new("sk_test_mock".to_string()))

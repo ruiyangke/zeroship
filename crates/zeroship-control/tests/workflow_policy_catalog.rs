@@ -1,6 +1,7 @@
 //! Startup seeding must preserve operator-owned workflow authority.
 #![expect(clippy::future_not_send, reason = "native catalog tests use compio")]
 
+mod common;
 #[allow(
     dead_code,
     reason = "the shared migrated platform also supports server tests"
@@ -18,7 +19,7 @@ use zeroship_data_orm::{
 };
 use zeroship_workflow_manager::policy::control::{self, PlanPolicyStore};
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn startup_preserves_archived_plans_and_complete_workflow_policy() {
     let fixture = Box::pin(platform::Platform::new()).await;
     let url = fixture

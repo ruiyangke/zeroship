@@ -188,7 +188,7 @@ fn activation_receipt(receipt: Option<&str>) -> JobSpec {
 /// Deploy, archive, stage while archived, restore and roll back: every
 /// transition reaches the manager in revision order, and every recorded
 /// receipt is the one the manager returned for that exact request.
-#[ntex::test]
+#[compio::test(crate = "crate::common::live::system")]
 async fn lifecycle_intents_reach_the_manager_in_revision_order() {
     let fixture = Fixture::new().await;
     let manager = fixture.coordinator().await;
@@ -290,7 +290,7 @@ async fn lifecycle_intents_reach_the_manager_in_revision_order() {
 
 /// Removing every schedule is still a normal activation: the manager selects
 /// the new deployment and fences the calendar the previous one installed.
-#[ntex::test]
+#[compio::test(crate = "crate::common::live::system")]
 async fn an_empty_schedule_list_fences_the_previous_calendar() {
     let fixture = Fixture::new().await;
     let manager = fixture.coordinator().await;
@@ -435,7 +435,7 @@ fn scripted(fixture: &Fixture, manager: &test::TestServer) -> Rc<Scripted> {
 /// remote activation, and a confirmation that fails after the reply all leave
 /// the intent pending; the next publisher resends the same revision and
 /// records the job the manager created the first time.
-#[ntex::test]
+#[compio::test(crate = "crate::common::live::system")]
 async fn lost_replies_and_restarts_confirm_only_the_original_receipt() {
     let fixture = Fixture::new().await;
     let manager = fixture.coordinator().await;
@@ -539,7 +539,7 @@ async fn lost_replies_and_restarts_confirm_only_the_original_receipt() {
 
 /// One app whose manager exchange never answers does not stop the others,
 /// and its later revision is never sent ahead of the blocked one.
-#[ntex::test]
+#[compio::test(crate = "crate::common::live::system")]
 async fn a_blocked_app_does_not_starve_other_apps() {
     let fixture = Fixture::new().await;
     let manager = fixture.coordinator().await;
@@ -602,7 +602,7 @@ async fn a_blocked_app_does_not_starve_other_apps() {
 }
 
 /// A refusal from the manager is never recorded as an acknowledgement.
-#[ntex::test]
+#[compio::test(crate = "crate::common::live::system")]
 async fn a_manager_conflict_leaves_the_intent_pending() {
     let fixture = Fixture::new().await;
     let manager = fixture.coordinator().await;
@@ -642,7 +642,7 @@ async fn a_manager_conflict_leaves_the_intent_pending() {
 /// An activation the manager has not acknowledged keeps its bundle even after
 /// newer deployments overtake it; once the manager's queue hold exists the
 /// hold protects it, and only releasing that hold lets the collector reclaim.
-#[ntex::test]
+#[compio::test(crate = "crate::common::live::system")]
 async fn a_pending_activation_keeps_its_bundle_until_the_queue_hold_takes_over() {
     let fixture = Fixture::new().await;
     let manager = fixture.coordinator().await;
@@ -756,7 +756,7 @@ async fn a_pending_activation_keeps_its_bundle_until_the_queue_hold_takes_over()
 /// A fault raised inside the catalog callback after every write is staged
 /// rolls back the pointer, the deployment row, the revision, the intent and
 /// the receipt together; archive and restore behave the same way.
-#[ntex::test]
+#[compio::test(crate = "crate::common::live::system")]
 async fn a_callback_fault_rolls_back_every_staged_catalog_write() {
     let fixture = Fixture::new().await;
     let actor = fixture.actor().await;
@@ -982,7 +982,7 @@ impl Backoff<'_> {
 /// A failing app is attempted only once its retry delay has passed, the delay
 /// doubles to its cap, and a success resets it, while a healthy app publishes
 /// on every pass throughout.
-#[ntex::test]
+#[compio::test(crate = "crate::common::live::system")]
 async fn a_failing_app_backs_off_while_other_apps_publish_every_pass() {
     let fixture = Fixture::new().await;
     let actor = fixture.actor().await;
@@ -1086,7 +1086,7 @@ async fn catalog_sessions(fixture: &Fixture) -> BTreeSet<i32> {
 
 /// The publisher keeps one catalog database for the life of the process. When
 /// its session is terminated, a later pass opens another and publishes again.
-#[ntex::test]
+#[compio::test(crate = "crate::common::live::system")]
 async fn a_later_pass_publishes_after_the_catalog_session_is_terminated() {
     let fixture = Fixture::new().await;
     let manager = fixture.coordinator().await;
@@ -1149,7 +1149,7 @@ async fn a_later_pass_publishes_after_the_catalog_session_is_terminated() {
 /// Publication refuses to start without Control's signer, with an unusable
 /// coordinator origin or with unusable bounds. A signed Control with a usable
 /// origin starts a publisher on the shared catalog that delivers deploys.
-#[ntex::test]
+#[compio::test(crate = "crate::common::live::system")]
 async fn publication_starts_only_with_a_signer_and_a_usable_coordinator() {
     let fixture = Fixture::new().await;
     let manager = fixture.coordinator().await;

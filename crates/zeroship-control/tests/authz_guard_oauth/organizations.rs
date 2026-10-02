@@ -1,7 +1,6 @@
 use super::{
     bearer_for_scope, create_app, fixture_with_platform, insert_user, seed_grants, Fixture,
 };
-use crate::common;
 use ntex::http::{Method, Request, StatusCode};
 use ntex::web::{self, test};
 use serde_json::{json, Value};
@@ -10,7 +9,7 @@ use zeroship_control::organizations::{
 };
 use zeroship_core::UserId;
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn organization_mutations_require_a_bearer_and_more_than_read_consent() {
     let (fx, organization, project) = fixture("org-route-consent").await;
     // Organization renaming is outside the default CLI grant set. Give this
@@ -168,7 +167,7 @@ async fn organization_mutations_require_a_bearer_and_more_than_read_consent() {
     cleanup(fx, &[&member, &newcomer]).await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn removing_an_admin_revokes_the_same_bearer_on_the_next_request() {
     let (fx, organization, _) = fixture("org-route-revocation").await;
     let admin = UserId::mint();
@@ -237,7 +236,7 @@ async fn removing_an_admin_revokes_the_same_bearer_on_the_next_request() {
     cleanup(fx, &[&admin, &member]).await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn owning_another_organization_does_not_authorize_its_neighbor() {
     let (fx, organization, project) = fixture("org-route-isolation").await;
     let outsider = UserId::mint();
@@ -340,7 +339,7 @@ async fn owning_another_organization_does_not_authorize_its_neighbor() {
     cleanup(fx, &[&outsider]).await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn invite_redemption_requires_organization_consent_and_the_issued_capability() {
     let (fx, organization, _) = fixture("org-route-invite").await;
     let invitee = UserId::mint();
@@ -512,6 +511,4 @@ async fn cleanup(fx: Fixture, additional_users: &[&UserId]) {
             .await
             .unwrap();
     }
-    drop(fx);
-    common::drain_pg().await;
 }

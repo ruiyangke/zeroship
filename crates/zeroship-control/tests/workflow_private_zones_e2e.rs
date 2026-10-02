@@ -172,7 +172,7 @@ async fn resolves(url: &str, role: Option<&str>, relation: &str) -> bool {
     found
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn the_two_zones_run_a_workflow_without_reaching_each_other() {
     let mut fleet = Fleet::with_workflow_manager();
     // The two relations the zone arms probe: the journal the workflow service

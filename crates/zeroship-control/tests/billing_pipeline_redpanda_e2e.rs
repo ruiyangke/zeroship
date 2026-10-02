@@ -30,8 +30,8 @@ use zeroship_metering::{Meter, UsageOutbox};
 use zeroship_stream::{adapters, StreamConfig, StreamRegistry};
 
 use crate::common;
-use crate::common::container_reaper::lifetime;
-use crate::common::container_reaper::{start_owned, DockerCli, OwnedContainer, Ownership};
+use crate::common::test_database::container_reaper::lifetime;
+use crate::common::test_database::container_reaper::{start_owned, DockerCli, OwnedContainer, Ownership};
 
 fn db_url() -> String {
     crate::common::require_control_db()
@@ -124,10 +124,9 @@ fn the_redpanda_broker_is_removed_when_its_process_is_killed_while_starting() {
 
 async fn pg(url: &str) -> compio_postgres::Client {
     let (client, conn) = connect(url, NoTls).await.expect("pg connect");
-    compio::runtime::spawn(async move {
+    crate::common::live::spawn(async move {
         let _ = conn.run().await;
-    })
-    .detach();
+    });
     client
 }
 
@@ -229,7 +228,7 @@ fn redpanda_config(brokers: &str, topic: &str, group: &str) -> StreamConfig {
     }))
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn producer_to_redpanda_to_recompute_to_spend_block_end_to_end() {
     let brokers = brokers();
 
@@ -326,13 +325,4 @@ async fn producer_to_redpanda_to_recompute_to_spend_block_end_to_end() {
     );
 
     let _ = std::fs::remove_dir_all(&wal_dir);
-
-    // Teardown: `client` holds this test's Postgres connection (the `registry`
-    // connection was already consumed into the `SpendEngine` temporary above,
-    // which drops - and asks its connection to close - at the end of that
-    // statement), and locals are dropped only after the body returns - by which
-    // point the runtime is gone and the socket can no longer be closed. Drop it
-    // explicitly, then wait for the close to land.
-    drop(client);
-    common::drain_pg().await;
 }

@@ -105,10 +105,9 @@ impl Fx {
     async fn new() -> Self {
         let url = common::require_control_db();
         let (pg, conn) = connect(&url, NoTls).await.expect("control-pg connect");
-        compio::runtime::spawn(async move {
+        crate::common::live::spawn(async move {
             let _ = conn.run().await;
-        })
-        .detach();
+        });
         let registry = Registry::new(&url).await.expect("registry");
         Self { registry, pg }
     }
@@ -533,7 +532,7 @@ async fn assert_allowed(fx: &Fx, owner: &UserId, organization: &str) {
 /// finalized invoice refuses, and paying THE SAME invoice in full clears it.
 ///
 /// One variable moves between the two organizations - whether the cash arrived.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn an_unpaid_invoice_refuses_and_paying_it_clears_the_refusal() {
     let fx = Fx::new().await;
 
@@ -549,14 +548,12 @@ async fn an_unpaid_invoice_refuses_and_paying_it_clears_the_refusal() {
     let invoice = fx.invoice(&settled, FINALIZED, 1_500, 0).await;
     fx.pay(&invoice, 1_500, CHARGE).await;
     assert_allowed(&fx, &payer, &settled).await;
-
-    common::drain_pg().await;
 }
 
 /// A void RELEASES the claim, so it must not refuse - and a credit that covers
 /// the whole invoice must not either, by arithmetic rather than by a case of
 /// its own. The refusing control is the same invoice left standing.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn a_void_and_a_fully_credited_invoice_are_both_settled() {
     let fx = Fx::new().await;
 
@@ -577,14 +574,12 @@ async fn a_void_and_a_fully_credited_invoice_are_both_settled() {
     // exists, and nothing is owed.
     fx.invoice(&credited, FINALIZED, 2_000, 2_000).await;
     assert_allowed(&fx, &credited_owner, &credited).await;
-
-    common::drain_pg().await;
 }
 
 /// Part of the cash is not all of it. The pair differs in the AMOUNT collected
 /// and in nothing else, so a predicate that tested "any payment row exists"
 /// rather than the balance would fail exactly here.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn a_partially_collected_invoice_still_owes_the_remainder() {
     let fx = Fx::new().await;
 
@@ -601,14 +596,12 @@ async fn a_partially_collected_invoice_still_owes_the_remainder() {
     let paid = fx.invoice(&full, FINALIZED, 1_000, 0).await;
     fx.pay(&paid, 1_000, CHARGE).await;
     assert_allowed(&fx, &full_owner, &full).await;
-
-    common::drain_pg().await;
 }
 
 /// A chargeback claws the cash back, so an invoice that WAS settled owes again.
 /// The pair is a paid invoice with and without the debit: nothing else differs,
 /// and the debt the network created is the whole of the difference.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn a_chargeback_reopens_a_paid_invoice() {
     let fx = Fx::new().await;
 
@@ -626,8 +619,6 @@ async fn a_chargeback_reopens_a_paid_invoice() {
     let paid = fx.invoice(&clean, FINALIZED, 1_000, 0).await;
     fx.pay(&paid, 1_000, CHARGE).await;
     assert_allowed(&fx, &clean_owner, &clean).await;
-
-    common::drain_pg().await;
 }
 
 /// A DRAFT invoice is not a CLAIM, so the unpaid-invoice arm must not refuse on
@@ -645,7 +636,7 @@ async fn a_chargeback_reopens_a_paid_invoice() {
 /// question and has its own pair below: not being a claim is not the same as
 /// having settled the period, and reading it as both is how a real debt escaped
 /// every enforcement point at once.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn a_draft_invoice_is_not_yet_a_claim_and_finalizing_it_makes_one() {
     let fx = Fx::new().await;
 
@@ -661,13 +652,11 @@ async fn a_draft_invoice_is_not_yet_a_claim_and_finalizing_it_makes_one() {
 
     fx.finalize(&invoice, 3_000).await;
     assert_refused(&fx, &owner, &drafted, 3_000).await;
-
-    common::drain_pg().await;
 }
 
 /// An organization that owes nothing at all is allowed at every point, and the
 /// paired debtor proves the fixture can produce a refusal on the same shape.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn an_organization_owing_nothing_is_allowed_everywhere() {
     let fx = Fx::new().await;
 
@@ -681,8 +670,6 @@ async fn an_organization_owing_nothing_is_allowed_everywhere() {
     fx.drop_projects(&owing).await;
     fx.invoice(&owing, FINALIZED, 700, 0).await;
     assert_refused(&fx, &debtor, &owing, 700).await;
-
-    common::drain_pg().await;
 }
 
 /// The reaper's re-check, in the state only the reaper can meet.
@@ -696,7 +683,7 @@ async fn an_organization_owing_nothing_is_allowed_everywhere() {
 ///
 /// The control is the same closed organization with no invoice behind it: a
 /// dissolved organization is not a blocker for being dissolved.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn a_debt_that_appears_after_the_dissolve_still_blocks_the_erasure() {
     let fx = Fx::new().await;
 
@@ -732,8 +719,6 @@ async fn a_debt_that_appears_after_the_dissolve_still_blocks_the_erasure() {
         "the blocker says the organization is closed"
     );
     assert_eq!(blocker.owed_cents, 900);
-
-    common::drain_pg().await;
 }
 
 /// Closed-period usage that was never invoiced.
@@ -746,7 +731,7 @@ async fn a_debt_that_appears_after_the_dissolve_still_blocks_the_erasure() {
 /// The zero-priced half is the one a predicate keyed on raw metered UNITS gets
 /// wrong: it sees usage, finds no invoice, and refuses to close an account that
 /// owes nobody anything.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn closed_period_usage_blocks_only_when_it_priced_to_money() {
     let fx = Fx::new().await;
 
@@ -784,14 +769,12 @@ async fn closed_period_usage_blocks_only_when_it_priced_to_money() {
     {
         panic!("a zero-priced period must not refuse the close: {o:?}")
     }
-
-    common::drain_pg().await;
 }
 
 /// Invoicing the period clears it, which is what makes the usage arm a claim
 /// about BILLING rather than about usage existing. The pair differs in whether
 /// an invoice covers the period.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn invoicing_the_period_clears_the_unbilled_usage_blocker() {
     let fx = Fx::new().await;
     let metered = fx.plan(NO_QUOTA).await;
@@ -819,15 +802,13 @@ async fn invoicing_the_period_clears_the_unbilled_usage_blocker() {
         !blockers.iter().any(|id| id == &invoiced),
         "the period was billed and the invoice paid: {blockers:?}"
     );
-
-    common::drain_pg().await;
 }
 
 /// The unbilled arm is asked only of a stack that owns the local invoice rail.
 /// Under `No` there is no local invoice that could be missing, so the same
 /// organization that blocks under `Yes` must not block - and the invoice arm,
 /// which reads rows rather than an absence, must keep blocking under both.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn the_unbilled_arm_belongs_to_the_local_invoicer_and_the_invoice_arm_to_both() {
     let fx = Fx::new().await;
     let metered = fx.plan(NO_QUOTA).await;
@@ -869,8 +850,6 @@ async fn the_unbilled_arm_belongs_to_the_local_invoicer_and_the_invoice_arm_to_b
             "an unpaid invoice owes under {invoicing:?} too"
         );
     }
-
-    common::drain_pg().await;
 }
 
 /// A VOID over a period that carries usage answers the same as a plain void.
@@ -884,7 +863,7 @@ async fn the_unbilled_arm_belongs_to_the_local_invoicer_and_the_invoice_arm_to_b
 /// A void is a deliberate statement that the period is done, not evidence that
 /// it was never billed. The pair below differs in the void alone: the same
 /// organization, the same usage, the same finalized invoice.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn a_void_over_a_period_with_usage_agrees_with_the_plain_void() {
     let fx = Fx::new().await;
     let metered = fx.plan(NO_QUOTA).await;
@@ -915,8 +894,6 @@ async fn a_void_over_a_period_with_usage_agrees_with_the_plain_void() {
         !blockers.iter().any(|id| id == &voided),
         "a void releases the period; the usage arm must not re-open it: {blockers:?}"
     );
-
-    common::drain_pg().await;
 }
 
 /// A DRAFT over a period that owed money must not settle it.
@@ -929,7 +906,7 @@ async fn a_void_over_a_period_with_usage_agrees_with_the_plain_void() {
 /// be closed and its sole owner erased.
 ///
 /// One organization, one variable: the SAME row reaches finalize and is paid.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn a_draft_invoice_does_not_settle_the_period_it_claimed() {
     let fx = Fx::new().await;
     let metered = fx.plan(NO_QUOTA).await;
@@ -945,8 +922,6 @@ async fn a_draft_invoice_does_not_settle_the_period_it_claimed() {
     fx.finalize(&claimed, PRICED_PERIOD_CENTS).await;
     fx.pay(&claimed, PRICED_PERIOD_CENTS, CHARGE).await;
     assert_money_clear(&fx, &owner, &stuck).await;
-
-    common::drain_pg().await;
 }
 
 /// A draft sends the period back to the PRICER, it does not assert a debt.
@@ -956,7 +931,7 @@ async fn a_draft_invoice_does_not_settle_the_period_it_claimed() {
 /// permanently undeletable, since the reconciler claims a row for a period it
 /// will price to nothing too. The pair differs in the included quota alone -
 /// the one term that decides whether the usage was worth anything.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn a_draft_sends_the_period_to_the_pricer_rather_than_asserting_a_debt() {
     let fx = Fx::new().await;
 
@@ -976,8 +951,6 @@ async fn a_draft_sends_the_period_to_the_pricer_rather_than_asserting_a_debt() {
         .await;
     fx.invoice(&billable, DRAFT, 0, 0).await;
     assert_unbilled_refused(&fx, &billable_owner, &billable, PRICED_PERIOD_CENTS).await;
-
-    common::drain_pg().await;
 }
 
 /// The unbilled arm prices the organization's WHOLE app roster, not the apps
@@ -993,7 +966,7 @@ async fn a_draft_sends_the_period_to_the_pricer_rather_than_asserting_a_debt() {
 /// standing charge of an app that never served a request, and an app set
 /// narrowed to accruers cannot see that app at all. The control differs in that
 /// idle app's base fee and in nothing else.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn a_non_accruing_app_on_a_base_fee_plan_is_priced_into_the_period() {
     let fx = Fx::new().await;
     let covered = fx.plan(COVERING_QUOTA).await;
@@ -1013,8 +986,6 @@ async fn a_non_accruing_app_on_a_base_fee_plan_is_priced_into_the_period() {
         .await;
     fx.app(&uncharged, &no_standing_charge).await;
     assert_money_clear(&fx, &control_owner, &uncharged).await;
-
-    common::drain_pg().await;
 }
 
 /// Which remedy an unbilled period names, and the one variable it turns on.
@@ -1026,7 +997,7 @@ async fn a_non_accruing_app_on_a_base_fee_plan_is_priced_into_the_period() {
 /// ever bills the immediately previous month, so an operator has to reconcile
 /// THAT period. Telling the second creator to add a card they already have
 /// would read as progress and produce none.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn the_unbilled_remedy_turns_on_whether_a_payment_identity_exists() {
     let fx = Fx::new().await;
     let metered = fx.plan(NO_QUOTA).await;
@@ -1052,8 +1023,6 @@ async fn the_unbilled_remedy_turns_on_whether_a_payment_identity_exists() {
         BillingRemedy::ReconcileClosedPeriod,
         "customer on file: the invoice is the only missing piece"
     );
-
-    common::drain_pg().await;
 }
 
 /// A VOID row must not answer for a period that also holds a DRAFT.
@@ -1069,7 +1038,7 @@ async fn the_unbilled_remedy_turns_on_whether_a_payment_identity_exists() {
 /// The CONTROL is the same shape with the void alone. Void really does settle a
 /// period, so a predicate that refused this pair by refusing every void would
 /// pass the second half while breaking the operator's correction path.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn a_void_does_not_answer_for_a_period_that_still_holds_a_draft() {
     let fx = Fx::new().await;
     let metered = fx.plan(NO_QUOTA).await;
@@ -1097,6 +1066,4 @@ async fn a_void_does_not_answer_for_a_period_that_still_holds_a_draft() {
     fx.void(&wrong).await;
     fx.invoice(&reissuing, DRAFT, 0, 0).await;
     assert_unbilled_refused(&fx, &owner, &reissuing, PRICED_PERIOD_CENTS).await;
-
-    common::drain_pg().await;
 }

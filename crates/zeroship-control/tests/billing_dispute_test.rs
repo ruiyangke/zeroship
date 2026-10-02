@@ -92,10 +92,9 @@ impl Fixture {
             compio_postgres::connect(db_url, compio_postgres::NoTls)
                 .await
                 .expect("control-pg connect");
-        compio::runtime::spawn(async move {
+        crate::common::live::spawn(async move {
             let _ = control_pg_conn.run().await;
-        })
-        .detach();
+        });
 
         let notifier = Arc::new(RecordingNotifier::new());
         let state = Arc::new(AppState {
@@ -194,10 +193,9 @@ async fn side_conn(db_url: &str) -> compio_postgres::Client {
     let (conn, driver) = compio_postgres::connect(db_url, compio_postgres::NoTls)
         .await
         .expect("side connect");
-    compio::runtime::spawn(async move {
+    crate::common::live::spawn(async move {
         let _ = driver.run().await;
-    })
-    .detach();
+    });
     conn
 }
 
@@ -429,7 +427,7 @@ async fn payment_kind_count(conn: &compio_postgres::Client, inv: &str, kind: &st
 // (a) created records the dispute + a dispute_debit; redelivery does NOT double-debit.
 // ───────────────────────────────────────────────────────────────────────────
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn dispute_created_records_debit_and_is_idempotent() {
     let url = db_url();
     let fx = Fixture::new(&url, "created-idem").await;
@@ -482,22 +480,13 @@ async fn dispute_created_records_debit_and_is_idempotent() {
         .clone();
     assert_eq!(row.get::<_, Option<String>>("reason").as_deref(), Some("fraudulent"));
     assert!(row.get::<_, bool>("has_due"), "evidence_due_at captured from due_by");
-
-    // Teardown: the service, the fixture, and the side connection all hold
-    // connections, and locals are dropped only after the body returns - by which
-    // point the runtime is gone and the sockets can no longer be closed. Drop
-    // them explicitly, then wait for the close to land.
-    drop(app);
-    drop(conn);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ───────────────────────────────────────────────────────────────────────────
 // (b) after a dispute_debit, a cash refund that fit the pre-dispute cap is rejected.
 // ───────────────────────────────────────────────────────────────────────────
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn dispute_debit_tightens_over_refund_cap() {
     let url = db_url();
     let fx = Fixture::new(&url, "cap-tighten").await;
@@ -555,18 +544,13 @@ async fn dispute_debit_tightens_over_refund_cap() {
     .await
     .expect("issue_refund call");
     assert!(matches!(ok, RefundOutcome::Issued { .. }), "a $20 refund still fits, got {ok:?}");
-
-    drop(app);
-    drop(conn);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ───────────────────────────────────────────────────────────────────────────
 // (c) .closed won restores cash via dispute_reversal; .closed lost leaves the debit.
 // ───────────────────────────────────────────────────────────────────────────
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn dispute_closed_won_restores_cash_lost_leaves_debit() {
     let url = db_url();
     let fx = Fixture::new(&url, "closed").await;
@@ -613,18 +597,13 @@ async fn dispute_closed_won_restores_cash_lost_leaves_debit() {
     assert_eq!(dispute_status(&conn, &du_lost).await.as_deref(), Some("lost"));
     assert_eq!(payment_kind_count(&conn, &inv_lost, "dispute_reversal").await, 0, "lost adds NO reversal");
     assert_eq!(cash_collected(&conn, &inv_lost).await, 0, "lost leaves the debit standing");
-
-    drop(app);
-    drop(conn);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ───────────────────────────────────────────────────────────────────────────
 // (d) the dispute produces exactly ONE `disputed` notification (per-organization ledger).
 // ───────────────────────────────────────────────────────────────────────────
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn dispute_produces_exactly_one_disputed_notification() {
     let url = db_url();
     let fx = Fixture::new(&url, "notify").await;
@@ -691,18 +670,13 @@ async fn dispute_produces_exactly_one_disputed_notification() {
         fx.notifier.delivered_for_kind(BillingNotificationKind::Disputed) >= 1,
         "the disputed kind was exercised"
     );
-
-    drop(app);
-    drop(conn);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ───────────────────────────────────────────────────────────────────────────
 // (e) a dispute on a credited/refunded invoice doesn't corrupt credit/refund balances.
 // ───────────────────────────────────────────────────────────────────────────
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn dispute_on_credited_refunded_invoice_preserves_balances() {
     let url = db_url();
     let fx = Fixture::new(&url, "credited").await;
@@ -798,11 +772,6 @@ async fn dispute_on_credited_refunded_invoice_preserves_balances() {
     );
     // And the dispute_debit is the SOLE new payment movement.
     assert_eq!(payment_kind_count(&conn, &inv, "dispute_debit").await, 1);
-
-    drop(app);
-    drop(conn);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 async fn credit_balance(conn: &compio_postgres::Client, organization: &str) -> i64 {
@@ -833,7 +802,7 @@ async fn refund_count(conn: &compio_postgres::Client, inv: &str) -> i64 {
 //     reversal (restored cash) stands — that combination would be an over-refund window.
 // ───────────────────────────────────────────────────────────────────────────
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn dispute_won_then_late_lost_is_rejected_cash_stays_restored() {
     let url = db_url();
     let fx = Fixture::new(&url, "won-then-lost").await;
@@ -873,11 +842,6 @@ async fn dispute_won_then_late_lost_is_rejected_cash_stays_restored() {
     // Exactly one reversal, zero extra debits from the late lost.
     assert_eq!(payment_kind_count(&conn, &inv, "dispute_reversal").await, 1);
     assert_eq!(payment_kind_count(&conn, &inv, "dispute_debit").await, 1);
-
-    drop(app);
-    drop(conn);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -886,7 +850,7 @@ async fn dispute_won_then_late_lost_is_rejected_cash_stays_restored() {
 //     (net cash restored), and the late `.created` does NOT resurrect it to `open`.
 // ───────────────────────────────────────────────────────────────────────────
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn dispute_closed_won_before_created_is_order_independent() {
     let url = db_url();
     let fx = Fixture::new(&url, "close-first").await;
@@ -922,11 +886,6 @@ async fn dispute_closed_won_before_created_is_order_independent() {
     assert_eq!(payment_kind_count(&conn, &inv, "dispute_debit").await, 1, "no second debit");
     assert_eq!(payment_kind_count(&conn, &inv, "dispute_reversal").await, 1, "no second reversal");
     assert_eq!(cash_collected(&conn, &inv).await, 6000, "end state identical to in-order delivery");
-
-    drop(app);
-    drop(conn);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -1007,7 +966,7 @@ async fn pending_dispute_count(conn: &compio_postgres::Client, du: &str) -> i64 
         .get::<_, i64>("n")
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn dispute_created_before_invoice_paid_resolves_on_linkage() {
     let url = db_url();
     let fx = Fixture::new(&url, "created-before-paid").await;
@@ -1082,17 +1041,11 @@ async fn dispute_created_before_invoice_paid_resolves_on_linkage() {
     assert_eq!(dispute_row_count(&conn, &du).await, 1, "still exactly one dispute row");
     assert_eq!(payment_kind_count(&conn, &inv, "dispute_debit").await, 1, "still exactly one debit");
     assert_eq!(pending_dispute_count(&conn, &du).await, 0, "no re-park");
-
-    drop(app);
-    drop(rconn);
-    drop(conn);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// A dispute on a charge the platform NEVER invoiced parks but NEVER resolves — it does NOT
 /// poison the webhook (no 5xx-retry storm), and never invents a billing_disputes row.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn dispute_on_never_invoiced_charge_parks_without_poison() {
     let url = db_url();
     let fx = Fixture::new(&url, "never-ours").await;
@@ -1122,18 +1075,13 @@ async fn dispute_on_never_invoiced_charge_parks_without_poison() {
     assert_eq!(status2, StatusCode::OK);
     assert_eq!(pending_dispute_count(&conn, &du).await, 1, "still exactly one parked row");
     assert_eq!(dispute_row_count(&conn, &du).await, 0);
-
-    drop(app);
-    drop(conn);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ───────────────────────────────────────────────────────────────────────────
 // (f) schema guard: the PR-8 objects exist on the migrated DB.
 // ───────────────────────────────────────────────────────────────────────────
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn pr8_schema_objects_present() {
     let url = db_url();
     let conn = side_conn(&url).await;
@@ -1193,9 +1141,6 @@ async fn pr8_schema_objects_present() {
         .expect("pending table")[0]
         .get("n");
     assert_eq!(pending, 1, "pending_disputes holding table must exist");
-
-    drop(conn);
-    common::drain_pg().await;
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -1207,7 +1152,7 @@ async fn pr8_schema_objects_present() {
 //     BLOCKS (its `lock_dispute_organization` waits on the held key) until we release it.
 // ───────────────────────────────────────────────────────────────────────────
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn dispute_created_takes_per_organization_advisory_lock() {
     let url = db_url();
     let fx = Fixture::new(&url, "dsp-lock").await;
@@ -1286,13 +1231,6 @@ async fn dispute_created_takes_per_organization_advisory_lock() {
         "the dispute_debit tightened the cap by the full disputed amount (9000 − 9000)",
     );
     let _ = pi;
-
-    drop(writer2);
-    drop(obs);
-    drop(app);
-    drop(conn);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -1322,7 +1260,7 @@ fn dispute_created_body_no_settling_object(evt: &str, du: &str, amount: i64) -> 
     .to_string()
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn dispute_created_with_no_settling_object_is_acked_not_poisoned() {
     let url = db_url();
     let fx = Fixture::new(&url, "no-settling-object").await;
@@ -1344,11 +1282,6 @@ async fn dispute_created_with_no_settling_object_is_acked_not_poisoned() {
     // Nothing written: no billing_disputes row, no pending_disputes row, no payment movement.
     assert_eq!(dispute_row_count(&conn, &du).await, 0, "no billing_disputes row invented");
     assert_eq!(pending_dispute_count(&conn, &du).await, 0, "no pending_disputes row parked");
-
-    drop(app);
-    drop(conn);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -1358,7 +1291,7 @@ async fn dispute_created_with_no_settling_object_is_acked_not_poisoned() {
 // appended, cash stays clawed-back at 0. The mirror of (g) but in the opposite direction.
 // ───────────────────────────────────────────────────────────────────────────
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn dispute_lost_then_late_won_is_rejected_cash_stays_clawed_back() {
     let url = db_url();
     let fx = Fixture::new(&url, "lost-then-won").await;
@@ -1402,11 +1335,6 @@ async fn dispute_lost_then_late_won_is_rejected_cash_stays_clawed_back() {
         "the clawed-back cash stays gone — a lost chargeback is final"
     );
     assert_eq!(payment_kind_count(&conn, &inv, "dispute_debit").await, 1, "exactly one debit");
-
-    drop(app);
-    drop(conn);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -1415,7 +1343,7 @@ async fn dispute_lost_then_late_won_is_rejected_cash_stays_clawed_back() {
 // NO `dispute_reversal` (lost ≠ won). Cash ends clawed-back. The lost twin of (h).
 // ───────────────────────────────────────────────────────────────────────────
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn dispute_closed_lost_before_created_seeds_terminal_debit_only() {
     let url = db_url();
     let fx = Fixture::new(&url, "close-lost-first").await;
@@ -1446,11 +1374,6 @@ async fn dispute_closed_lost_before_created_seeds_terminal_debit_only() {
     assert_eq!(dispute_status(&conn, &du).await.as_deref(), Some("lost"), "late created did NOT resurrect to open");
     assert_eq!(payment_kind_count(&conn, &inv, "dispute_debit").await, 1, "no second debit");
     assert_eq!(cash_collected(&conn, &inv).await, 0, "end state identical to in-order delivery");
-
-    drop(app);
-    drop(conn);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -1460,7 +1383,7 @@ async fn dispute_closed_lost_before_created_seeds_terminal_debit_only() {
 // (no row invented, no cash moved).
 // ───────────────────────────────────────────────────────────────────────────
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn dispute_closed_before_created_with_no_invoice_acks_no_dispute_row() {
     let url = db_url();
     let fx = Fixture::new(&url, "close-no-invoice").await;
@@ -1478,11 +1401,6 @@ async fn dispute_closed_before_created_with_no_invoice_acks_no_dispute_row() {
     // Nothing written.
     assert_eq!(dispute_row_count(&conn, &du).await, 0, "no billing_disputes row invented");
     assert_eq!(pending_dispute_count(&conn, &du).await, 0, "no pending_disputes row");
-
-    drop(app);
-    drop(conn);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -1519,7 +1437,7 @@ async fn seed_dispute_row_direct(
     du
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn billing_disputes_controlled_update_trigger_raises_on_illegal_mutations() {
     let url = db_url();
     let fx = Fixture::new(&url, "trigger").await;
@@ -1606,11 +1524,6 @@ async fn billing_disputes_controlled_update_trigger_raises_on_illegal_mutations(
     .await
     .expect("legal open→won progression must succeed");
     assert_eq!(dispute_status(&conn, &du_open).await.as_deref(), Some("won"));
-
-    drop(app);
-    drop(conn);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -1627,7 +1540,7 @@ async fn billing_disputes_controlled_update_trigger_raises_on_illegal_mutations(
 // flips false.
 // ───────────────────────────────────────────────────────────────────────────
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn dispute_closed_takes_per_organization_advisory_lock() {
     let url = db_url();
     let fx = Fixture::new(&url, "dsp-close-lock").await;
@@ -1753,15 +1666,6 @@ async fn dispute_closed_takes_per_organization_advisory_lock() {
     assert_eq!(payment_kind_count(&conn, &inv_cbc, "dispute_debit").await, 1, "debit applied");
     assert_eq!(cash_collected(&conn, &inv_cbc).await, 0, "cap tightened by the close-before-create debit");
     let _ = pi_cbc;
-
-    drop(writer4);
-    drop(obs2);
-    drop(writer2);
-    drop(obs);
-    drop(app);
-    drop(conn);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -1772,7 +1676,7 @@ async fn dispute_closed_takes_per_organization_advisory_lock() {
 // BOTH as candidates, and assert the pi_…'s invoice (A) wins.
 // ───────────────────────────────────────────────────────────────────────────
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn resolve_invoice_for_dispute_prefers_payment_intent_over_charge() {
     let url = db_url();
     let conn = side_conn(&url).await;
@@ -1826,7 +1730,4 @@ async fn resolve_invoice_for_dispute_prefers_payment_intent_over_charge() {
         .expect("resolve ch")
         .expect("an invoice resolves");
     assert_eq!(resolved_ch, inv_ch, "charge alone resolves the charge's invoice");
-
-    drop(conn);
-    common::drain_pg().await;
 }

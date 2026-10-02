@@ -58,10 +58,9 @@ async fn build_state(db_url: &str) -> (Arc<AppState>, PathBuf, PathBuf) {
         compio_postgres::connect(db_url, compio_postgres::NoTls)
             .await
             .expect("control-pg connect");
-    compio::runtime::spawn(async move {
+    crate::common::live::spawn(async move {
         let _ = control_pg_conn.run().await;
-    })
-    .detach();
+    });
 
     let state = Arc::new(AppState {
         service_auth: std::sync::Arc::new(zeroship_core::service_peers::ServiceAuth::unconfigured()),
@@ -151,7 +150,7 @@ fn spend_limit_route(cfg: &mut web::ServiceConfig) {
     );
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn get_spend_limit_returns_the_app_spend_limit_override() {
     let url = db_url();
     let (state, blob_root, deploy_tmp_dir) = build_state(&url).await;
@@ -208,13 +207,4 @@ async fn get_spend_limit_returns_the_app_spend_limit_override() {
     pat.cleanup(&state).await;
     let _ = std::fs::remove_dir_all(&blob_root);
     let _ = std::fs::remove_dir_all(&deploy_tmp_dir);
-
-    // Teardown: the spend engine, the service, and the app state all hold (or
-    // share) a Postgres connection, and locals are dropped only after the body
-    // returns - by which point the runtime is gone and the sockets can no
-    // longer be closed. Drop them explicitly, then wait for the close to land.
-    drop(engine);
-    drop(svc);
-    drop(state);
-    common::drain_pg().await;
 }

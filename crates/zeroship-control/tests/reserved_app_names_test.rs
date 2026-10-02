@@ -92,10 +92,9 @@ async fn build_test_state(label: &str) -> Fixture {
     let db_url = common::require_control_db();
     let (control_pg_client, control_pg_conn) =
         connect(&db_url, NoTls).await.expect("control-pg connect");
-    compio::runtime::spawn(async move {
+    crate::common::live::spawn(async move {
         let _ = control_pg_conn.run().await;
-    })
-    .detach();
+    });
 
     let blob_root = tmpdir(&format!("blob-{label}"));
     let deploy_tmp_dir = tmpdir(&format!("dtmp-{label}"));
@@ -235,7 +234,7 @@ async fn cleanup_app(fx: &Fixture, id: &AppId) {
 /// refusal on its own cannot tell "refuses reserved names" apart from "refuses
 /// everything" - a gate that denies universally reads as correct from the
 /// refusal side alone.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn every_reserved_name_is_refused_and_an_ordinary_name_is_accepted() {
     let fx = build_test_state("refuse").await;
     let creator = common::authz_fixture::seeded_principal(&fx.state).await;
@@ -282,9 +281,6 @@ async fn every_reserved_name_is_refused_and_an_ordinary_name_is_accepted() {
 
     cleanup_app(&fx, &created_id).await;
     creator.cleanup(&fx.state).await;
-    drop(control);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// Case-insensitivity THROUGH THE ROUTE. Hostnames are case-insensitive
@@ -294,7 +290,7 @@ async fn every_reserved_name_is_refused_and_an_ordinary_name_is_accepted() {
 /// The control here is an uppercase name that is NOT reserved: it separates
 /// "the route folds case before matching the reserved set" from "the route
 /// refuses uppercase", which a refusal-only test cannot distinguish.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn a_reserved_name_is_refused_in_every_letter_case() {
     let fx = build_test_state("case").await;
     let creator = common::authz_fixture::seeded_principal(&fx.state).await;
@@ -324,9 +320,6 @@ async fn a_reserved_name_is_refused_in_every_letter_case() {
 
     cleanup_app(&fx, &created_id).await;
     creator.cleanup(&fx.state).await;
-    drop(control);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// A reserved name and a MALFORMED name are different outcomes with different
@@ -334,7 +327,7 @@ async fn a_reserved_name_is_refused_in_every_letter_case() {
 /// alone: 409 says a well-formed name is unavailable, 400 says the name is not
 /// a legal name at all. If both collapsed to one status the refusal would send
 /// the creator to fix the wrong thing.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn a_reserved_name_and_a_malformed_name_answer_differently() {
     let fx = build_test_state("status").await;
     let creator = common::authz_fixture::seeded_principal(&fx.state).await;
@@ -345,9 +338,6 @@ async fn a_reserved_name_and_a_malformed_name_answer_differently() {
         create!(control, creator.bearer(), "not a legal name!");
 
     creator.cleanup(&fx.state).await;
-    drop(control);
-    drop(fx);
-    common::drain_pg().await;
 
     assert_eq!(
         reserved_status,
@@ -377,7 +367,7 @@ async fn a_reserved_name_and_a_malformed_name_answer_differently() {
 /// `registry::name_validation_tests` rules on the predicate without a database.
 /// This is the PATH claim, for the same reason stated in this file's header:
 /// a predicate stays green when its call site stops being reached.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn a_name_in_the_app_id_namespace_is_refused_by_the_route() {
     let fx = build_test_state("appid").await;
     let creator = common::authz_fixture::seeded_principal(&fx.state).await;
@@ -417,15 +407,12 @@ async fn a_name_in_the_app_id_namespace_is_refused_by_the_route() {
 
     cleanup_app(&fx, &created_id).await;
     creator.cleanup(&fx.state).await;
-    drop(control);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// The registry is the choke point, and `crates/zeroship-control/src/bin/dev_provision.rs`
 /// reaches it WITHOUT the HTTP handler. Driving `Registry::create_app` directly
 /// covers that vector and pins the typed error the HTTP layer maps.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn registry_refuses_a_reserved_name_directly() {
     let fx = build_test_state("registry").await;
     let creator = common::authz_fixture::seeded_principal(&fx.state).await;
@@ -454,6 +441,4 @@ async fn registry_refuses_a_reserved_name_directly() {
 
     cleanup_app(&fx, &record.id).await;
     creator.cleanup(&fx.state).await;
-    drop(fx);
-    common::drain_pg().await;
 }

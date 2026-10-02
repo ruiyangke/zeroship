@@ -4,6 +4,10 @@
 //! share state within that instance, so libtest defaults to serial execution
 //! through .cargo/config.toml.
 //!
+//! Every case is a live case (`common::live`): the tasks it starts and the
+//! connections it opens are closed before its runtime goes, so no case leaves
+//! an io_uring ring behind for the ones after it.
+//!
 //! With autotests disabled, register new database test modules below. Filter a
 //! module with `cargo test -p zeroship-control --test live_db env_store::`.
 

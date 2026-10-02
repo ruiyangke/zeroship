@@ -8,7 +8,7 @@
 //! `container_reaper::lifetime`.
 
 use crate::common;
-use crate::common::container_reaper::lifetime;
+use crate::common::test_database::container_reaper::lifetime;
 
 /// The child test, by its full path in this binary.
 const CHILD_TEST: &str = "test_database_lifetime::the_control_test_database_reports_its_container";

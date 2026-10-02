@@ -14,22 +14,19 @@ use zeroship_control::cron::audit_retention;
 use zeroship_control::Registry;
 use zeroship_core::UserId;
 
-use crate::common;
-
 fn db_url() -> String {
     crate::common::require_control_db()
 }
 
 async fn raw_conn(dsn: &str) -> compio_postgres::Client {
     let (client, conn) = connect(dsn, NoTls).await.expect("connect");
-    compio::runtime::spawn(async move {
+    crate::common::live::spawn(async move {
         let _ = conn.run().await;
-    })
-    .detach();
+    });
     client
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn app_audit_is_append_only_but_retention_sweep_deletes_old() {
     let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
@@ -109,12 +106,4 @@ async fn app_audit_is_append_only_but_retention_sweep_deletes_old() {
         remaining, 1,
         "retention sweep deletes the >12-month row, keeps the fresh one"
     );
-
-    // Teardown: `conn` and `registry` each hold a Postgres connection, and
-    // locals are dropped only after the body returns - by which point the
-    // runtime is gone and the sockets can no longer be closed. Drop them
-    // explicitly, then wait for the close to land.
-    drop(conn);
-    drop(registry);
-    common::drain_pg().await;
 }

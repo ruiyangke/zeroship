@@ -36,10 +36,9 @@ static SWEEP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 async fn pg(db_url: &str) -> compio_postgres::Client {
     let (client, conn) = connect(db_url, NoTls).await.expect("pg connect");
-    compio::runtime::spawn(async move {
+    crate::common::live::spawn(async move {
         let _ = conn.run().await;
-    })
-    .detach();
+    });
     client
 }
 
@@ -143,7 +142,7 @@ async fn read_state(client: &compio_postgres::Client, app: &AppId) -> (Option<St
 // held guard cannot deadlock another task's poll the way it could under a
 // work-stealing executor.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn period_rewrite_reports_a_total_that_shrank() {
     let url = db_url();
     let client = pg(&url).await;
@@ -213,7 +212,7 @@ async fn period_rewrite_reports_a_total_that_shrank() {
 
 // See the allow on `period_rewrite_reports_a_total_that_shrank` above.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn evaluate_all_persists_and_returns_transitions() {
     let url = db_url();
     let client = pg(&url).await;
@@ -256,16 +255,6 @@ async fn evaluate_all_persists_and_returns_transitions() {
     );
     let (_state2, hist2) = read_state(&client, &app).await;
     assert_eq!(hist2, 1, "no extra history row on a stable tick");
-
-    // Teardown: `engine`/`metering` each hold a connection through their cloned
-    // `Registry`, and `client` is a raw side connection - locals are dropped
-    // only after the body returns, by which point the runtime is gone and the
-    // sockets can no longer be closed. Drop them explicitly, then wait for the
-    // close to land.
-    drop(engine);
-    drop(metering);
-    drop(client);
-    common::drain_pg().await;
 }
 
 /// #1 (atomic transition): the `app_spend_state` UPSERT and the
@@ -277,7 +266,7 @@ async fn evaluate_all_persists_and_returns_transitions() {
 /// versa) would fail this consistency check.
 // See the allow on `period_rewrite_reports_a_total_that_shrank` above.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn transition_writes_state_and_history_atomically_and_consistent() {
     let url = db_url();
     let client = pg(&url).await;
@@ -339,16 +328,11 @@ async fn transition_writes_state_and_history_atomically_and_consistent() {
         Some(state_limit),
         "history limit matches state eval limit"
     );
-
-    drop(engine);
-    drop(metering);
-    drop(client);
-    common::drain_pg().await;
 }
 
 // See the allow on `period_rewrite_reports_a_total_that_shrank` above.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn overflowing_spend_is_skipped_not_clamped_and_blocked() {
     // MAJOR-1: an app whose priced `spend_cents` overflows i64 must be SKIPPED
     // with a warn! by the spend sweep — NOT clamped to i64::MAX and Blocked. This
@@ -410,16 +394,11 @@ async fn overflowing_spend_is_skipped_not_clamped_and_blocked() {
         "no app_spend_state row written for the skipped app"
     );
     assert_eq!(hist, 0, "no spend_state_history row for the skipped app");
-
-    drop(engine);
-    drop(metering);
-    drop(client);
-    common::drain_pg().await;
 }
 
 // See the allow on `period_rewrite_reports_a_total_that_shrank` above.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn raising_limit_recovers_block_immediately() {
     // Faithful PG exercise of the raised-limit recovery: an app pinned at Block
     // recovers to Allow on the next tick once `set_limit` raises the cap far
@@ -454,11 +433,6 @@ async fn raising_limit_recovers_block_immediately() {
     let (state, hist) = read_state(&client, &app).await;
     assert_eq!(state.as_deref(), Some("allow"));
     assert_eq!(hist, 2, "Block\u{2192}Allow appends a second history row");
-
-    drop(engine);
-    drop(metering);
-    drop(client);
-    common::drain_pg().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -471,7 +445,7 @@ async fn raising_limit_recovers_block_immediately() {
 
 // See the allow on `period_rewrite_reports_a_total_that_shrank` above.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn set_limit_writes_only_app_spend_limit_and_fleet_eval_reflects_it() {
     let url = db_url();
     let client = pg(&url).await;
@@ -527,16 +501,11 @@ async fn set_limit_writes_only_app_spend_limit_and_fleet_eval_reflects_it() {
         Some("allow"),
         "the fleet eval honored the app_spend_limit override (Allow, not Block at plan default)",
     );
-
-    drop(engine);
-    drop(metering);
-    drop(client);
-    common::drain_pg().await;
 }
 
 // See the allow on `period_rewrite_reports_a_total_that_shrank` above.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn transition_history_row_binds_non_null_period() {
     let url = db_url();
     let client = pg(&url).await;
@@ -572,9 +541,4 @@ async fn transition_history_row_binds_non_null_period() {
         1,
         "the history period is a first-of-month billing_period DATE"
     );
-
-    drop(engine);
-    drop(metering);
-    drop(client);
-    common::drain_pg().await;
 }

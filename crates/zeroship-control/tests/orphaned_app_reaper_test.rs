@@ -93,10 +93,9 @@ async fn build_state(db_url: &str, label: &str) -> Fixture {
         compio_postgres::connect(db_url, compio_postgres::NoTls)
             .await
             .expect("control-pg connect");
-    compio::runtime::spawn(async move {
+    crate::common::live::spawn(async move {
         let _ = control_pg_conn.run().await;
-    })
-    .detach();
+    });
     let control_pg = Arc::new(control_pg_client);
 
     let state = Arc::new(AppState {
@@ -253,7 +252,7 @@ async fn seed_owner_user(state: &AppState) -> UserId {
 // deadlock another task's poll the way it could under a work-stealing
 // executor.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn reaper_archives_ownerless_app_and_retains_its_bundle() {
     let url = db_url();
     let _guard = reaper_test_lock();
@@ -345,13 +344,6 @@ async fn reaper_archives_ownerless_app_and_retains_its_bundle() {
     );
 
     cleanup_app_row(state, &app_id).await;
-
-    // Teardown: the fixture holds the only handle to this test's Postgres
-    // connection, and locals are dropped only after the body returns - by which
-    // point the runtime is gone and the socket can no longer be closed. Drop it
-    // explicitly, then wait for the close to land.
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -359,7 +351,7 @@ async fn reaper_archives_ownerless_app_and_retains_its_bundle() {
 // ---------------------------------------------------------------------------
 // See the allow on `reaper_archives_ownerless_app_and_retains_its_bundle` above.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn reaper_leaves_owned_app_untouched() {
     let url = db_url();
     let _guard = reaper_test_lock();
@@ -398,9 +390,6 @@ async fn reaper_leaves_owned_app_untouched() {
             &[&owner.as_str()],
         )
         .await;
-
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -408,7 +397,7 @@ async fn reaper_leaves_owned_app_untouched() {
 // ---------------------------------------------------------------------------
 // See the allow on `reaper_archives_ownerless_app_and_retains_its_bundle` above.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn reaper_never_touches_system_app() {
     let url = db_url();
     let _guard = reaper_test_lock();
@@ -432,9 +421,6 @@ async fn reaper_never_touches_system_app() {
 
     // cleanup
     cleanup_app_row(state, &app_id).await;
-
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -442,7 +428,7 @@ async fn reaper_never_touches_system_app() {
 // ---------------------------------------------------------------------------
 // See the allow on `reaper_archives_ownerless_app_and_retains_its_bundle` above.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn reaper_respects_grace_window() {
     let url = db_url();
     let _guard = reaper_test_lock();
@@ -463,9 +449,6 @@ async fn reaper_respects_grace_window() {
 
     // cleanup
     cleanup_app_row(state, &app_id).await;
-
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -473,7 +456,7 @@ async fn reaper_respects_grace_window() {
 // ---------------------------------------------------------------------------
 // See the allow on `reaper_archives_ownerless_app_and_retains_its_bundle` above.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn direct_archive_retains_db_row_and_vfs_blob() {
     let url = db_url();
     let _guard = reaper_test_lock();
@@ -511,7 +494,4 @@ async fn direct_archive_retains_db_row_and_vfs_blob() {
     );
 
     cleanup_app_row(state, &app_id).await;
-
-    drop(fx);
-    common::drain_pg().await;
 }

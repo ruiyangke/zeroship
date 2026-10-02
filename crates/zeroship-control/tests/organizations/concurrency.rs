@@ -2,7 +2,7 @@ use super::{organizations, seed_user, Fx, Org, OrganizationError};
 use compio_postgres::Client;
 use std::time::Duration;
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn concurrent_owner_departures_preserve_the_last_owner() {
     let fx = Fx::new().await;
     let mut org = Org::new(&fx, "concurrent-leave").await;

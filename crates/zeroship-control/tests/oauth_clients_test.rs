@@ -31,10 +31,9 @@ fn db_url() -> String {
 
 async fn pg() -> Client {
     let (client, conn) = connect(&db_url(), NoTls).await.expect("control-pg connect");
-    compio::runtime::spawn(async move {
+    crate::common::live::spawn(async move {
         let _ = conn.run().await;
-    })
-    .detach();
+    });
     client
 }
 
@@ -76,7 +75,7 @@ async fn drop_client(pg: &Client, client_id: &str) {
         .await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn a_configured_registration_lands_hashed_and_reconciles_idempotently() {
     let pg = pg().await;
     let client_id = format!("cfg-client-{}", Uuid::new_v4().simple());
@@ -136,14 +135,13 @@ async fn a_configured_registration_lands_hashed_and_reconciles_idempotently() {
     assert_eq!(rows[0].get::<_, String>("client_name"), "ACME CI (renamed)");
 
     drop_client(&pg, &client_id).await;
-    common::drain_pg().await;
 }
 
 /// `skip_consent` follows the TRUSTED set, and nothing in the registration can
 /// move it. Both halves run the identical registration so the only variable is
 /// the trusted set - asserting the `true` case alone would pass even if the
 /// value were being read off the registration.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn skip_consent_is_derived_from_the_trusted_set_not_the_registration() {
     let pg = pg().await;
     let client_id = format!("cfg-trusted-{}", Uuid::new_v4().simple());
@@ -174,12 +172,11 @@ async fn skip_consent_is_derived_from_the_trusted_set_not_the_registration() {
     }
 
     drop_client(&pg, &client_id).await;
-    common::drain_pg().await;
 }
 
 /// An absent key is not an empty set. `None` manages nothing; `Some` is
 /// authoritative and de-registers a first-party client it no longer names.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn absent_config_manages_nothing_and_present_config_prunes() {
     let pg = pg().await;
     let stale = format!("cfg-stale-{}", Uuid::new_v4().simple());
@@ -214,14 +211,13 @@ async fn absent_config_manages_nothing_and_present_config_prunes() {
     assert_eq!(count_client(&pg, &kept).await, 1);
 
     drop_client(&pg, &kept).await;
-    common::drain_pg().await;
 }
 
 /// The two client families this reconciler does not register, it also must not
 /// delete: per-app end-user clients come from the deploy path, and the platform
 /// CLI client is reconciled by the auth service at its own boot. Pruning either
 /// would make two services fight over the same rows.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn pruning_spares_per_app_clients_and_the_platform_cli_client() {
     let pg = pg().await;
     let app_client = zeroship_core::typed_id::app_oauth_client_id(&AppId::mint());
@@ -258,13 +254,12 @@ async fn pruning_spares_per_app_clients_and_the_platform_cli_client() {
     if !cli_existed {
         drop_client(&pg, PLATFORM_CLI_CLIENT_ID).await;
     }
-    common::drain_pg().await;
 }
 
 /// A rejected registration fails the whole pass. Boot treats this as fatal, so
 /// the alternative would be a deployment that came up with a login surface
 /// silently missing.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn an_invalid_registration_fails_the_pass() {
     let pg = pg().await;
     let client_id = format!("cfg-bad-{}", Uuid::new_v4().simple());
@@ -280,5 +275,4 @@ async fn an_invalid_registration_fails_the_pass() {
         0,
         "a rejected registration writes no row"
     );
-    common::drain_pg().await;
 }

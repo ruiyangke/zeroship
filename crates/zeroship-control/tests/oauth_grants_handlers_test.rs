@@ -48,10 +48,9 @@ impl Fixture {
     async fn new(db_url: &str, label: &str) -> Self {
         let (control_pg_client, control_pg_conn) =
             connect(db_url, NoTls).await.expect("control-pg connect");
-        compio::runtime::spawn(async move {
+        crate::common::live::spawn(async move {
             let _ = control_pg_conn.run().await;
-        })
-        .detach();
+        });
 
         let blob_root = tmpdir(&format!("blob-{label}"));
         let deploy_tmp_dir = tmpdir(&format!("deploy-{label}"));
@@ -382,7 +381,7 @@ macro_rules! init_control {
     }};
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn list_returns_empty_when_no_grants() {
     let db_url = db_url();
     let fx = Fixture::new(&db_url, "empty").await;
@@ -400,17 +399,9 @@ async fn list_returns_empty_when_no_grants() {
     assert_eq!(body, json!([]));
 
     caller.cleanup(&fx.state).await;
-
-    // Teardown: the service and the fixture both hold connections, and locals
-    // are dropped only after the body returns - by which point the runtime is
-    // gone and the sockets can no longer be closed. Drop them explicitly, then
-    // wait for the close to land.
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn list_returns_user_grants_with_client_metadata() {
     let db_url = db_url();
     let fx = Fixture::new(&db_url, "metadata").await;
@@ -454,13 +445,9 @@ async fn list_returns_user_grants_with_client_metadata() {
 
     fx.cleanup_clients(&[client_id]).await;
     caller.cleanup(&fx.state).await;
-
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn list_does_not_leak_other_users_grants() {
     let db_url = db_url();
     let fx = Fixture::new(&db_url, "isolation").await;
@@ -489,13 +476,9 @@ async fn list_does_not_leak_other_users_grants() {
     fx.cleanup_clients(&[client_a, client_b]).await;
     cleanup_user(&fx.state, &other_user).await;
     caller.cleanup(&fx.state).await;
-
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn revoke_removes_grant_row() {
     let db_url = db_url();
     let fx = Fixture::new(&db_url, "revoke-row").await;
@@ -522,13 +505,9 @@ async fn revoke_removes_grant_row() {
 
     fx.cleanup_clients(&[client_id]).await;
     caller.cleanup(&fx.state).await;
-
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn revoke_removes_native_grant_for_user_client_pair() {
     let db_url = db_url();
     let fx = Fixture::new(&db_url, "revoke-native").await;
@@ -555,13 +534,9 @@ async fn revoke_removes_native_grant_for_user_client_pair() {
 
     fx.cleanup_clients(&[client_id]).await;
     caller.cleanup(&fx.state).await;
-
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn revoke_returns_404_when_no_grant() {
     let db_url = db_url();
     let fx = Fixture::new(&db_url, "missing").await;
@@ -580,13 +555,9 @@ async fn revoke_returns_404_when_no_grant() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 
     caller.cleanup(&fx.state).await;
-
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn revoke_does_not_affect_other_users() {
     let db_url = db_url();
     let fx = Fixture::new(&db_url, "other-user").await;
@@ -611,10 +582,6 @@ async fn revoke_does_not_affect_other_users() {
     fx.cleanup_clients(&[client_id]).await;
     revoker.cleanup(&fx.state).await;
     owner.cleanup(&fx.state).await;
-
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// The revocation cascade: revoking a grant sets
@@ -623,7 +590,7 @@ async fn revoke_does_not_affect_other_users() {
 /// DELETE + UPDATE commit atomically (BEGIN/COMMIT) on control's existing
 /// `control_pg` connection — no per-call connect. This is the full faithful loop:
 /// the relay alias was forwarding (active) → revoke → it bounces (inactive).
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn revoke_cascade_revokes_relay_alias_so_inbound_bounces() {
     let db_url = db_url();
     let fx = Fixture::new(&db_url, "cascade").await;
@@ -681,10 +648,6 @@ async fn revoke_cascade_revokes_relay_alias_so_inbound_bounces() {
     cleanup_identities(&fx.state, &client_id).await;
     fx.cleanup_clients(&[client_id]).await;
     caller.cleanup(&fx.state).await;
-
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// Seed the `zeroship.app_oauth_clients` extension row carrying the app's apex
@@ -734,7 +697,7 @@ async fn insert_app_oauth_client(state: &AppState, client_id: &str, sector: &str
 /// REAL gateway reader (`is_family_revoked_since`) — keyed exactly as the
 /// wrapper / Bearer / DPoP arms key it — now reports a still-live token (one
 /// whose `iat` predates the marker) as revoked. PG-gated.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn revoke_grant_writes_token_family_marker_that_rejects_live_token() {
     let db_url = db_url();
     let fx = Fixture::new(&db_url, "tokmarker").await;
@@ -860,10 +823,6 @@ async fn revoke_grant_writes_token_family_marker_that_rejects_live_token() {
         .await
         .ok();
     caller.cleanup(&fx.state).await;
-
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// Re-grant stability: revoke then re-grant reuses the SAME alias
@@ -871,7 +830,7 @@ async fn revoke_grant_writes_token_family_marker_that_rejects_live_token() {
 /// alias forwards again — no new alias, no dead-alias bounce. The auth-side
 /// writer (`mint_alias_at_consent`) clears `revoked_at` on the deterministic
 /// row; this test exercises that clear directly to prove the row is reusable.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn re_grant_reuses_same_alias_with_cleared_revoked_at() {
     let db_url = db_url();
     let fx = Fixture::new(&db_url, "regrant").await;
@@ -931,10 +890,6 @@ async fn re_grant_reuses_same_alias_with_cleared_revoked_at() {
     cleanup_identities(&fx.state, &client_id).await;
     fx.cleanup_clients(&[client_id]).await;
     caller.cleanup(&fx.state).await;
-
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// Raw `(grant_present, revoked_at_is_set)` snapshot of the terminal state, so
@@ -966,7 +921,7 @@ async fn grant_and_alias_state(
 /// asserts the load-bearing invariant in each: **grant-absent ⇒ alias-inert**
 /// (the alias does NOT resolve), even when `revoked_at` was left NULL by the
 /// losing writer.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn revoke_vs_reconsent_race_grant_absent_implies_alias_inert() {
     let db_url = db_url();
     let fx = Fixture::new(&db_url, "revoke-race").await;
@@ -1192,16 +1147,12 @@ async fn revoke_vs_reconsent_race_grant_absent_implies_alias_inert() {
     }
 
     caller.cleanup(&fx.state).await;
-
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// Archive removes runtime routing but preserves OAuth identity and grant rows.
 /// Restore therefore recovers the same origin and pairwise identity rather than
 /// minting a second security domain for the same app.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn app_archive_preserves_relay_identities() {
     let db_url = db_url();
     let fx = Fixture::new(&db_url, "appdel").await;
@@ -1267,14 +1218,11 @@ async fn app_archive_preserves_relay_identities() {
         .ok();
     cleanup_user(&fx.state, &user_a).await;
     cleanup_user(&fx.state, &user_b).await;
-
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// App archive happy path: the handler returns the retained app record with its
 /// archive timestamp.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn app_archive_returns_200_with_retained_record() {
     let db_url = db_url();
     let fx = Fixture::new(&db_url, "atomic-ok").await;
@@ -1329,13 +1277,9 @@ async fn app_archive_returns_200_with_retained_record() {
         )
         .await
         .ok();
-
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn unauthenticated_request_returns_401() {
     let db_url = db_url();
     let fx = Fixture::new(&db_url, "unauth").await;
@@ -1349,8 +1293,4 @@ async fn unauthenticated_request_returns_401() {
     let status = test::call_service(&app, req).await.status();
 
     assert_eq!(status, StatusCode::UNAUTHORIZED);
-
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }

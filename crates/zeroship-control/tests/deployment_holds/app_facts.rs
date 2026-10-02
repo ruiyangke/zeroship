@@ -14,7 +14,7 @@ use zeroship_workflow_client::ControlAppFacts;
 /// and nothing more: it is a real position rather than a constant, and it does
 /// not go backwards across reads of the same source. Asserting a particular
 /// value would bind this test to the fixture's write volume.
-#[ntex::test]
+#[compio::test(crate = "crate::common::live::system")]
 async fn app_facts_answer_the_policy_inputs_and_the_deletion_marker() {
     let fixture = Fixture::new().await;
     let live = zeroship_core::AppId::mint();
@@ -153,7 +153,7 @@ async fn app_facts_answer_the_policy_inputs_and_the_deletion_marker() {
 }
 
 /// The client refuses a request it should never send, before any exchange.
-#[ntex::test]
+#[compio::test(crate = "crate::common::live::system")]
 async fn the_client_refuses_an_empty_or_oversized_request() {
     let fixture = Fixture::new().await;
     let control_server = fixture.control("http://127.0.0.1:1/".into()).await;
@@ -190,7 +190,7 @@ async fn the_client_refuses_an_empty_or_oversized_request() {
 
 /// Only the verified `svc/workflow` ROLE reaches the facts, and the check runs
 /// before the body is decoded.
-#[ntex::test]
+#[compio::test(crate = "crate::common::live::system")]
 async fn app_facts_authenticate_before_decoding() {
     let fixture = Fixture::new().await;
     let app = zeroship_core::AppId::mint();

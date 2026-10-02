@@ -248,10 +248,9 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
         compio_postgres::connect(db_url, compio_postgres::NoTls)
             .await
             .expect("control-pg connect");
-    compio::runtime::spawn(async move {
+    crate::common::live::spawn(async move {
         let _ = control_pg_conn.run().await;
-    })
-    .detach();
+    });
     let control_pg = Arc::new(control_pg_client);
 
     let state = Arc::new(AppState {
@@ -491,7 +490,7 @@ async fn insert_grant(
 // (a) credit_ledger is append-only; kind↔sign CHECK rejects bad signs.
 // ===========================================================================
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn credit_ledger_is_append_only_and_kind_sign_checked() {
     let url = db_url();
     let fx = build_fixture(&url, "appendonly").await;
@@ -577,13 +576,6 @@ async fn credit_ledger_is_append_only_and_kind_sign_checked() {
         .expect("read back")[0]
         .get("amount_cents");
     assert_eq!(amt, 1000);
-
-    // Teardown: the fixture holds a Postgres connection, and locals are dropped
-    // only after the body returns - by which point the runtime is gone and the
-    // socket can no longer be closed. Drop it explicitly, then wait for the
-    // close to land.
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -597,7 +589,7 @@ async fn credit_ledger_is_append_only_and_kind_sign_checked() {
 // deadlock another task's poll the way it could under a work-stealing
 // executor.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn finalize_consumes_oldest_first_and_balances() {
     let url = db_url();
     let fx = build_fixture(&url, "consume").await;
@@ -677,9 +669,6 @@ async fn finalize_consumes_oldest_first_and_balances() {
         .get("amount_cents");
     assert_eq!(drawn_old, -300, "oldest grant fully consumed first");
     assert_eq!(drawn_new, -200, "newer grant consumed for the remainder");
-
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -688,7 +677,7 @@ async fn finalize_consumes_oldest_first_and_balances() {
 
 // See the allow on `finalize_consumes_oldest_first_and_balances` above.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn reconcile_rerun_does_not_double_consume() {
     let url = db_url();
     let fx = build_fixture(&url, "rerun").await;
@@ -760,9 +749,6 @@ async fn reconcile_rerun_does_not_double_consume() {
         n, 1,
         "exactly one consumed entry — never doubled by a re-run"
     );
-
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -771,7 +757,7 @@ async fn reconcile_rerun_does_not_double_consume() {
 //      REAL helper twice on the SAME draft invoice id inside a tx.
 // ===========================================================================
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn consume_helper_is_idempotent_on_draft_redrive() {
     let url = db_url();
     let fx = build_fixture(&url, "draftredrive").await;
@@ -834,9 +820,6 @@ async fn consume_helper_is_idempotent_on_draft_redrive() {
         bal, 400,
         "balance conserved — the helper never double-draws on a re-drive"
     );
-
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -845,7 +828,7 @@ async fn consume_helper_is_idempotent_on_draft_redrive() {
 
 // See the allow on `finalize_consumes_oldest_first_and_balances` above.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn expired_grant_is_not_consumed() {
     let url = db_url();
     let fx = build_fixture(&url, "expired").await;
@@ -903,9 +886,6 @@ async fn expired_grant_is_not_consumed() {
         "only the non-expired $2 grant is drawn (the expired $10 is skipped)"
     );
     assert_eq!(inv.3, 300, "total = 500 − 200 = 300");
-
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -914,7 +894,7 @@ async fn expired_grant_is_not_consumed() {
 
 // See the allow on `finalize_consumes_oldest_first_and_balances` above.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn non_usd_grant_is_not_drawn_against_usd_bill() {
     let url = db_url();
     let fx = build_fixture(&url, "currency").await;
@@ -981,9 +961,6 @@ async fn non_usd_grant_is_not_drawn_against_usd_bill() {
         .await
         .unwrap();
     assert_eq!(eur_bal, 1000, "the EUR grant is untouched");
-
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -991,7 +968,7 @@ async fn non_usd_grant_is_not_drawn_against_usd_bill() {
 // body is a Conflict (no second grant).
 // ===========================================================================
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn grant_helper_idempotency_key_and_fingerprint() {
     let url = db_url();
     let fx = build_fixture(&url, "granthelper").await;
@@ -1097,9 +1074,6 @@ async fn grant_helper_idempotency_key_and_fingerprint() {
         bad.is_err(),
         "a non-USD grant is rejected at the Rust boundary (v1 USD-pinned)"
     );
-
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -1118,7 +1092,7 @@ async fn grant_helper_idempotency_key_and_fingerprint() {
 // note is a body change ⇒ 409, never a silent return of the first grant.
 // ===========================================================================
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn grant_note_change_is_a_conflict() {
     let url = db_url();
     let fx = build_fixture(&url, "notefp").await;
@@ -1239,9 +1213,6 @@ async fn grant_note_change_is_a_conflict() {
         .expect("count")[0]
         .get("n");
     assert_eq!(n, 1, "the note conflict never created a second grant");
-
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -1256,7 +1227,7 @@ async fn grant_note_change_is_a_conflict() {
 // correctness GUARD for that scoping, not a behavioral distinguisher.
 // ===========================================================================
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn grant_idempotency_key_is_creator_scoped() {
     let url = db_url();
     let fx = build_fixture(&url, "xtenant").await;
@@ -1338,9 +1309,6 @@ async fn grant_idempotency_key_is_creator_scoped() {
         .await
         .unwrap();
     assert_eq!(bal_b, 0, "organization B has no credit");
-
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -1349,7 +1317,7 @@ async fn grant_idempotency_key_is_creator_scoped() {
 // lowercase-only, so a non-normalized kind would have FK/domain-violated.
 // ===========================================================================
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn grant_kind_is_case_insensitive() {
     let url = db_url();
     let fx = build_fixture(&url, "kindcase").await;
@@ -1409,9 +1377,6 @@ async fn grant_kind_is_case_insensitive() {
     .await
     .expect("mixed-case promo accepted");
     assert!(matches!(r2, GrantOutcome::Created(_)));
-
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -1435,7 +1400,7 @@ async fn grant_kind_is_case_insensitive() {
 //       at most the grant balance, and the balance never goes negative.
 // ===========================================================================
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn consume_takes_per_organization_advisory_lock() {
     let url = db_url();
     let fx = build_fixture(&url, "lock").await;
@@ -1476,20 +1441,18 @@ async fn consume_takes_per_organization_advisory_lock() {
     let (obs_client, obs_conn) = compio_postgres::connect(&url, compio_postgres::NoTls)
         .await
         .expect("observer connect");
-    compio::runtime::spawn(async move {
+    crate::common::live::spawn(async move {
         let _ = obs_conn.run().await;
-    })
-    .detach();
+    });
 
     // Open a transaction on a DEDICATED connection and run consume inside it; the
     // transaction-scoped advisory lock is held until we commit/rollback.
     let (mut conn, conn_run) = compio_postgres::connect(&url, compio_postgres::NoTls)
         .await
         .expect("consume connect");
-    compio::runtime::spawn(async move {
+    crate::common::live::spawn(async move {
         let _ = conn_run.run().await;
-    })
-    .detach();
+    });
     let tx = conn.transaction().await.expect("tx");
     let applied = credit::consume_at_finalize(&tx, organization, &inv, 600, "usd")
         .await
@@ -1553,10 +1516,9 @@ async fn consume_takes_per_organization_advisory_lock() {
     let (mut conn2, conn2_run) = compio_postgres::connect(&url, compio_postgres::NoTls)
         .await
         .expect("consume2 connect");
-    compio::runtime::spawn(async move {
+    crate::common::live::spawn(async move {
         let _ = conn2_run.run().await;
-    })
-    .detach();
+    });
     let tx2 = conn2.transaction().await.expect("tx2");
     let applied2 = credit::consume_at_finalize(&tx2, organization, &inv2, 900, "usd")
         .await
@@ -1576,12 +1538,6 @@ async fn consume_takes_per_organization_advisory_lock() {
         "balance is non-negative and exact after both draws ($10 − $6 − $4)"
     );
     assert!(bal >= 0, "balance MUST never go negative");
-
-    drop(obs_client);
-    drop(conn);
-    drop(conn2);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -1589,7 +1545,7 @@ async fn consume_takes_per_organization_advisory_lock() {
 //      ZERO `consumed` rows appended. The reconciler then finalizes total = subtotal.
 // ===========================================================================
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn consume_with_empty_ledger_applies_zero_and_appends_nothing() {
     let url = db_url();
     let fx = build_fixture(&url, "emptyledger").await;
@@ -1645,9 +1601,6 @@ async fn consume_with_empty_ledger_applies_zero_and_appends_nothing() {
             .unwrap(),
         0
     );
-
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -1657,7 +1610,7 @@ async fn consume_with_empty_ledger_applies_zero_and_appends_nothing() {
 //      against a $0 bill.
 // ===========================================================================
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn consume_with_zero_subtotal_short_circuits() {
     let url = db_url();
     let fx = build_fixture(&url, "zerosub").await;
@@ -1717,9 +1670,6 @@ async fn consume_with_zero_subtotal_short_circuits() {
         1000,
         "the grant is preserved — never drawn against a $0 bill",
     );
-
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -1731,7 +1681,7 @@ async fn consume_with_zero_subtotal_short_circuits() {
 //      grant set at draw time; a later grant is simply available for the NEXT bill.)
 // ===========================================================================
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn late_grant_is_not_drawn_by_an_earlier_consume() {
     let url = db_url();
     let fx = build_fixture(&url, "lategrant").await;
@@ -1825,9 +1775,6 @@ async fn late_grant_is_not_drawn_by_an_earlier_consume() {
         1000,
         "the late grant's full value is preserved for the next bill",
     );
-
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -1837,7 +1784,7 @@ async fn late_grant_is_not_drawn_by_an_earlier_consume() {
 //     `InvalidInput` before any INSERT.
 // ===========================================================================
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn grant_rejects_non_operator_kinds_at_the_boundary() {
     let url = db_url();
     let fx = build_fixture(&url, "kindreject").await;
@@ -1877,9 +1824,6 @@ async fn grant_rejects_non_operator_kinds_at_the_boundary() {
         .expect("count")[0]
         .get("n");
     assert_eq!(n, 0, "a rejected-kind grant appends NO ledger row");
-
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -1892,7 +1836,7 @@ async fn grant_rejects_non_operator_kinds_at_the_boundary() {
 //      RED if the `credit_ledger_grant_ref` CHECK is dropped.
 // ===========================================================================
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn credit_ledger_grant_ref_check_binds_kind_to_grant_reference() {
     let url = db_url();
     let fx = build_fixture(&url, "grantref").await;
@@ -1964,9 +1908,6 @@ async fn credit_ledger_grant_ref_check_binds_kind_to_grant_reference() {
         n, 1,
         "neither illegal row was inserted — only the seed grant exists"
     );
-
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -1975,7 +1916,7 @@ async fn credit_ledger_grant_ref_check_binds_kind_to_grant_reference() {
 //      grant balance is preserved (one partial `consumed` entry against that one grant).
 // ===========================================================================
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn single_large_grant_is_capped_at_subtotal_leftover_preserved() {
     let url = db_url();
     let fx = build_fixture(&url, "creditcap").await;
@@ -2053,9 +1994,6 @@ async fn single_large_grant_is_capped_at_subtotal_leftover_preserved() {
         .expect("sum")[0]
         .get("s");
     assert_eq!(drawn, -600, "one consumed entry of −$6 (the capped draw)");
-
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -2072,7 +2010,7 @@ async fn single_large_grant_is_capped_at_subtotal_leftover_preserved() {
 //      block on the organization key — the "must be WAITING" assertion would fail.
 // ===========================================================================
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn consume_and_record_plan_change_serialize_on_the_organization_lock() {
     let url = db_url();
     let fx = build_fixture(&url, "consume-vs-planchange").await;
@@ -2126,10 +2064,9 @@ async fn consume_and_record_plan_change_serialize_on_the_organization_lock() {
     let (mut conn, conn_run) = compio_postgres::connect(&url, compio_postgres::NoTls)
         .await
         .expect("consume connect");
-    compio::runtime::spawn(async move {
+    crate::common::live::spawn(async move {
         let _ = conn_run.run().await;
-    })
-    .detach();
+    });
     let tx = conn.transaction().await.expect("tx");
     let applied = credit::consume_at_finalize(&tx, organization, &inv, 600, "usd")
         .await
@@ -2210,8 +2147,4 @@ async fn consume_and_record_plan_change_serialize_on_the_organization_lock() {
         bal >= 0,
         "balance never goes negative under consume↔plan-change serialization"
     );
-
-    drop(conn);
-    drop(fx);
-    common::drain_pg().await;
 }

@@ -71,7 +71,7 @@ thread_local! {
     };
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn a_worker_host_runs_a_run_started_through_ordinary_app_ingress() {
     let mut fleet = Fleet::with_workflow_manager();
 

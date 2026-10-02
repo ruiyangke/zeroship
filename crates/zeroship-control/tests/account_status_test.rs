@@ -43,10 +43,9 @@ async fn fx() -> Fx {
     let (pg, conn) = compio_postgres::connect(&url, compio_postgres::NoTls)
         .await
         .expect("side connect");
-    compio::runtime::spawn(async move {
+    crate::common::live::spawn(async move {
         let _ = conn.run().await;
-    })
-    .detach();
+    });
     Fx { registry, pg }
 }
 
@@ -93,7 +92,7 @@ async fn backdate_past_due(pg: &compio_postgres::Client, organization: &str, day
 
 const T0: i64 = 1_777_000_000; // a fixed Stripe-style `event.created` baseline.
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn payment_failed_moves_to_past_due() {
     let _ = db_url();
     let f = fx().await;
@@ -129,17 +128,9 @@ async fn payment_failed_moves_to_past_due() {
         .expect("read history");
     assert_eq!(hist.len(), 1, "exactly one transition recorded");
     assert_eq!(hist[0].get::<_, String>("to_state"), "past_due");
-
-    // Teardown: `store` and `f` (its registry + a raw side connection) each
-    // hold a connection, and locals are dropped only after the body returns -
-    // by which point the runtime is gone and the sockets can no longer be
-    // closed. Drop them explicitly, then wait for the close to land.
-    drop(store);
-    drop(f);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn repeated_failure_is_idempotent() {
     let _ = db_url();
     let f = fx().await;
@@ -196,13 +187,9 @@ async fn repeated_failure_is_idempotent() {
         .unwrap()[0]
         .get("n");
     assert_eq!(n, 1, "no extra history row for an idempotent repeat");
-
-    drop(store);
-    drop(f);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn dunning_exhaustion_suspends() {
     let _ = db_url();
     let f = fx().await;
@@ -257,13 +244,9 @@ async fn dunning_exhaustion_suspends() {
         .unwrap()[0]
         .get("suspended_at");
     assert!(suspended_at.is_some(), "suspended_at is stamped on suspension");
-
-    drop(store);
-    drop(f);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn payment_success_reactivates() {
     let _ = db_url();
     let f = fx().await;
@@ -319,10 +302,6 @@ async fn payment_success_reactivates() {
         .await
         .expect("idempotent recover");
     assert!(again.is_none(), "recovery of an already-active organization is a no-op");
-
-    drop(store);
-    drop(f);
-    common::drain_pg().await;
 }
 
 /// `registry.get_routes` must report EACH app the account state of ITS OWN
@@ -341,7 +320,7 @@ async fn payment_success_reactivates() {
 /// leak one organization's enforcement onto another's apps or drop it
 /// entirely. Two organizations, one suspended and one not, with an app each,
 /// bind exactly that: the assertion fails in both directions.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn get_routes_reports_each_app_its_own_organization_state() {
     let _ = db_url();
     let f = fx().await;
@@ -401,10 +380,6 @@ async fn get_routes_reports_each_app_its_own_organization_state() {
         AccountState::Active,
         "a suspension must not leak onto another organization's app"
     );
-
-    drop(store);
-    drop(f);
-    common::drain_pg().await;
 }
 
 /// CRITICAL #1: an out-of-order/redelivered `payment_failed` whose Stripe
@@ -415,7 +390,7 @@ async fn get_routes_reports_each_app_its_own_organization_state() {
 /// The `last_recovered_at` high-water (stamped from `event.created`) makes the
 /// stale failure a no-op; guarding on `state` alone would flip active→past_due
 /// and let the sweep suspend a paying organization.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn out_of_order_paid_then_failed_does_not_resuspend() {
     let _ = db_url();
     let f = fx().await;
@@ -491,10 +466,6 @@ async fn out_of_order_paid_then_failed_does_not_resuspend() {
         .expect("active→past_due on a genuine post-recovery failure");
     assert_eq!(re.to, AccountState::PastDue);
     assert_eq!(db_state(&f.pg, organization).await.as_deref(), Some("past_due"));
-
-    drop(store);
-    drop(f);
-    common::drain_pg().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -505,7 +476,7 @@ async fn out_of_order_paid_then_failed_does_not_resuspend() {
 // parent-first insert: the status INSERT FK-violates and the call errors.)
 // ---------------------------------------------------------------------------
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn payment_failed_creates_organization_billing_parent_first() {
     let _url = db_url();
     let f = fx().await;
@@ -538,8 +509,4 @@ async fn payment_failed_creates_organization_billing_parent_first() {
         .await
         .unwrap();
     assert_eq!(parent.len(), 1, "record_payment_failed created the organization_billing FK parent");
-
-    drop(store);
-    drop(f);
-    common::drain_pg().await;
 }

@@ -296,10 +296,9 @@ async fn build_test_state_with_admin_quota(
         compio_postgres::connect(db_url, compio_postgres::NoTls)
             .await
             .expect("control-pg connect");
-    compio::runtime::spawn(async move {
+    crate::common::live::spawn(async move {
         let _ = control_pg_conn.run().await;
-    })
-    .detach();
+    });
     let control_pg = Arc::new(control_pg_client);
 
     let state = Arc::new(AppState {
@@ -359,7 +358,7 @@ async fn build_test_state_with_admin_quota(
 // Test cases
 // ---------------------------------------------------------------------------
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn deploy_happy_path_returns_200_with_deploy_hash() {
     let db_url = db_url();
 
@@ -467,17 +466,9 @@ async fn deploy_happy_path_returns_200_with_deploy_hash() {
     // collect noise.
     let _ = fx.state.registry.archive_app(&app_id).await;
     pat.cleanup(&fx.state).await;
-
-    // Teardown: the service and the fixture both hold connections, and locals
-    // are dropped only after the body returns - by which point the runtime is
-    // gone and the sockets can no longer be closed. Drop them explicitly, then
-    // wait for the close to land.
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn deploy_wrong_content_type_returns_415_without_consuming_body() {
     let db_url = db_url();
 
@@ -533,13 +524,9 @@ async fn deploy_wrong_content_type_returns_415_without_consuming_body() {
         "deploy_tmp_dir must be empty on 415 (body should not stream)",
     );
     pat.cleanup(&fx.state).await;
-
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn deploy_missing_auth_returns_401_without_consuming_body() {
     let db_url = db_url();
 
@@ -590,13 +577,9 @@ async fn deploy_missing_auth_returns_401_without_consuming_body() {
         dir_is_empty(&fx.deploy_tmp_dir),
         "wrong bearer must not stream body to tmp",
     );
-
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn deploy_manifest_not_first_returns_400() {
     let db_url = db_url();
 
@@ -672,10 +655,6 @@ async fn deploy_manifest_not_first_returns_400() {
 
     let _ = fx.state.registry.archive_app(&app_id).await;
     pat.cleanup(&fx.state).await;
-
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// Spec §5.1/§5.2 regression: a manifest declaring a scope that collides
@@ -683,7 +662,7 @@ async fn deploy_manifest_not_first_returns_400() {
 /// REJECTED by the deploy handler with a 4xx — NOT accepted with a 200 and
 /// then silently un-provisioned. `ingest` only enforces scope-id FORMAT, so
 /// the collision guard has to run in the handler before the manifest commit.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn deploy_colliding_scope_returns_400_invalid_scope() {
     let db_url = db_url();
 
@@ -775,16 +754,12 @@ async fn deploy_colliding_scope_returns_400_invalid_scope() {
 
     let _ = fx.state.registry.archive_app(&app_id).await;
     pat.cleanup(&fx.state).await;
-
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// Companion to the collision test: a well-formed, NON-colliding declared
 /// scope (`read:billing`, the mirror order, which is NOT in the platform
 /// vocabulary) deploys cleanly with a 200.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn deploy_noncolliding_scope_returns_200() {
     let db_url = db_url();
 
@@ -853,10 +828,6 @@ async fn deploy_noncolliding_scope_returns_200() {
 
     let _ = fx.state.registry.archive_app(&app_id).await;
     pat.cleanup(&fx.state).await;
-
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -919,7 +890,7 @@ async fn deploy_service(
     .await
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn deploy_rejects_legacy_migration_approval_query() {
     let db_url = db_url();
     let fx = build_test_state(&db_url, "legacy-query").await;
@@ -966,10 +937,6 @@ async fn deploy_rejects_legacy_migration_approval_query() {
 
     let _ = fx.state.registry.archive_app(&app_id).await;
     pat.cleanup(&fx.state).await;
-
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// A bundle that still carries `manifest.migrations` is refused, and nothing it
@@ -979,7 +946,7 @@ async fn deploy_rejects_legacy_migration_approval_query() {
 /// it lands before any blob is written. A refusal moved behind the blob writes
 /// would still answer 400 and leave the migration document stored, which is the
 /// regression the blob assertion is here for.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn deploy_rejects_legacy_manifest_migrations_and_writes_no_blob() {
     let db_url = db_url();
     let fx = build_test_state(&db_url, "legacy-manifest").await;
@@ -1057,10 +1024,6 @@ async fn deploy_rejects_legacy_manifest_migrations_and_writes_no_blob() {
 
     let _ = fx.state.registry.archive_app(&app_id).await;
     pat.cleanup(&fx.state).await;
-
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// Deploying to an app id that does not exist writes no blobs.
@@ -1080,7 +1043,7 @@ async fn deploy_rejects_legacy_manifest_migrations_and_writes_no_blob() {
 /// 403 rather than 404 is also the better answer on its own terms: the response
 /// is identical for an app that does not exist and one the caller does not own,
 /// so it is not an existence oracle.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn deploy_to_nonexistent_app_does_not_write_blobs() {
     let db_url = db_url();
 
@@ -1145,9 +1108,6 @@ async fn deploy_to_nonexistent_app_does_not_write_blobs() {
     );
 
     pat.cleanup(&fx.state).await;
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// Deploy is rate limited.
@@ -1160,7 +1120,7 @@ async fn deploy_to_nonexistent_app_does_not_write_blobs() {
 /// unauthenticated request is rejected before any handler body runs and would
 /// never reach the limiter: a version of this test without credentials passes
 /// through 31 straight 401s and proves nothing.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn deploy_is_rate_limited() {
     let db_url = db_url();
     // Small admin quota so 31 requests actually cross it.
@@ -1216,9 +1176,6 @@ async fn deploy_is_rate_limited() {
     );
 
     pat.cleanup(&fx.state).await;
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -1436,7 +1393,7 @@ async fn live_deploy_hash(state: &AppState, app_id: &AppId) -> Option<String> {
 /// The remedy is the route the control surface actually serves. Naming a
 /// command that does not exist would send a creator looking for a verb the CLI
 /// has never had.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn deploy_naming_an_unbound_database_is_refused_and_names_the_binding_call() {
     let db_url = db_url();
     let fx = build_test_state(&db_url, "binding-absent").await;
@@ -1498,9 +1455,6 @@ async fn deploy_naming_an_unbound_database_is_refused_and_names_the_binding_call
 
     let _ = fx.state.registry.archive_app(&app_id).await;
     pat.cleanup(&fx.state).await;
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// THE CONTROL, differing from the case above in ONE variable: the same app,
@@ -1508,7 +1462,7 @@ async fn deploy_naming_an_unbound_database_is_refused_and_names_the_binding_call
 ///
 /// Without it, a guard that refused every deploy would print exactly what the
 /// refusal above prints.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn deploy_declaring_no_database_needs_no_binding_and_goes_live() {
     let db_url = db_url();
     let fx = build_test_state(&db_url, "binding-none").await;
@@ -1532,9 +1486,6 @@ async fn deploy_declaring_no_database_needs_no_binding_and_goes_live() {
 
     let _ = fx.state.registry.archive_app(&app_id).await;
     pat.cleanup(&fx.state).await;
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 
@@ -1636,7 +1587,7 @@ fn marked_zship(marker: &str) -> (Vec<u8>, String) {
 
 /// Every malformed command identity is refused before a body byte is read,
 /// and the canonical id one variable away is accepted.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn deploy_requires_one_canonical_command_id_before_reading_the_body() {
     let fx = build_test_state(&db_url(), "command-header").await;
     let app = deploy_service(fx.state.clone()).await;
@@ -1677,16 +1628,13 @@ async fn deploy_requires_one_canonical_command_id_before_reading_the_body() {
 
     let _ = fx.state.registry.archive_app(&app_id).await;
     pat.cleanup(&fx.state).await;
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// A lost reply is recovered by resending the same bytes under the same id:
 /// the original result comes back even after a later deploy moved the app and
 /// the app's schema changed, and nothing is ingested, admitted, retargeted or
 /// published again.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn an_exact_retry_returns_the_first_acceptance_without_republishing() {
     let fx = build_test_state(&db_url(), "command-replay").await;
     let app = deploy_service(fx.state.clone()).await;
@@ -1747,15 +1695,12 @@ async fn an_exact_retry_returns_the_first_acceptance_without_republishing() {
 
     let _ = fx.state.registry.archive_app(&app_id).await;
     pat.cleanup(&fx.state).await;
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// The same command id with other bytes, from another actor, or on another app
 /// is refused without revealing anything about the first deploy, and without
 /// ingesting the refused artifact.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn a_reused_command_id_conflicts_without_disclosing_its_receipt() {
     let fx = build_test_state(&db_url(), "command-conflict").await;
     let app = deploy_service(fx.state.clone()).await;
@@ -1850,14 +1795,11 @@ async fn a_reused_command_id_conflicts_without_disclosing_its_receipt() {
     }
     teammate.cleanup(&fx.state).await;
     pat.cleanup(&fx.state).await;
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// Two copies of one deploy racing each other accept once: one receipt, one
 /// revision, one intent, and both callers see the same result.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn concurrent_duplicate_deploys_accept_once() {
     let fx = build_test_state(&db_url(), "command-race").await;
     let app = deploy_service(fx.state.clone()).await;
@@ -1887,15 +1829,12 @@ async fn concurrent_duplicate_deploys_accept_once() {
 
     let _ = fx.state.registry.archive_app(&app_id).await;
     pat.cleanup(&fx.state).await;
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// Redeploying an earlier artifact is an intentional rollback: a new command,
 /// a new revision and a new activation of the original deployment row. The
 /// artifact hash never stands in for the command.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn a_rollback_to_an_earlier_artifact_is_a_new_activation() {
     let fx = build_test_state(&db_url(), "command-rollback").await;
     let app = deploy_service(fx.state.clone()).await;
@@ -1946,14 +1885,11 @@ async fn a_rollback_to_an_earlier_artifact_is_a_new_activation() {
 
     let _ = fx.state.registry.archive_app(&app_id).await;
     pat.cleanup(&fx.state).await;
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// A refused deploy leaves no receipt, revision, intent or pointer behind, so
 /// the same command is evaluated afresh once the creator fixes the cause.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn a_refused_deploy_commits_nothing_and_the_same_command_can_succeed_later() {
     let fx = build_test_state(&db_url(), "command-refused").await;
     let app = deploy_service(fx.state.clone()).await;
@@ -2017,14 +1953,11 @@ async fn a_refused_deploy_commits_nothing_and_the_same_command_can_succeed_later
 
     let _ = fx.state.registry.archive_app(&app_id).await;
     pat.cleanup(&fx.state).await;
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// A deleted app is refused before any receipt lookup: an exact retry of a
 /// command it once accepted cannot report success or stage code again.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn a_deleted_app_refuses_command_replay() {
     let fx = build_test_state(&db_url(), "command-deleted").await;
     let app = deploy_service(fx.state.clone()).await;
@@ -2079,7 +2012,4 @@ async fn a_deleted_app_refuses_command_replay() {
     );
 
     pat.cleanup(&fx.state).await;
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }

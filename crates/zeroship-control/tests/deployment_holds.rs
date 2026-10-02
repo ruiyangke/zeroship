@@ -7,8 +7,10 @@
 #[path = "../../zeroship-workflow-server/tests/support/platform.rs"]
 mod platform;
 
-#[path = "common/deployments.rs"]
-mod deployment_commands;
+mod common;
+
+use common::deployments as deployment_commands;
+
 #[path = "deployment_holds/app_facts.rs"]
 mod app_facts;
 #[path = "deployment_holds/queue.rs"]
@@ -358,7 +360,7 @@ impl Fixture {
         // Under the platform fixture's own work directory, which outlives the
         // server this composes.
         let objects = self.platform.work.path().join("payloads");
-        test::server(move || {
+        let server = test::server(move || {
             let url = url.clone();
             let catalog_url = catalog_url.clone();
             let control = control.clone();
@@ -425,7 +427,9 @@ impl Fixture {
                     .configure(zeroship_workflow_server::configure)
             }
         })
-        .await
+        .await;
+        crate::common::live::register_listener(server.addr());
+        server
     }
 
     /// Control's hold routes over the fixture registry's retention executor,
@@ -442,7 +446,7 @@ impl Fixture {
             )
             .unwrap(),
         );
-        test::server(move || {
+        let server = test::server(move || {
             let state = state.clone();
             let api = api.clone();
             async move {
@@ -461,7 +465,9 @@ impl Fixture {
                     .configure(zeroship_control::app_facts_api::configure)
             }
         })
-        .await
+        .await;
+        crate::common::live::register_listener(server.addr());
+        server
     }
 
     async fn joined_worker(
@@ -589,7 +595,7 @@ async fn placement(
         .await
 }
 
-#[ntex::test]
+#[compio::test(crate = "crate::common::live::system")]
 async fn signed_deployment_holds_preserve_app_scope_across_worker_replacement() {
     let fixture = Fixture::new().await;
     let (app, deploy, hash) = fixture.deployment("holds-owner").await;
@@ -915,7 +921,7 @@ async fn verify_gate(
     })
 }
 
-#[ntex::test]
+#[compio::test(crate = "crate::common::live::system")]
 async fn failed_final_placement_authorization_rolls_back_hold_generations() {
     let fixture = Fixture::new().await;
     let (app, deploy, _) = fixture.deployment("holds-rollback").await;
@@ -969,6 +975,7 @@ async fn failed_final_placement_authorization_rolls_back_hold_generations() {
         }
     })
     .await;
+    crate::common::live::register_listener(server.addr());
     let api = DeploymentHoldApi::new(
         fixture.state.registry.retention().clone(),
         &origin(&server),

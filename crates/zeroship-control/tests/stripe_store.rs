@@ -38,14 +38,13 @@ async fn fresh_organization_id(url: &str) -> String {
 
 async fn pg(db_url: &str) -> compio_postgres::Client {
     let (client, conn) = connect(db_url, NoTls).await.expect("pg connect");
-    compio::runtime::spawn(async move {
+    crate::common::live::spawn(async move {
         let _ = conn.run().await;
-    })
-    .detach();
+    });
     client
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn link_account_roundtrip() {
     let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
@@ -71,16 +70,9 @@ async fn link_account_roundtrip() {
     // Unlink returns true, then false.
     assert!(store.unlink_account(organization).await.unwrap());
     assert!(!store.unlink_account(organization).await.unwrap());
-
-    // Teardown: `store` wraps the `Registry` that owns the live connection, and
-    // it is dropped only after the body returns - by which point the runtime is
-    // gone and the socket can no longer be closed. Drop it explicitly, then
-    // wait for the close to land.
-    drop(store);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn reject_bad_account_id_shape() {
     let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
@@ -107,12 +99,9 @@ async fn reject_bad_account_id_shape() {
         assert!(matches!(err, StripeError::Validation(_)),
             "expected Validation for '{bad}', got {err:?}");
     }
-
-    drop(store);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn record_payout_idempotent() {
     let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
@@ -165,12 +154,9 @@ async fn record_payout_idempotent() {
     assert_eq!(totals.net, 850);
 
     store.unlink_account(organization).await.ok();
-
-    drop(store);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn total_earnings_aggregates_correctly() {
     let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
@@ -201,12 +187,9 @@ async fn total_earnings_aggregates_correctly() {
     assert_eq!(totals.net, 1913);
 
     store.unlink_account(organization).await.ok();
-
-    drop(store);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn recent_payouts_newest_first_with_limit() {
     let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
@@ -254,12 +237,9 @@ async fn recent_payouts_newest_first_with_limit() {
     assert_eq!(one.len(), 1);
 
     store.unlink_account(organization).await.ok();
-
-    drop(store);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn per_organization_isolation() {
     let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
@@ -291,12 +271,9 @@ async fn per_organization_isolation() {
 
     store.unlink_account(a).await.ok();
     store.unlink_account(b).await.ok();
-
-    drop(store);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn empty_creator_totals_are_zero() {
     let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
@@ -311,12 +288,9 @@ async fn empty_creator_totals_are_zero() {
     assert_eq!(totals.net, 0);
 
     assert!(store.recent_payouts(organization, 10).await.unwrap().is_empty());
-
-    drop(store);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn payload_hash_mismatch_rejects_duplicate() {
     let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
@@ -362,12 +336,9 @@ async fn payload_hash_mismatch_rejects_duplicate() {
     );
 
     store.unlink_account(organization).await.ok();
-
-    drop(store);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn payout_ledger_check_constraints_reject_impossible_rows() {
     let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
@@ -391,13 +362,9 @@ async fn payout_ledger_check_constraints_reject_impossible_rows() {
     );
 
     store.unlink_account(organization).await.ok();
-
-    drop(pg);
-    drop(store);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn unlink_is_soft_delete_payouts_preserved() {
     let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
@@ -421,12 +388,9 @@ async fn unlink_is_soft_delete_payouts_preserved() {
         "ledger must survive soft-delete");
     let totals = store.total_earnings(organization).await.unwrap();
     assert_eq!(totals.gross, 100);
-
-    drop(store);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn double_unlink_returns_false_second_time() {
     let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
@@ -438,12 +402,9 @@ async fn double_unlink_returns_false_second_time() {
     assert!(store.unlink_account(organization).await.unwrap());
     assert!(!store.unlink_account(organization).await.unwrap(),
         "second unlink must be a no-op (already soft-deleted)");
-
-    drop(store);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn same_account_link_is_idempotent_no_history_pollution() {
     let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
@@ -462,12 +423,9 @@ async fn same_account_link_is_idempotent_no_history_pollution() {
     assert_eq!(h.len(), 1, "same-account relinks must not append history");
     assert_eq!(h[0].stripe_account_id, "acct_idempotentLink123");
     assert!(h[0].unlinked_at.is_none());
-
-    drop(store);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn organization_history_allows_only_one_open_row_per_organization() {
     let url = db_url();
     Registry::new(&url).await.expect("registry");
@@ -497,12 +455,9 @@ async fn organization_history_allows_only_one_open_row_per_organization() {
     pg.execute("DELETE FROM zeroship.organization_account_history WHERE organization_id = $1", &[&organization])
         .await
         .ok();
-
-    drop(pg);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn relink_clears_unlinked_at_and_records_history() {
     let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
@@ -527,9 +482,6 @@ async fn relink_clears_unlinked_at_and_records_history() {
     assert!(h[0].unlinked_at.is_none(), "new link is open");
     assert_eq!(h[1].stripe_account_id, "acct_firstAccount12");
     assert!(h[1].unlinked_at.is_some(), "old link is closed");
-
-    drop(store);
-    common::drain_pg().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -555,7 +507,7 @@ async fn make_real_organization(client: &compio_postgres::Client) -> String {
     organization_id
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn set_customer_relocates_to_refs_and_reverse_lookup_round_trips() {
     let url = db_url();
     let client = pg(&url).await;
@@ -612,13 +564,9 @@ async fn set_customer_relocates_to_refs_and_reverse_lookup_round_trips() {
         .await
         .unwrap();
     assert_eq!(parent.len(), 1, "set_customer created the organization_billing identity (FK parent)");
-
-    drop(client);
-    drop(store);
-    common::drain_pg().await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn set_customer_is_idempotent_on_reset() {
     let url = db_url();
     let client = pg(&url).await;
@@ -639,8 +587,4 @@ async fn set_customer_is_idempotent_on_reset() {
         .await
         .unwrap();
     assert_eq!(rows[0].get::<_, i64>("n"), 1, "still exactly one customer ref after re-set");
-
-    drop(client);
-    drop(store);
-    common::drain_pg().await;
 }

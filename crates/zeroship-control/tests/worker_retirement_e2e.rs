@@ -12,10 +12,9 @@ async fn database(url: &str) -> compio_postgres::Client {
     let (client, connection) = compio_postgres::connect(url, compio_postgres::NoTls)
         .await
         .expect("fleet database connect");
-    compio::runtime::spawn(async move {
+    crate::common::live::spawn(async move {
         let _ = connection.run().await;
-    })
-    .detach();
+    });
     client
 }
 
@@ -26,7 +25,7 @@ async fn database(url: &str) -> compio_postgres::Client {
 /// own exit, so the signer stays active and could admit the replacement a
 /// restart draws. A shutdown path that revoked its signer, or that wrote
 /// nothing at all, fails one of the two.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn a_worker_stopped_gracefully_retires_its_own_instance() {
     let mut fleet = Fleet::start();
     let pg = database(&fleet.database.url()).await;

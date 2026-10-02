@@ -294,10 +294,9 @@ async fn build_fixture(db_url: &str, label: &str, tax_provider: Arc<dyn TaxProvi
         compio_postgres::connect(db_url, compio_postgres::NoTls)
             .await
             .expect("control-pg connect");
-    compio::runtime::spawn(async move {
+    crate::common::live::spawn(async move {
         let _ = control_pg_conn.run().await;
-    })
-    .detach();
+    });
     let control_pg = Arc::new(control_pg_client);
 
     let state = Arc::new(AppState {
@@ -518,7 +517,7 @@ async fn insert_grant(
 // deadlock another task's poll the way it could under a work-stealing
 // executor.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn native_tax_is_zero_and_total_is_subtotal_minus_credit() {
     let url = db_url();
     let fx = build_fixture(
@@ -572,13 +571,6 @@ async fn native_tax_is_zero_and_total_is_subtotal_minus_credit() {
     );
     // The balance CHECK (total = subtotal − credit + tax) held (the row finalized).
     assert_eq!(inv.4, inv.1 - inv.2 + inv.3, "balance CHECK identity");
-
-    // Teardown: the fixture holds a Postgres connection, and locals are dropped
-    // only after the body returns - by which point the runtime is gone and the
-    // socket can no longer be closed. Drop it explicitly, then wait for the
-    // close to land.
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -590,7 +582,7 @@ async fn native_tax_is_zero_and_total_is_subtotal_minus_credit() {
 
 // See the allow on `native_tax_is_zero_and_total_is_subtotal_minus_credit` above.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn fake_provider_tax_is_frozen_and_total_includes_tax() {
     let url = db_url();
     // Inject the FAKE provider the SAME way Native is injected (the Arc slot) — (c).
@@ -652,9 +644,6 @@ async fn fake_provider_tax_is_frozen_and_total_includes_tax() {
         bases[0], 700,
         "tax computed over the post-credit base (1000 − 300)"
     );
-
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -665,7 +654,7 @@ async fn fake_provider_tax_is_frozen_and_total_includes_tax() {
 
 // See the allow on `native_tax_is_zero_and_total_is_subtotal_minus_credit` above.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn fake_provider_tax_without_credit_holds_balance_check() {
     let url = db_url();
     let fake = Arc::new(FakeTaxProvider::new(250));
@@ -709,9 +698,6 @@ async fn fake_provider_tax_without_credit_holds_balance_check() {
         bases[0], 500,
         "tax computed over the full subtotal (no credit)"
     );
-
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -748,7 +734,7 @@ impl TaxProvider for ErrTaxProvider {
 
 // See the allow on `native_tax_is_zero_and_total_is_subtotal_minus_credit` above.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn tax_provider_error_fails_closed_invoice_not_finalized() {
     let url = db_url();
     let fx = build_fixture(
@@ -805,9 +791,6 @@ async fn tax_provider_error_fails_closed_invoice_not_finalized() {
         finalized, 0,
         "no finalized invoice when the tax provider errors"
     );
-
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -824,7 +807,7 @@ async fn tax_provider_error_fails_closed_invoice_not_finalized() {
 
 // See the allow on `native_tax_is_zero_and_total_is_subtotal_minus_credit` above.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn missing_customer_with_usage_is_skipped_no_invoice() {
     let url = db_url();
     let fx = build_fixture(
@@ -869,9 +852,6 @@ async fn missing_customer_with_usage_is_skipped_no_invoice() {
         any, 0,
         "a organization with usage but no Stripe customer gets NO invoice (skipped + warned)"
     );
-
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -884,7 +864,7 @@ async fn missing_customer_with_usage_is_skipped_no_invoice() {
 
 // See the allow on `native_tax_is_zero_and_total_is_subtotal_minus_credit` above.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn credit_fully_covers_subtotal_zero_invoice_no_charge_row() {
     let url = db_url();
     let fx = build_fixture(
@@ -972,9 +952,6 @@ async fn credit_fully_covers_subtotal_zero_invoice_no_charge_row() {
         pay_rows, 0,
         "no invoice_payments charge row for a $0 invoice"
     );
-
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -990,7 +967,7 @@ async fn credit_fully_covers_subtotal_zero_invoice_no_charge_row() {
 
 // See the allow on `native_tax_is_zero_and_total_is_subtotal_minus_credit` above.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn tax_computed_once_over_summed_multi_segment_subtotal() {
     let url = db_url();
     let fake = Arc::new(FakeTaxProvider::new(200));
@@ -1096,7 +1073,4 @@ async fn tax_computed_once_over_summed_multi_segment_subtotal() {
         bases[0], 800,
         "tax computed over the SUMMED post-credit subtotal (300 + 500)"
     );
-
-    drop(fx);
-    common::drain_pg().await;
 }

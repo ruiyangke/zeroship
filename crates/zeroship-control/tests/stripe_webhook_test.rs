@@ -112,10 +112,9 @@ impl Fixture {
             compio_postgres::connect(db_url, compio_postgres::NoTls)
                 .await
                 .expect("control-pg connect");
-        compio::runtime::spawn(async move {
+        crate::common::live::spawn(async move {
             let _ = control_pg_conn.run().await;
-        })
-        .detach();
+        });
 
         let state = Arc::new(AppState {
             service_auth: std::sync::Arc::new(zeroship_core::service_peers::ServiceAuth::unconfigured()),
@@ -182,19 +181,19 @@ impl Drop for Fixture {
 /// `record_infra_payment`. Returns the base URL.
 async fn start_flaky_invoice_mock(fail_n: u32) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind mock");
-    let base_url = format!("http://{}", listener.local_addr().expect("addr"));
+    let address = listener.local_addr().expect("addr");
+    crate::common::live::register_listener(address);
+    let base_url = format!("http://{address}");
     let calls = Arc::new(AtomicU32::new(0));
-    compio::runtime::spawn(async move {
+    crate::common::live::spawn(async move {
         loop {
             let Ok((stream, _)) = listener.accept().await else { break };
             let calls = Arc::clone(&calls);
-            compio::runtime::spawn(async move {
+            crate::common::live::spawn(async move {
                 serve_flaky_conn(stream, calls, fail_n).await;
-            })
-            .detach();
+            });
         }
-    })
-    .detach();
+    });
     base_url
 }
 
@@ -204,18 +203,18 @@ async fn start_flaky_invoice_mock(fail_n: u32) -> String {
 /// across a void+reissue). Returns the base URL.
 async fn start_fixed_settlement_mock(pi: String, ch: String) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind mock");
-    let base_url = format!("http://{}", listener.local_addr().expect("addr"));
-    compio::runtime::spawn(async move {
+    let address = listener.local_addr().expect("addr");
+    crate::common::live::register_listener(address);
+    let base_url = format!("http://{address}");
+    crate::common::live::spawn(async move {
         loop {
             let Ok((stream, _)) = listener.accept().await else { break };
             let (pi, ch) = (pi.clone(), ch.clone());
-            compio::runtime::spawn(async move {
+            crate::common::live::spawn(async move {
                 serve_fixed_conn(stream, pi, ch).await;
-            })
-            .detach();
+            });
         }
-    })
-    .detach();
+    });
     base_url
 }
 
@@ -300,7 +299,7 @@ fn find_header_end(buf: &[u8]) -> Option<usize> {
 fn http_resp(status: u16, body: &str) -> Vec<u8> {
     let reason = if status == 200 { "OK" } else { "Internal Server Error" };
     let mut resp = format!(
-        "HTTP/1.1 {status} {reason}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: keep-alive\r\n\r\n",
+        "HTTP/1.1 {status} {reason}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
         body.len()
     )
     .into_bytes();
@@ -322,7 +321,7 @@ macro_rules! init_control {
     }};
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn invoice_paid_webhook_records_app_audit_row() {
     let db_url = db_url();
     let fx = Fixture::new(&db_url, "record-audit").await;
@@ -376,10 +375,9 @@ async fn invoice_paid_webhook_records_app_audit_row() {
     let (conn, conn_driver) = compio_postgres::connect(&db_url, compio_postgres::NoTls)
         .await
         .expect("registry conn");
-    compio::runtime::spawn(async move {
+    crate::common::live::spawn(async move {
         let _ = conn_driver.run().await;
-    })
-    .detach();
+    });
     let rows = conn
         .query(
             "SELECT resource, detail \
@@ -395,16 +393,6 @@ async fn invoice_paid_webhook_records_app_audit_row() {
     assert_eq!(detail["amount_cents"], 1234);
     assert_eq!(detail["stripe_event_id"], event_id);
     assert_eq!(detail["stripe_object_id"], stripe_object_id);
-
-    // Teardown: the service and the fixture both hold connections, and locals
-    // are dropped only after the body returns - by which point the runtime is
-    // gone and the sockets can no longer be closed. Drop them explicitly, then
-    // wait for the close to land.
-    drop(conn);
-    drop(seed);
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// A paid INFRA invoice webhook appends a `charge` `invoice_payments` row recording
@@ -414,7 +402,7 @@ async fn invoice_paid_webhook_records_app_audit_row() {
 /// Drives the real `stripe_handlers::webhook` end to end (signature path, JSON
 /// parse, dispatch, the infra branch's `record_infra_payment` → the real
 /// `invoice_payments::append_charge`) against live PG.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn infra_invoice_paid_appends_charge_payment_row() {
     let db_url = db_url();
     let fx = Fixture::new(&db_url, "infra-payment").await;
@@ -520,11 +508,6 @@ async fn infra_invoice_paid_appends_charge_payment_row() {
         .expect("read invoice");
     assert_eq!(inv[0].get::<_, String>("status"), "finalized");
     assert_eq!(inv[0].get::<_, i64>("total_cents"), 4500);
-
-    drop(seed);
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// POST a webhook body to `$app`, optionally with a `stripe-signature` header.
@@ -644,7 +627,7 @@ async fn charge_row_count(conn: &compio_postgres::Client, invoice_id: &str) -> i
 /// equals the single payment amount, NOT double. Both events are distinct so the
 /// `stripe_events_seen` gate does NOT dedup them; only the `provider_ref`
 /// idempotency index keeps cash_collected honest.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn distinct_events_same_invoice_append_one_charge_row() {
     let db_url = db_url();
     let fx = Fixture::new(&db_url, "idem-distinct-evt").await;
@@ -699,11 +682,6 @@ async fn distinct_events_same_invoice_append_one_charge_row() {
         .await
         .expect("cash_collected");
     assert_eq!(cash, 4500, "cash_collected must be the single amount, NOT doubled");
-
-    drop(conn);
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// Same-event retry leg: the charge-row append runs BEFORE the fallible
@@ -716,7 +694,7 @@ async fn distinct_events_same_invoice_append_one_charge_row() {
 /// `invoice_settlement_ids`). A flaky mock fails the FIRST expanded
 /// `GET /v1/invoices` (HTTP 500 → `StripeError` → fail closed), then succeeds on the
 /// retry. The body inlines NO pi_/ch_, so the fetch is forced.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn same_event_retry_after_later_failure_appends_one_charge_row() {
     let db_url = db_url();
     // Wire a flaky mock that fails the FIRST settlement-id GET, then succeeds.
@@ -786,11 +764,6 @@ async fn same_event_retry_after_later_failure_appends_one_charge_row() {
         .expect("count pi refs")[0]
         .get::<_, i64>("n");
     assert_eq!(pi_refs, 1, "the fetched pi_ linkage was recorded on retry (D2)");
-
-    drop(conn);
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// A TRANSIENT `append_charge` failure must NOT be swallowed-then-claimed (which
@@ -806,7 +779,7 @@ async fn same_event_retry_after_later_failure_appends_one_charge_row() {
 /// append run) but NO `metadata.organization_id` and NO `customer` — so the fall-through
 /// payout path returns early (`missing_organization_id`) WITHOUT touching the DB. The
 /// append is therefore the SOLE DB write, isolating its failure.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn append_failure_leaves_event_unclaimed_not_silently_dropped() {
     let db_url = db_url();
     let fx = Fixture::new(&db_url, "fail-closed-append").await;
@@ -858,11 +831,6 @@ async fn append_failure_leaves_event_unclaimed_not_silently_dropped() {
     );
     // No charge row was committed (the INSERT itself failed).
     assert_eq!(charge_row_count(&conn, &inv_id).await, 0, "no partial charge row on failed append");
-
-    drop(conn);
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// Count payout-ledger rows for a organization.
@@ -882,7 +850,7 @@ async fn payout_row_count(conn: &compio_postgres::Client, organization_id: &str)
 /// `payouts.organization_id → organization_accounts(organization_id)` FK that an
 /// infra-only organization cannot satisfy — a 500 AFTER the infra writes committed
 /// (non-atomic; the event never acked → Stripe retried forever — a poison loop).
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn infra_invoice_paid_without_connect_account_acks_200_no_payout() {
     let db_url = db_url();
     let fx = Fixture::new(&db_url, "d3-infra-no-connect").await;
@@ -917,18 +885,13 @@ async fn infra_invoice_paid_without_connect_account_acks_200_no_payout() {
         0,
         "an infra invoice.paid must NOT write a payout row (it returns before record_payout)",
     );
-
-    drop(conn);
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// No-regression companion: a NON-infra `invoice.paid` (a real Connect-revenue event —
 /// `metadata.organization_id` present, NO `invoice_kind=infra`) MUST still route to the
 /// `record_payout` path and record a payout for an organization with a linked Connect
 /// account. The infra branch's `return` is scoped to infra invoices only.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn non_infra_invoice_paid_still_routes_to_payout() {
     let db_url = db_url();
     let fx = Fixture::new(&db_url, "d3-connect-payout").await;
@@ -972,18 +935,13 @@ async fn non_infra_invoice_paid_still_routes_to_payout() {
         1,
         "a real Connect organization's invoice.paid still records a payout (D3 did not break this)",
     );
-
-    drop(conn);
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// Payout attribution: a Connect-revenue `invoice.paid` whose settling account
 /// (`on_behalf_of`) is NOT the claimed `metadata.organization_id`'s own account must be
 /// REJECTED — no payout credited. A forged organization id cannot steal another account's
 /// revenue, so the ownership check is what makes attribution meaningful.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn payout_with_mismatched_settling_account_is_rejected() {
     let db_url = db_url();
     let fx = Fixture::new(&db_url, "m4-attribution").await;
@@ -1033,11 +991,6 @@ async fn payout_with_mismatched_settling_account_is_rejected() {
         0,
         "and certainly none mis-credited to the real settling account's organization",
     );
-
-    drop(conn);
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// A real `invoice.paid` payload carries NO inline pi_/ch_ (Basil removed the
@@ -1046,7 +999,7 @@ async fn payout_with_mismatched_settling_account_is_rejected() {
 /// `billing_provider_refs(payment_intent|charge)` linkage from the FETCHED object —
 /// reading them off the payload records NO linkage, so a later real dispute could
 /// never resolve back to us.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn infra_invoice_paid_fetches_settlement_linkage_when_payload_omits_it() {
     let db_url = db_url();
     // A healthy mock (fail_n=0) that serves the expanded invoice with pi_flaky/ch_flaky.
@@ -1096,11 +1049,6 @@ async fn infra_invoice_paid_fetches_settlement_linkage_when_payload_omits_it() {
         pairs.contains(&("payment_intent".to_string(), format!("pi_flaky_{suffix}"))),
         "pi_ linkage fetched + recorded; got {pairs:?}",
     );
-
-    drop(conn);
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// A settling `pi_`/`ch_` already linked to invoice A, then seen for a DIFFERENT
@@ -1111,7 +1059,7 @@ async fn infra_invoice_paid_fetches_settlement_linkage_when_payload_omits_it() {
 /// belongs to invoice A; it is an idempotent no-op), the event is CLAIMED, and the
 /// cross-invoice ref is NOT created. An insert covering only the narrower unique
 /// raises SQLSTATE 23505 → 500 → the event stays UNCLAIMED → Stripe retries forever.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn settling_pi_reused_across_invoices_does_not_poison_webhook() {
     let db_url = db_url();
     // A mock that returns the SAME fixed pi_/ch_ for EVERY invoice — modelling a
@@ -1202,11 +1150,6 @@ async fn settling_pi_reused_across_invoices_does_not_poison_webhook() {
         inv_a,
         "the reused pi_ stays linked to the FIRST settlement (invoice A), never re-pointed to B",
     );
-
-    drop(conn);
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// Dunning must fail closed: an error from `record_payment_failed` during an
@@ -1218,7 +1161,7 @@ async fn settling_pi_reused_across_invoices_does_not_poison_webhook() {
 /// NOT a real `users` row: `record_payment_failed`'s parent-first
 /// `INSERT INTO organization_billing (organization_id)` FK-violates
 /// `organizations(id)` → Err.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn payment_failed_record_error_fails_closed_unclaimed() {
     let db_url = db_url();
     let fx = Fixture::new(&db_url, "m1-dunning-failclosed").await;
@@ -1257,18 +1200,13 @@ async fn payment_failed_record_error_fails_closed_unclaimed() {
         0,
         "the event must NOT be claimed — Stripe retries so the organization still enters dunning",
     );
-
-    drop(conn);
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// An `account.updated` flipping `charges_enabled=false` (Stripe risk/KYC hold) must
 /// update the CACHED flag, so the `connect_checkout` gate (which reads
 /// `organization_accounts.charges_enabled`) blocks the account. Leaving it in the
 /// silent `_ => ignored` arm would let a disabled account keep passing the gate.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn account_updated_disables_cached_charges_flag() {
     let db_url = db_url();
     let fx = Fixture::new(&db_url, "m2-account-updated").await;
@@ -1317,11 +1255,6 @@ async fn account_updated_disables_cached_charges_flag() {
         !acct_row.charges_enabled,
         "account.updated must flip the cached charges_enabled to false so checkout is blocked",
     );
-
-    drop(conn);
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// No double-debit: a `charge.dispute.funds_withdrawn` event must NOT append a second
@@ -1330,7 +1263,7 @@ async fn account_updated_disables_cached_charges_flag() {
 /// `Σ(invoice_payments)` is debited EXACTLY ONCE. It must stay in the silent
 /// `_ => ignored` arm, and this test guards against a future handler being wired to
 /// BOTH rails.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn dispute_funds_event_does_not_double_debit() {
     let db_url = db_url();
     let fx = Fixture::new(&db_url, "m2-funds-nodouble").await;
@@ -1397,11 +1330,6 @@ async fn dispute_funds_event_does_not_double_debit() {
         1,
         "the funds event must NOT add a second dispute_debit (single source of truth)",
     );
-
-    drop(conn);
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// Append a charge row through the REAL helper (keeps cash_collected honest).
@@ -1434,7 +1362,7 @@ async fn dispute_debit_count(conn: &compio_postgres::Client, invoice_id: &str) -
 /// it is held — the same-event redeliveries serialize. Mirrors the consume-lock test
 /// `issue_refund_takes_per_organization_advisory_lock`. Without the lock around the
 /// check-then-act, the try-lock on the same key would succeed.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn lock_event_serializes_same_event() {
     let db_url = db_url();
     let fx = Fixture::new(&db_url, "m3-event-lock").await;
@@ -1479,10 +1407,6 @@ async fn lock_event_serializes_same_event() {
         .execute("SELECT pg_advisory_unlock(hashtext($1::text)::bigint)", &[&event_id])
         .await;
     drop(lock_conn);
-
-    drop(probe);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ─── G6 replay-dedup ledger tests ──────────────────────────────────────────
@@ -1492,10 +1416,9 @@ async fn side_conn(db_url: &str) -> compio_postgres::Client {
     let (conn, driver) = compio_postgres::connect(db_url, compio_postgres::NoTls)
         .await
         .expect("side connect");
-    compio::runtime::spawn(async move {
+    crate::common::live::spawn(async move {
         let _ = driver.run().await;
-    })
-    .detach();
+    });
     conn
 }
 
@@ -1560,7 +1483,7 @@ fn setup_intent_body(event_id: &str, organization_id: &str) -> String {
 /// re-run (no second audit row) and the redelivery is 200-acked. WITHOUT the
 /// `stripe_events_seen` ledger this fails: `setup_intent.succeeded` has no
 /// payouts-table dedup of its own, so the handler runs twice (two audit rows).
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn redelivered_event_is_deduped_handler_not_rerun() {
     let db_url = db_url();
     let fx = Fixture::new(&db_url, "dedup-replay").await;
@@ -1590,17 +1513,12 @@ async fn redelivered_event_is_deduped_handler_not_rerun() {
         1,
         "handler did NOT re-run on redelivery — exactly-once effective"
     );
-
-    drop(conn);
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// A FORGED / unsigned event is rejected by signature verification BEFORE the
 /// dedup ledger is touched: it is neither claimed (no ledger row) nor processed
 /// (no audit row). Proves sig-verify-FIRST ordering.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn forged_event_rejected_before_ledger_claim() {
     let db_url = db_url();
     // Real secret + verification ON.
@@ -1627,18 +1545,13 @@ async fn forged_event_rejected_before_ledger_claim() {
         0,
         "forged event NEVER processed"
     );
-
-    drop(conn);
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// A handler that FAILS (non-2xx) does NOT claim the event — so Stripe's retry
 /// re-processes it (no lost event). Here the first delivery names a organization_id
 /// with no `users` row ⇒ `set_default_pm`'s FK insert errors ⇒ 500, unclaimed.
 /// The retry (after the user exists) succeeds and is then recorded once.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn handler_failure_is_retried_not_lost() {
     let db_url = db_url();
     let fx = Fixture::new(&db_url, "dedup-retry").await;
@@ -1687,11 +1600,6 @@ async fn handler_failure_is_retried_not_lost() {
     assert_eq!(b2["status"], "default_pm_set");
     assert_eq!(ledger_count(&conn, &event_id).await, 1, "retry recorded once");
     assert_eq!(setup_audit_count(&conn, &organization_id, &event_id).await, 1);
-
-    drop(conn);
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -1705,10 +1613,9 @@ async fn owned_conn(db_url: &str) -> compio_postgres::Client {
     let (conn, driver) = compio_postgres::connect(db_url, compio_postgres::NoTls)
         .await
         .expect("owned connect");
-    compio::runtime::spawn(async move {
+    crate::common::live::spawn(async move {
         let _ = driver.run().await;
-    })
-    .detach();
+    });
     conn
 }
 
@@ -1766,7 +1673,7 @@ fn refund_updated_body(event_id: &str, re_id: &str, status: &str) -> String {
 /// later FAILS must be marked `failed` so the over-refund cap STOPS counting it — the
 /// organization can re-refund the same cash. A redelivery is a no-op. Leaving the
 /// refund `issued` would keep the cash permanently "refunded" and block a re-refund.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn refund_updated_failed_cash_refund_frees_the_cap_idempotently() {
     let db_url = db_url();
     let fx = Fixture::new(&db_url, "refund-updated-cash").await;
@@ -1859,18 +1766,13 @@ async fn refund_updated_failed_cash_refund_frees_the_cap_idempotently() {
     assert_eq!(r2.status(), StatusCode::OK, "redelivery processed");
     let b2: Value = serde_json::from_slice(&test::read_body(r2).await).unwrap();
     assert_eq!(b2["status"], "refund_already_reversed", "no double-reversal");
-
-    drop(conn);
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// MONEY-CRITICAL (charge.refund.updated, credit clawback via a directly-seeded re_…):
 /// a credit-destination refund whose Refund later FAILS claws back the minted credit,
 /// conserving the balance; a redelivery is a no-op. We seed the re_… linkage directly
 /// (a credit refund carries none natively) to exercise the clawback path end-to-end.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn refund_updated_failed_credit_claws_back_grant() {
     let db_url = db_url();
     let fx = Fixture::new(&db_url, "refund-updated-claw").await;
@@ -1941,16 +1843,11 @@ async fn refund_updated_failed_credit_claws_back_grant() {
     assert_eq!(b2["status"], "refund_already_reversed", "no double-reversal");
     assert_eq!(clawback_count(&conn, &refund_id).await, 1, "still exactly one clawback");
     assert_eq!(credit_balance(&conn, organization_id).await, 0, "balance still conserved");
-
-    drop(conn);
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// A `charge.refund.updated` with a NON-terminal status (e.g. `succeeded`) is a benign
 /// no-op — it must NOT reverse a healthy refund.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn refund_updated_succeeded_is_noop() {
     let db_url = db_url();
     let fx = Fixture::new(&db_url, "refund-updated-ok").await;
@@ -1963,11 +1860,6 @@ async fn refund_updated_succeeded_is_noop() {
     let b: Value = serde_json::from_slice(&test::read_body(r).await).unwrap();
     assert_eq!(b["status"], "refund_update_noop", "a non-failure update is a no-op");
     assert_eq!(ledger_count(&conn, &evt).await, 1, "event still claimed (acked)");
-
-    drop(conn);
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// Count payout_failures rows for a organization.
@@ -2004,7 +1896,7 @@ fn payout_failed_body(event_id: &str, po_id: &str, account: &str, amount: i64) -
 /// payout.failed (webhook follow-up): records a payout_failures row + (via the notify cron)
 /// exactly ONE payout_failed notification, idempotent on the payout id. The deferred
 /// "acked but not acted on" arm would record no ledger row and send no notification.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn payout_failed_records_failure_and_notifies_once() {
     let db_url = db_url();
     let fx = Fixture::new(&db_url, "payout-failed").await;
@@ -2048,11 +1940,6 @@ async fn payout_failed_records_failure_and_notifies_once() {
         1,
         "still exactly one payout_failed notification (no duplicate)",
     );
-
-    drop(conn);
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// Count `sent` `billing_notifications` rows for a organization + kind (per-organization, immune to
@@ -2129,7 +2016,7 @@ fn pi_failed_body(event_id: &str, pi_id: &str, account: &str, amount: i64) -> St
 /// connect_checkout_failures row + (via the cron) exactly ONE checkout_failed
 /// notification, idempotent on the PI id. No money moved — informational. The deferred
 /// "acked but not acted on" arm would drop it silently.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn payment_intent_failed_surfaces_record_and_notifies_once() {
     let db_url = db_url();
     let fx = Fixture::new(&db_url, "pi-failed").await;
@@ -2163,11 +2050,6 @@ async fn payment_intent_failed_surfaces_record_and_notifies_once() {
     let b2: Value = serde_json::from_slice(&test::read_body(r2).await).unwrap();
     assert_eq!(b2["status"], "duplicate", "same pi_… is a no-op");
     assert_eq!(checkout_failure_count(&conn, organization_id).await, 1, "still one row");
-
-    drop(conn);
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -2230,7 +2112,7 @@ fn stripe_v1(secret: &str, t: i64, body: &str) -> String {
 /// Body cap: a body over MAX_WEBHOOK_BODY_BYTES is rejected with 413
 /// BEFORE any parse/HMAC/DB work. The fixture still signs the request, but the body
 /// cap runs ahead of signature verification and remains the gate under test.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn webhook_oversized_body_rejected_413() {
     let db_url = db_url();
     let fx = Fixture::new(&db_url, "boundary-413").await;
@@ -2245,15 +2127,11 @@ async fn webhook_oversized_body_rejected_413() {
         StatusCode::PAYLOAD_TOO_LARGE,
         "a webhook body over 256 KiB is rejected with 413 before parse/HMAC/DB"
     );
-
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// Signature-header cap: a `stripe-signature` header over
 /// MAX_SIGNATURE_HEADER_BYTES is rejected 400 while signature verification is active.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn webhook_oversized_signature_header_rejected_400() {
     let db_url = db_url();
     let fx = Fixture::new_with_secret(&db_url, "boundary-sig", "whsec_test_boundary").await;
@@ -2270,16 +2148,12 @@ async fn webhook_oversized_signature_header_rejected_400() {
         StatusCode::BAD_REQUEST,
         "a stripe-signature header over 4096 bytes is rejected with 400"
     );
-
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// Missing signature header: with a real configured secret, a request carrying NO
 /// `stripe-signature` header is rejected 400 (the empty header has
 /// no `t`/`v1` → verify fails). Proves the unsigned request never reaches a handler.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn webhook_missing_signature_header_rejected_400() {
     let db_url = db_url();
     let fx = Fixture::new_with_secret(&db_url, "boundary-nosig", "whsec_test_nosig").await;
@@ -2299,11 +2173,6 @@ async fn webhook_missing_signature_header_rejected_400() {
         "a request with NO stripe-signature header is rejected 400 when verification is on"
     );
     assert_eq!(ledger_count(&conn, &event_id).await, 0, "unsigned event never claimed");
-
-    drop(conn);
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// Multi-v1 OR-fold: a signature header whose FIRST `v1=` is WRONG but a LATER `v1=`
@@ -2311,7 +2180,7 @@ async fn webhook_missing_signature_header_rejected_400() {
 /// on the first mismatch). The event then dispatches and is claimed.
 ///
 /// RED if `verify_stripe_signature` early-exits on the first non-matching v1.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn webhook_second_v1_matches_is_accepted() {
     let db_url = db_url();
     let secret = "whsec_test_rotation";
@@ -2340,11 +2209,6 @@ async fn webhook_second_v1_matches_is_accepted() {
         "a later matching v1 is accepted (rotation-window OR-fold; no early-exit on the first mismatch)"
     );
     assert_eq!(ledger_count(&conn, &event_id).await, 1, "the accepted event is claimed");
-
-    drop(conn);
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// Empty signing secret → verify Err: `verify_stripe_signature` with an EMPTY secret
@@ -2367,7 +2231,7 @@ fn verify_empty_secret_is_err() {
 /// panic mapped to 500), so this pins the ERROR MESSAGE and pins that the event
 /// was never claimed in the dedup ledger - i.e. the rejection happened before
 /// any database work.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn webhook_empty_secret_is_always_500() {
     let db_url = db_url();
     let fx = Fixture::new_with_secret(&db_url, "boundary-emptysecret", "").await;
@@ -2393,11 +2257,6 @@ async fn webhook_empty_secret_is_always_500() {
         0,
         "the rejected event is never claimed - no database work ran"
     );
-
-    drop(conn);
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// A body that is NOT valid JSON, delivered while the secret is EMPTY, still
@@ -2414,7 +2273,7 @@ async fn webhook_empty_secret_is_always_500() {
 /// which changes ONE variable - a non-empty secret - and must get a DIFFERENT
 /// error. Without that partner a green here cannot separate "the empty-secret
 /// check fired" from "this endpoint 500s on everything".
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn webhook_empty_secret_rejects_before_parsing_the_body() {
     let db_url = db_url();
     let fx = Fixture::new_with_secret(&db_url, "emptysecret-preparse", "").await;
@@ -2433,10 +2292,6 @@ async fn webhook_empty_secret_rejects_before_parsing_the_body() {
         "the empty-secret check must run BEFORE the body is parsed (got a parse \
          error instead, so verification now happens after parsing)"
     );
-
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// The one-variable control for `webhook_empty_secret_rejects_before_parsing_the_body`:
@@ -2447,7 +2302,7 @@ async fn webhook_empty_secret_rejects_before_parsing_the_body() {
 /// rejects everything the same way.
 ///
 /// Note both arms reject BEFORE parsing, so neither returns `invalid json`.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn webhook_configured_secret_bad_signature_reports_signature_error() {
     let db_url = db_url();
     let fx =
@@ -2471,10 +2326,6 @@ async fn webhook_configured_secret_bad_signature_reports_signature_error() {
         b["error"], "webhook secret not configured",
         "a configured secret must never report itself as not configured"
     );
-
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// Concurrent dispatch e2e: two CONCURRENT `webhook()` calls for the SAME event_id
@@ -2482,7 +2333,7 @@ async fn webhook_configured_secret_bad_signature_reports_signature_error() {
 /// the second observes the first's claim and 200-acks as a `duplicate`. End-to-end
 /// exactly-once (the lock PRIMITIVE is unit-tested in `lock_event_serializes_same_event`;
 /// this pins the full webhook() path).
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn concurrent_same_event_dispatches_once() {
     let db_url = db_url();
     let fx = Fixture::new(&db_url, "concurrent-dispatch").await;
@@ -2530,17 +2381,12 @@ async fn concurrent_same_event_dispatches_once() {
         "the handler dispatched exactly once across the concurrent deliveries"
     );
     assert_eq!(ledger_count(&conn, &event_id).await, 1, "event claimed exactly once");
-
-    drop(conn);
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// payout.failed with NO connected account: a `payout.failed` carrying neither a
 /// top-level `account` nor a destination → benign 200 ack (`no_connected_account`), no
 /// payout_failures row written.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn payout_failed_without_connected_account_acks_no_row() {
     let db_url = db_url();
     let fx = Fixture::new(&db_url, "payout-noacct").await;
@@ -2578,16 +2424,11 @@ async fn payout_failed_without_connected_account_acks_no_row() {
         .expect("count")[0]
         .get::<_, i64>("n");
     assert_eq!(n, 0, "no payout_failures row written for this payout");
-
-    drop(conn);
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// payment_intent.payment_failed with NO connected account: a platform (non-Connect)
 /// PI failure → benign 200 ack (`no_connected_account`), no connect_checkout_failures row.
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn payment_intent_failed_without_connected_account_acks_no_row() {
     let db_url = db_url();
     let fx = Fixture::new(&db_url, "pifail-noacct").await;
@@ -2626,17 +2467,12 @@ async fn payment_intent_failed_without_connected_account_acks_no_row() {
         .expect("count")[0]
         .get::<_, i64>("n");
     assert_eq!(n, 0, "no connect_checkout_failures row written for this pi");
-
-    drop(conn);
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// account.updated for an UNLINKED account: an `account.updated` for an `acct_…` we
 /// never linked updates 0 rows → `account_not_linked` ack, no error. The event is still
 /// claimed (it was validly delivered; re-processing it would be a no-op).
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn account_updated_unlinked_account_acks_not_linked() {
     let db_url = db_url();
     let fx = Fixture::new(&db_url, "acct-unlinked").await;
@@ -2665,8 +2501,4 @@ async fn account_updated_unlinked_account_acks_not_linked() {
         b["status"], "account_not_linked",
         "an account.updated for an acct_ we never linked is a benign no-op (0-row flag update)"
     );
-
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
 }

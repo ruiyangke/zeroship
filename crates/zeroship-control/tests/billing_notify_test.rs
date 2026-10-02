@@ -115,10 +115,9 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
         compio_postgres::connect(db_url, compio_postgres::NoTls)
             .await
             .expect("control-pg connect");
-    compio::runtime::spawn(async move {
+    crate::common::live::spawn(async move {
         let _ = control_pg_conn.run().await;
-    })
-    .detach();
+    });
 
     // The spend-band tests below drive the real spend-reconcile sweep, which
     // fails closed with "global default FX missing" unless the shared
@@ -389,7 +388,7 @@ async fn age_pending(pg: &compio_postgres::Client, organization: &str) {
 // ===========================================================================
 // See the allow on `tick_until_sent` above.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn each_kind_produces_exactly_one_notification() {
     let url = db_url();
     let fx = build_fixture(&url, "each-kind").await;
@@ -514,19 +513,12 @@ async fn each_kind_produces_exactly_one_notification() {
             "no pending rows remain for organization {c} after settle"
         );
     }
-
-    // Teardown: the fixture holds a Postgres connection, and locals are dropped
-    // only after the body returns - by which point the runtime is gone and the
-    // socket can no longer be closed. Drop it explicitly, then wait for the
-    // close to land.
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ===========================================================================
 // (a) claim-before-send is multi-node safe: two CONCURRENT ticks send each event once
 // ===========================================================================
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn concurrent_ticks_send_each_event_once() {
     let url = db_url();
     let fx = build_fixture(&url, "concurrent").await;
@@ -543,10 +535,9 @@ async fn concurrent_ticks_send_each_event_once() {
     let (side, side_conn) = compio_postgres::connect(&url, compio_postgres::NoTls)
         .await
         .expect("side lock conn");
-    compio::runtime::spawn(async move {
+    crate::common::live::spawn(async move {
         let _ = side_conn.run().await;
-    })
-    .detach();
+    });
     let held: bool = side
         .query("SELECT pg_advisory_lock($1)", &[&NOTIFY_LOCK_KEY])
         .await
@@ -605,10 +596,6 @@ async fn concurrent_ticks_send_each_event_once() {
     // The PK guarantees exactly ONE ledger row for the transition, now `sent`.
     assert_eq!(ledger_count(&fx.pg, organization, "sent").await, 1);
     assert_eq!(ledger_count(&fx.pg, organization, "pending").await, 0);
-
-    drop(side);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -617,7 +604,7 @@ async fn concurrent_ticks_send_each_event_once() {
 // ===========================================================================
 // See the allow on `tick_until_sent` above.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn crash_before_flip_redrives_idempotent() {
     let url = db_url();
     let fx = build_fixture(&url, "redrive").await;
@@ -705,9 +692,6 @@ async fn crash_before_flip_redrives_idempotent() {
     );
     // The row is now `sent` (the re-drive flipped it).
     assert_eq!(ledger_count(&fx.pg, organization, "sent").await, 1);
-
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// The obh_ surrogate id of the single history row for a organization.
@@ -726,7 +710,7 @@ async fn obh_id(pg: &compio_postgres::Client, organization: &str) -> String {
 //     re-checked on REAL rows (the cross-source disjointness is also asserted in
 //     zeroship-core typed_id tests).
 // ===========================================================================
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn history_surrogate_ids_carry_disjoint_prefixes() {
     let url = db_url();
     let fx = build_fixture(&url, "prefixes").await;
@@ -764,9 +748,6 @@ async fn history_surrogate_ids_carry_disjoint_prefixes() {
             );
         }
     }
-
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -915,7 +896,7 @@ async fn spend_tick(state: &AppState) {
 
 // See the allow on `tick_until_sent` above.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn spend_band_walk_produces_one_notification_per_transition() {
     let url = db_url();
     let fx = build_fixture(&url, "spend-band").await;
@@ -1046,9 +1027,6 @@ async fn spend_band_walk_produces_one_notification_per_transition() {
     // The app NAME made it into the dedup transition_id mapping (sanity: the ledger rows
     // are keyed by the she_ transition id, one per band).
     let _ = app_name; // (name is asserted via the rendered body in notify.rs unit tests)
-
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -1069,7 +1047,7 @@ async fn spend_band_walk_produces_one_notification_per_transition() {
 // ===========================================================================
 // See the allow on `tick_until_sent` above.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn spend_band_recovery_walk_sends_no_notifications() {
     let url = db_url();
     let fx = build_fixture(&url, "spend-recovery").await;
@@ -1186,9 +1164,6 @@ async fn spend_band_recovery_walk_sends_no_notifications() {
         0,
         "no pending spend notification rows for a recovery walk"
     );
-
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -1211,7 +1186,7 @@ async fn age_history(pg: &compio_postgres::Client, organization: &str, days: i64
 
 // See the allow on `tick_until_sent` above.
 #[allow(clippy::await_holding_lock)]
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn aged_transition_past_scan_window_is_not_notified() {
     let url = db_url();
     let fx = build_fixture(&url, "watermark").await;
@@ -1263,9 +1238,6 @@ async fn aged_transition_past_scan_window_is_not_notified() {
         0,
         "the aged past_due remains un-notified even after the sweep delivered a fresh row",
     );
-
-    drop(fx);
-    common::drain_pg().await;
 }
 
 // ===========================================================================
@@ -1274,7 +1246,7 @@ async fn aged_transition_past_scan_window_is_not_notified() {
 // notify lock tests). The dunning key is distinct from spend/notify so the sweeps
 // never block each other.
 // ===========================================================================
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn dunning_tick_skips_when_advisory_lock_held() {
     let url = db_url();
     let fx = build_fixture(&url, "dunning-lock").await;
@@ -1299,10 +1271,9 @@ async fn dunning_tick_skips_when_advisory_lock_held() {
     let (side, side_conn) = compio_postgres::connect(&url, compio_postgres::NoTls)
         .await
         .expect("side lock conn");
-    compio::runtime::spawn(async move {
+    crate::common::live::spawn(async move {
         let _ = side_conn.run().await;
-    })
-    .detach();
+    });
     let got: bool = side
         .query(
             "SELECT pg_try_advisory_lock($1) AS locked",
@@ -1344,10 +1315,6 @@ async fn dunning_tick_skips_when_advisory_lock_held() {
         Some("suspended"),
         "the exhausted organization is suspended once the lock is free",
     );
-
-    drop(side);
-    drop(fx);
-    common::drain_pg().await;
 }
 
 /// Read the persisted account state for a organization (None ⇒ no row).

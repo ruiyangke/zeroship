@@ -32,27 +32,27 @@ const LAGO_API_KEY: &str = "lago_hmac_conformance";
 const STRIPE_SECRET: &str = "sk_test_conformance";
 const OPENMETER_TOKEN: &str = "om_test_conformance";
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn provider_conformance_lago() {
     run_provider_conformance(Adapter::Lago).await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn provider_conformance_lite() {
     run_provider_conformance(Adapter::Lite).await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn provider_conformance_openmeter() {
     run_provider_conformance(Adapter::OpenMeter).await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn provider_conformance_stripe_meters() {
     run_provider_conformance(Adapter::StripeMeters).await;
 }
 
-#[compio::test]
+#[compio::test(crate = "crate::common::live")]
 async fn provider_conformance_stripe_invoice() {
     run_provider_conformance(Adapter::StripeInvoice).await;
 }
@@ -917,25 +917,24 @@ impl MockHttpProvider {
     async fn start(kind: HttpKind) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind mock");
         let addr = listener.local_addr().expect("mock local addr");
+        crate::common::live::register_listener(addr);
         let base_url = format!("http://{addr}");
         let state = Arc::new(Mutex::new(MockHttpState {
             kind,
             ..MockHttpState::default()
         }));
         let accept_state = Arc::clone(&state);
-        compio::runtime::spawn(async move {
+        crate::common::live::spawn(async move {
             loop {
                 let Ok((stream, _peer)) = listener.accept().await else {
                     break;
                 };
                 let conn_state = Arc::clone(&accept_state);
-                compio::runtime::spawn(async move {
+                crate::common::live::spawn(async move {
                     serve_http_conn(stream, conn_state).await;
-                })
-                .detach();
+                });
             }
-        })
-        .detach();
+        });
         Self { base_url, state }
     }
 
@@ -1338,7 +1337,7 @@ fn json_escape(s: &str) -> String {
 }
 
 fn http_204() -> Vec<u8> {
-    b"HTTP/1.1 204 No Content\r\ncontent-length: 0\r\nconnection: keep-alive\r\n\r\n".to_vec()
+    b"HTTP/1.1 204 No Content\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".to_vec()
 }
 
 fn http_json(status: u16, json: &str) -> Vec<u8> {
@@ -1353,7 +1352,7 @@ fn http_json(status: u16, json: &str) -> Vec<u8> {
         "HTTP/1.1 {status} {reason}\r\n\
          content-type: application/json\r\n\
          content-length: {}\r\n\
-         connection: keep-alive\r\n\r\n",
+         connection: close\r\n\r\n",
         body.len()
     )
     .into_bytes();
