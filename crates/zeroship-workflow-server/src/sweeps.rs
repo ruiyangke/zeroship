@@ -164,7 +164,9 @@ impl MaintenanceLane {
                 )))
             }
         };
-        let settlement = receipt.settlement(&grant).map_err(SweepError::Journal)?;
+        let settlement = receipt
+            .settlement(&grant)
+            .map_err(|refusal| SweepError::Journal(refusal.into()))?;
         authority
             .settle(&self.queue, &settlement)
             .await

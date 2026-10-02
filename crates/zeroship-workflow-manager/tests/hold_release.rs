@@ -27,7 +27,7 @@ use zeroship_core::{
     app_id::AppId,
     workflow_coordination::{Assignment, RunId, WorkerId},
     workflow_deployments::{HoldGeneration, HoldScope},
-    workflow_jobs::{DeploymentId, JobId, JobOperation, JobOutcome, JobSpec, Settlement},
+    workflow_jobs::{DeploymentId, JobId, JobOperation, JobOutcome, JobSpec},
     workflow_schedules::{
         ActivateSchedules, DisableSchedules, RegisterSchedules, ScheduleDescriptor, ScheduleId,
     },
@@ -213,11 +213,7 @@ async fn settle_next(
         let job = grant.delivery().job.clone();
         lane.settle(
             queue,
-            &Settlement {
-                delivery: grant.delivery().clone(),
-                outcome: outcome(&job),
-                successors: vec![],
-            },
+            &support::settlement_from(grant.delivery().clone(), outcome(&job)),
         )
         .await
         .unwrap();
@@ -229,11 +225,7 @@ async fn settle_next(
     queue
         .settle(
             &placed,
-            &Settlement {
-                delivery: grant.delivery().clone(),
-                outcome: outcome(&job),
-                successors: vec![],
-            },
+            &support::settlement_from(grant.delivery().clone(), outcome(&job)),
         )
         .await
         .unwrap();

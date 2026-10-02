@@ -59,11 +59,7 @@ async fn prelimit_barriers(fixture: &Fixture) {
     host.queue
         .settle(
             &authority,
-            &Settlement {
-                delivery: recovered,
-                outcome: JobOutcome::Completed {},
-                successors: vec![],
-            },
+            &support::settlement_from(recovered, JobOutcome::Completed {}),
         )
         .await
         .unwrap();
@@ -88,22 +84,14 @@ async fn prelimit_barriers(fixture: &Fixture) {
     host.queue
         .settle(
             &authority,
-            &Settlement {
-                delivery: delivered,
-                outcome: JobOutcome::Completed {},
-                successors: vec![],
-            },
+            &support::settlement_from(delivered, JobOutcome::Completed {}),
         )
         .await
         .unwrap();
     nothing_deliverable(&host, &authority).await;
-    let ack = Settlement {
-        delivery: first_delivery,
-        outcome: JobOutcome::Management {
+    let ack = support::settlement_from(first_delivery, JobOutcome::Management {
             outcome: ManagementOutcome::Conflict {},
-        },
-        successors: vec![],
-    };
+        });
     host.queue.settle(&authority, &ack).await.unwrap();
     let second_delivery = claim_sweep(&host, &authority)
         .await
@@ -121,13 +109,9 @@ async fn prelimit_barriers(fixture: &Fixture) {
     host.queue
         .settle(
             &authority,
-            &Settlement {
-                delivery: second_delivery,
-                outcome: JobOutcome::Management {
+            &support::settlement_from(second_delivery, JobOutcome::Management {
                     outcome: ManagementOutcome::Denied {},
-                },
-                successors: vec![],
-            },
+                }),
         )
         .await
         .unwrap();
@@ -307,14 +291,9 @@ async fn settlement_authority(fixture: &Fixture) {
         .unwrap()
         .delivery()
         .clone();
-    let successor = ordinary(&app);
-    let settlement = Settlement {
-        delivery,
-        outcome: JobOutcome::Management {
+    let settlement = support::settlement_from(delivery, JobOutcome::Management {
             outcome: ManagementOutcome::NotFound {},
-        },
-        successors: vec![successor],
-    };
+        });
     let before = snapshot(&host).await;
     let checks = Cell::new(0);
     let refused = host
@@ -343,7 +322,7 @@ async fn settlement_authority(fixture: &Fixture) {
 async fn replay_authority(
     host: &Host,
     authority: &Assignment,
-    settlement: &Settlement,
+    settlement: &JournalSettlement,
     receipt: &zeroship_core::workflow_jobs::SettlementReceipt,
 ) {
     let before = snapshot(host).await;
@@ -371,13 +350,13 @@ async fn replay_authority(
     let row = single(
         &host.database,
         "management",
-        value!({"id":settlement.delivery.job.id.as_str()}),
+        value!({"id":settlement.delivery().job.id.as_str()}),
     )
     .await;
     patch(
         &host.database,
         "management",
-        settlement.delivery.job.id.as_str(),
+        settlement.delivery().job.id.as_str(),
         value!({"outcome":null}),
     )
     .await;
@@ -404,7 +383,7 @@ async fn replay_authority(
     patch(
         &host.database,
         "management",
-        settlement.delivery.job.id.as_str(),
+        settlement.delivery().job.id.as_str(),
         value!({"outcome":row["outcome"]}),
     )
     .await;

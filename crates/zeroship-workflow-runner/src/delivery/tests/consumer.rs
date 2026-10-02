@@ -116,14 +116,16 @@ impl JobTransport for Queue {
     }
     async fn settle(
         &self,
-        settlement: &Settlement,
+        journal: &AppWorkflows,
+        lease: &Lease,
     ) -> Result<SettlementReceipt, WorkflowServiceError> {
+        let settlement = committed_settlement(journal, lease).await?;
         self.events.send(Event::Settled).unwrap();
         Ok(SettlementReceipt {
-            job_id: settlement.delivery.job.id.clone(),
-            app_id: settlement.delivery.job.app_id.clone(),
-            attempt: settlement.delivery.attempt,
-            outcome: settlement.outcome.clone(),
+            job_id: settlement.delivery().job.id.clone(),
+            app_id: settlement.delivery().job.app_id.clone(),
+            attempt: settlement.delivery().attempt,
+            outcome: settlement.outcome().clone(),
         })
     }
     async fn complete(
@@ -136,9 +138,8 @@ impl JobTransport for Queue {
     ) -> Result<Completed, WorkflowServiceError> {
         assert!(confirmed.is_empty(), "an in-process store confirms its own uploads");
         let receipt = journal.complete_job(task, lease, execution).await?;
-        let settlement = receipt.settlement(lease)?;
         Ok(Completed {
-            settlement: JobTransport::settle(self, &settlement).await?,
+            settlement: JobTransport::settle(self, journal, lease).await?,
             receipt,
         })
     }
@@ -715,7 +716,7 @@ struct NativeManager {
     worker: WorkerId,
     scope: AssignedScope,
     lose_ack: Cell<bool>,
-    requests: RefCell<Vec<Settlement>>,
+    requests: RefCell<Vec<JournalSettlement>>,
     settled: flume::Sender<()>,
     completion: flume::Receiver<()>,
 }
@@ -924,8 +925,10 @@ impl JobTransport for NativeManager {
     }
     async fn settle(
         &self,
-        request: &Settlement,
+        journal: &AppWorkflows,
+        lease: &Self::Lease,
     ) -> Result<SettlementReceipt, WorkflowServiceError> {
+        let request = &committed_settlement(journal, lease).await?;
         self.requests.borrow_mut().push(request.clone());
         let receipt = self
             .coordinator
@@ -948,9 +951,8 @@ impl JobTransport for NativeManager {
     ) -> Result<Completed, WorkflowServiceError> {
         assert!(confirmed.is_empty(), "an in-process store confirms its own uploads");
         let receipt = journal.complete_job(task, lease, execution).await?;
-        let settlement = receipt.settlement(lease)?;
         Ok(Completed {
-            settlement: JobTransport::settle(self, &settlement).await?,
+            settlement: JobTransport::settle(self, journal, lease).await?,
             receipt,
         })
     }
@@ -1089,8 +1091,7 @@ async fn manager_collect_duty_settles_without_publishing_or_executing_creator_wo
     let requests = manager.requests.borrow();
     assert_eq!(requests.len(), 2);
     assert_eq!(requests[0], requests[1]);
-    assert_eq!(requests[0].delivery.job, collect);
-    assert!(requests[0].successors.is_empty());
+    assert_eq!(requests[0].delivery().job, collect);
 }
 
 #[compio::test]
@@ -1147,7 +1148,7 @@ async fn manager_delivers_committed_fanout_publication_without_executor() {
     let requests = manager.requests.borrow();
     assert_eq!(requests.len(), 2);
     assert_eq!(requests[0], requests[1]);
-    assert_eq!(requests[0].delivery.job, fanout);
+    assert_eq!(requests[0].delivery().job, fanout);
 }
 
 #[compio::test]
@@ -1207,8 +1208,7 @@ async fn manager_delivers_committed_propagation_page_without_executor() {
     let requests = manager.requests.borrow();
     assert_eq!(requests.len(), 2);
     assert_eq!(requests[0], requests[1]);
-    assert_eq!(requests[0].delivery.job, page);
-    assert!(requests[0].successors.is_empty());
+    assert_eq!(requests[0].delivery().job, page);
 }
 
 #[compio::test]
@@ -1290,8 +1290,8 @@ async fn manager_reconciliation_publishes_creator_work_before_the_consumer_execu
     let requests = manager.requests.borrow();
     assert_eq!(requests.len(), 3);
     assert_eq!(requests[0], requests[1]);
-    assert_eq!(requests[0].delivery.job.id, reconciliation.id);
-    assert_eq!(requests[2].delivery.job.id, fixture.job.id);
+    assert_eq!(requests[0].delivery().job.id, reconciliation.id);
+    assert_eq!(requests[2].delivery().job.id, fixture.job.id);
 }
 
 /// The platform policy source composed beside the native manager.
@@ -1358,7 +1358,7 @@ impl NativeManager {
             .ingress_epoch
     }
 
-    async fn settle_directly(&self, settlement: &Settlement) -> SettlementReceipt {
+    async fn settle_directly(&self, settlement: &JournalSettlement) -> SettlementReceipt {
         self.coordinator
             .settle_job(&self.worker, settlement, || async { Ok(self.worker.clone()) })
             .await
@@ -1575,9 +1575,9 @@ async fn the_lane_closes_and_retires_once_after_lost_ack_and_redelivery() {
         let requests = manager.requests.borrow();
         assert_eq!(requests.len(), 2, "the lost acknowledgement was retried");
         assert_eq!(requests[0], requests[1]);
-        assert_eq!(requests[0].delivery.job, close);
-        assert_eq!(requests[0].delivery.attempt.get(), 2);
-        assert_eq!(requests[0].outcome, committed.outcome);
+        assert_eq!(requests[0].delivery().job, close);
+        assert_eq!(requests[0].delivery().attempt.get(), 2);
+        assert_eq!(*requests[0].outcome(), committed.outcome);
     }
     assert_eq!(fixture.probe.starts.get(), 0, "closure runs no app code");
     assert_eq!(
@@ -1815,6 +1815,5 @@ async fn retention_release_duty_dispatches_to_the_creator_hold_release() {
     let requests = manager.requests.borrow();
     assert_eq!(requests.len(), 2, "the lost acknowledgement was retried");
     assert_eq!(requests[0], requests[1]);
-    assert_eq!(requests[0].delivery.job, job);
-    assert!(requests[0].successors.is_empty());
+    assert_eq!(requests[0].delivery().job, job);
 }

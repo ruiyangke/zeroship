@@ -20,7 +20,9 @@ use zeroship_core::{
     service_peers::{service_issuer, CONTROL_SERVICE_NAME, WORKER_SERVICE_NAME},
     typed_id,
     workflow_coordination::*,
-    workflow_jobs::{JobOperation, JobOutcome, ManagementCommand, Settlement},
+    workflow_jobs::{
+        JobOperation, JobOutcome, JobReceipt, JournalSettlement, ManagementCommand,
+    },
     workflow_policy::AppPolicy,
 };
 use zeroship_workflow::WorkflowServiceError;
@@ -526,13 +528,16 @@ async fn management_is_durable_bounded_typed_and_assignment_scoped() {
     let outcome = ManagementOutcome::Applied {
         state: RunState::Paused,
     };
-    let settlement = Settlement {
-        delivery: grant.delivery().clone(),
-        outcome: JobOutcome::Management {
-            outcome: outcome.clone(),
+    let settlement = JournalSettlement::from_receipt(
+        &JobReceipt {
+            job: grant.delivery().job.clone(),
+            outcome: JobOutcome::Management {
+                outcome: outcome.clone(),
+            },
         },
-        successors: vec![],
-    };
+        grant.delivery(),
+    )
+    .unwrap();
     let foreign_worker = WorkerId::mint();
     assert_eq!(
         a.manager
@@ -571,18 +576,32 @@ async fn management_is_durable_bounded_typed_and_assignment_scoped() {
             .unwrap(),
         Some(management_receipt)
     );
-    let mut conflicting = settlement.clone();
-    conflicting.outcome = JobOutcome::Management {
-        outcome: ManagementOutcome::NotFound {},
-    };
+    let conflicting = JournalSettlement::from_receipt(
+        &JobReceipt {
+            job: grant.delivery().job.clone(),
+            outcome: JobOutcome::Management {
+                outcome: ManagementOutcome::NotFound {},
+            },
+        },
+        grant.delivery(),
+    )
+    .unwrap();
     assert_eq!(
         b.manager
             .settle_job(&worker, &conflicting, || async { Ok(worker.clone()) })
             .await,
         Err(Error::Conflict)
     );
-    let mut foreign = settlement.clone();
-    foreign.delivery.job.app_id = AppId::mint();
+    let mut foreign_delivery = grant.delivery().clone();
+    foreign_delivery.job.app_id = AppId::mint();
+    let foreign = JournalSettlement::from_receipt(
+        &JobReceipt {
+            job: foreign_delivery.job.clone(),
+            outcome: settlement.outcome().clone(),
+        },
+        &foreign_delivery,
+    )
+    .unwrap();
     assert_eq!(
         a.manager
             .settle_job(&worker, &foreign, || async { Ok(worker.clone()) })

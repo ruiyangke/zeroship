@@ -49,12 +49,6 @@ async fn fanout_lost_ack_replays_without_executor_or_storage() {
     assert_eq!(fixture.metadata.renewals.get(), 0);
     assert!(!super::collection::has_task(&fixture).await);
     assert_eq!(fixture.app.pending_jobs(None, 100).await.unwrap(), pending);
-    assert!(fixture
-        .metadata
-        .requests
-        .borrow()
-        .iter()
-        .all(|request| request.successors.is_empty()));
 }
 
 #[compio::test]

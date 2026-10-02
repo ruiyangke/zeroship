@@ -11,7 +11,7 @@ use zeroship_core::{
     },
     workflow_jobs::{
         BroadcastId, Delivery, DeliveryLease, DeploymentId, JobId, JobOperation, JobOutcome,
-        JobSpec, ManagementCommand, PropagationId, Settlement, SettlementReceipt, SubmitJob,
+        JobReceipt, JobSpec, ManagementCommand, PropagationId, SettlementReceipt, SubmitJob,
     },
     workflow_schedules::ScheduleId,
 };
@@ -178,35 +178,36 @@ fn management_result(command: &ManagementCommand) -> ManagementOutcome {
     }
 }
 
-fn settlement(operation: JobOperation) -> Settlement {
-    let outcome = match &operation {
+fn outcome_for(operation: &JobOperation) -> JobOutcome {
+    match operation {
         JobOperation::Management { command, .. } => JobOutcome::Management {
             outcome: management_result(command),
         },
         JobOperation::Close { .. } => JobOutcome::Closed { drained: true },
         _ => JobOutcome::Waiting {},
-    };
-    let job = JobSpec {
-        id: JobId::mint(),
-        app_id: AppId::mint(),
-        operation,
-        available_at: 0.try_into().unwrap(),
-    };
-    let successor = JobSpec {
-        id: JobId::mint(),
-        available_at: 321.try_into().unwrap(),
-        ..job.clone()
-    };
-    Settlement {
-        delivery: Delivery {
-            job,
-            worker_id: WorkerId::mint(),
-            assignment_revision: 2.try_into().unwrap(),
-            attempt: 3.try_into().unwrap(),
-            deadline: 456.try_into().unwrap(),
+    }
+}
+
+fn delivery(operation: JobOperation) -> Delivery {
+    Delivery {
+        job: JobSpec {
+            id: JobId::mint(),
+            app_id: AppId::mint(),
+            operation,
+            available_at: 0.try_into().unwrap(),
         },
-        outcome,
-        successors: vec![successor],
+        worker_id: WorkerId::mint(),
+        assignment_revision: 2.try_into().unwrap(),
+        attempt: 3.try_into().unwrap(),
+        deadline: 456.try_into().unwrap(),
+    }
+}
+
+fn receipt(operation: JobOperation) -> JobReceipt {
+    let delivery = delivery(operation);
+    JobReceipt {
+        job: delivery.job.clone(),
+        outcome: outcome_for(&delivery.job.operation),
     }
 }
 
@@ -339,14 +340,14 @@ fn outcome_objects_preserve_closed_management_results_and_operation_families() {
                 "{operation:?}: {outcome:?}"
             );
             if expected {
-                let mut command = settlement(operation);
+                let mut command = receipt(operation);
                 command.outcome = outcome.clone();
                 let encoded = round_trip(&command);
                 assert_eq!(encoded["outcome"], wire);
                 let receipt = SettlementReceipt {
-                    app_id: command.delivery.job.app_id,
-                    job_id: command.delivery.job.id,
-                    attempt: command.delivery.attempt,
+                    app_id: command.job.app_id,
+                    job_id: command.job.id,
+                    attempt: 3.try_into().unwrap(),
                     outcome: outcome.clone(),
                 };
                 assert_eq!(round_trip(&receipt)["outcome"], wire);
@@ -471,11 +472,11 @@ fn management_outcomes_pair_with_the_command_that_asked_for_them() {
 #[test]
 fn outcome_objects_reject_private_data_missing_fields_and_secondary_results() {
     for (outcome, wire) in outcomes() {
-        let command = settlement(JobOperation::Reconcile {});
+        let command = receipt(JobOperation::Reconcile {});
         let receipt = SettlementReceipt {
-            app_id: command.delivery.job.app_id.clone(),
-            job_id: command.delivery.job.id.clone(),
-            attempt: command.delivery.attempt,
+            app_id: command.job.app_id.clone(),
+            job_id: command.job.id.clone(),
+            attempt: 3.try_into().unwrap(),
             outcome: outcome.clone(),
         };
         let mut paths = vec![""];
@@ -502,7 +503,7 @@ fn outcome_objects_reject_private_data_missing_fields_and_secondary_results() {
                 refuses::<JobOutcome>(invalid.clone());
                 let mut invalid_command = json!(command);
                 invalid_command["outcome"] = invalid.clone();
-                refuses::<Settlement>(invalid_command);
+                refuses::<JobReceipt>(invalid_command);
                 let mut invalid_receipt = json!(receipt);
                 invalid_receipt["outcome"] = invalid;
                 refuses::<SettlementReceipt>(invalid_receipt);
@@ -524,7 +525,7 @@ fn outcome_objects_reject_private_data_missing_fields_and_secondary_results() {
         refuses::<SettlementReceipt>(secondary);
         let mut secondary = json!(command);
         secondary["managementOutcome"] = json!({"kind":"denied"});
-        refuses::<Settlement>(secondary);
+        refuses::<JobReceipt>(secondary);
         if !matches!(outcome, JobOutcome::Management { .. }) {
             let mut foreign = wire;
             foreign["outcome"] = json!({"kind":"denied"});
@@ -549,7 +550,7 @@ fn executable_prerequisites_belong_only_to_operations_that_require_code() {
     let mut executable = false;
     let mut journal_only = false;
     for (operation, expected) in operations() {
-        let job = settlement(operation).delivery.job;
+        let job = delivery(operation).job;
         let wire = round_trip(&job);
         assert!(wire.get("deploymentId").is_none());
         let expected_deployment = expected
@@ -710,9 +711,8 @@ fn restart_policy_is_normalized_before_resolving_the_executable_prerequisite() {
 }
 
 #[test]
-fn delivery_and_settlement_preserve_logical_and_attempt_identities() {
-    let settlement = settlement(JobOperation::Collect {});
-    let delivery = &settlement.delivery;
+fn delivery_and_receipt_preserve_logical_and_attempt_identities() {
+    let delivery = delivery(JobOperation::Collect {});
     let job = &delivery.job;
     let expected_job = json!({
         "id":job.id,"appId":job.app_id,
@@ -723,45 +723,30 @@ fn delivery_and_settlement_preserve_logical_and_attempt_identities() {
         "job":expected_job,"workerId":delivery.worker_id,
         "assignmentRevision":2,"attempt":3,"deadline":456,
     });
-    assert_eq!(round_trip(delivery), expected_delivery);
-    let successor = &settlement.successors[0];
-    assert_ne!(successor.id, job.id);
-    assert_eq!(
-        round_trip(&settlement),
-        json!({
-            "delivery":expected_delivery,"outcome":{"kind":"waiting"},
-            "successors":[{
-                "id":successor.id,"appId":job.app_id,
-                "operation":{"kind":"collect"},"availableAt":321,
-            }],
-        })
-    );
+    assert_eq!(round_trip(&delivery), expected_delivery);
+    // The queue receipt names the logical job and the attempt the queue counted,
+    // never a delivery envelope.
     let receipt = SettlementReceipt {
         job_id: job.id.clone(),
         app_id: job.app_id.clone(),
         attempt: delivery.attempt,
-        outcome: settlement.outcome,
+        outcome: JobOutcome::Waiting {},
     };
     assert_eq!(
         round_trip(&receipt),
         json!({"jobId":job.id,"appId":job.app_id,"attempt":3,"outcome":{"kind":"waiting"}})
     );
-    round_trip(&Settlement {
-        successors: Vec::new(),
-        outcome: JobOutcome::Completed {},
-        ..settlement
-    });
 }
 
 #[test]
 fn worker_publication_and_lease_replies_are_closed_and_carry_no_caller_expiry() {
-    let value = settlement(JobOperation::Reconcile {});
+    let value = delivery(JobOperation::Reconcile {});
     let request = SubmitJob {
         scope: AssignedScope {
-            app_id: value.delivery.job.app_id.clone(),
-            assignment_revision: value.delivery.assignment_revision,
+            app_id: value.job.app_id.clone(),
+            assignment_revision: value.assignment_revision,
         },
-        job: value.delivery.job.clone(),
+        job: value.job.clone(),
     };
     let wire = round_trip(&request);
     assert_eq!(
@@ -783,7 +768,7 @@ fn worker_publication_and_lease_replies_are_closed_and_carry_no_caller_expiry() 
         }
     }
     let lease = DeliveryLease {
-        delivery: value.delivery,
+        delivery: value,
         remaining_ms: std::num::NonZeroU64::new(789).unwrap(),
     };
     let wire = round_trip(&lease);
@@ -813,17 +798,9 @@ fn worker_publication_and_lease_replies_are_closed_and_carry_no_caller_expiry() 
 #[test]
 fn customer_data_is_rejected_at_every_message_and_operation_boundary() {
     for (operation, _) in operations() {
-        let value = settlement(operation);
+        let value = receipt(operation);
         let wire = round_trip(&value);
-        for path in [
-            "",
-            "/outcome",
-            "/delivery",
-            "/delivery/job",
-            "/delivery/job/operation",
-            "/successors/0",
-            "/successors/0/operation",
-        ] {
+        for path in ["", "/outcome", "/job", "/job/operation"] {
             for field in [
                 "input",
                 "history",
@@ -841,7 +818,7 @@ fn customer_data_is_rejected_at_every_message_and_operation_boundary() {
                     .as_object_mut()
                     .unwrap()
                     .insert(field.into(), json!({"private":"customer-data"}));
-                refuses::<Settlement>(injected);
+                refuses::<JobReceipt>(injected);
             }
         }
     }
@@ -903,27 +880,25 @@ fn job_and_deployment_ids_refuse_other_entities_and_malformed_wire_values() {
 #[test]
 fn nested_identifiers_cannot_be_replaced_with_other_entity_types() {
     for (operation, _) in operations() {
-        let wire = round_trip(&settlement(operation));
+        let wire = round_trip(&receipt(operation));
         for (path, foreign) in [
-            ("/delivery/job/id", json!(DeploymentId::mint())),
-            ("/delivery/job/operation/deploymentId", json!(JobId::mint())),
+            ("/job/id", json!(DeploymentId::mint())),
+            ("/job/operation/deploymentId", json!(JobId::mint())),
             (
-                "/delivery/job/operation/command/deploymentId",
+                "/job/operation/command/deploymentId",
                 json!(JobId::mint()),
             ),
-            ("/delivery/job/appId", json!(WorkerId::mint())),
-            ("/delivery/workerId", json!(AppId::mint())),
-            ("/delivery/job/operation/runId", json!(RequestId::mint())),
-            ("/delivery/job/operation/requestId", json!(RunId::mint())),
-            ("/delivery/job/operation/scheduleId", json!(RunId::mint())),
-            ("/successors/0/id", json!(DeploymentId::mint())),
+            ("/job/appId", json!(WorkerId::mint())),
+            ("/job/operation/runId", json!(RequestId::mint())),
+            ("/job/operation/requestId", json!(RunId::mint())),
+            ("/job/operation/scheduleId", json!(RunId::mint())),
         ] {
             if wire.pointer(path).is_none() {
                 continue;
             }
             let mut invalid = wire.clone();
             *invalid.pointer_mut(path).unwrap() = foreign;
-            refuses::<Settlement>(invalid);
+            refuses::<JobReceipt>(invalid);
         }
     }
 }
@@ -936,12 +911,11 @@ fn counters_and_deadlines_enforce_native_ranges_on_the_wire() {
         generation: 0,
         revision: 1.try_into().unwrap(),
     };
-    let wire = round_trip(&settlement(operation));
+    let wire = round_trip(&delivery(operation));
     for path in [
-        "/delivery/assignmentRevision",
-        "/delivery/attempt",
-        "/delivery/job/operation/revision",
-        "/successors/0/operation/revision",
+        "/assignmentRevision",
+        "/attempt",
+        "/job/operation/revision",
     ] {
         for bad in [
             json!(0),
@@ -953,11 +927,11 @@ fn counters_and_deadlines_enforce_native_ranges_on_the_wire() {
         ] {
             let mut invalid = wire.clone();
             *invalid.pointer_mut(path).unwrap() = bad;
-            refuses::<Settlement>(invalid);
+            refuses::<Delivery>(invalid);
         }
         let mut maximum = wire.clone();
         *maximum.pointer_mut(path).unwrap() = json!(i64::MAX);
-        round_trip(&serde_json::from_value::<Settlement>(maximum).unwrap());
+        round_trip(&serde_json::from_value::<Delivery>(maximum).unwrap());
     }
     for bad in [
         json!(-1),
@@ -967,17 +941,13 @@ fn counters_and_deadlines_enforce_native_ranges_on_the_wire() {
         Value::Null,
     ] {
         let mut invalid = wire.clone();
-        invalid["delivery"]["job"]["operation"]["generation"] = bad;
-        refuses::<Settlement>(invalid);
+        invalid["job"]["operation"]["generation"] = bad;
+        refuses::<Delivery>(invalid);
     }
     let mut maximum = wire.clone();
-    maximum["delivery"]["job"]["operation"]["generation"] = json!(u32::MAX);
-    round_trip(&serde_json::from_value::<Settlement>(maximum).unwrap());
-    for path in [
-        "/delivery/deadline",
-        "/delivery/job/availableAt",
-        "/successors/0/availableAt",
-    ] {
+    maximum["job"]["operation"]["generation"] = json!(u32::MAX);
+    round_trip(&serde_json::from_value::<Delivery>(maximum).unwrap());
+    for path in ["/deadline", "/job/availableAt"] {
         for bad in [
             json!(-1),
             json!(u64::MAX),
@@ -987,12 +957,12 @@ fn counters_and_deadlines_enforce_native_ranges_on_the_wire() {
         ] {
             let mut invalid = wire.clone();
             *invalid.pointer_mut(path).unwrap() = bad;
-            refuses::<Settlement>(invalid);
+            refuses::<Delivery>(invalid);
         }
         for valid in [0, i64::MAX] {
             let mut boundary = wire.clone();
             *boundary.pointer_mut(path).unwrap() = json!(valid);
-            round_trip(&serde_json::from_value::<Settlement>(boundary).unwrap());
+            round_trip(&serde_json::from_value::<Delivery>(boundary).unwrap());
         }
     }
 }
@@ -1083,8 +1053,8 @@ fn workflow_operations_require_native_revisions_and_cron_identity() {
 fn missing_fields_and_unknown_operations_or_outcomes_are_rejected() {
     for (operation, _) in operations() {
         requires_every_key(
-            &settlement(operation),
-            &["", "/delivery", "/delivery/job", "/delivery/job/operation"],
+            &receipt(operation),
+            &["", "/outcome", "/job", "/job/operation"],
         );
     }
     let app = AppId::mint();
@@ -1125,7 +1095,7 @@ fn missing_fields_and_unknown_operations_or_outcomes_are_rejected() {
             &["", "/outcome"],
         );
     }
-    let wire = round_trip(&settlement(JobOperation::Reconcile {}));
+    let wire = round_trip(&receipt(JobOperation::Reconcile {}));
     for operation in [
         json!({"kind":"execute","body":{}}),
         json!({"kind":"Collect"}),
@@ -1133,8 +1103,8 @@ fn missing_fields_and_unknown_operations_or_outcomes_are_rejected() {
         Value::Null,
     ] {
         let mut invalid = wire.clone();
-        invalid["delivery"]["job"]["operation"] = operation;
-        refuses::<Settlement>(invalid);
+        invalid["job"]["operation"] = operation;
+        refuses::<JobReceipt>(invalid);
     }
     for outcome in [
         json!("completed"),
@@ -1153,13 +1123,13 @@ fn missing_fields_and_unknown_operations_or_outcomes_are_rejected() {
     ] {
         let mut invalid = wire.clone();
         invalid["outcome"] = outcome.clone();
-        refuses::<Settlement>(invalid);
+        refuses::<JobReceipt>(invalid);
         refuses::<JobOutcome>(outcome);
     }
     for successors in [Value::Null, json!({}), json!("pending")] {
         let mut invalid = wire.clone();
         invalid["successors"] = successors;
-        refuses::<Settlement>(invalid);
+        refuses::<JobReceipt>(invalid);
     }
 }
 
@@ -1337,7 +1307,7 @@ fn only_intent_producing_operations_can_re_establish_responsibility() {
             operation,
             JobOperation::Close { .. } | JobOperation::Reconcile {} | JobOperation::Collect {}
         );
-        let job = settlement(operation).delivery.job;
+        let job = delivery(operation).job;
         assert_eq!(job.produces_intents(), expected, "{:?}", job.operation);
         if expected {
             producing += 1;

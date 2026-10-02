@@ -20,7 +20,9 @@ pub(crate) fn to_op_error(error: WorkflowServiceError) -> OpError {
     // the distinction exists.
     if matches!(
         error,
-        WorkflowServiceError::Internal(_) | WorkflowServiceError::Unavailable(_)
+        WorkflowServiceError::Internal(_)
+            | WorkflowServiceError::InvalidResponse(_)
+            | WorkflowServiceError::Unavailable(_)
     ) {
         tracing::warn!(
             code = error.code(),
@@ -30,6 +32,9 @@ pub(crate) fn to_op_error(error: WorkflowServiceError) -> OpError {
     }
     let message = match &error {
         WorkflowServiceError::Internal(_) => "workflow operation failed".to_owned(),
+        WorkflowServiceError::InvalidResponse(_) => {
+            "workflow service answered unexpectedly".to_owned()
+        }
         WorkflowServiceError::Unavailable(_) => "workflow service is unavailable".to_owned(),
         _ => error.to_string(),
     };
@@ -56,6 +61,7 @@ mod tests {
             | E::Unavailable(_)
             | E::Timeout
             | E::IngressFenced(_)
+            | E::InvalidResponse(_)
             | E::Internal(_) => {}
         }
     }
@@ -72,6 +78,7 @@ mod tests {
             E::Unavailable("engine down".into()),
             E::Timeout,
             E::IngressFenced(None),
+            E::InvalidResponse("reply contradicts its request".into()),
             E::Internal("invariant broken".into()),
         ];
         let mut codes: Vec<&str> = all.iter().map(E::code).collect();

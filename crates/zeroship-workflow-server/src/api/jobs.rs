@@ -7,22 +7,23 @@ use zeroship_core::{
     service_identity::{endpoints, ServiceEndpoint},
     workflow_coordination::{
         AssignedScope, PayloadLocation, PayloadReservation, PinnedDeployment, ReadTaskPayload,
-        ReservePayload, ResolveTaskExecutable, WorkerId,
+        ReservePayload, ResolveTaskExecutable, VerifyAssignment, WorkerId,
     },
-    workflow_jobs::{Settlement, SubmitJob},
+    workflow_jobs::{Delivery, JobSpec, JournalSettlement, SubmitJob},
     workflow_policy::MAX_JOURNAL_BYTES_CEILING,
 };
 use zeroship_workflow::{
     service::{
         delivery::{
-            AcceptedJob, ClaimedTask, RenewedTask, ReportedExecution, ReportedGrant, TaskClaim,
+            AcceptedJob, ClaimedTask, JobReceipt, RenewedTask, ReportedExecution, ReportedGrant,
+            TaskClaim,
         },
         AppWorkflows, TaskToken, WorkerIdentity,
     },
     WorkflowServiceError,
 };
 use zeroship_workflow_client::{
-    ClaimedDelivery, JobReceiptQuery, ReleaseDelivery, RenewDelivery, RenewedDelivery, Reported,
+    ClaimedDelivery, JobReceiptQuery, ReleaseDelivery, RenewDelivery, RenewedDelivery,
     SettleDelivery,
 };
 use zeroship_workflow_manager::Error as NativeError;
@@ -83,10 +84,13 @@ pub fn configure(config: &mut web::ServiceConfig) {
 
 /// Bind the app this call acts for to this service's journal.
 ///
-/// THE APP IS NEVER READ FROM THE BODY AS A PLACEMENT. It comes from the
-/// delivery the manager half has already matched against its own queue row under
-/// the credential that verified the request, so this cannot reach a journal for
-/// an app the caller holds no delivery on.
+/// OBSERVING THE APP IS POLICY I/O, SO THIS IS FENCED OFF THE BODY ALONE. Binding
+/// upserts the app's policy ledger row and asks Control for its facts, whose
+/// refusals differ by whether the app exists -- an oracle if any caller could
+/// name any app. Every route therefore proves the caller holds the delivery (or,
+/// for the task routes that carry no delivery, a queue row) for the app against
+/// the queue under the credential that verified the request BEFORE reaching here.
+/// The app selects which journal to ask; it is never itself the authorization.
 async fn journal(state: &SharedState, app: &AppId) -> Result<AppWorkflows, Error> {
     let source = state.policy_source.as_ref().ok_or(Error::Unavailable)?;
     state
@@ -105,7 +109,9 @@ async fn journal(state: &SharedState, app: &AppId) -> Result<AppWorkflows, Error
 fn journal_error(error: WorkflowServiceError) -> Error {
     if matches!(
         error,
-        WorkflowServiceError::Internal(_) | WorkflowServiceError::Unavailable(_)
+        WorkflowServiceError::Internal(_)
+            | WorkflowServiceError::InvalidResponse(_)
+            | WorkflowServiceError::Unavailable(_)
     ) {
         tracing::warn!(
             code = error.code(),
@@ -128,10 +134,12 @@ fn journal_error(error: WorkflowServiceError) -> Error {
         // so the caller may take the same delivery again.
         WorkflowServiceError::Unavailable(_) | WorkflowServiceError::Timeout => Error::Unavailable,
         // Ingress epochs are established by the creator-facing calls, never by a
-        // delivery: nothing on this path carries one to be fenced.
-        WorkflowServiceError::IngressFenced(_) | WorkflowServiceError::Internal(_) => {
-            Error::Unavailable
-        }
+        // delivery: nothing on this path carries one to be fenced. A peer reply
+        // that contradicts its request is likewise a host condition with nothing
+        // the caller can act on.
+        WorkflowServiceError::IngressFenced(_)
+        | WorkflowServiceError::InvalidResponse(_)
+        | WorkflowServiceError::Internal(_) => Error::Unavailable,
     }
 }
 
@@ -148,11 +156,36 @@ async fn authenticate(
     .map_err(|_| Error::Unavailable)?
 }
 
+/// Refuse a body naming a delivery the verified worker was not handed.
+///
+/// THE CREDENTIAL NAMES THE HOLDER; THE BODY ONLY NAMES THE DELIVERY. The journal
+/// looks a task up by the delivery's worker, so a body naming another worker,
+/// with that worker's task token, would otherwise act on that worker's task.
+fn signed_for(actor: &VerifiedWorker, delivery: &Delivery) -> Result<(), Error> {
+    if &delivery.worker_id != actor.id() {
+        return Err(Error::Denied);
+    }
+    Ok(())
+}
+
+/// The journal's receipt for `job`, which the caller has already been proved to
+/// hold.
+async fn journal_receipt(
+    state: &SharedState,
+    job: &JobSpec,
+) -> Result<Option<JobReceipt>, Error> {
+    journal(state, &job.app_id)
+        .await?
+        .job_receipt(job)
+        .await
+        .map_err(journal_error)
+}
+
 /// The queue half of a settlement, whichever half produced its outcome.
 async fn settled(
     state: &SharedState,
     actor: &VerifiedWorker,
-    settlement: &Settlement,
+    settlement: &JournalSettlement,
 ) -> Result<zeroship_core::workflow_jobs::SettlementReceipt, Error> {
     state
         .service
@@ -228,6 +261,19 @@ async fn claim(
         async {
             let actor = authenticate(&request, &state, endpoints::WORKFLOW_JOB_CLAIM).await?;
             let command: AssignedScope = read_json(&request, body).await?;
+            // AUTHORIZE BEFORE ANY POLICY I/O. The delivery ceiling below is
+            // read from the policy source, which observes the app, so placement
+            // is proved here first: a worker the app has not placed is refused
+            // without the app being named to the policy source at all.
+            state
+                .service
+                .manager
+                .verify_assignment(&VerifyAssignment {
+                    app_id: command.app_id.clone(),
+                    worker_id: actor.id().clone(),
+                    assignment_revision: command.assignment_revision,
+                })
+                .await?;
             let granted = state
                 .service
                 .manager
@@ -308,14 +354,25 @@ async fn heartbeat(
     )
 }
 
-/// Settle a delivery, either with an outcome the caller's own journal committed
-/// or by committing the execution it reports and settling what that produced.
+/// Settle a delivery with the outcome the journal decides: by committing the
+/// execution the body reports, or, for a body that reports none, from the
+/// receipt the journal already holds for the job.
 ///
-/// THE JOURNAL COMMITS FIRST for the reported-execution half, because its commit
-/// is what decides the outcome the queue is settled with. A failure between the
-/// halves leaves the journal holding a receipt whose delivery is unsettled, which
-/// the caller recovers by reading that receipt and settling it as the other half
-/// of this endpoint.
+/// THE OUTCOME NEVER COMES FROM THE CALLER, and neither do successors. A holder
+/// reports what its executor produced; the journal's commit decides what that
+/// means for the job, and the queue is settled with that decision and nothing
+/// else. A journal receipt carries no successors, so a settlement publishes none.
+///
+/// THE JOURNAL COMMITS FIRST for an execution, because its commit is what decides
+/// the outcome. A failure between the halves leaves the journal holding a receipt
+/// whose delivery is unsettled, and the holder recovers it by sending the same
+/// delivery again with no execution.
+///
+/// THE QUEUE FENCE COMES FIRST FOR EVERY BODY. Reaching the journal observes the
+/// app's policy, so a caller whose delivery is not the queue's latest for that
+/// job is refused before any journal is asked -- otherwise the refusal would
+/// differ by whether the app exists in Control, and a receipt read several kinds
+/// answer would still take that app's journal lock.
 async fn settle(
     request: web::HttpRequest,
     state: State<SharedState>,
@@ -326,47 +383,46 @@ async fn settle(
         async {
             let actor = authenticate(&request, &state, endpoints::WORKFLOW_JOB_SETTLE).await?;
             let command: SettleDelivery<ReportedExecution> = read_json(&request, body).await?;
-            match command.reported().map_err(|_| Error::Invalid)? {
-                Reported::Outcome(outcome) => {
-                    settled(
-                        &state,
-                        &actor,
-                        &Settlement {
-                            delivery: command.delivery.clone(),
-                            outcome: outcome.clone(),
-                            successors: command.successors.clone(),
-                        },
-                    )
-                    .await
-                }
-                Reported::Execution(reported) => {
-                    let journal = journal(&state, &command.delivery.job.app_id).await?;
-                    let grant = ReportedGrant::resume(
-                        command.delivery.clone(),
-                        reported.grant_ms,
-                        started,
-                    )
+            signed_for(&actor, &command.delivery)?;
+            state
+                .service
+                .manager
+                .queue()
+                .require_latest_delivery(&command.delivery)
+                .await?;
+            let Some(reported) = &command.execution else {
+                let receipt = journal_receipt(&state, &command.delivery.job)
+                    .await?
+                    .ok_or(Error::Conflict)?;
+                let grant = ReportedGrant::resume(command.delivery.clone(), None, started)
                     .map_err(journal_error)?;
-                    let claim =
-                        TaskClaim::resume(reported.task.clone(), command.delivery.clone(), started)
-                            .map_err(journal_error)?;
-                    let receipt = journal
-                        .complete_reported_job(
-                            &claim,
-                            &grant,
-                            reported.execution.clone(),
-                            &reported.confirmed,
-                        )
-                        .await
-                        .map_err(journal_error)?;
-                    // The journal receipt does not cross back. Its two fields are
-                    // the logical job the caller sent and the outcome the
-                    // settlement receipt already carries, so a second copy would
-                    // be a half the caller has nothing to check it against.
-                    let settlement = receipt.settlement(&grant).map_err(journal_error)?;
-                    settled(&state, &actor, &settlement).await
-                }
-            }
+                let settlement = receipt
+                    .settlement(&grant)
+                    .map_err(|refusal| journal_error(refusal.into()))?;
+                return settled(&state, &actor, &settlement).await;
+            };
+            let journal = journal(&state, &command.delivery.job.app_id).await?;
+            let grant = ReportedGrant::resume(command.delivery.clone(), reported.grant_ms, started)
+                .map_err(journal_error)?;
+            let claim = TaskClaim::resume(reported.task.clone(), command.delivery.clone(), started)
+                .map_err(journal_error)?;
+            let receipt = journal
+                .complete_reported_job(
+                    &claim,
+                    &grant,
+                    reported.execution.clone(),
+                    &reported.confirmed,
+                )
+                .await
+                .map_err(journal_error)?;
+            // The journal receipt does not cross back. Its two fields are the
+            // logical job the caller sent and the outcome the settlement receipt
+            // already carries, so a second copy would be a half the caller has
+            // nothing to check it against.
+            let settlement = receipt
+                .settlement(&grant)
+                .map_err(|refusal| journal_error(refusal.into()))?;
+            settled(&state, &actor, &settlement).await
         }
         .await,
     )
@@ -401,6 +457,12 @@ async fn task_payload(
             let token = TaskToken::try_from(command.token).map_err(|_| Error::Unauthenticated)?;
             let worker = WorkerIdentity::new(actor.id().as_str().to_owned())
                 .map_err(|_| Error::Unauthenticated)?;
+            state
+                .service
+                .manager
+                .queue()
+                .require_placement(actor.id(), &command.app_id)
+                .await?;
             let journal = journal(&state, &command.app_id).await?;
             let located: PayloadLocation = journal
                 .service()
@@ -445,6 +507,12 @@ async fn task_executable(
             let token = TaskToken::try_from(command.token).map_err(|_| Error::Unauthenticated)?;
             let worker = WorkerIdentity::new(actor.id().as_str().to_owned())
                 .map_err(|_| Error::Unauthenticated)?;
+            state
+                .service
+                .manager
+                .queue()
+                .require_placement(actor.id(), &command.app_id)
+                .await?;
             let journal = journal(&state, &command.app_id).await?;
             let pinned: PinnedDeployment = journal
                 .service()
@@ -471,6 +539,11 @@ async fn task_executable(
 /// sit leased until its deadline lapsed instead of reopening at once.
 /// `tasks::assign` re-checks deployment availability before the next dispatch, so
 /// the work is not lost and is not replayed against an inadmissible deployment.
+///
+/// AUTHORIZED BY THE TASK TOKEN AND THE CREDENTIAL TOGETHER. The journal finds
+/// the task by the delivery's worker, so the body's worker has to be the one
+/// that signed the request; a token alone would let any worker holding it give
+/// back another worker's task.
 async fn release(
     request: web::HttpRequest,
     state: State<SharedState>,
@@ -479,8 +552,17 @@ async fn release(
     let started = Instant::now();
     respond(
         async {
-            let _actor = authenticate(&request, &state, endpoints::WORKFLOW_JOB_RELEASE).await?;
+            let actor = authenticate(&request, &state, endpoints::WORKFLOW_JOB_RELEASE).await?;
             let command: ReleaseDelivery<ClaimedTask> = read_json(&request, body).await?;
+            signed_for(&actor, &command.delivery)?;
+            // A release reaches the journal only for a delivery the queue
+            // currently holds for the caller, fenced before any policy I/O.
+            state
+                .service
+                .manager
+                .queue()
+                .require_latest_delivery(&command.delivery)
+                .await?;
             let journal = journal(&state, &command.delivery.job.app_id).await?;
             let grant =
                 ReportedGrant::resume(
@@ -502,11 +584,14 @@ async fn release(
 
 /// Read the committed outcome of one logical job.
 ///
-/// ADDRESSED BY THE JOB, and authorized by the app that job names rather than by
-/// a task credential: there is no task to present once an attempt has committed,
-/// which is exactly the case this read exists for. What bounds it is the same
-/// binding every delivery call takes -- the journal of the app the delivery
-/// names -- and `job_receipt` checks the job against that app itself.
+/// ADDRESSED BY THE JOB, and authorized by the queue's record of who holds it
+/// rather than by a task credential: there is no task to present once an attempt
+/// has committed, which is exactly the case this read exists for. The caller has
+/// to be the worker the queue last delivered the job to, and that is proved
+/// BEFORE the journal is asked, so a caller that does not hold the job reaches no
+/// journal at all -- not its answer, and not the app lock several kinds take to
+/// give one. A holder superseded by a later claim is refused as `Conflict`, the
+/// same answer a superseded delivery gets everywhere else.
 ///
 /// ABSENCE IS A FACT, not a refusal: no attempt has committed one yet, so the
 /// reply is a null body rather than an error, and a holder reads it as
@@ -518,13 +603,15 @@ async fn receipt(
 ) -> web::HttpResponse {
     respond(
         async {
-            let _actor = authenticate(&request, &state, endpoints::WORKFLOW_JOB_RECEIPT).await?;
+            let actor = authenticate(&request, &state, endpoints::WORKFLOW_JOB_RECEIPT).await?;
             let command: JobReceiptQuery = read_json(&request, body).await?;
-            let journal = journal(&state, &command.job.app_id).await?;
-            journal
-                .job_receipt(&command.job)
-                .await
-                .map_err(journal_error)
+            state
+                .service
+                .manager
+                .queue()
+                .require_latest_holder(actor.id(), &command.job)
+                .await?;
+            journal_receipt(&state, &command.job).await
         }
         .await,
     )
@@ -555,6 +642,12 @@ async fn task_payload_reserve(
             let token = TaskToken::try_from(command.token).map_err(|_| Error::Unauthenticated)?;
             let worker = WorkerIdentity::new(actor.id().as_str().to_owned())
                 .map_err(|_| Error::Unauthenticated)?;
+            state
+                .service
+                .manager
+                .queue()
+                .require_placement(actor.id(), &command.app_id)
+                .await?;
             let journal = journal(&state, &command.app_id).await?;
             let reserved: PayloadReservation = journal
                 .service()

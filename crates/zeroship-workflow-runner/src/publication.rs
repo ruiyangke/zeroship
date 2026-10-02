@@ -11,7 +11,7 @@ use zeroship_workflow::{
 };
 use zeroship_core::{
     workflow_coordination::AssignedScope,
-    workflow_jobs::{Settlement, SettlementReceipt},
+    workflow_jobs::SettlementReceipt,
 };
 use zeroship_workflow_client::{LeasedJob, WorkerCoordinator};
 
@@ -52,9 +52,10 @@ impl JobTransport for HostTransport {
 
     async fn settle(
         &self,
-        settlement: &Settlement,
+        journal: &Self::Journal,
+        lease: &LeasedJob,
     ) -> Result<SettlementReceipt, WorkflowServiceError> {
-        JobTransport::settle(&self.client, settlement).await
+        JobTransport::settle(&self.client, journal, lease).await
     }
 
     async fn release(

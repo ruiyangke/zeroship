@@ -130,21 +130,12 @@ async fn exercise_journal_job(fixture: &Fixture, queue: &Queue, operation: JobOp
         .heartbeat(&authority, granted.delivery())
         .await
         .unwrap();
-    let successor = JobSpec {
-        id: JobId::mint(),
-        ..spec.clone()
-    };
-    let settlement = Settlement {
-        delivery: renewed.delivery().clone(),
-        outcome: JobOutcome::Completed {},
-        successors: vec![successor.clone()],
-    };
+    let settlement = support::settlement_from(renewed.delivery().clone(), JobOutcome::Completed {});
     let receipt = queue.settle(&authority, &settlement).await.unwrap();
     assert_eq!(
         queue.settle(&authority, &settlement).await.unwrap(),
         receipt
     );
-    finish(queue, &authority, &successor).await;
     assert_eq!(queue.submit(&spec).await.unwrap(), spec);
     assert!(claim_for(queue, &authority, &spec).await.unwrap().is_none());
     assert!(
@@ -205,12 +196,19 @@ async fn journal_commands(fixture: &Fixture, queue: &Queue) {
             JobOutcome::Waiting {},
             JobOutcome::Rejected {},
         ] {
-            let rejected = Settlement {
-                delivery: renewed.delivery().clone(),
-                outcome,
-                successors: vec![job(&app, &DeploymentId::mint())],
-            };
-            super::outcomes::refused(fixture, queue, &authority, &rejected, Error::Invalid).await;
+            // A management job admits only an outcome that answers its command,
+            // so these families cannot become a settlement at all.
+            assert_eq!(
+                zeroship_core::workflow_jobs::JournalSettlement::from_receipt(
+                    &zeroship_core::workflow_jobs::JobReceipt {
+                        job: renewed.delivery().job.clone(),
+                        outcome,
+                    },
+                    renewed.delivery(),
+                )
+                .unwrap_err(),
+                zeroship_core::workflow_jobs::SettlementRefusal::Invalid,
+            );
         }
         // A management result has to answer the command the enqueued job
         // carries, so the settled outcome is read off that command rather than
@@ -230,11 +228,7 @@ async fn journal_commands(fixture: &Fixture, queue: &Queue) {
                 }
             }
         };
-        let settlement = Settlement {
-            delivery: renewed.delivery().clone(),
-            outcome: JobOutcome::Management { outcome: result },
-            successors: vec![],
-        };
+        let settlement = support::settlement_from(renewed.delivery().clone(), JobOutcome::Management { outcome: result });
         let settled = queue.settle(&authority, &settlement).await.unwrap();
         assert_eq!(
             queue.settle(&authority, &settlement).await.unwrap(),
@@ -335,15 +329,15 @@ async fn reject_leased_projection(
     queue: &Queue,
     faults: &FaultClient,
     authority: &Assignment,
-    settlement: &Settlement,
+    settlement: &JournalSettlement,
     projection: Value,
 ) {
-    let spec = &settlement.delivery.job;
+    let spec = &settlement.delivery().job;
     let app = &spec.app_id;
     set_projection(fixture, spec, projection).await;
     let before = rows(fixture, "jobs", value!({"app_id":app.as_str()})).await;
     assert!(matches!(
-        queue.heartbeat(authority, &settlement.delivery).await,
+        queue.heartbeat(authority, settlement.delivery()).await,
         Err(Error::Storage)
     ));
     assert_eq!(
@@ -412,11 +406,7 @@ async fn projection_mismatch(fixture: &Fixture) {
                 .await;
         }
         let grant = claim_for(&queue, &authority, &spec).await.unwrap().unwrap();
-        let settlement = Settlement {
-            delivery: grant.delivery().clone(),
-            outcome: JobOutcome::Completed {},
-            successors: vec![],
-        };
+        let settlement = support::settlement_from(grant.delivery().clone(), JobOutcome::Completed {});
         for projection in wrong {
             reject_leased_projection(
                 fixture,
@@ -602,11 +592,7 @@ async fn provenance_reclamation(fixture: &Fixture) {
     queue
         .settle(
             &authority,
-            &Settlement {
-                delivery: renewed.delivery().clone(),
-                outcome: JobOutcome::Waiting {},
-                successors: vec![],
-            },
+            &support::settlement_from(renewed.delivery().clone(), JobOutcome::Waiting {}),
         )
         .await
         .unwrap();

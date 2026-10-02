@@ -14,7 +14,7 @@ use zeroship_core::{
     service_identity::{endpoints, verify_service_call, ServiceEndpoint},
     service_peers::{ServiceAuth, ServiceKeyring},
     workflow_coordination::{Assignment, RunFailure, AUDIENCE},
-    workflow_jobs::{Settlement, SettlementReceipt},
+    workflow_jobs::SettlementReceipt,
     workflow_policy::{AppPolicy, EstablishIngress, PolicyLease, PolicyLeaseRequest},
 };
 use zeroship_data_orm::connection::ConnectionFactory;
@@ -781,7 +781,11 @@ impl JobTransport for Probe {
     ) -> Result<Renewed<Self::Lease>, WorkflowServiceError> {
         panic!("no delivered job")
     }
-    async fn settle(&self, _: &Settlement) -> Result<SettlementReceipt, WorkflowServiceError> {
+    async fn settle(
+        &self,
+        _: &AppWorkflows,
+        _: &Self::Lease,
+    ) -> Result<SettlementReceipt, WorkflowServiceError> {
         panic!("no delivered job")
     }
     async fn complete(

@@ -25,7 +25,9 @@ use zeroship_core::{
     app_id::AppId,
     workflow_coordination::{AssignedScope, RegisterWorker, Revision, WorkerId, WorkerState},
     workflow_deployments::{HoldGeneration, HoldReceipt, HoldScope, HoldState},
-    workflow_jobs::{Delivery, DeploymentId, JobSpec, Settlement, SettlementReceipt, SubmitJob},
+    workflow_jobs::{
+        Delivery, DeploymentId, JobSpec, JournalSettlement, SettlementReceipt, SubmitJob,
+    },
     workflow_schedules::{ActivateSchedules, RegisterSchedules, ScheduleDescriptor},
 };
 use zeroship_workflow::{
@@ -33,7 +35,9 @@ use zeroship_workflow::{
     service::{delivery::DeliveredTask, publication::JobPublisher, AppWorkflows},
     WorkflowExecution, WorkflowServiceError,
 };
-use zeroship_workflow_runner::delivery::{Claimed, Completed, JobTransport, Renewed};
+use zeroship_workflow_runner::delivery::{
+    committed_settlement, Claimed, Completed, JobTransport, Renewed,
+};
 use zeroship_workflow_manager::{
     capacity::LocalCapacity,
     coordinator::{Coordinator, Options as CoordinatorOptions, Placed},
@@ -733,7 +737,7 @@ impl LocalSweeps {
     /// unavailable manager storage.
     pub async fn settle(
         &self,
-        settlement: &Settlement,
+        settlement: &JournalSettlement,
     ) -> Result<SettlementReceipt, WorkflowServiceError> {
         let (app, settlement) = (self.app.clone(), settlement.clone());
         self.client
@@ -837,30 +841,16 @@ impl JobTransport for LocalTransport {
         Ok(Renewed { lease, renewal })
     }
 
+    /// Settled from this process's own journal, as the service settles a
+    /// delivery that crossed to it: the receipt is read here, not taken from the
+    /// caller.
     async fn settle(
         &self,
-        settlement: &Settlement,
+        journal: &AppWorkflows,
+        lease: &DeliveryGrant,
     ) -> Result<SettlementReceipt, WorkflowServiceError> {
-        let settlement = settlement.clone();
-        let receipt = self
-            .client
-            .call(move |manager| {
-                async move {
-                    manager
-                        .coordinator
-                        .settle_job(&manager.worker, &settlement, || {
-                            ready(Ok(manager.worker.clone()))
-                        })
-                        .await
-                        .map_err(manager_error)
-                }
-                .boxed_local()
-            })
-            .await?;
-        // Settled work may have committed successor intents in the creator
-        // outbox. A full channel already holds a pending wake.
-        let _ = self.settled.try_send(());
-        Ok(receipt)
+        self.settle_queue(committed_settlement(journal, lease).await?)
+            .await
     }
 
     /// Both halves are this process's own journal, asked directly.
@@ -899,9 +889,38 @@ impl JobTransport for LocalTransport {
             .await?;
         let settlement = receipt.settlement(lease)?;
         Ok(Completed {
-            settlement: JobTransport::settle(self, &settlement).await?,
+            settlement: self.settle_queue(settlement).await?,
             receipt,
         })
+    }
+}
+
+impl LocalTransport {
+    /// The queue half every settlement on this host ends in, and the wake it
+    /// owes.
+    async fn settle_queue(
+        &self,
+        settlement: JournalSettlement,
+    ) -> Result<SettlementReceipt, WorkflowServiceError> {
+        let receipt = self
+            .client
+            .call(move |manager| {
+                async move {
+                    manager
+                        .coordinator
+                        .settle_job(&manager.worker, &settlement, || {
+                            ready(Ok(manager.worker.clone()))
+                        })
+                        .await
+                        .map_err(manager_error)
+                }
+                .boxed_local()
+            })
+            .await?;
+        // Settled work may have committed successor intents in the creator
+        // outbox. A full channel already holds a pending wake.
+        let _ = self.settled.try_send(());
+        Ok(receipt)
     }
 }
 

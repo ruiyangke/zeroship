@@ -25,6 +25,8 @@ mod policy_fixture;
 #[path = "support/server_process.rs"]
 mod server_process;
 
+#[path = "http_jobs/authority.rs"]
+mod authority;
 #[path = "http_jobs/fanout.rs"]
 mod fanout;
 #[path = "http_jobs/propagation.rs"]
@@ -54,7 +56,7 @@ use zeroship_core::{
     },
     workflow_jobs::{
         Delivery, DeploymentId, JobId, JobOperation, JobOutcome, JobSpec,
-        ManagementCommand, Settlement, SettlementReceipt, SubmitJob,
+        ManagementCommand, SettlementReceipt, SubmitJob,
     },
     workflow_policy::AppPolicy,
     workflow_schedules::ScheduleId,
@@ -336,6 +338,109 @@ impl Fixture {
             .map(|row| row.get(0))
             .collect()
     }
+
+    async fn job_column(&self, job: &JobSpec, column: &str) -> Option<String> {
+        self.platform
+            .admin
+            .query_one(
+                &format!(
+                    "SELECT {column}::text FROM workflow_manager.jobs WHERE app_id=$1 AND id=$2"
+                ),
+                &[&job.app_id.as_str(), &job.id.as_str()],
+            )
+            .await
+            .unwrap()
+            .get(0)
+    }
+
+    /// An advance job for a run of its own, so its claim hands out a task and its
+    /// execution can complete without another case's run being in the way.
+    async fn fresh_executable(&self) -> JobSpec {
+        let run = journal::seed_run(&self.platform, &self.assignment.app_id).await;
+        JobSpec {
+            id: JobId::mint(),
+            app_id: self.assignment.app_id.clone(),
+            operation: JobOperation::Advance {
+                deployment_id: self.deploy.clone(),
+                run_id: run,
+                generation: 0,
+                revision: 1.try_into().unwrap(),
+            },
+            available_at: 1.try_into().unwrap(),
+        }
+    }
+
+    /// Submit and claim `job` as this fixture's worker, returning the delivery and
+    /// the task the journal handed out under it.
+    async fn held(&self, job: &JobSpec) -> (Delivery, ClaimedTask) {
+        self.submit(job).await;
+        let (delivery, accepted) = self.claimed(job).await;
+        let Some(AcceptedJob::Execute {
+            assignment,
+            remaining_ms,
+        }) = accepted
+        else {
+            panic!("the journal holds this run, so its acceptance hands out a task")
+        };
+        (
+            delivery,
+            ClaimedTask {
+                id: assignment.id.clone(),
+                token: assignment.token.clone(),
+                remaining_ms,
+            },
+        )
+    }
+
+    /// A second enrolled worker, holding no placement and no delivery.
+    async fn other_worker(&self) -> Worker {
+        let worker = Worker::new();
+        enroll(&self.platform, &self.http, &self.server.url, &worker).await;
+        worker
+    }
+
+    async fn post_as<T: Serialize>(
+        &self,
+        worker: &Worker,
+        endpoint: ServiceEndpoint,
+        body: &T,
+    ) -> (StatusCode, Value) {
+        post(
+            &self.http,
+            &self.server.url,
+            endpoint,
+            &worker.assertion(),
+            body,
+        )
+        .await
+    }
+}
+
+/// The settle body that reports an execution: the batch a run that completes
+/// produces, under the task and the creator authority the claim handed out.
+///
+/// Built as JSON rather than through the client's envelope, like every settle
+/// body in this target: what is under test is what the ROUTE does with a body a
+/// worker chose, and a typed envelope only lets a test send what it can express.
+fn executed(delivery: &Delivery, task: &ClaimedTask) -> Value {
+    json!({
+        "delivery": delivery,
+        "execution": ReportedExecution {
+            grant_ms: Some(task.remaining_ms),
+            task: task.clone(),
+            confirmed: Vec::new(),
+            execution: zeroship_workflow::WorkflowExecution::from_runtime_value(
+                json!({"outcomes":[{"kind":"RunCompleted"}]}),
+            )
+            .unwrap(),
+        },
+    })
+}
+
+/// The settle body that reports no execution: the delivery alone, which the
+/// service settles from the receipt its journal holds.
+fn committed(delivery: &Delivery) -> Value {
+    json!({"delivery": delivery})
 }
 
 fn assertion(issuer: &ServiceIssuer, key: &ServiceSigningKey, audience: &str) -> String {
@@ -383,21 +488,13 @@ async fn enroll(platform: &platform::Platform, http: &Client, url: &str, worker:
     assert_eq!(status, StatusCode::OK, "{body}");
 }
 
-fn settlement(delivery: &Delivery, successors: Vec<JobSpec>) -> Settlement {
-    Settlement {
-        delivery: delivery.clone(),
-        outcome: JobOutcome::Completed {},
-        successors,
-    }
-}
-
 #[ntex::test]
 async fn delivery_and_receipts_remain_scoped_across_process_restart_and_placement_expiry() {
     let mut fixture = Fixture::new().await;
-    let job = fixture.job();
+    let job = fixture.fresh_executable().await;
+    // `held` submits it again: the second submission of one job is idempotent.
     fixture.submit(&job).await;
-    fixture.submit(&job).await;
-    let original = fixture.claim(&job).await;
+    let (original, task) = fixture.held(&job).await;
     assert_eq!(original.attempt.get(), 1);
     assert_eq!(
         fixture
@@ -418,9 +515,10 @@ async fn delivery_and_receipts_remain_scoped_across_process_restart_and_placemen
     assert_eq!(renewed.delivery.job, original.job);
     assert_eq!(renewed.delivery.attempt, original.attempt);
     assert!(renewed.delivery.deadline >= original.deadline);
-    let successor = fixture.job();
-    let command = settlement(&original, vec![successor.clone()]);
-    let (status, body) = fixture.post(endpoints::WORKFLOW_JOB_SETTLE, &command).await;
+    let execution = executed(&original, &task);
+    let (status, body) = fixture
+        .post(endpoints::WORKFLOW_JOB_SETTLE, &execution)
+        .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let receipt: SettlementReceipt = serde_json::from_value(body.clone()).unwrap();
     assert_eq!(body["outcome"], json!({"kind":"completed"}));
@@ -428,21 +526,24 @@ async fn delivery_and_receipts_remain_scoped_across_process_restart_and_placemen
     assert_eq!(receipt.app_id, job.app_id);
     assert_eq!(receipt.attempt, original.attempt);
     assert_eq!(receipt.outcome, JobOutcome::Completed {});
-    assert_foreign_worker_denied(&fixture, &command).await;
-    assert_receipt_replay(&mut fixture, &command, &successor, body).await;
+    assert_foreign_worker_denied(&fixture, &original).await;
+    assert_receipt_replay(&mut fixture, &original, &execution, body).await;
 }
 
+/// A settled delivery's exact retry replays its receipt across a restart and
+/// after its placement and registration have expired, and stops once the
+/// worker's enrollment does. Both retries a holder can send replay: the delivery
+/// alone, and the same execution again, which the journal answers from the task
+/// it already completed rather than committing twice.
 async fn assert_receipt_replay(
     fixture: &mut Fixture,
-    command: &Settlement,
-    successor: &JobSpec,
+    delivery: &Delivery,
+    execution: &Value,
     body: Value,
 ) {
-    let job = &command.delivery.job;
-    let before_job = fixture.job_snapshot(job).await;
-    let before_successor = fixture.job_snapshot(successor).await;
-    assert_eq!(before_job.len(), 1);
-    assert_eq!(before_successor.len(), 1);
+    let job = &delivery.job;
+    let before = fixture.job_snapshot(job).await;
+    assert_eq!(before.len(), 1);
     fixture.server.restart(&fixture.http).await;
     fixture
         .platform
@@ -462,23 +563,14 @@ async fn assert_receipt_replay(
         )
         .await
         .unwrap();
-    assert_eq!(
-        fixture.post(endpoints::WORKFLOW_JOB_SETTLE, command).await,
-        (StatusCode::OK, body)
-    );
-    assert_eq!(fixture.job_snapshot(job).await, before_job);
-    assert_eq!(fixture.job_snapshot(successor).await, before_successor);
-    let changed = Settlement {
-        outcome: JobOutcome::Rejected {},
-        ..command.clone()
-    };
-    assert_eq!(
-        fixture
-            .post(endpoints::WORKFLOW_JOB_SETTLE, &changed)
-            .await
-            .0,
-        StatusCode::CONFLICT
-    );
+    for retry in [&committed(delivery), execution] {
+        assert_eq!(
+            fixture.post(endpoints::WORKFLOW_JOB_SETTLE, retry).await,
+            (StatusCode::OK, body.clone()),
+            "{retry}"
+        );
+        assert_eq!(fixture.job_snapshot(job).await, before);
+    }
     assert_eq!(
         fixture
             .post(endpoints::WORKFLOW_JOB_CLAIM, &fixture.scope())
@@ -497,14 +589,14 @@ async fn assert_receipt_replay(
         .unwrap();
     assert_eq!(
         fixture
-            .post(endpoints::WORKFLOW_JOB_SETTLE, command)
+            .post(endpoints::WORKFLOW_JOB_SETTLE, &committed(delivery))
             .await
             .0,
         StatusCode::UNAUTHORIZED
     );
 }
 
-async fn assert_foreign_worker_denied(fixture: &Fixture, command: &Settlement) {
+async fn assert_foreign_worker_denied(fixture: &Fixture, delivery: &Delivery) {
     let foreign = Worker::new();
     enroll(
         &fixture.platform,
@@ -528,12 +620,9 @@ async fn assert_foreign_worker_denied(fixture: &Fixture, command: &Settlement) {
         ),
         (
             endpoints::WORKFLOW_JOB_HEARTBEAT,
-            serde_json::to_value(renewal(&command.delivery)).unwrap(),
+            serde_json::to_value(renewal(delivery)).unwrap(),
         ),
-        (
-            endpoints::WORKFLOW_JOB_SETTLE,
-            serde_json::to_value(command).unwrap(),
-        ),
+        (endpoints::WORKFLOW_JOB_SETTLE, committed(delivery)),
     ] {
         let (status, body) = post(
             &fixture.http,
@@ -608,29 +697,27 @@ async fn queue_refuses_foreign_scope_and_platform_job_origins() {
                 .0,
             StatusCode::FORBIDDEN
         );
+        // A settlement has no successor field to carry one in.
         assert_eq!(
             fixture
                 .post(
                     endpoints::WORKFLOW_JOB_SETTLE,
-                    &settlement(&delivery, vec![denied.clone()])
+                    &json!({"delivery": delivery, "successors": [denied]})
                 )
-                .await
-                .0,
-            StatusCode::FORBIDDEN
+                .await,
+            (StatusCode::BAD_REQUEST, json!({"code":"invalid"}))
         );
         assert!(fixture.job_snapshot(&denied).await.is_empty());
         assert_eq!(fixture.job_snapshot(&job).await, before);
     }
-    assert_eq!(
-        fixture
-            .post(
-                endpoints::WORKFLOW_JOB_SETTLE,
-                &settlement(&delivery, Vec::new())
-            )
-            .await
-            .0,
-        StatusCode::OK
-    );
+    // The control: the same delivery without the field parses and is settled
+    // with the journal's own decision, which rejected an advance for a run it
+    // does not hold when the claim reached it.
+    let (status, body) = fixture
+        .post(endpoints::WORKFLOW_JOB_SETTLE, &committed(&delivery))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["outcome"], json!({"kind":"rejected"}));
 }
 
 async fn rejects_incomplete_job_envelopes(fixture: &Fixture) {
@@ -681,45 +768,6 @@ async fn rejects_incomplete_job_envelopes(fixture: &Fixture) {
     assert!(fixture.job_snapshot(&candidate).await.is_empty());
 }
 
-async fn rejects_invalid_settlement_outcomes(fixture: &Fixture, delivery: &Delivery) {
-    let command = settlement(delivery, Vec::new());
-    let before = fixture.job_snapshot(&delivery.job).await;
-    assert_eq!(before.len(), 1);
-    for outcome in [
-        json!("completed"),
-        json!("waiting"),
-        json!("rejected"),
-        json!({"kind":"completed","result":"private"}),
-        json!({"kind":"waiting","history":[]}),
-        json!({"kind":"rejected","error":"private"}),
-        json!({"kind":"completed","outcome":{"kind":"denied"}}),
-        json!({"kind":"management"}),
-        json!({"kind":"management","outcome":null}),
-        json!({"kind":"management","outcome":{"kind":"applied"}}),
-        json!({"kind":"management","outcome":{"kind":"applied","state":"invented"}}),
-        json!({"kind":"management","outcome":{"kind":"denied","input":"private"}}),
-        // A closed management result still cannot settle an execution job.
-        json!({"kind":"management","outcome":{"kind":"denied"}}),
-    ] {
-        let mut body = json!(command);
-        body["outcome"] = outcome;
-        assert_eq!(
-            fixture.post(endpoints::WORKFLOW_JOB_SETTLE, &body).await,
-            (StatusCode::BAD_REQUEST, json!({"code":"invalid"})),
-        );
-        assert_eq!(fixture.job_snapshot(&delivery.job).await, before);
-    }
-    let mut secondary = json!(command);
-    secondary["managementOutcome"] = json!({"kind":"denied"});
-    assert_eq!(
-        fixture
-            .post(endpoints::WORKFLOW_JOB_SETTLE, &secondary)
-            .await,
-        (StatusCode::BAD_REQUEST, json!({"code":"invalid"})),
-    );
-    assert_eq!(fixture.job_snapshot(&delivery.job).await, before);
-}
-
 #[ntex::test]
 async fn queue_routes_authenticate_before_body_and_reject_open_metadata() {
     let fixture = Fixture::new().await;
@@ -727,7 +775,6 @@ async fn queue_routes_authenticate_before_body_and_reject_open_metadata() {
     fixture.submit(&job).await;
     let delivery = fixture.claim(&job).await;
     rejects_incomplete_job_envelopes(&fixture).await;
-    rejects_invalid_settlement_outcomes(&fixture, &delivery).await;
     for (endpoint, mut body) in [
         (
             endpoints::WORKFLOW_JOB_SUBMIT,
@@ -745,10 +792,7 @@ async fn queue_routes_authenticate_before_body_and_reject_open_metadata() {
             endpoints::WORKFLOW_JOB_HEARTBEAT,
             serde_json::to_value(renewal(&delivery)).unwrap(),
         ),
-        (
-            endpoints::WORKFLOW_JOB_SETTLE,
-            serde_json::to_value(settlement(&delivery, Vec::new())).unwrap(),
-        ),
+        (endpoints::WORKFLOW_JOB_SETTLE, committed(&delivery)),
     ] {
         rejects_before_body(fixture.server.address, endpoint).await;
         for token in [
@@ -841,13 +885,15 @@ async fn queue_routes_authenticate_before_body_and_reject_open_metadata() {
         .0,
         StatusCode::UNAUTHORIZED
     );
-    let command = settlement(&delivery, Vec::new());
-    let (status, body) = fixture.post(endpoints::WORKFLOW_JOB_SETTLE, &command).await;
+    // A fresh assertion is decided on what the body says, and the outcome is the
+    // journal's: it rejected an advance for a run it does not hold at the claim.
+    let (status, body) = fixture
+        .post(endpoints::WORKFLOW_JOB_SETTLE, &committed(&delivery))
+        .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let receipt: SettlementReceipt = serde_json::from_value(body.clone()).unwrap();
     assert_eq!(receipt.job_id, job.id);
-    assert_eq!(receipt.outcome, JobOutcome::Completed {});
-    assert_eq!(body["outcome"], json!({"kind":"completed"}));
+    assert_eq!(receipt.outcome, JobOutcome::Rejected {});
 }
 
 async fn rejects_before_body(address: std::net::SocketAddr, endpoint: ServiceEndpoint) {
@@ -987,13 +1033,10 @@ async fn revoking_a_join_signer_denies_its_worker_while_a_sibling_signer_stays_a
     let job_e = fixture.job();
     fixture.submit(&job_e).await;
     let claimed_e_before = fixture.claim(&job_e).await;
-    let settle_e_before = fixture
-        .post(
-            endpoints::WORKFLOW_JOB_SETTLE,
-            &settlement(&claimed_e_before, vec![]),
-        )
+    let renew_e_before = fixture
+        .post(endpoints::WORKFLOW_JOB_HEARTBEAT, &renewal(&claimed_e_before))
         .await;
-    assert_eq!(settle_e_before.0, StatusCode::OK, "{:?}", settle_e_before.1);
+    assert_eq!(renew_e_before.0, StatusCode::OK, "{:?}", renew_e_before.1);
 
     let (submit_g_status, body) = post(
         &fixture.http,
@@ -1076,9 +1119,16 @@ async fn revoking_a_join_signer_denies_its_worker_while_a_sibling_signer_stays_a
     );
 }
 
+/// A worker cannot decide the outcome of a management command Control reads.
+///
+/// Management is a sweep, so the service's own lane claims it; this case arranges
+/// that claim under the worker's own identity, which is the most a worker could
+/// ever hold of one. A settlement naming the outcome is refused as a body, and one
+/// naming no execution finds no receipt, because no journal applied the command.
+/// Either way the command, its job and its ordering are left as they were.
 #[ntex::test]
-async fn management_receipt_replay_rechecks_enrollment_after_linkage_reads() {
-    use zeroship_core::workflow_coordination::{ManageRun, ManagementOperation, ManagementOutcome};
+async fn a_worker_cannot_decide_a_management_outcome() {
+    use zeroship_core::workflow_coordination::{ManageRun, ManagementOperation};
 
     let fixture = Fixture::new().await;
     let request = ManageRun {
@@ -1098,8 +1148,6 @@ async fn management_receipt_replay_rechecks_enrollment_after_linkage_reads() {
     )
     .await;
     assert_eq!(accepted.0, StatusCode::OK, "{:?}", accepted.1);
-    // Management is a sweep, so the lane claims it. What this case is about
-    // begins at the settle route below.
     let delivery = fixture.swept().await;
     assert_eq!(
         delivery.job.operation,
@@ -1112,47 +1160,25 @@ async fn management_receipt_replay_rechecks_enrollment_after_linkage_reads() {
             },
         }
     );
-    let settlement = Settlement {
-        delivery,
-        outcome: JobOutcome::Management {
-            outcome: ManagementOutcome::NotFound {},
-        },
-        successors: vec![],
-    };
-    let receipt = fixture
-        .post(endpoints::WORKFLOW_JOB_SETTLE, &settlement)
-        .await;
-    assert_eq!(receipt.0, StatusCode::OK, "{:?}", receipt.1);
-    // Receipt recovery depends on enrollment rather than renewed placement.
-    fixture
-        .platform
-        .admin
-        .execute(
-            "UPDATE workflow_manager.assignments SET expires_at=0 WHERE app_id=$1",
-            &[&settlement.delivery.job.app_id.as_str()],
-        )
-        .await
-        .unwrap();
     let before = management_snapshot(&fixture).await;
-    for replace_key in [false, true] {
-        deny_management_replay_after_linkage_wait(&fixture, &settlement, replace_key).await;
-        assert_eq!(management_snapshot(&fixture).await, before);
-        assert_eq!(
-            fixture
-                .post(endpoints::WORKFLOW_JOB_SETTLE, &settlement)
-                .await
-                .0,
-            StatusCode::UNAUTHORIZED
-        );
-        replace_enrollment(&fixture, fixture.worker.key.verifying_key_bytes()).await;
-        assert_eq!(
-            fixture
-                .post(endpoints::WORKFLOW_JOB_SETTLE, &settlement)
-                .await,
-            receipt
-        );
-        assert_eq!(management_snapshot(&fixture).await, before);
-    }
+    let forged = json!({
+        "delivery": delivery,
+        "outcome": {"kind":"management","outcome":{"kind":"not_found"}},
+    });
+    let answer = fixture.post(endpoints::WORKFLOW_JOB_SETTLE, &forged).await;
+    assert_eq!(
+        management_snapshot(&fixture).await,
+        before,
+        "a worker's settlement decided the command: {answer:?}"
+    );
+    assert_eq!(answer, (StatusCode::BAD_REQUEST, json!({"code":"invalid"})));
+    assert_eq!(
+        fixture
+            .post(endpoints::WORKFLOW_JOB_SETTLE, &committed(&delivery))
+            .await,
+        (StatusCode::CONFLICT, json!({"code":"conflict"}))
+    );
+    assert_eq!(management_snapshot(&fixture).await, before);
 }
 
 async fn management_snapshot(fixture: &Fixture) -> Vec<(String, String)> {
@@ -1171,54 +1197,6 @@ async fn management_snapshot(fixture: &Fixture) -> Vec<(String, String)> {
         "fixture must include all linked receipt and scope records"
     );
     rows.iter().map(|row| (row.get(0), row.get(1))).collect()
-}
-
-async fn deny_management_replay_after_linkage_wait(
-    fixture: &Fixture,
-    settlement: &Settlement,
-    replace_key: bool,
-) {
-    let admin_url = fixture
-        .platform
-        .runtime_url
-        .replacen("zeroship_workflow@", "postgres@", 1);
-    let mut blocker = platform::connect(&admin_url).await;
-    let pid: i32 = blocker
-        .query_one("SELECT pg_backend_pid()", &[])
-        .await
-        .unwrap()
-        .get(0);
-    let lock = blocker.transaction().await.unwrap();
-    lock.batch_execute("LOCK TABLE workflow_manager.management IN ACCESS EXCLUSIVE MODE")
-        .await
-        .unwrap();
-    let request = fixture.post(endpoints::WORKFLOW_JOB_SETTLE, settlement);
-    let revoke = async {
-        compio::time::timeout(Duration::from_secs(3), async {
-            loop {
-                let waiting: bool = fixture.platform.admin.query_one(
-                    "SELECT EXISTS(SELECT 1 FROM pg_stat_activity a JOIN pg_locks l ON l.pid=a.pid \
-                     WHERE a.usename='zeroship_workflow' AND a.state='active' \
-                     AND $1=ANY(pg_blocking_pids(a.pid)) AND NOT l.granted \
-                     AND l.relation='workflow_manager.management'::regclass \
-                     AND l.mode='AccessShareLock' AND a.query ILIKE '%management%')", &[&pid],
-                ).await.unwrap().get(0);
-                if waiting {
-                    break;
-                }
-                compio::time::sleep(Duration::from_millis(1)).await;
-            }
-        })
-        .await
-        .expect("exact settlement must reach the blocked management linkage SELECT");
-        change_enrollment(fixture, replace_key).await;
-        lock.commit().await.unwrap();
-    };
-    let ((status, body), ()) = futures::join!(Box::pin(request), Box::pin(revoke));
-    assert_eq!(
-        (status, body),
-        (StatusCode::FORBIDDEN, json!({"code":"denied"}))
-    );
 }
 
 #[derive(Clone, Copy)]
@@ -1249,26 +1227,35 @@ async fn blocked_request(fixture: &Fixture, job: &JobSpec, kind: RequestKind) ->
         })
         .unwrap();
     }
+    if matches!(kind, RequestKind::Settle | RequestKind::Replay) {
+        // A settlement reaches the queue only with an outcome the journal decided:
+        // the execution it commits first, or, for a replay, the receipt that
+        // commit left behind.
+        let (delivery, task) = fixture.held(job).await;
+        let executed = executed(&delivery, &task);
+        if matches!(kind, RequestKind::Settle) {
+            return executed;
+        }
+        assert_eq!(
+            fixture.post(kind.endpoint(), &executed).await.0,
+            StatusCode::OK
+        );
+        return committed(&delivery);
+    }
     fixture.submit(job).await;
     if matches!(kind, RequestKind::Claim) {
         return serde_json::to_value(fixture.scope()).unwrap();
     }
     let delivery = fixture.claim(job).await;
-    if matches!(kind, RequestKind::Heartbeat) {
-        return serde_json::to_value(renewal(&delivery)).unwrap();
-    }
-    let command = settlement(&delivery, Vec::new());
-    if matches!(kind, RequestKind::Replay) {
-        assert_eq!(
-            fixture.post(kind.endpoint(), &command).await.0,
-            StatusCode::OK
-        );
-    }
-    serde_json::to_value(command).unwrap()
+    serde_json::to_value(renewal(&delivery)).unwrap()
 }
 
 async fn deny_blocked_operation(fixture: &Fixture, kind: RequestKind, replace_key: bool) {
-    let job = fixture.job();
+    let job = if matches!(kind, RequestKind::Settle | RequestKind::Replay) {
+        fixture.fresh_executable().await
+    } else {
+        fixture.job()
+    };
     let command = blocked_request(fixture, &job, kind).await;
     let before = fixture.job_snapshot(&job).await;
     let mut blocker = platform::connect(&fixture.platform.runtime_url).await;
@@ -1413,8 +1400,6 @@ async fn one_exchange_carries_the_queue_and_journal_halves_of_a_delivery() {
             endpoints::WORKFLOW_JOB_SETTLE,
             &SettleDelivery {
                 delivery: delivery.clone(),
-                outcome: None,
-                successors: Vec::new(),
                 execution: Some(ReportedExecution {
                     grant_ms: Some(extended.remaining_ms),
                     task: ClaimedTask {

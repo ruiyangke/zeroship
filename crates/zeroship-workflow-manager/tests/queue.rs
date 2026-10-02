@@ -12,7 +12,7 @@ use zeroship_core::{
     app_id::AppId,
     workflow_coordination::{Assignment, RunId, VerifyAssignment, WorkerId},
     workflow_jobs::{
-        Delivery, DeploymentId, JobId, JobOperation, JobOutcome, JobSpec, Settlement,
+        Delivery, DeploymentId, JobId, JobOperation, JobOutcome, JobSpec, JournalSettlement,
         SettlementReceipt,
     },
 };
@@ -64,9 +64,9 @@ case!(
     delayed_jobs_and_redelivery
 );
 case!(
-    sqlite_atomic_successors_and_replayed_receipts,
-    postgres_atomic_successors_and_replayed_receipts,
-    atomic_successors_and_replayed_receipts
+    sqlite_atomic_receipt_and_replayed_receipts,
+    postgres_atomic_receipt_and_replayed_receipts,
+    atomic_receipt_and_replayed_receipts
 );
 case!(
     sqlite_revocation_rolls_back_mutations,
@@ -203,12 +203,8 @@ async fn dispatch_order(fixture: &Fixture, id: &JobId) -> i64 {
         .expect("dispatch order is an integer")
 }
 
-fn settlement(delivery: &Delivery, successors: Vec<JobSpec>) -> Settlement {
-    Settlement {
-        delivery: delivery.clone(),
-        outcome: JobOutcome::Completed {},
-        successors,
-    }
+fn settlement(delivery: &Delivery) -> JournalSettlement {
+    support::settlement(delivery, JobOutcome::Completed {})
 }
 
 async fn stored(fixture: &Fixture, id: &JobId) -> Option<Value> {
@@ -619,12 +615,7 @@ async fn postgres_shortened_authority_bounds_commit_wait_and_receipt_replays() {
         .unwrap()
         .delivery()
         .clone();
-    let successor = job(&app);
-    queue
-        .ensure_deployment(&app, successor.deployment_id().unwrap())
-        .await
-        .unwrap();
-    let command = settlement(&delivery, vec![successor.clone()]);
+    let command = settlement(&delivery);
     let Admin::Postgres(admin) = &fixture.admin else {
         unreachable!()
     };
@@ -699,7 +690,7 @@ async fn postgres_shortened_authority_bounds_commit_wait_and_receipt_replays() {
     assert_eq!(receipt.job_id, spec.id);
     assert_eq!(receipt.app_id, app);
     assert_eq!(receipt.attempt, delivery.attempt);
-    assert_eq!(receipt.outcome, command.outcome);
+    assert_eq!(receipt.outcome, *command.outcome());
     assert_eq!(
         queue.settle(&expired_authority, &command).await.unwrap(),
         receipt
@@ -715,14 +706,10 @@ async fn postgres_shortened_authority_bounds_commit_wait_and_receipt_replays() {
     else {
         panic!("job query returned a count");
     };
-    assert_eq!(rows.len(), 2);
+    assert_eq!(rows.len(), 1, "a settlement publishes no successor row");
     assert_eq!(
         stored(&fixture, &spec.id).await.unwrap()["state"],
         value!("settled")
-    );
-    assert_eq!(
-        stored(&fixture, &successor.id).await.unwrap()["state"],
-        value!("ready")
     );
 }
 
@@ -767,7 +754,7 @@ async fn concurrent_scope_registration_preserves_identity_and_queue(fixture: &Fi
         assert_eq!(registered_scope(&database, &app).await, before_scope);
         assert_eq!(stored(fixture, &spec.id).await.unwrap(), before_job);
         assert!((hosts[2].claim(&authority).await.unwrap()).is_none());
-        let command = settlement(&delivery, Vec::new());
+        let command = settlement(&delivery);
         let receipt = hosts[3].settle(&authority, &command).await.unwrap();
         assert_eq!(
             hosts[0].settle(&authority, &command).await.unwrap(),
@@ -876,7 +863,7 @@ async fn submission_and_competing_claims(fixture: &Fixture) {
         ));
         assert_eq!(
             first
-                .settle(&foreign_authority, &settlement(delivery, vec![]))
+                .settle(&foreign_authority, &settlement(delivery))
                 .await,
             Err(Error::Denied)
         );
@@ -887,14 +874,8 @@ async fn submission_and_competing_claims(fixture: &Fixture) {
         first.heartbeat(&authority, &forged).await,
         Err(Error::Conflict)
     ));
-    let mut foreign_successor = job(&foreign);
-    foreign_successor.available_at = 0.try_into().unwrap();
-    assert_eq!(
-        first
-            .settle(&authority, &settlement(delivery, vec![foreign_successor]))
-            .await,
-        Err(Error::Denied)
-    );
+    // There is no successor field through which a caller could name a foreign
+    // app, so the delivery stays leased until this holder settles it.
     assert_eq!(
         stored(fixture, &spec.id).await.unwrap()["state"],
         value!("leased")
@@ -948,7 +929,7 @@ async fn delayed_jobs_and_redelivery(fixture: &Fixture) {
     ));
     assert_eq!(
         queue
-            .settle(&authority, &settlement(&renewed, vec![]))
+            .settle(&authority, &settlement(&renewed))
             .await,
         Err(Error::Conflict)
     );
@@ -977,7 +958,7 @@ async fn delayed_jobs_and_redelivery(fixture: &Fixture) {
     ));
     assert_eq!(
         queue
-            .settle(&authority, &settlement(&renewed, vec![]))
+            .settle(&authority, &settlement(&renewed))
             .await,
         Err(Error::Conflict)
     );
@@ -1038,12 +1019,12 @@ async fn delayed_jobs_and_redelivery(fixture: &Fixture) {
         .clone();
     assert!(retried.deadline >= lost_reply.deadline);
     queue
-        .settle(&retry_authority, &settlement(&original, vec![]))
+        .settle(&retry_authority, &settlement(&original))
         .await
         .unwrap();
 }
 
-async fn atomic_successors_and_replayed_receipts(fixture: &Fixture) {
+async fn atomic_receipt_and_replayed_receipts(fixture: &Fixture) {
     let queue = queue(fixture, Options::default()).await;
     let app = AppId::mint();
     queue.register_scope(&app).await.unwrap();
@@ -1057,36 +1038,7 @@ async fn atomic_successors_and_replayed_receipts(fixture: &Fixture) {
         .unwrap()
         .delivery()
         .clone();
-    assert_eq!(
-        queue
-            .settle(&authority, &settlement(&delivery, vec![parent.clone()]))
-            .await,
-        Err(Error::Conflict)
-    );
-    let first = job(&app);
-    let mut existing = job(&app);
-    existing.available_at = (now(fixture).await + 60_000).try_into().unwrap();
-    queue.submit(&existing).await.unwrap();
-    let mut conflict = existing.clone();
-    conflict.operation = JobOperation::Collect {};
-    assert_eq!(
-        queue
-            .settle(
-                &authority,
-                &settlement(&delivery, vec![first.clone(), conflict])
-            )
-            .await,
-        Err(Error::Conflict)
-    );
-    assert!(stored(fixture, &first.id).await.is_none());
-    assert_eq!(
-        stored(fixture, &parent.id).await.unwrap()["state"],
-        value!("leased")
-    );
-    let command = settlement(
-        &delivery,
-        vec![first.clone(), existing.clone(), first.clone()],
-    );
+    let command = settlement(&delivery);
     let receipt = queue.settle(&authority, &command).await.unwrap();
     let reopened = Queue::connect(
         fixture.binding(),
@@ -1096,46 +1048,36 @@ async fn atomic_successors_and_replayed_receipts(fixture: &Fixture) {
     )
     .await
     .unwrap();
-    assert_eq!(
-        reopened.settle(&authority, &command).await.unwrap(),
-        receipt
-    );
-    assert_eq!(reopened.submit(&first).await.unwrap(), first);
-    assert_eq!(reopened.submit(&existing).await.unwrap(), existing);
-    let mut reordered = command.clone();
-    reordered.successors.reverse();
-    assert_eq!(
-        reopened.settle(&authority, &reordered).await.unwrap(),
-        receipt
-    );
+    // An exact retry replays the stored receipt.
+    assert_eq!(reopened.settle(&authority, &command).await.unwrap(), receipt);
     assert_replay_authentication(&reopened, &authority, &command, &receipt).await;
-    let mut changed = command.clone();
-    changed.outcome = JobOutcome::Waiting {};
+    // A settlement that decided a different outcome does not replay, whichever
+    // family the operation admits.
+    let changed = support::settlement(&delivery, JobOutcome::Waiting {});
     assert_eq!(
         reopened.settle(&authority, &changed).await,
         Err(Error::Conflict)
     );
-    changed = command.clone();
-    changed.successors.clear();
+    // A settlement for a delivery the queue has since superseded is refused.
+    let mut forged = delivery.clone();
+    forged.attempt = 2.try_into().unwrap();
     assert_eq!(
-        reopened.settle(&authority, &changed).await,
+        reopened
+            .settle(&authority, &support::settlement(&forged, JobOutcome::Completed {}))
+            .await,
         Err(Error::Conflict)
     );
-    let next = reopened
-        .claim(&authority)
-        .await
-        .unwrap()
-        .unwrap()
-        .delivery()
-        .clone();
-    assert_eq!(next.job, first);
+    assert_eq!(
+        stored(fixture, &parent.id).await.unwrap()["state"],
+        value!("settled")
+    );
     assert!((reopened.claim(&authority).await.unwrap()).is_none());
 }
 
 async fn assert_replay_authentication(
     queue: &Queue,
     authority: &Assignment,
-    command: &Settlement,
+    command: &JournalSettlement,
     receipt: &SettlementReceipt,
 ) {
     let expired = Assignment {
@@ -1152,7 +1094,7 @@ async fn assert_replay_authentication(
                 |tx| {
                     identity_checked.set(true);
                     async move {
-                        assert_transaction_job(&tx, &command.delivery.job, "settled").await?;
+                        assert_transaction_job(&tx, &command.delivery().job, "settled").await?;
                         Ok(authority.worker_id.clone())
                     }
                 }
@@ -1234,12 +1176,7 @@ async fn revocation_rolls_back_mutations(fixture: &Fixture) {
         value!(delivery.deadline.get())
     );
     assert_authorization_rolled_back(fixture, &app).await;
-    let successor = job(&app);
-    queue
-        .ensure_deployment(&app, successor.deployment_id().unwrap())
-        .await
-        .unwrap();
-    let command = settlement(&delivery, vec![successor.clone()]);
+    let command = settlement(&delivery);
     checks.set(0);
     assert_eq!(
         queue
@@ -1261,7 +1198,6 @@ async fn revocation_rolls_back_mutations(fixture: &Fixture) {
             .await,
         Err(Error::Denied)
     );
-    assert!(stored(fixture, &successor.id).await.is_none());
     assert_authorization_rolled_back(fixture, &app).await;
     assert_eq!(
         stored(fixture, &spec.id).await.unwrap()["state"],
@@ -1335,9 +1271,8 @@ async fn cancellation_rolls_back_settlement(
     fixture: &Fixture,
     queue: &Queue,
     authority: &Assignment,
-    command: &Settlement,
+    command: &JournalSettlement,
 ) {
-    assert!(!command.successors.is_empty());
     let blocked = Queue::connect(
         fixture.binding(),
         fixture.url(),
@@ -1363,7 +1298,7 @@ async fn cancellation_rolls_back_settlement(
                         if complete {
                             Ok(authority)
                         } else {
-                            assert_transaction_job(&tx, &command.delivery.job, "settled").await?;
+                            assert_transaction_job(&tx, &command.delivery().job, "settled").await?;
                             std::future::pending().await
                         }
                     }
@@ -1373,9 +1308,12 @@ async fn cancellation_rolls_back_settlement(
             .await,
         Err(Error::Timeout)
     );
-    for successor in &command.successors {
-        assert!(stored(fixture, &successor.id).await.is_none());
-    }
+    // The cancelled transaction rolled the outcome write back, so the row is
+    // still leased and an exact retry settles it.
+    assert_eq!(
+        stored(fixture, &command.delivery().job.id).await.unwrap()["state"],
+        value!("leased")
+    );
     assert_eq!(
         queue.settle(authority, command).await.unwrap().outcome,
         JobOutcome::Completed {}
@@ -1476,7 +1414,7 @@ async fn refused_kind_at_the_head(fixture: &Fixture) {
     // And the refusal itself: with the maintenance row settled, the head is all
     // that is left, and the restricted claimant answers nothing rather than it.
     queue
-        .settle(&authority, &settlement(claimed.delivery(), vec![]))
+        .settle(&authority, &settlement(claimed.delivery()))
         .await
         .unwrap();
     assert_eq!(
@@ -1542,7 +1480,7 @@ async fn journal_sweep_is_left_to_the_lane(fixture: &Fixture) {
         .expect("the creator row behind the head is claimable");
     assert_eq!(claimed.delivery().job, behind);
     queue
-        .settle(&authority, &settlement(claimed.delivery(), vec![]))
+        .settle(&authority, &settlement(claimed.delivery()))
         .await
         .unwrap();
     assert_eq!(
@@ -1598,14 +1536,7 @@ async fn journal_sweep_is_left_to_the_lane(fixture: &Fixture) {
 }
 
 async fn bounds_and_privileges(fixture: &Fixture) {
-    let queue = queue(
-        fixture,
-        Options {
-            max_successors: 1,
-            ..Options::default()
-        },
-    )
-    .await;
+    let queue = queue(fixture, Options::default()).await;
     let app = AppId::mint();
     queue.register_scope(&app).await.unwrap();
     let authority = assignment(fixture, &app).await;
@@ -1620,12 +1551,11 @@ async fn bounds_and_privileges(fixture: &Fixture) {
         .clone();
     assert_eq!(
         queue
-            .settle(
-                &authority,
-                &settlement(&delivery, vec![job(&app), job(&app)])
-            )
-            .await,
-        Err(Error::Capacity)
+            .settle(&authority, &settlement(&delivery))
+            .await
+            .unwrap()
+            .outcome,
+        JobOutcome::Completed {}
     );
     let small = Queue::connect(
         fixture.binding(),
@@ -1646,10 +1576,6 @@ async fn bounds_and_privileges(fixture: &Fixture) {
         },
         Options {
             transaction_timeout: Duration::ZERO,
-            ..Options::default()
-        },
-        Options {
-            max_successors: 0,
             ..Options::default()
         },
         Options {
@@ -1907,7 +1833,7 @@ async fn delivery_grant_budget(fixture: &Fixture) {
         "the new grant carries the renewed budget"
     );
     queue
-        .settle(&authority, &settlement(renewed.delivery(), vec![]))
+        .settle(&authority, &settlement(renewed.delivery()))
         .await
         .unwrap();
 }

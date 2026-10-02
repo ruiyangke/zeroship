@@ -17,8 +17,8 @@ pub use app_facts::ControlAppFacts;
 pub use control::ControlCoordinator;
 pub use jobs::{ClaimedJob, LeasedJob, RenewedJob};
 pub use journal::{
-    ClaimedDelivery, Exclusive, JobJournal, JobReceiptQuery, ReleaseDelivery, RenewDelivery,
-    RenewedDelivery, Reported, SettleDelivery,
+    ClaimedDelivery, JobJournal, JobReceiptQuery, ReleaseDelivery, RenewDelivery,
+    RenewedDelivery, SettleDelivery,
 };
 pub use policy::LeasedPolicy;
 pub use queue_holds::QueueDeploymentHolds;

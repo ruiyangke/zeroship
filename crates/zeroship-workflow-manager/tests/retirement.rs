@@ -26,7 +26,7 @@ use zeroship_core::{
         AssignedScope, RegisterWorker, Revision, RunId, WorkerId, WorkerState,
     },
     workflow_jobs::{
-        BroadcastId, DeploymentId, JobId, JobOperation, JobOutcome, JobSpec, Settlement,
+        BroadcastId, DeploymentId, JobId, JobOperation, JobOutcome, JobSpec,
         SettlementReceipt, SubmitJob,
     },
     workflow_policy::{AppPolicy, EstablishIngress, PolicyLeaseRequest},
@@ -330,11 +330,7 @@ impl Host {
     ) -> Result<SettlementReceipt, Error> {
         lane.settle(
             &self.queue,
-            &Settlement {
-                delivery: grant.delivery().clone(),
-                outcome,
-                successors: Vec::new(),
-            },
+            &support::settlement_from(grant.delivery().clone(), outcome),
         )
         .await
     }
@@ -348,11 +344,7 @@ impl Host {
         self.coordinator
             .settle_job(
                 worker,
-                &Settlement {
-                    delivery: grant.delivery().clone(),
-                    outcome,
-                    successors: Vec::new(),
-                },
+                &support::settlement_from(grant.delivery().clone(), outcome),
                 || ready(Ok(worker.clone())),
             )
             .await
@@ -742,10 +734,18 @@ async fn settlement(fixture: &Fixture) {
     assert_eq!(closing.state, ScopeState::Closing);
     assert_eq!(closing.close_job, Some(close.id.clone()));
     let grant = host.claim_sweep().await.unwrap();
+    // Closure settles only with closed evidence, and that is a property of the
+    // receipt: another outcome family cannot become a settlement at all.
     assert_eq!(
-        host.settle_sweep(&grant, JobOutcome::Completed {}).await,
-        Err(Error::Invalid),
-        "closure settles only with closed evidence"
+        zeroship_core::workflow_jobs::JournalSettlement::from_receipt(
+            &zeroship_core::workflow_jobs::JobReceipt {
+                job: grant.delivery().job.clone(),
+                outcome: JobOutcome::Completed {},
+            },
+            grant.delivery(),
+        )
+        .unwrap_err(),
+        zeroship_core::workflow_jobs::SettlementRefusal::Invalid,
     );
     host.settle_sweep(&grant, JobOutcome::Closed { drained: false })
         .await
@@ -1008,16 +1008,15 @@ async fn worker_denial(fixture: &Fixture) {
     let job = advance(&host.app, 0);
     host.publish(&job).await.unwrap();
     let grant = host.claim().await.unwrap();
-    let settlement = Settlement {
-        delivery: grant.delivery().clone(),
-        outcome: JobOutcome::Completed {},
-        successors: vec![close],
-    };
+    let settlement = support::settlement_from(grant.delivery().clone(), JobOutcome::Completed {});
     assert_eq!(
         host.coordinator
             .settle_job(&host.worker, &settlement, || ready(Ok(host.worker.clone())))
-            .await,
-        Err(Error::Denied)
+            .await
+            .unwrap()
+            .outcome,
+        JobOutcome::Completed {},
+        "creator work settles with its own outcome; only closure and management are manager-owned"
     );
     assert_eq!(host.state().await.state, ScopeState::Open);
 }

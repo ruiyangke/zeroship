@@ -27,7 +27,7 @@ use zeroship_core::{
     app_id::AppId,
     typed_id,
     workflow_coordination::{Revision, WorkerId},
-    workflow_jobs::{JobOperation, JobOutcome, JobSpec},
+    workflow_jobs::{JobOperation, JobOutcome, JobReceipt, JobSpec, JournalSettlement},
 };
 use zeroship_data_orm::{connection::ConnectionFactory, orm::Output, value};
 
@@ -91,8 +91,8 @@ impl JobLease for Lease {
 
 #[derive(Default)]
 struct Metadata {
-    settlements: RefCell<BTreeMap<i64, Settlement>>,
-    requests: RefCell<Vec<Settlement>>,
+    settlements: RefCell<BTreeMap<i64, JournalSettlement>>,
+    requests: RefCell<Vec<JournalSettlement>>,
     releases: Cell<usize>,
     lose_ack: Cell<bool>,
     /// Every acknowledgement is lost, not just the first, so a retry loop has
@@ -101,6 +101,9 @@ struct Metadata {
     reject_renewal: Cell<bool>,
     stall_renewal: Cell<bool>,
     substitute_renewal: Cell<bool>,
+    /// Answer a settlement with a different family-valid outcome than the one
+    /// the journal committed, the way a peer that settled another request would.
+    substitute_outcome: Cell<bool>,
     renewals: Cell<usize>,
     renewal_deadline: Cell<Option<Instant>>,
     renewed_late: Cell<bool>,
@@ -182,14 +185,18 @@ impl JobTransport for Metadata {
             renewal,
         })
     }
+    /// Settled from the journal this host holds, as every in-process transport
+    /// settles, and recorded so a retry is seen to settle the same thing.
     async fn settle(
         &self,
-        settlement: &Settlement,
+        journal: &AppWorkflows,
+        lease: &Lease,
     ) -> Result<SettlementReceipt, WorkflowServiceError> {
+        let settlement = &committed_settlement(journal, lease).await?;
         self.requests.borrow_mut().push(settlement.clone());
         let mut settlements = self.settlements.borrow_mut();
         let previous = settlements
-            .entry(settlement.delivery.attempt.get())
+            .entry(settlement.delivery().attempt.get())
             .or_insert_with(|| settlement.clone());
         assert_eq!(
             previous, settlement,
@@ -198,11 +205,16 @@ impl JobTransport for Metadata {
         if self.lose_every_ack.get() || self.lose_ack.replace(false) {
             return Err(WorkflowServiceError::Timeout);
         }
+        let outcome = if self.substitute_outcome.get() {
+            JobOutcome::Waiting {}
+        } else {
+            settlement.outcome().clone()
+        };
         Ok(SettlementReceipt {
-            job_id: settlement.delivery.job.id.clone(),
-            app_id: settlement.delivery.job.app_id.clone(),
-            attempt: settlement.delivery.attempt,
-            outcome: settlement.outcome.clone(),
+            job_id: settlement.delivery().job.id.clone(),
+            app_id: settlement.delivery().job.app_id.clone(),
+            attempt: settlement.delivery().attempt,
+            outcome,
         })
     }
     /// The journal commits first, because its commit is what decides the outcome
@@ -218,9 +230,8 @@ impl JobTransport for Metadata {
     ) -> Result<Completed, WorkflowServiceError> {
         assert!(confirmed.is_empty(), "an in-process store confirms its own uploads");
         let receipt = journal.complete_job(task, lease, execution).await?;
-        let settlement = receipt.settlement(lease)?;
         Ok(Completed {
-            settlement: JobTransport::settle(self, &settlement).await?,
+            settlement: JobTransport::settle(self, journal, lease).await?,
             receipt,
         })
     }
@@ -587,9 +598,9 @@ impl Fixture {
                 panic!("a sweep fixture must not hand the lane creator work")
             }
         };
-        let settlement = receipt.settlement(&lease)?;
+        receipt.settlement(&lease)?;
         let manager = loop {
-            match JobTransport::settle(&*self.metadata, &settlement).await {
+            match JobTransport::settle(&*self.metadata, &self.app, &lease).await {
                 Ok(observed) => break observed,
                 Err(WorkflowServiceError::Timeout) => {
                     compio::time::sleep(Duration::from_millis(5)).await;
@@ -745,6 +756,62 @@ async fn revoked_authority_discards_a_resolved_frontier_instead_of_publishing_it
     assert_ne!(fixture.task_state().await, "completed");
     assert!(fixture.app.job_receipt(&fixture.job).await.unwrap().is_none());
     assert!(fixture.metadata.requests.borrow().is_empty());
+}
+
+/// An in-process transport settles a committed delivery from its journal's own
+/// receipt: refused while nothing has committed, and once the execution commits,
+/// settled with exactly the receipt's outcome and no successors.
+#[compio::test]
+async fn an_in_process_settlement_is_read_from_the_journal() {
+    let fixture = Box::pin(Fixture::new(AppPolicy::default())).await;
+    assert!(matches!(
+        committed_settlement(&fixture.app, &fixture.lease).await,
+        Err(WorkflowServiceError::Conflict(_))
+    ));
+    let mut slot = fixture.slot(Duration::from_secs(5));
+    let DeliveryOutcome::Settled { creator, .. } = Box::pin(slot.run(
+        &fixture.app,
+        fixture.app.binding(),
+        claimed(&fixture.app, fixture.lease.clone()).await.unwrap(),
+    ))
+    .await
+    .unwrap() else {
+        panic!("the advance completes")
+    };
+    assert_eq!(
+        committed_settlement(&fixture.app, &fixture.lease)
+            .await
+            .unwrap(),
+        JournalSettlement::from_receipt(
+            &JobReceipt {
+                job: fixture.lease.delivery.job.clone(),
+                outcome: creator.outcome.clone(),
+            },
+            &fixture.lease.delivery,
+        )
+        .unwrap()
+    );
+}
+
+/// A manager half that reports a different family-valid outcome than the one the
+/// journal committed is a peer contract violation, not a settlement: the slot
+/// refuses it rather than reporting it as this delivery's result.
+#[compio::test]
+async fn a_settlement_with_another_outcome_is_refused() {
+    let fixture = Box::pin(Fixture::new(AppPolicy::default())).await;
+    fixture.metadata.substitute_outcome.set(true);
+    let mut slot = fixture.slot(Duration::from_secs(5));
+    let error = Box::pin(slot.run(
+        &fixture.app,
+        fixture.app.binding(),
+        claimed(&fixture.app, fixture.lease.clone()).await.unwrap(),
+    ))
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(error, WorkflowServiceError::InvalidResponse(_)),
+        "{error}"
+    );
 }
 
 #[compio::test]

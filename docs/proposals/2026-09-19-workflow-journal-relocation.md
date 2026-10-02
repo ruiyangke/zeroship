@@ -752,8 +752,9 @@ protocol. This extends a working client rather than inventing one.
    does not notice that the first derives from the wrong one for this endpoint.
 
    **And the merged reply has one validated half and one unvalidated one.** The settlement half
-   is checked: `WorkerCoordinator::settle_job` compares the receipt's `app_id`, `job_id`,
-   `attempt` and `outcome` against the request and refuses a mismatch. The journal half is not.
+   is checked: `WorkerCoordinator::settle_execution` and `settle_committed` compare the
+   receipt's `app_id`, `job_id` and `attempt` against the request and refuse a mismatch,
+   and refuse an `outcome` in a family the operation does not admit. The journal half is not.
    `CompletionReceipt` (`crates/zeroship-workflow/src/service/types.rs`) carries `task_id`,
    `app_id`, `run_id` and `generation`, and `execute`
    (`crates/zeroship-workflow-runner/src/delivery.rs`) returns what `complete_job` answered
@@ -1007,9 +1008,10 @@ protocol. This extends a working client rather than inventing one.
    `acknowledge` (`crates/zeroship-workflow-runner/src/delivery.rs`) settles through
    `Ok(observed) => return Ok(observed)` and carries no settlement-identity check of its own.
    Two arguments say that is right rather than missing. Over HTTP,
-   `WorkerCoordinator::settle_job` checks a strict superset - the same four fields plus
-   `outcome.valid_for` - and `submission_and_settlement_receipts_cannot_substitute_metadata`
-   substitutes each in turn against a fake peer. The CLI's `LocalTransport` never reaches that
+   `WorkerCoordinator::settle_committed` checks the identity fields and `outcome.valid_for`,
+   and `submission_and_settlement_receipts_cannot_substitute_metadata` and
+   `a_settlement_reply_in_a_family_the_operation_refuses_is_invalid` substitute each in turn
+   against a fake peer. The CLI's `LocalTransport` never reaches that
    check and cannot disagree either: `queue.rs` builds three of the receipt's fields from the
    request and the fourth, `app_id`, from the assignment, which `delivery_selector` selected BY
    `delivery.job.app_id`.
@@ -1294,11 +1296,8 @@ protocol. This extends a working client rather than inventing one.
      should not restore it by adding a field.
      One arm sits outside this fence on purpose: a settlement replayed against an already-completed
      task returns the stored receipt before any re-validation, because there is nothing left to
-     commit, and `fanout_delivery_and_receipts_preserve_scope_without_holds`
-     (`crates/zeroship-workflow-server/tests/http_jobs/fanout.rs`) and
-     `propagation_delivery_and_receipts_preserve_scope_without_holds`
-     (`crates/zeroship-workflow-server/tests/http_jobs/propagation.rs`) assert exactly that
-     idempotence. Demanding evidence there would fail a replay that must succeed.
+     commit, and `delivery_and_receipts_remain_scoped_across_process_restart_and_placement_expiry`
+     (`crates/zeroship-workflow-server/tests/http_jobs.rs`) asserts exactly that idempotence. Demanding evidence there would fail a replay that must succeed.
 
 
    **And the lane cannot start before the worker narrows, which folds two bullets into one.** The

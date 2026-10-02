@@ -15,7 +15,7 @@ use support::{Admin, Backend, Fixture};
 use zeroship_core::{
     app_id::AppId,
     workflow_coordination::{Assignment, WorkerId},
-    workflow_jobs::{DeploymentId, JobId, JobOperation, JobOutcome, JobSpec, Settlement},
+    workflow_jobs::{DeploymentId, JobId, JobOperation, JobOutcome, JobSpec},
 };
 use zeroship_data_orm::{
     orm::{Operation, Output},
@@ -269,11 +269,7 @@ async fn durable_responsibility(fixture: &Fixture, kind: DutyKind) {
         reopened.due(kind, None).await.unwrap(),
         std::slice::from_ref(&app)
     );
-    let settlement = Settlement {
-        delivery: delivered,
-        outcome: JobOutcome::Completed {},
-        successors: vec![],
-    };
+    let settlement = support::settlement_from(delivered, JobOutcome::Completed {});
     owner.settle(&queue, &settlement).await.unwrap();
     let following = reopened.dispatch(&app, kind).await.unwrap().unwrap();
     assert_ne!(following.id, accepted.id);
@@ -319,11 +315,7 @@ async fn activation(fixture: &Fixture, kind: DutyKind) {
     owner
         .settle(
             &queue,
-            &Settlement {
-                delivery,
-                outcome: JobOutcome::Completed {},
-                successors: vec![],
-            },
+            &support::settlement_from(delivery, JobOutcome::Completed {}),
         )
         .await
         .unwrap();
@@ -402,11 +394,7 @@ async fn waiting_pages(fixture: &Fixture, kind: DutyKind) {
     let owner = lane(&app);
     let delivery = claim(&queue, &owner).await;
     assert_eq!(delivery.delivery().job, first);
-    let command = Settlement {
-        delivery: delivery.delivery().clone(),
-        outcome: JobOutcome::Waiting {},
-        successors: vec![],
-    };
+    let command = support::settlement_from(delivery.delivery().clone(), JobOutcome::Waiting {});
     let receipt = owner.settle(&queue, &command).await.unwrap();
     let completed = snapshot(fixture, &app, kind).await;
     assert_eq!(completed["pending_job_id"], value!(first.id.as_str()));
@@ -442,11 +430,7 @@ async fn waiting_pages(fixture: &Fixture, kind: DutyKind) {
     owner
         .settle(
             &reopened_queue,
-            &Settlement {
-                delivery: delivery.delivery().clone(),
-                outcome: JobOutcome::Waiting {},
-                successors: vec![],
-            },
+            &support::settlement_from(delivery.delivery().clone(), JobOutcome::Waiting {}),
         )
         .await
         .unwrap();
@@ -474,11 +458,7 @@ async fn completed_pages(fixture: &Fixture, kind: DutyKind) {
     owner
         .settle(
             &queue,
-            &Settlement {
-                delivery: delivery.delivery().clone(),
-                outcome: JobOutcome::Completed {},
-                successors: vec![],
-            },
+            &support::settlement_from(delivery.delivery().clone(), JobOutcome::Completed {}),
         )
         .await
         .unwrap();
@@ -525,11 +505,7 @@ async fn unrelated_page(fixture: &Fixture, kind: DutyKind) {
     owner
         .settle(
             &queue,
-            &Settlement {
-                delivery: delivery.delivery().clone(),
-                outcome: JobOutcome::Waiting {},
-                successors: vec![],
-            },
+            &support::settlement_from(delivery.delivery().clone(), JobOutcome::Waiting {}),
         )
         .await
         .unwrap();
@@ -555,26 +531,14 @@ async fn settlement_rollback(fixture: &Fixture, kind: DutyKind) {
     let owner = lane(&app);
     let delivery = claim(&queue, &owner).await;
     assert_eq!(delivery.delivery().job, pending);
-    let successor = JobSpec {
-        id: JobId::mint(),
-        operation: JobOperation::Collect {},
-        available_at: 0.try_into().unwrap(),
-        ..pending.clone()
-    };
-    let command = Settlement {
-        delivery: delivery.delivery().clone(),
-        outcome: JobOutcome::Waiting {},
-        successors: vec![successor.clone()],
-    };
+    let command = support::settlement_from(delivery.delivery().clone(), JobOutcome::Waiting {});
     let obligation = snapshot(fixture, &app, kind).await;
     let leased = stored_job(fixture, &pending).await.unwrap();
     assert_eq!(leased["state"], value!("leased"));
-    assert!(stored_job(fixture, &successor).await.is_none());
     fault(fixture, true).await;
     assert!(owner.settle(&queue, &command).await.is_err());
     assert_eq!(snapshot(fixture, &app, kind).await, obligation);
     assert_eq!(stored_job(fixture, &pending).await.unwrap(), leased);
-    assert!(stored_job(fixture, &successor).await.is_none());
     assert!(recovery.due(kind, None).await.unwrap().is_empty());
 
     fault(fixture, false).await;
@@ -583,15 +547,11 @@ async fn settlement_rollback(fixture: &Fixture, kind: DutyKind) {
         stored_job(fixture, &pending).await.unwrap()["state"],
         value!("settled")
     );
-    assert_eq!(
-        stored_job(fixture, &successor).await.unwrap()["state"],
-        value!("ready")
-    );
     assert_eq!(recovery.due(kind, None).await.unwrap(), vec![app.clone()]);
     let settled = snapshot(fixture, &app, kind).await;
     assert_eq!(owner.settle(&queue, &command).await.unwrap(), receipt);
     assert_eq!(snapshot(fixture, &app, kind).await, settled);
-    assert_eq!(job_count(fixture, &app).await, 2);
+    assert_eq!(job_count(fixture, &app).await, 1);
 }
 
 async fn fault(fixture: &Fixture, install: bool) {

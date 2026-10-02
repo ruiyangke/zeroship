@@ -22,9 +22,12 @@ use std::{
     num::NonZeroU64,
     time::{Duration, Instant},
 };
+pub use zeroship_core::workflow_jobs::{JobReceipt, JournalSettlement};
 use zeroship_core::{
     app_id::AppId,
-    workflow_jobs::{Delivery, JobLease, JobOperation, JobOutcome, JobSpec, Settlement},
+    workflow_jobs::{
+        valid_outcome, Delivery, JobLease, JobOperation, JobOutcome, JobSpec, SettlementRefusal,
+    },
 };
 use zeroship_data_orm::{
     orm::{Entity, EntityAlias, FindOptions, FromRow, Operation, Output, ReadPredicate},
@@ -56,32 +59,12 @@ pub(super) fn run_attempt<'a, T: 'a>(
     })
 }
 
-/// A semantic result belongs to the logical job, not its delivery attempt.
-/// Successor publication remains independently durable in the creator outbox.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct JobReceipt {
-    pub job: JobSpec,
-    pub outcome: JobOutcome,
-}
-
-impl JobReceipt {
-    /// Bind a persisted outcome to the current attempt for queue settlement.
-    ///
-    /// # Errors
-    /// Rejects an attempt for a different immutable logical job.
-    pub fn settlement(&self, lease: &impl JobLease) -> Result<Settlement, WorkflowServiceError> {
-        if lease.delivery().job != self.job {
-            return Err(conflict());
+impl From<SettlementRefusal> for WorkflowServiceError {
+    fn from(refusal: SettlementRefusal) -> Self {
+        match refusal {
+            SettlementRefusal::Conflict => conflict(),
+            SettlementRefusal::Invalid => invalid(),
         }
-        if !valid_outcome(&self.job.operation, &self.outcome) {
-            return Err(invalid());
-        }
-        Ok(Settlement {
-            delivery: lease.delivery().clone(),
-            outcome: self.outcome.clone(),
-            successors: Vec::new(),
-        })
     }
 }
 
@@ -747,34 +730,6 @@ impl Record {
     }
 }
 
-const fn valid_outcome(operation: &JobOperation, outcome: &JobOutcome) -> bool {
-    if !outcome.valid_for(operation) {
-        return false;
-    }
-    match operation {
-        JobOperation::Activate { .. } => matches!(outcome, JobOutcome::Completed {}),
-        // Advance admits every scheduling outcome, and `JobOutcome::valid_for`
-        // settles Management on its own: it pairs the result with the command
-        // that asked for it, which no family test here could narrow further.
-        JobOperation::Advance { .. } | JobOperation::Management { .. } => true,
-        JobOperation::Cron { .. } => {
-            matches!(outcome, JobOutcome::Completed {} | JobOutcome::Rejected {})
-        }
-        JobOperation::Reconcile {} => {
-            matches!(outcome, JobOutcome::Completed {} | JobOutcome::Waiting {})
-        }
-        JobOperation::Close { .. } => matches!(outcome, JobOutcome::Closed { .. }),
-        JobOperation::Collect {}
-        | JobOperation::Fanout { .. }
-        | JobOperation::Propagate { .. }
-        // A refused release is Waiting, never Rejected: the deployment is still
-        // needed, and the journal holder keeps it until a later job succeeds.
-        | JobOperation::ReleaseHold { .. } => {
-            matches!(outcome, JobOutcome::Completed {} | JobOutcome::Waiting {})
-        }
-    }
-}
-
 impl AppWorkflows {
     /// Accept only the run, generation, deployment and frontier named by a job.
     /// Duplicate jobs replay their semantic receipt; delivery attempts acquire
@@ -1045,6 +1000,7 @@ impl AppWorkflows {
                         &tx,
                         &claim.app,
                         &upload.payload_id,
+                        Some(claim.task.id.as_str()),
                         upload.expires_at,
                     )
                     .await?;

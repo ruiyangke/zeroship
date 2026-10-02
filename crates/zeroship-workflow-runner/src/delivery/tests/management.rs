@@ -56,12 +56,6 @@ async fn management_lost_ack_replays_without_executing_app_code() {
     assert_eq!(fixture.probe.starts.get(), 0);
     assert_eq!(fixture.probe.stops.get(), 0);
     assert_eq!(fixture.metadata.renewals.get(), 0);
-    assert!(fixture
-        .metadata
-        .requests
-        .borrow()
-        .iter()
-        .all(|request| request.successors.is_empty()));
 }
 
 #[compio::test]

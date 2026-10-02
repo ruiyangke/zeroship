@@ -8,7 +8,7 @@ use crate::{models::Claimant, queue::DeliveryGrant, Error, Queue};
 use zeroship_core::{
     app_id::AppId,
     workflow_coordination::{Assignment, Revision, WorkerId},
-    workflow_jobs::{Settlement, SettlementReceipt},
+    workflow_jobs::{JournalSettlement, SettlementReceipt},
 };
 
 /// The revision every asserted authority carries.
@@ -71,11 +71,11 @@ impl MaintenanceAuthority {
     ///
     /// # Errors
     /// Refuses a delivery leased by another identity, a lapsed lease, conflicting
-    /// successors and failed queue transactions.
+    /// settlements and failed queue transactions.
     pub async fn settle(
         &self,
         queue: &Queue,
-        settlement: &Settlement,
+        settlement: &JournalSettlement,
     ) -> Result<SettlementReceipt, Error> {
         queue.settle(&self.asserted(queue).await?, settlement).await
     }

@@ -396,7 +396,7 @@ impl WorkflowService {
         // count is always one, so it changes nothing here -- but one
         // implementation means the served path cannot drift from the in-process
         // one, and the deadline compared is the reservation's either way.
-        confirm_staged(&tx, scope.app(), &id, row.expires_at).await?;
+        confirm_staged(&tx, scope.app(), &id, scope.task_id(), row.expires_at).await?;
         scope.validate_at(tx.now().await?)?;
         tx.commit().await?;
         Ok(StagedPayload { id, reference })
@@ -1311,19 +1311,24 @@ pub(crate) async fn confirm_staged(
     tx: &Transaction,
     app: &AppId,
     id: &str,
+    task_id: Option<&str>,
     expires_at: i64,
 ) -> Result<(), WorkflowServiceError> {
+    let mut filter = models::payloads::app_id
+        .eq(app.as_str())?
+        .and(models::payloads::id.eq(id)?)
+        .and(models::payloads::state.eq("uploading")?)
+        .and(models::payloads::expires_at.eq(expires_at)?);
+    // A reservation keyed by a task may be confirmed by that task alone. The
+    // task column is NULL for an ownerless staging, whose whole identity is
+    // `(app_id, request_id)`, so the term is added only when a task holds it.
+    if let Some(task) = task_id {
+        filter = filter.and(models::payloads::task_id.eq(Some(task))?);
+    }
     let changed = tx
         .database()
         .entity::<models::payloads::Entity>()?
-        .update_many(
-            models::payloads::app_id
-                .eq(app.as_str())?
-                .and(models::payloads::id.eq(id)?)
-                .and(models::payloads::state.eq("uploading")?)
-                .and(models::payloads::expires_at.eq(expires_at)?),
-            models::payloads::state.set("staged")?,
-        )
+        .update_many(filter, models::payloads::state.set("staged")?)
         .await?;
     super::fence::changed_once(changed, || {
         WorkflowServiceError::Conflict("payload reservation was claimed elsewhere".into())
@@ -1339,11 +1344,12 @@ pub(crate) async fn confirm_reported(
     tx: &Transaction,
     app: &AppId,
     id: &str,
+    task_id: Option<&str>,
     expires_at: i64,
 ) -> Result<(), WorkflowServiceError> {
     let row = payload(tx, app, id).await?;
     if matches!(row.state.as_str(), "staged" | "referenced") {
         return Ok(());
     }
-    confirm_staged(tx, app, id, expires_at).await
+    confirm_staged(tx, app, id, task_id, expires_at).await
 }

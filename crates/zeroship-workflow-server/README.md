@@ -66,23 +66,36 @@ sequence. It records a historical receipt even before the app's first activation
 Delayed retries cannot disable a newer restore. Calendar disable preserves
 accepted jobs and recovery; it does not acknowledge worker policy changes.
 
-`POST /v1/jobs/{submit,claim,heartbeat,settle}` binds worker identity to its
-enrolled signing key. Native callbacks recheck that exact key and stored app
-placement after queue locks and before commit. Workers cannot submit manager-owned
-cron or management commands. Exact settlement replay checks current enrollment
-of the original worker even after placement expires. Claim and heartbeat replies
+`POST /v1/jobs/{submit,claim,heartbeat,settle,release,receipt}` binds worker
+identity to its enrolled signing key. Native callbacks recheck that exact key,
+and every callback that mutates an app's queue rechecks the stored app placement
+after the queue lock and before commit. Release is the deliberate exception the
+route records: a holder whose deployment was just parked must still be able to
+give work back, and the next dispatch rechecks availability. Workers cannot
+submit manager-owned cron or management commands. Claim and heartbeat replies
 transfer remaining lease duration after commit; worker wall clocks are not used
 to interpret the manager's absolute timestamps.
 
+A settlement carries the delivery and, when the holder has one, the execution to
+commit; it never carries an outcome or successors. The journal commits the
+execution and the queue is settled with the outcome that commit decided. A body
+with no execution is first checked against the queue's latest delivery fence for
+the job, then settled from the receipt the journal already holds, and refused as
+a conflict when it holds none. Exact settlement replay checks current enrollment
+of the original worker even after placement expires. Settle and release refuse a
+delivery naming any worker but the one that signed the request, and each first
+checks the queue's latest delivery for the job; a job's receipt is read only by
+the worker the queue last delivered it to, whose live placement is rechecked.
+Every one of those checks comes before any journal is asked.
+
 Control accepts lifecycle commands through `POST /v1/management/enqueue` and
 reads their durable outcome through `POST /v1/management/status`. Commands become
-ordered `Management` jobs in the same queue as execution work. Workers claim and
-settle them through the job endpoints with a closed management outcome; there is
-no separate command polling or acknowledgement route. Acceptance atomically
-records the command, job, run ordering and execution barrier. Settlement commits
-the queue receipt, command outcome and matching barrier change together. Exact
-settlement replay preserves that result after placement replacement while still
-checking the original worker's enrollment.
+ordered `Management` jobs in the same queue as execution work. The service's own
+maintenance lane claims and applies them and settles each with the outcome its
+journal committed; there is no separate command polling or acknowledgement route.
+Acceptance atomically records the command, job, run ordering and execution
+barrier. Settlement commits the queue receipt, command outcome and matching
+barrier change together.
 
 Latest restart names its deployment in the command. Control is the authority for
 the app pointer and the deployment catalog and is the only caller this endpoint

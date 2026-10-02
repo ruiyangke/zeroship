@@ -1606,10 +1606,13 @@ impl zeroship_workflow_runner::delivery::JobTransport for Manager {
 
     async fn settle(
         &self,
-        settlement: &zeroship_core::workflow_jobs::Settlement,
+        journal: &zeroship_workflow::service::AppWorkflows,
+        lease: &Self::Lease,
     ) -> Result<zeroship_core::workflow_jobs::SettlementReceipt, WorkflowServiceError> {
+        let settlement =
+            zeroship_workflow_runner::delivery::committed_settlement(journal, lease).await?;
         self.coordinator
-            .settle_job(&self.worker, settlement, || async {
+            .settle_job(&self.worker, &settlement, || async {
                 Ok(self.worker.clone())
             })
             .await
@@ -1627,10 +1630,11 @@ impl zeroship_workflow_runner::delivery::JobTransport for Manager {
         let receipt = journal
             .complete_reported_job(task, lease, execution, &confirmed)
             .await?;
-        let settlement = receipt.settlement(lease)?;
         Ok(zeroship_workflow_runner::delivery::Completed {
-            settlement: zeroship_workflow_runner::delivery::JobTransport::settle(self, &settlement)
-                .await?,
+            settlement: zeroship_workflow_runner::delivery::JobTransport::settle(
+                self, journal, lease,
+            )
+            .await?,
             receipt,
         })
     }

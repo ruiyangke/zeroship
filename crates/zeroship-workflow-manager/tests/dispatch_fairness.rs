@@ -21,7 +21,7 @@ use zeroship_core::{
     app_id::AppId,
     workflow_coordination::{Assignment, RunId, VerifyAssignment, WorkerId},
     workflow_jobs::{
-        BroadcastId, Delivery, DeploymentId, JobId, JobOperation, JobOutcome, JobSpec, Settlement,
+        BroadcastId, Delivery, DeploymentId, JobId, JobOperation, JobOutcome, JobSpec,
     },
 };
 use zeroship_data_orm::orm::{Database, FromRow};
@@ -428,11 +428,7 @@ async fn stable_rotation(fixture: &Fixture) {
     assert_eq!(rotation(&database, &app).await, claimed);
     assert_eq!(queue.submit(&first).await.unwrap(), first);
     assert_eq!(rotation(&database, &app).await, claimed);
-    let command = Settlement {
-        delivery: renewed,
-        outcome: JobOutcome::Completed {},
-        successors: Vec::new(),
-    };
+    let command = support::settlement_from(renewed, JobOutcome::Completed {});
     let receipt = queue.settle(&authority, &command).await.unwrap();
     assert_eq!(rotation(&database, &app).await, claimed);
     assert_eq!(claim(&queue, &authority).await.job, second);
@@ -541,11 +537,7 @@ async fn fanout_reorders(fixture: &Fixture) {
     queue
         .settle(
             &authority,
-            &Settlement {
-                delivery: earlier,
-                outcome: JobOutcome::Completed {},
-                successors: vec![],
-            },
+            &support::settlement_from(earlier, JobOutcome::Completed {}),
         )
         .await
         .unwrap();

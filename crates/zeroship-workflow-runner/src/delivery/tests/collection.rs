@@ -56,12 +56,6 @@ async fn collect_lost_ack_replays_without_executor_or_artifacts() {
     assert_eq!(fixture.metadata.renewals.get(), 0);
     assert!(!has_task(&fixture).await);
     assert_eq!(fixture.app.pending_jobs(None, 1).await.unwrap(), before);
-    assert!(fixture
-        .metadata
-        .requests
-        .borrow()
-        .iter()
-        .all(|request| request.successors.is_empty()));
 }
 
 /// Collection bounds the sweep cannot honour are refused where they are

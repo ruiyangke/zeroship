@@ -22,7 +22,7 @@ use zeroship_core::{
     app_id::AppId,
     workflow_coordination::{Assignment, RunId, WorkerId},
     workflow_deployments::{HoldGeneration, HoldReceipt, HoldScope, HoldState},
-    workflow_jobs::{DeploymentId, JobId, JobOperation, JobOutcome, JobSpec, Settlement},
+    workflow_jobs::{DeploymentId, JobId, JobOperation, JobOutcome, JobSpec, JournalSettlement},
     workflow_schedules::{ActivateSchedules, RegisterSchedules, ScheduleDescriptor, ScheduleId},
 };
 use zeroship_data_orm::{orm::Output, value, Value};
@@ -30,7 +30,6 @@ use zeroship_workflow_calendar::{
     IntervalAnchor, ScheduleCatchUp, ScheduleOverlap, ScheduleTiming,
 };
 use zeroship_workflow_manager::{
-    maintenance::MaintenanceAuthority,
     recovery::{Options as RecoveryOptions, Recovery},
     retention::HoldClient,
     scheduling::{Options as SchedulerOptions, Scheduler},
@@ -220,9 +219,8 @@ const fn claimant(operation: &JobOperation) -> Claimant {
     }
 }
 
-/// Claim as `claimant` on an authority the caller states. [`finish_sweep`]
-/// covers the whole discharge of a sweep; this form is for contracts that go on
-/// to heartbeat or settle the delivery themselves.
+/// Claim as `claimant` on an authority the caller states, for contracts that go
+/// on to heartbeat or settle the delivery themselves.
 async fn claim_as(
     queue: &Queue,
     authority: &Assignment,
@@ -250,36 +248,12 @@ async fn claim_for(
 /// Discharge the app's next row through the host that may take it: a sweep is
 /// claimed as the lane and creator work under the placement `authority` states.
 /// Both settle on that same authority, so its caller can replay the receipt.
-async fn finish(queue: &Queue, authority: &Assignment, expected: &JobSpec) -> Settlement {
+async fn finish(queue: &Queue, authority: &Assignment, expected: &JobSpec) -> JournalSettlement {
     let delivery = claim_for(queue, authority, expected).await.unwrap().unwrap();
     assert_eq!(delivery.delivery().job, *expected);
-    let settlement = Settlement {
-        delivery: delivery.delivery().clone(),
-        outcome: JobOutcome::Completed {},
-        successors: vec![],
-    };
+    let settlement =
+        support::settlement(delivery.delivery(), JobOutcome::Completed {});
     queue.settle(authority, &settlement).await.unwrap();
-    settlement
-}
-
-/// Discharge a journal sweep the way its own host does. `finish` above is the
-/// placed host, which takes creator work alone: a sweep is claimed by the lane
-/// in the process that owns the queue, and that lane asserts its authority
-/// rather than reading a placement.
-async fn finish_sweep(queue: &Queue, app: &AppId, expected: &JobSpec) -> Settlement {
-    let authority = MaintenanceAuthority::new(app.clone(), WorkerId::mint());
-    let granted = authority
-        .claim(queue, Ok(support::delivery_ceiling()))
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(granted.delivery().job, *expected);
-    let settlement = Settlement {
-        delivery: granted.delivery().clone(),
-        outcome: JobOutcome::Completed {},
-        successors: vec![],
-    };
-    authority.settle(queue, &settlement).await.unwrap();
     settlement
 }
 
@@ -574,7 +548,7 @@ async fn scheduling_retention(fixture: &Fixture) {
     let acquired = faults.acquired.get();
     let released = faults.released.get();
     let replay = queue.settle(&authority, &cron).await.unwrap();
-    assert_eq!(replay.job_id, cron.delivery.job.id);
+    assert_eq!(replay.job_id, cron.delivery().job.id);
     assert_eq!(replay.outcome, JobOutcome::Completed {});
     assert_eq!(
         faults.acquired.get(),

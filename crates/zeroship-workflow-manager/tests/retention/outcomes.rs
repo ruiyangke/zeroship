@@ -12,7 +12,7 @@ pub async fn refused(
     fixture: &Fixture,
     queue: &Queue,
     authority: &Assignment,
-    settlement: &Settlement,
+    settlement: &JournalSettlement,
     expected: Error,
 ) {
     let before = snapshot(fixture).await;
@@ -86,22 +86,26 @@ async fn outcome_families(fixture: &Fixture) {
         let acquired = faults.acquired.get();
         assert!(acquired > 0);
         let released = faults.released.get();
-        let successor = JobSpec {
-            id: JobId::mint(),
-            app_id: app.clone(),
-            operation: JobOperation::Collect {},
-            available_at: 0.try_into().unwrap(),
+        let delivery = granted.delivery().clone();
+        // A cross-family outcome cannot become a settlement at all: the only
+        // constructor refuses it before the queue is even asked.
+        let receipt_of = |outcome: JobOutcome| {
+            JournalSettlement::from_receipt(
+                &zeroship_core::workflow_jobs::JobReceipt {
+                    job: delivery.job.clone(),
+                    outcome,
+                },
+                &delivery,
+            )
         };
-        let mut attempt = Settlement {
-            delivery: granted.delivery().clone(),
-            outcome: JobOutcome::Management {
+        assert_eq!(
+            receipt_of(JobOutcome::Management {
                 outcome: ManagementOutcome::Conflict {},
-            },
-            successors: vec![job(&app, &DeploymentId::mint())],
-        };
-        refused(fixture, &queue, &authority, &attempt, Error::Invalid).await;
-        attempt.outcome = outcome.clone();
-        attempt.successors = vec![successor.clone()];
+            })
+            .unwrap_err(),
+            zeroship_core::workflow_jobs::SettlementRefusal::Invalid
+        );
+        let attempt = support::settlement_from(delivery.clone(), outcome.clone());
         let receipt = queue.settle(&authority, &attempt).await.unwrap();
         assert_eq!(receipt.outcome, outcome);
         assert_eq!(queue.settle(&authority, &attempt).await.unwrap(), receipt);
@@ -114,24 +118,23 @@ async fn outcome_families(fixture: &Fixture) {
             outcome
         );
 
-        let mut changed = attempt.clone();
-        changed.outcome = if matches!(outcome, JobOutcome::Waiting {}) {
-            JobOutcome::Completed {}
-        } else {
-            JobOutcome::Waiting {}
-        };
+        let changed = support::settlement_from(
+            delivery.clone(),
+            if matches!(outcome, JobOutcome::Waiting {}) {
+                JobOutcome::Completed {}
+            } else {
+                JobOutcome::Waiting {}
+            },
+        );
         refused(fixture, &queue, &authority, &changed, Error::Conflict).await;
-        changed.outcome = JobOutcome::Management {
-            outcome: ManagementOutcome::Denied {},
-        };
-        refused(fixture, &queue, &authority, &changed, Error::Invalid).await;
-        changed = attempt.clone();
-        changed.successors = vec![job(&app, &DeploymentId::mint())];
-        refused(fixture, &queue, &authority, &changed, Error::Conflict).await;
+        assert_eq!(
+            receipt_of(JobOutcome::Management {
+                outcome: ManagementOutcome::Denied {},
+            })
+            .unwrap_err(),
+            zeroship_core::workflow_jobs::SettlementRefusal::Invalid
+        );
         assert_eq!(queue.settle(&authority, &attempt).await.unwrap(), receipt);
-        // The successor is a journal sweep, so the lane that owns the queue is
-        // what discharges it; the settlement above was the creator row's.
-        finish_sweep(&queue, &app, &successor).await;
         assert_eq!(faults.acquired.get(), acquired);
         assert_eq!(faults.released.get(), released);
     }
@@ -139,7 +142,7 @@ async fn outcome_families(fixture: &Fixture) {
     reject_before_lookup(fixture, &queue).await;
 }
 
-async fn reject_before_lookup(fixture: &Fixture, queue: &Queue) {
+async fn reject_before_lookup(fixture: &Fixture, _queue: &Queue) {
     let unknown = AppId::mint();
     let authority = assignment(&unknown);
     let mut spec = job(&unknown, &DeploymentId::mint());
@@ -149,17 +152,29 @@ async fn reject_before_lookup(fixture: &Fixture, queue: &Queue) {
         revision: 1.try_into().unwrap(),
         command: zeroship_core::workflow_jobs::ManagementCommand::RestartStarted { from: None },
     };
-    let attempt = Settlement {
-        delivery: zeroship_core::workflow_jobs::Delivery {
-            job: spec,
-            worker_id: authority.worker_id.clone(),
-            assignment_revision: authority.revision,
-            attempt: 1.try_into().unwrap(),
-            deadline: authority.expires_at,
-        },
-        outcome: JobOutcome::Completed {},
-        successors: vec![],
+    let delivery = zeroship_core::workflow_jobs::Delivery {
+        job: spec,
+        worker_id: authority.worker_id.clone(),
+        assignment_revision: authority.revision,
+        attempt: 1.try_into().unwrap(),
+        deadline: authority.expires_at,
     };
-    // Outcome-family validation precedes even app registration and delivery lookup.
-    refused(fixture, queue, &authority, &attempt, Error::Invalid).await;
+    // Outcome-family validation is part of construction, so it runs before any
+    // app registration or delivery lookup: the unknown app is never touched.
+    assert_eq!(
+        JournalSettlement::from_receipt(
+            &zeroship_core::workflow_jobs::JobReceipt {
+                job: delivery.job.clone(),
+                outcome: JobOutcome::Completed {},
+            },
+            &delivery,
+        )
+        .unwrap_err(),
+        zeroship_core::workflow_jobs::SettlementRefusal::Invalid
+    );
+    assert!(
+        rows(fixture, "queue_scopes", value!({"id":unknown.as_str()}))
+            .await
+            .is_empty()
+    );
 }

@@ -29,7 +29,7 @@ use zeroship_core::{
         AssignedScope, RegisterWorker, Revision, RunId, WorkerId, WorkerState,
     },
     workflow_jobs::{
-        BroadcastId, DeploymentId, JobId, JobOperation, JobOutcome, JobSpec, Settlement, SubmitJob,
+        BroadcastId, DeploymentId, JobId, JobOperation, JobOutcome, JobSpec, SubmitJob,
     },
     workflow_policy::{AppPolicy, EstablishIngress, PolicyLeaseRequest},
     workflow_schedules::DisableSchedules,
@@ -213,11 +213,7 @@ impl Host {
         self.coordinator
             .settle_job(
                 &self.worker,
-                &Settlement {
-                    delivery: grant.delivery().clone(),
-                    outcome,
-                    successors: Vec::new(),
-                },
+                &support::settlement_from(grant.delivery().clone(), outcome),
                 || ready(Ok(self.worker.clone())),
             )
             .await
@@ -237,11 +233,7 @@ impl Host {
         self.lane
             .settle(
                 &self.queue,
-                &Settlement {
-                    delivery: grant.delivery().clone(),
-                    outcome: JobOutcome::Closed { drained },
-                    successors: Vec::new(),
-                },
+                &support::settlement_from(grant.delivery().clone(), JobOutcome::Closed { drained }),
             )
             .await
             .unwrap();

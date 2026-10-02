@@ -6,14 +6,13 @@
 use crate::{
     clock::{Clock, Sample, RESOLUTION_MILLIS},
     error::Error,
-    models::{self, jobs, queue_scopes, Claimant, Job, Scope},
+    models::{self, assignments, jobs, queue_scopes, Claimant, Job, Placement, Scope},
     retention::{self, Retention},
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::{
     cell::Cell,
-    collections::BTreeMap,
     future::{poll_fn, ready, Future},
     io::Write,
     num::{NonZeroU64, NonZeroUsize},
@@ -25,7 +24,8 @@ use zeroship_core::{
     app_id::AppId,
     workflow_coordination::{Assignment, VerifyAssignment, WorkerId},
     workflow_jobs::{
-        Delivery, DeliveryLease, DeploymentId, JobLease, JobSpec, Settlement, SettlementReceipt,
+        valid_outcome, Delivery, DeliveryLease, DeploymentId, JobLease, JobSpec,
+        JournalSettlement, SettlementReceipt,
     },
     workflow_policy::AppPolicy,
 };
@@ -37,13 +37,12 @@ use zeroship_data_orm::{
     value, ConnectOptions, Value,
 };
 
-/// Bounds leases, transaction waits and successor metadata.
+/// Bounds leases and transaction waits.
 #[derive(Clone, Copy, Debug)]
 pub struct Options {
     pub max_connections: NonZeroUsize,
     pub lease: Duration,
     pub transaction_timeout: Duration,
-    pub max_successors: usize,
     pub max_metadata_bytes: usize,
 }
 
@@ -53,7 +52,6 @@ impl Default for Options {
             max_connections: NonZeroUsize::new(8).unwrap(),
             lease: Duration::from_secs(30),
             transaction_timeout: Duration::from_secs(5),
-            max_successors: 256,
             max_metadata_bytes: 256 * 1024,
         }
     }
@@ -74,8 +72,7 @@ pub struct Queue {
     pub(crate) holds: Rc<dyn crate::retention::HoldClient>,
 }
 
-struct PreparedSettlement<'a> {
-    successors: BTreeMap<&'a str, &'a JobSpec>,
+struct PreparedSettlement {
     digest: String,
 }
 
@@ -159,7 +156,6 @@ impl Queue {
             || Instant::now()
                 .checked_add(options.transaction_timeout)
                 .is_none()
-            || options.max_successors == 0
             || options.max_metadata_bytes == 0
             || options.lease.as_millis() == 0
             || i64::try_from(options.lease.as_millis()).is_err()
@@ -575,22 +571,25 @@ impl Queue {
         .await
     }
 
-    /// Atomically persist an outcome and its immutable successor jobs.
+    /// Atomically persist the outcome the journal decided.
     /// Retried settled deliveries return the stored receipt after lease expiry;
     /// the host must still authenticate the original worker identity.
     ///
+    /// A settlement publishes no successor. Successors belong to the creator
+    /// journal's own frontier, which commits them independently of the queue.
+    ///
     /// # Errors
-    /// Refuses changed settlements, foreign successors and stale delivery fences.
+    /// Refuses changed settlements, stale delivery fences and failed transactions.
     pub async fn settle(
         &self,
         assignment: &Assignment,
-        settlement: &Settlement,
+        settlement: &JournalSettlement,
     ) -> Result<SettlementReceipt, Error> {
         self.settle_authorized(
             &assignment.into(),
             settlement,
             |_| ready(Ok(assignment.clone())),
-            |_| ready(Ok(settlement.delivery.worker_id.clone())),
+            |_| ready(Ok(settlement.delivery().worker_id.clone())),
         )
         .await
     }
@@ -598,15 +597,15 @@ impl Queue {
     /// Revalidate active placement around an atomic settlement. Receipt replay
     /// checks current enrollment of the original worker through `authorize_replay`;
     /// expired or replaced placement does not erase its immutable receipt.
-    /// Replay neither renews placement nor admits successor writes.
+    /// Replay neither renews placement nor writes anything the caller supplies.
     /// Both callbacks receive the active transaction for scoped metadata reads.
     ///
     /// # Errors
-    /// Refuses revoked active delivery, conflicting successors and failed transactions.
+    /// Refuses revoked active delivery, conflicting settlements and failed transactions.
     pub async fn settle_authorized<F, Fut, R, Replay>(
         &self,
         assignment: &VerifyAssignment,
-        settlement: &Settlement,
+        settlement: &JournalSettlement,
         mut authorize: F,
         mut authorize_replay: R,
     ) -> Result<SettlementReceipt, Error>
@@ -617,14 +616,14 @@ impl Queue {
         Replay: Future<Output = Result<WorkerId, Error>>,
     {
         let prepared = self.prepare_settlement(assignment, settlement)?;
-        let delivery = &settlement.delivery;
+        let delivery = settlement.delivery();
+        let outcome = settlement.outcome();
         let budget = Budget::new(self.options.transaction_timeout);
         loop {
             let result = self
                 .transact_for(budget.clone(), |tx| {
                     let authorize = &mut authorize;
                     let authorize_replay = &mut authorize_replay;
-                    let successors = &prepared.successors;
                     let digest = &prepared.digest;
                     let budget = &budget;
                     async move {
@@ -633,27 +632,21 @@ impl Queue {
                             .await?
                             .ok_or(Error::Conflict)?;
                         matches_delivery(&job, delivery)?;
-                        let outcome = serde_json::to_string(&settlement.outcome)
-                            .map_err(|_| Error::Invalid)?;
+                        let stored_outcome =
+                            serde_json::to_string(outcome).map_err(|_| Error::Invalid)?;
                         let receipt = SettlementReceipt {
                             job_id: delivery.job.id.clone(),
                             app_id: assignment.app_id.clone(),
                             attempt: delivery.attempt,
-                            outcome: settlement.outcome.clone(),
+                            outcome: outcome.clone(),
                         };
                         if job.state == "settled" {
                             if job.settlement_digest.as_deref() != Some(digest.as_str())
-                                || job.outcome.as_deref() != Some(&outcome)
+                                || job.outcome.as_deref() != Some(&stored_outcome)
                             {
                                 return Err(Error::Conflict);
                             }
-                            crate::management::settle(
-                                &tx,
-                                &delivery.job,
-                                &settlement.outcome,
-                                true,
-                            )
-                            .await?;
+                            crate::management::settle(&tx, &delivery.job, outcome, true).await?;
                             if authorize_replay(tx.clone()).await? != delivery.worker_id {
                                 return Err(Error::Denied);
                             }
@@ -666,41 +659,21 @@ impl Queue {
                         if let Some(deployment) = delivery.job.deployment_id() {
                             retention::require_held(&tx, &assignment.app_id, deployment).await?;
                         }
-                        for successor in successors.values() {
-                            if !self.existing(&tx, successor).await? {
-                                if let Some(deployment) = successor.deployment_id() {
-                                    if !retention::prepared(&tx, &assignment.app_id, deployment)
-                                        .await?
-                                    {
-                                        return Ok(Retention::Acquire(deployment.clone()));
-                                    }
-                                }
-                            }
-                        }
-                        for successor in successors.values() {
-                            self.insert(&tx, successor, sample.millis).await?;
-                        }
-                        crate::management::settle(&tx, &delivery.job, &settlement.outcome, false)
-                            .await?;
+                        crate::management::settle(&tx, &delivery.job, outcome, false).await?;
                         update(
                             &tx,
                             fence(delivery),
                             value!({
-                                "state":"settled","outcome":outcome,"settlement_digest":digest
+                                "state":"settled","outcome":stored_outcome,"settlement_digest":digest
                             }),
                         )
                         .await?;
-                        crate::recovery::settled_page(
-                            &tx,
-                            &delivery.job,
-                            &settlement.outcome,
-                            sample.millis,
-                        )
-                        .await?;
+                        crate::recovery::settled_page(&tx, &delivery.job, outcome, sample.millis)
+                            .await?;
                         Box::pin(crate::recovery::settled_close(
                             &tx,
                             &delivery.job,
-                            &settlement.outcome,
+                            outcome,
                             sample.millis,
                         ))
                         .await?;
@@ -721,51 +694,145 @@ impl Queue {
         }
     }
 
-    fn prepare_settlement<'a>(
-        &self,
-        assignment: &VerifyAssignment,
-        settlement: &'a Settlement,
-    ) -> Result<PreparedSettlement<'a>, Error> {
-        let delivery = &settlement.delivery;
-        bound(assignment, delivery)?;
-        if !settlement.outcome.valid_for(&delivery.job.operation) {
-            return Err(Error::Invalid);
-        }
-        if settlement.successors.len() > self.options.max_successors {
-            return Err(Error::Capacity);
-        }
-        self.encode(settlement)?;
-        let mut successors = BTreeMap::new();
-        for successor in &settlement.successors {
-            if matches!(
-                successor.operation,
-                zeroship_core::workflow_jobs::JobOperation::Management { .. }
-                    | zeroship_core::workflow_jobs::JobOperation::Close { .. }
-            ) {
-                return Err(Error::Invalid);
-            }
-            if successor.app_id != assignment.app_id {
+    /// Refuse a delivery that is not the one this queue last handed out for its
+    /// job: the job, worker, assignment revision and attempt the latest claim
+    /// wrote.
+    ///
+    /// A FENCE WITHOUT A LIVENESS CHECK, because the caller has not decided yet
+    /// whether it is settling or replaying. A settled job keeps the fence of the
+    /// delivery that settled it, so an exact replay passes here after its lease
+    /// has lapsed, and [`Self::settle_authorized`] then decides which branch the
+    /// delivery takes. What this lets a host do is refuse a caller that does
+    /// not hold the job BEFORE it reads anything a holder alone may read.
+    ///
+    /// # Errors
+    /// Refuses with `Conflict` a delivery the queue never made or has since
+    /// superseded, and reports failed transactions.
+    pub async fn require_latest_delivery(&self, delivery: &Delivery) -> Result<(), Error> {
+        self.transact(|tx| async move {
+            let job = load(&tx, &delivery.job.app_id, delivery.job.id.as_str())
+                .await?
+                .ok_or(Error::Conflict)?;
+            matches_delivery(&job, delivery)
+        })
+        .await
+    }
+
+    /// Refuse a task call for an app this worker has no live placement on.
+    ///
+    /// A task read or reservation names an app and a task credential, never a
+    /// delivery, so the queue cannot compare the exact attempt the way
+    /// [`Self::require_latest_delivery`] does. What it proves instead is that the
+    /// worker is admitted to the app at all, which is what must be true before
+    /// the policy source is asked to observe it. The journal then authorizes the
+    /// task itself. Without this fence, naming another tenant's app would make
+    /// the policy source observe it and answer differently by whether that app
+    /// exists.
+    ///
+    /// # Errors
+    /// Refuses with `Denied` a released or lapsed placement on the app, and
+    /// reports failed transactions.
+    pub async fn require_placement(&self, worker: &WorkerId, app: &AppId) -> Result<(), Error> {
+        self.transact(|tx| async move {
+            let placement = tx
+                .entity::<assignments::Entity>()?
+                .find::<Placement>(
+                    assignments::app_id
+                        .eq(app.as_str())?
+                        .and(assignments::worker_id.eq(worker.as_str())?),
+                    FindOptions {
+                        limit: Some(1),
+                        ..Default::default()
+                    },
+                )
+                .await?
+                .into_iter()
+                .next()
+                .ok_or(Error::Denied)?;
+            if placement.released || placement.expires_at <= self.clock.now().await? {
                 return Err(Error::Denied);
             }
-            if successor.id == delivery.job.id {
+            Ok(())
+        })
+        .await
+    }
+
+    /// Refuse a receipt read for anyone but the worker this queue last delivered
+    /// `job` to, or for a worker whose placement on the app is gone.
+    ///
+    /// THE LATEST HOLDER, NOT A LIVE ONE. A claim writes `worker_id` and nothing
+    /// clears it, so a settled job still names the worker that settled it --
+    /// the holder a lost settlement reply leaves needing the job's receipt --
+    /// and the claim that superseded an earlier holder is what refuses that
+    /// holder here.
+    ///
+    /// PLACEMENT IS RECHECKED BECAUSE A HOLD OUTLIVES IT. A settled row keeps
+    /// naming its worker after the app's placement was released, so the queue
+    /// row alone would let a worker that lost the app keep reading its outcomes.
+    /// The read takes the app lock and requires the worker's stored placement to
+    /// be live, which is the same authority a claim reads.
+    ///
+    /// The job is compared whole, not by id, so a holder is answered about the
+    /// job it was delivered and not about another operation under the same id.
+    ///
+    /// # Errors
+    /// Refuses with `Conflict` a job this worker does not hold, including one
+    /// the queue has never seen; refuses with `Denied` a released or lapsed
+    /// placement; and reports failed transactions.
+    pub async fn require_latest_holder(
+        &self,
+        worker: &WorkerId,
+        job: &JobSpec,
+    ) -> Result<(), Error> {
+        self.transact(|tx| async move {
+            let stored = load(&tx, &job.app_id, job.id.as_str())
+                .await?
+                .ok_or(Error::Conflict)?;
+            if stored.spec()? != *job || stored.worker_id.as_deref() != Some(worker.as_str()) {
                 return Err(Error::Conflict);
             }
-            if successors
-                .insert(successor.id.as_str(), successor)
-                .is_some_and(|previous| previous != successor)
-            {
-                return Err(Error::Conflict);
+            let placement = tx
+                .entity::<assignments::Entity>()?
+                .find::<Placement>(
+                    assignments::app_id
+                        .eq(job.app_id.as_str())?
+                        .and(assignments::worker_id.eq(worker.as_str())?),
+                    FindOptions {
+                        limit: Some(1),
+                        ..Default::default()
+                    },
+                )
+                .await?
+                .into_iter()
+                .next()
+                .ok_or(Error::Denied)?;
+            if placement.released || placement.expires_at <= self.clock.now().await? {
+                return Err(Error::Denied);
             }
+            Ok(())
+        })
+        .await
+    }
+
+    fn prepare_settlement(
+        &self,
+        assignment: &VerifyAssignment,
+        settlement: &JournalSettlement,
+    ) -> Result<PreparedSettlement, Error> {
+        let delivery = settlement.delivery();
+        bound(assignment, delivery)?;
+        if !valid_outcome(&delivery.job.operation, settlement.outcome()) {
+            return Err(Error::Invalid);
         }
+        self.encode(settlement)?;
         let digest = digest(&self.encode(&(
             &delivery.job,
             &delivery.worker_id,
             delivery.assignment_revision,
             delivery.attempt,
-            &settlement.outcome,
-            successors.values().collect::<Vec<_>>(),
+            settlement.outcome(),
         ))?);
-        Ok(PreparedSettlement { successors, digest })
+        Ok(PreparedSettlement { digest })
     }
 
     fn deadline(&self, assignment: &Assignment, now: i64) -> Result<i64, Error> {

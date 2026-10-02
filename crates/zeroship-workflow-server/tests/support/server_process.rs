@@ -59,6 +59,11 @@ impl ServerProcess {
         Self::spawn_with(database, peers, directory, name, client, false).await
     }
 
+    /// How many app-facts observations the Control peer has answered.
+    pub fn control_facts_requests(&self) -> usize {
+        self._control.facts_requests()
+    }
+
     async fn spawn_with(
         database: &str,
         peers: &Path,

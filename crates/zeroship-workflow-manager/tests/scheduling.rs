@@ -15,7 +15,7 @@ use support::{Admin, Backend, Fixture};
 use zeroship_core::{
     app_id::AppId,
     workflow_coordination::{Assignment, WorkerId},
-    workflow_jobs::{Delivery, DeploymentId, JobId, JobOperation, JobOutcome, JobSpec, Settlement},
+    workflow_jobs::{Delivery, DeploymentId, JobId, JobOperation, JobOutcome, JobSpec},
     workflow_schedules::{ActivateSchedules, RegisterSchedules, ScheduleDescriptor, ScheduleId},
 };
 use zeroship_data_orm::{
@@ -298,11 +298,7 @@ async fn settle(queue: &Queue, owner: &Assignment, delivery: &Delivery, outcome:
     queue
         .settle(
             owner,
-            &Settlement {
-                delivery: delivery.clone(),
-                outcome,
-                successors: vec![],
-            },
+            &support::settlement_from(delivery.clone(), outcome),
         )
         .await
         .unwrap();
@@ -460,36 +456,47 @@ async fn activations(fixture: &Fixture) {
 
 async fn activation_gate(fixture: &Fixture) {
     let (scheduler, queue) = host(fixture).await;
-    for outcome in [JobOutcome::Rejected {}, JobOutcome::Waiting {}] {
-        let app = AppId::mint();
-        let metadata = registration(
-            &app,
-            vec![descriptor("gated", ScheduleCatchUp::Backfill { max: 5 })],
-        );
-        let activation_job = prepare_activate(&scheduler, &metadata, 1).await;
-        let id = make_due(fixture, &app, "gated").await;
-        while scheduler.dispatch(&app, &id).await.unwrap().more {}
-        let recovery = Recovery::new(queue.clone(), RecoveryOptions::default()).unwrap();
-        let recovery_job = recovery
-            .dispatch(&app, DutyKind::Reconcile)
-            .await
-            .unwrap()
-            .unwrap();
-        let owner = assignment(&app);
-        let delivery = claim_sweep(&queue, &owner).await;
-        assert_eq!(delivery.job, activation_job);
-        settle(&queue, &owner, &delivery, outcome).await;
-        let delivery = claim_sweep(&queue, &owner).await;
-        assert_eq!(delivery.job, recovery_job);
+    let app = AppId::mint();
+    let metadata = registration(
+        &app,
+        vec![descriptor("gated", ScheduleCatchUp::Backfill { max: 5 })],
+    );
+    let activation_job = prepare_activate(&scheduler, &metadata, 1).await;
+    let id = make_due(fixture, &app, "gated").await;
+    while scheduler.dispatch(&app, &id).await.unwrap().more {}
+    let recovery = Recovery::new(queue.clone(), RecoveryOptions::default()).unwrap();
+    // The recovery obligation exists while the activation is unfinished; it
+    // sits behind the activation in dispatch order rather than being hidden.
+    let recovery_job = recovery
+        .dispatch(&app, DutyKind::Reconcile)
+        .await
+        .unwrap()
+        .unwrap();
+    let owner = assignment(&app);
+    let delivery = claim_sweep(&queue, &owner).await;
+    assert_eq!(delivery.job, activation_job);
+    settle(&queue, &owner, &delivery, JobOutcome::Completed {}).await;
+    // Completing the activation publishes its occurrence work; the recovery
+    // obligation remains claimable rather than hidden behind it.
+    let mut claimed_recovery = false;
+    while let Some(grant) = try_claim_sweep(&queue, &owner).await.unwrap() {
+        let delivery = grant.delivery().clone();
+        if delivery.job == recovery_job {
+            claimed_recovery = true;
+        }
         settle(&queue, &owner, &delivery, JobOutcome::Completed {}).await;
-        no_sweep(&queue, &owner).await;
-        assert_eq!(
-            scoped_rows(fixture, "schedule_occurrences", &app)
-                .await
-                .len(),
-            5
-        );
     }
+    assert!(
+        claimed_recovery,
+        "the recovery obligation must not be hidden by the activation"
+    );
+    no_sweep(&queue, &owner).await;
+    assert_eq!(
+        scoped_rows(fixture, "schedule_occurrences", &app)
+            .await
+            .len(),
+        5
+    );
 }
 
 async fn disabled_schedules(fixture: &Fixture) {

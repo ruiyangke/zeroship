@@ -15,7 +15,7 @@
 //! identity bound would be a capability it never exercises.
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use zeroship_core::workflow_jobs::{Delivery, DeliveryLease, JobOutcome, JobSpec};
+use zeroship_core::workflow_jobs::{Delivery, DeliveryLease, JobSpec};
 
 /// The journal payloads one implementation's merged exchanges carry.
 ///
@@ -30,7 +30,7 @@ pub trait JobJournal {
     /// What a renewal's journal half answers.
     type Renewal: DeserializeOwned;
     /// What a holder reports for the journal half of a settlement. Its reply
-    /// carries no journal half, for the reason recorded below `Exclusive`.
+    /// carries no journal half, for the reason recorded below [`SettleDelivery`].
     type Execution: Serialize;
     /// What the journal answers when asked for a logical job's committed
     /// outcome.
@@ -80,70 +80,25 @@ pub struct RenewedDelivery<R> {
     pub renewal: Option<R>,
 }
 
-/// A settlement request, carrying either an outcome the caller's own journal
-/// already committed or the execution this service must commit first.
+/// A settlement request: the delivery, and the execution the service commits
+/// before settling it, when the holder has one to report.
 ///
-/// EXACTLY ONE OF THE TWO. The outcome of an execution is not known until the
-/// journal commits it, so a caller reporting one cannot also name the other;
-/// [`Self::reported`] is what refuses a body that names both or neither, since
-/// serde cannot express the exclusion between two optional fields.
+/// THERE IS NO OUTCOME HERE AND NO SUCCESSOR. The queue is settled with what the
+/// journal decides, never with what the holder says: an execution's outcome is
+/// what its commit produces, and a body with no execution is settled from the
+/// receipt the journal already holds for the job -- the recovery for a holder
+/// whose earlier settlement reply was lost, or whose claim found the job already
+/// committed. A journal receipt carries no successors, so a settlement publishes
+/// nothing a worker named.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SettleDelivery<C> {
     pub delivery: Delivery,
-    /// The outcome the caller's journal already holds for this delivery.
-    #[serde(default = "absent", skip_serializing_if = "Option::is_none")]
-    pub outcome: Option<JobOutcome>,
-    /// Successors the caller publishes with that outcome, in one transaction.
-    ///
-    /// Always serialized, empty or not: with the outcome present this body is
-    /// exactly the `Settlement` it reports, which is one shape for a reader to
-    /// hold rather than two that differ by an absent list.
-    #[serde(default)]
-    pub successors: Vec<JobSpec>,
     /// The execution to commit into the journal, whose outcome then settles the
-    /// delivery.
+    /// delivery. Absent asks the service to settle from the journal's receipt.
     #[serde(default = "absent", skip_serializing_if = "Option::is_none")]
     pub execution: Option<C>,
 }
-
-/// Which half of a settlement request the caller supplied.
-#[derive(Debug)]
-pub enum Reported<'a, C> {
-    /// An outcome and successors the caller's own journal already committed.
-    Outcome(&'a JobOutcome),
-    /// An execution whose outcome this service must commit before settling.
-    Execution(&'a C),
-}
-
-impl<C> SettleDelivery<C> {
-    /// Which half this request carries.
-    ///
-    /// # Errors
-    /// Reports a body naming both halves or neither.
-    pub fn reported(&self) -> Result<Reported<'_, C>, Exclusive> {
-        match (&self.outcome, &self.execution) {
-            (Some(outcome), None) => Ok(Reported::Outcome(outcome)),
-            (None, Some(execution)) => {
-                if self.successors.is_empty() {
-                    Ok(Reported::Execution(execution))
-                } else {
-                    // A journal completion publishes its own successors from
-                    // the frontier it commits. A caller naming them here would
-                    // be naming the successors of an outcome it has not seen.
-                    Err(Exclusive)
-                }
-            }
-            _ => Err(Exclusive),
-        }
-    }
-}
-
-/// A settlement request named both halves, neither, or successors beside an
-/// execution.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("a settlement reports either a committed outcome or an execution, never both")]
-pub struct Exclusive;
 
 // A SETTLEMENT ANSWERS WITH ONE HALF, because the other adds nothing. The
 // journal's own receipt names the logical job and the outcome it committed, and
@@ -164,12 +119,12 @@ const fn absent<T>() -> Option<T> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ClaimedDelivery, Exclusive, RenewDelivery, Reported, SettleDelivery};
+    use super::{ClaimedDelivery, RenewDelivery, SettleDelivery};
     use serde_json::{json, Value};
     use zeroship_core::{
         app_id::AppId,
         workflow_coordination::{RunId, WorkerId},
-        workflow_jobs::{DeploymentId, JobId, JobOutcome},
+        workflow_jobs::{DeploymentId, JobId},
     };
 
     fn delivery() -> Value {
@@ -217,40 +172,38 @@ mod tests {
         serde_json::from_value::<ClaimedDelivery<Value>>(claimed.clone()).unwrap();
         assert!(serde_json::from_value::<ClaimedDelivery<Value>>(intruded(claimed)).is_err());
 
-        let settle = json!({"delivery": delivery(), "outcome": {"kind": "completed"}});
+        let settle = json!({"delivery": delivery()});
         serde_json::from_value::<SettleDelivery<Value>>(settle.clone()).unwrap();
         assert!(serde_json::from_value::<SettleDelivery<Value>>(intruded(settle)).is_err());
     }
 
-    /// The journal half of a settlement is optional in the shape and exclusive
-    /// in the contract, so the exclusion is a check rather than a type.
+    /// A settlement names a delivery and, optionally, an execution, and nothing
+    /// that would let a holder choose the outcome or publish a job.
+    ///
+    /// Both accepted shapes parse first, so the refusals below measure the field
+    /// they add rather than a body that never parsed.
     #[test]
-    fn a_settlement_reports_one_half_and_refuses_both_or_neither() {
+    fn a_settlement_carries_no_outcome_and_no_successor() {
         let decoded =
-            |body: Value| serde_json::from_value::<SettleDelivery<Value>>(body).unwrap();
-        let reported = json!({"delivery": delivery(), "outcome": {"kind": "completed"}});
-        assert!(matches!(
-            decoded(reported.clone()).reported(),
-            Ok(Reported::Outcome(JobOutcome::Completed {}))
-        ));
+            |body: &Value| serde_json::from_value::<SettleDelivery<Value>>(body.clone());
+        let committed = json!({"delivery": delivery()});
+        assert!(decoded(&committed).unwrap().execution.is_none());
         let executed = json!({"delivery": delivery(), "execution": {"outcomes": []}});
-        assert!(matches!(
-            decoded(executed.clone()).reported(),
-            Ok(Reported::Execution(_))
-        ));
+        assert!(decoded(&executed).unwrap().execution.is_some());
 
-        assert_eq!(
-            decoded(json!({"delivery": delivery()})).reported().unwrap_err(),
-            Exclusive
-        );
-        let mut both = reported;
-        both["execution"] = json!({"outcomes": []});
-        assert_eq!(decoded(both).reported().unwrap_err(), Exclusive);
-        // Successors belong to an outcome the caller has already seen, so they
-        // cannot ride an execution whose outcome the journal has yet to decide.
-        let mut published = executed;
-        published["successors"] = json!([delivery()["job"].clone()]);
-        assert_eq!(decoded(published).reported().unwrap_err(), Exclusive);
+        let refused = [
+            ("outcome", json!({"kind": "completed"})),
+            ("successors", json!([delivery()["job"].clone()])),
+            ("successors", json!([])),
+        ];
+        assert!(!refused.is_empty());
+        for base in [&committed, &executed] {
+            for (field, value) in &refused {
+                let mut body = base.clone();
+                body[field] = value.clone();
+                assert!(decoded(&body).is_err(), "{body}");
+            }
+        }
     }
 }
 

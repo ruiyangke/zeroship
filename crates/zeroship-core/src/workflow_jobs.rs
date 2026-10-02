@@ -457,13 +457,121 @@ impl JobOutcome {
     }
 }
 
-/// Successors use the same stable identities when published through an outbox.
+/// A semantic result belongs to the logical job, not its delivery attempt.
+/// Successor publication remains independently durable in the creator outbox.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct Settlement {
-    pub delivery: Delivery,
+pub struct JobReceipt {
+    pub job: JobSpec,
     pub outcome: JobOutcome,
-    pub successors: Vec<JobSpec>,
+}
+
+impl JobReceipt {
+    /// Bind a persisted outcome to the current attempt for queue settlement.
+    ///
+    /// # Errors
+    /// Rejects an attempt for a different immutable logical job and an outcome
+    /// the job's operation does not admit.
+    pub fn settlement(
+        &self,
+        lease: &impl JobLease,
+    ) -> Result<JournalSettlement, SettlementRefusal> {
+        JournalSettlement::from_receipt(self, lease.delivery())
+    }
+}
+
+/// A settlement the journal decided, bound to the delivery that reports it.
+///
+/// THE OUTCOME AND THE DELIVERY ARE PRIVATE, and the only constructor takes a
+/// [`JobReceipt`] the journal produced. A settlement assembled from request data
+/// therefore has no type to be: the wire carries an execution the service
+/// commits, never an outcome a caller chose and never a successor. Successor
+/// publication belongs to the creator journal's own frontier, not to settlement.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JournalSettlement {
+    delivery: Delivery,
+    outcome: JobOutcome,
+}
+
+impl JournalSettlement {
+    /// The only way to build a settlement: from the receipt the journal holds
+    /// for the delivery's logical job.
+    ///
+    /// # Errors
+    /// Refuses a receipt for a different job and an outcome the job's operation
+    /// does not admit.
+    pub fn from_receipt(
+        receipt: &JobReceipt,
+        delivery: &Delivery,
+    ) -> Result<Self, SettlementRefusal> {
+        if delivery.job != receipt.job {
+            return Err(SettlementRefusal::Conflict);
+        }
+        if !valid_outcome(&receipt.job.operation, &receipt.outcome) {
+            return Err(SettlementRefusal::Invalid);
+        }
+        Ok(Self {
+            delivery: delivery.clone(),
+            outcome: receipt.outcome.clone(),
+        })
+    }
+
+    #[must_use]
+    pub const fn delivery(&self) -> &Delivery {
+        &self.delivery
+    }
+
+    #[must_use]
+    pub const fn outcome(&self) -> &JobOutcome {
+        &self.outcome
+    }
+}
+
+/// A receipt could not become a settlement for a delivery.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum SettlementRefusal {
+    /// The receipt names a different immutable logical job than the delivery.
+    #[error("workflow receipt is for another delivery")]
+    Conflict,
+    /// The outcome family does not answer the job's operation.
+    #[error("workflow outcome does not answer its operation")]
+    Invalid,
+}
+
+/// Match the outcome family to its operation, narrowing the families
+/// `JobOutcome::valid_for` admits to the ones a journal can commit.
+///
+/// Creator handlers separately enforce their lifecycle rules; this check grants
+/// no execution authority.
+#[must_use]
+pub const fn valid_outcome(operation: &JobOperation, outcome: &JobOutcome) -> bool {
+    if !outcome.valid_for(operation) {
+        return false;
+    }
+    match operation {
+        JobOperation::Activate { .. } => matches!(outcome, JobOutcome::Completed {}),
+        // Advance admits every scheduling outcome, and `JobOutcome::valid_for`
+        // settles Management on its own: it pairs the result with the command
+        // that asked for it, which no family test here could narrow further.
+        JobOperation::Advance { .. } | JobOperation::Management { .. } => true,
+        JobOperation::Cron { .. } => {
+            matches!(outcome, JobOutcome::Completed {} | JobOutcome::Rejected {})
+        }
+        JobOperation::Reconcile {} => {
+            matches!(outcome, JobOutcome::Completed {} | JobOutcome::Waiting {})
+        }
+        JobOperation::Close { .. } => matches!(outcome, JobOutcome::Closed { .. }),
+        // A refused hold release is Waiting, never Rejected: the deployment is
+        // still needed, and the journal holder keeps it until a later job
+        // succeeds.
+        JobOperation::Collect {}
+        | JobOperation::Fanout { .. }
+        | JobOperation::Propagate { .. }
+        | JobOperation::ReleaseHold { .. } => {
+            matches!(outcome, JobOutcome::Completed {} | JobOutcome::Waiting {})
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

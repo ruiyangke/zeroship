@@ -1,5 +1,5 @@
 use super::*;
-use zeroship_core::{workflow_coordination::ManagementOutcome, workflow_jobs::PropagationId};
+use zeroship_core::workflow_jobs::PropagationId;
 
 fn page(fixture: &Fixture, obligation: &PropagationId, revision: i64) -> JobSpec {
     JobSpec {
@@ -11,9 +11,13 @@ fn page(fixture: &Fixture, obligation: &PropagationId, revision: i64) -> JobSpec
     }
 }
 
+/// A propagation page is queued without a deployment, run or hold, and a worker
+/// it is delivered to can neither page it forward nor settle it with an outcome
+/// of its own: the next page is the journal's to publish, and this journal
+/// committed none.
 #[ntex::test]
-async fn propagation_delivery_and_receipts_preserve_scope_without_holds() {
-    let mut fixture = Fixture::new().await;
+async fn propagation_delivery_preserves_scope_without_holds_and_publishes_nothing() {
+    let fixture = Fixture::new().await;
     let obligation = PropagationId::mint();
     let job = page(&fixture, &obligation, 1);
     fixture.submit(&job).await;
@@ -39,26 +43,29 @@ async fn propagation_delivery_and_receipts_preserve_scope_without_holds() {
         );
         assert_eq!(fixture.job_snapshot(&job).await, before);
     }
+    let stored: Value = serde_json::from_str(&before[0]).unwrap();
+    assert_eq!(stored["operation_kind"], "propagate");
+    assert!(stored["deployment_id"].is_null() && stored["run_id"].is_null());
     let delivery = fixture.sweep(&job).await;
     let successor = page(&fixture, &obligation, 2);
-    let mut command = settlement(&delivery, vec![successor.clone()]);
-    command.outcome = JobOutcome::Management {
-        outcome: ManagementOutcome::Denied {},
-    };
     let before = fixture.job_snapshot(&job).await;
+    let forged = json!({
+        "delivery": delivery,
+        "outcome": {"kind":"waiting"},
+        "successors": [successor],
+    });
+    assert_eq!(
+        fixture.post(endpoints::WORKFLOW_JOB_SETTLE, &forged).await,
+        (StatusCode::BAD_REQUEST, json!({"code":"invalid"}))
+    );
     assert_eq!(
         fixture
-            .post(endpoints::WORKFLOW_JOB_SETTLE, &command)
-            .await
-            .0,
-        StatusCode::BAD_REQUEST
+            .post(endpoints::WORKFLOW_JOB_SETTLE, &committed(&delivery))
+            .await,
+        (StatusCode::CONFLICT, json!({"code":"conflict"}))
     );
     assert_eq!(fixture.job_snapshot(&job).await, before);
     assert!(fixture.job_snapshot(&successor).await.is_empty());
-    command.outcome = JobOutcome::Waiting {};
-    let (status, body) = fixture.post(endpoints::WORKFLOW_JOB_SETTLE, &command).await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["outcome"], json!({"kind":"waiting"}));
     let held = fixture
         .platform
         .admin
@@ -69,11 +76,7 @@ async fn propagation_delivery_and_receipts_preserve_scope_without_holds() {
         .await
         .unwrap();
     assert_eq!(held.get::<_, i64>(0), 0);
-    let stored: Value = serde_json::from_str(&fixture.job_snapshot(&successor).await[0]).unwrap();
-    assert_eq!(stored["operation_kind"], "propagate");
-    assert!(stored["deployment_id"].is_null() && stored["run_id"].is_null());
-    assert_foreign_worker_denied(&fixture, &command).await;
-    assert_receipt_replay(&mut fixture, &command, &successor, body).await;
+    assert_foreign_worker_denied(&fixture, &delivery).await;
 }
 
 #[ntex::test]

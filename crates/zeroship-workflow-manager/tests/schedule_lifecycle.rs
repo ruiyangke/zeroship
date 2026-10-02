@@ -24,7 +24,7 @@ use zeroship_core::{
     app_id::AppId,
     workflow_coordination::{Assignment, RequestId, WorkerId},
     workflow_deployments::{HoldGeneration, HoldReceipt},
-    workflow_jobs::{DeploymentId, JobId, JobOperation, JobOutcome, JobSpec, Settlement},
+    workflow_jobs::{DeploymentId, JobId, JobOperation, JobOutcome, JobSpec},
     workflow_schedules::{
         ActivateSchedules, DisableSchedules, RegisterSchedules, ScheduleDescriptor, ScheduleId,
     },
@@ -332,11 +332,7 @@ async fn settle_until(queue: &Queue, assignment: &Assignment, target: &JobId, bl
         queue
             .settle(
                 assignment,
-                &Settlement {
-                    delivery,
-                    outcome: JobOutcome::Completed {},
-                    successors: vec![],
-                },
+                &support::settlement_from(delivery, JobOutcome::Completed {}),
             )
             .await
             .unwrap();

@@ -25,7 +25,7 @@ use std::{
 };
 use zeroship_core::{
     workflow_coordination::{AssignedScope, FailureCode},
-    workflow_jobs::{Delivery, JobLease, JobSpec, Settlement, SettlementReceipt},
+    workflow_jobs::{Delivery, JobLease, JobSpec, JournalSettlement, SettlementReceipt},
 };
 use zeroship_workflow_client::{LeasedJob, WorkerCoordinator};
 
@@ -80,11 +80,17 @@ pub trait JobTransport {
         lease: &Self::Lease,
         task: &DeliveredTask,
     ) -> impl Future<Output = Result<Renewed<Self::Lease>, WorkflowServiceError>>;
-    /// Settle an outcome the journal has already committed. The receipt is the
-    /// caller's, so no journal half rides this one.
+    /// Settle a delivery whose job the journal has already committed, with the
+    /// receipt the journal holds for it.
+    ///
+    /// NO OUTCOME IS AN ARGUMENT. Whoever holds the journal reads the receipt at
+    /// settlement time -- this process, through [`committed_settlement`], or the
+    /// service at the far end of the call -- so every transport records the
+    /// outcome the journal decided and no successor, whatever its caller holds.
     fn settle(
         &self,
-        settlement: &Settlement,
+        journal: &Self::Journal,
+        lease: &Self::Lease,
     ) -> impl Future<Output = Result<SettlementReceipt, WorkflowServiceError>>;
     /// Commit a frontier, and any upload confirmations its settlement owes.
     ///
@@ -214,11 +220,16 @@ impl JobTransport for WorkerCoordinator {
         })
     }
 
+    /// The service settles from its own journal's receipt, so only the delivery
+    /// crosses.
     async fn settle(
         &self,
-        settlement: &Settlement,
+        _journal: &Self::Journal,
+        lease: &Self::Lease,
     ) -> Result<SettlementReceipt, WorkflowServiceError> {
-        self.settle_job(settlement).await.map_err(metadata_error)
+        self.settle_committed(lease.delivery())
+            .await
+            .map_err(metadata_error)
     }
 
     /// The journal half of a release crosses with the delivery it gives back.
@@ -437,7 +448,7 @@ impl<T: JobTransport> DeliverySlot<T> {
         let accepted = accepted.ok_or_else(|| lossy("journal acceptance"))?;
         let task = match accepted {
             JobAcceptance::Deferred => return Ok(DeliveryOutcome::Deferred),
-            JobAcceptance::Settled(receipt) => return self.acknowledge(*receipt, &lease).await,
+            JobAcceptance::Settled(receipt) => return self.acknowledge(app, *receipt, &lease).await,
             JobAcceptance::Execute(task) => *task,
         };
         let authority = match authority.and_then(|authority| {
@@ -522,7 +533,7 @@ impl<T: JobTransport> DeliverySlot<T> {
                 creator: Box::new(completed.receipt),
                 manager: completed.settlement,
             }),
-            ExecutionResult::Recovered(receipt) => self.acknowledge(*receipt, &lease).await,
+            ExecutionResult::Recovered(receipt) => self.acknowledge(app, *receipt, &lease).await,
             ExecutionResult::Interrupted(control) => Ok(DeliveryOutcome::Interrupted(control)),
         }
     }
@@ -544,15 +555,17 @@ impl<T: JobTransport> DeliverySlot<T> {
 
     async fn acknowledge(
         &self,
+        app: &T::Journal,
         receipt: JobReceipt,
         lease: &T::Lease,
     ) -> Result<DeliveryOutcome, WorkflowServiceError> {
-        // Construct once. In particular, an outbox retry must not change this
-        // attempt's successor set after the manager might have committed it.
-        let settlement = receipt.settlement(lease)?;
+        // The receipt this slot reports must belong to the delivery it settles:
+        // one that arrived over a wire for another job, or in an outcome family
+        // the operation does not admit, is refused before anything is settled.
+        receipt.settlement(lease)?;
         let manager = bounded(self.options.operation_timeout, async {
             loop {
-                match self.transport.settle(&settlement).await {
+                match self.transport.settle(app, lease).await {
                     Ok(observed) => return Ok(observed),
                     Err(error) if retryable(&error) => {
                         compio::time::sleep(self.options.retry_delay).await;
@@ -562,6 +575,11 @@ impl<T: JobTransport> DeliverySlot<T> {
             }
         })
         .await?;
+        // The queue's receipt and the journal's must decide the same outcome. A
+        // manager half that settled a different outcome answered a different
+        // settlement, so reporting it as this delivery's result would hide the
+        // disagreement rather than settle on it.
+        agrees(&receipt, &manager)?;
         Ok(DeliveryOutcome::Settled {
             creator: Box::new(receipt),
             manager,
@@ -766,14 +784,20 @@ async fn execute<T: JobTransport>(
                 .complete(app, &lease, &task, outcome.clone(), confirmed.clone())
                 .await
             {
-                Ok(completed) => return Ok(completed),
+                Ok(completed) => {
+                    // The merged half must still agree with the receipt the
+                    // journal holds; a transport that answered another
+                    // settlement is a contract violation, not this delivery's
+                    // result.
+                    agrees(&completed.receipt, &completed.settlement)?;
+                    return Ok(completed);
+                }
                 Err(error) if retryable(&error) => {
                     if let Ok(Some(receipt)) = transport.receipt(app, &lease.delivery().job).await {
-                        let settlement = receipt.settlement(&lease)?;
-                        return Ok(Completed {
-                            settlement: transport.settle(&settlement).await?,
-                            receipt,
-                        });
+                        receipt.settlement(&lease)?;
+                        let settlement = transport.settle(app, &lease).await?;
+                        agrees(&receipt, &settlement)?;
+                        return Ok(Completed { settlement, receipt });
                     }
                     compio::time::sleep(options.retry_delay).await;
                 }
@@ -810,6 +834,16 @@ pub(super) async fn bounded<T>(
     compio::time::timeout(timeout, Box::pin(future))
         .await
         .map_err(|_| WorkflowServiceError::Timeout)?
+}
+
+/// The manager settled the same outcome the journal receipt records.
+fn agrees(receipt: &JobReceipt, manager: &SettlementReceipt) -> Result<(), WorkflowServiceError> {
+    if manager.outcome != receipt.outcome {
+        return Err(WorkflowServiceError::InvalidResponse(
+            "workflow settlement receipt disagrees with the journal receipt".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn same_delivery(left: &Delivery, right: &Delivery) -> bool {
@@ -869,4 +903,28 @@ pub fn scope_journal(
     authority: &PolicyAuthority,
 ) -> Result<AppWorkflows, WorkflowServiceError> {
     journal.clone().with_authority(authority.clone())
+}
+
+/// The settlement an in-process journal holds for a committed delivery: the
+/// outcome of the job's receipt, read now, and no successors.
+///
+/// The one implementation every transport that holds its journal settles from,
+/// so it records exactly what the service records for a crossed transport rather
+/// than an outcome its caller hands it.
+///
+/// # Errors
+/// Refuses a job the journal holds no receipt for, a receipt for another job,
+/// and the journal's own refusals.
+pub async fn committed_settlement(
+    journal: &AppWorkflows,
+    lease: &impl JobLease,
+) -> Result<JournalSettlement, WorkflowServiceError> {
+    journal
+        .job_receipt(&lease.delivery().job)
+        .await?
+        .ok_or_else(|| {
+            WorkflowServiceError::Conflict("workflow job has no committed receipt".into())
+        })?
+        .settlement(lease)
+        .map_err(WorkflowServiceError::from)
 }

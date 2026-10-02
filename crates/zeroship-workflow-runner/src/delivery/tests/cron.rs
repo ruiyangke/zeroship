@@ -68,7 +68,6 @@ async fn cron_lost_ack_and_redelivery_publish_once_without_starting_executor() {
         let requests = fixture.metadata.requests.borrow();
         assert_eq!(requests.len(), 2);
         assert_eq!(requests[0], requests[1]);
-        assert!(requests[0].successors.is_empty());
     }
     fixture
         .deployments

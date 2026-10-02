@@ -143,7 +143,9 @@ fn refused(error: Error) -> RunFailure {
 fn refusal(error: &WorkflowServiceError) -> RunFailure {
     if matches!(
         error,
-        WorkflowServiceError::Internal(_) | WorkflowServiceError::Unavailable(_)
+        WorkflowServiceError::Internal(_)
+            | WorkflowServiceError::InvalidResponse(_)
+            | WorkflowServiceError::Unavailable(_)
     ) {
         tracing::warn!(
             code = error.code(),
@@ -170,7 +172,9 @@ fn refusal(error: &WorkflowServiceError) -> RunFailure {
         WorkflowServiceError::Timeout => RunFailure::Timeout {},
         WorkflowServiceError::IngressFenced(after) => RunFailure::IngressFenced { after: *after },
         WorkflowServiceError::Unavailable(_) => RunFailure::Unavailable {},
-        WorkflowServiceError::Internal(_) => RunFailure::Internal {},
+        WorkflowServiceError::InvalidResponse(_) | WorkflowServiceError::Internal(_) => {
+            RunFailure::Internal {}
+        }
     }
 }
 

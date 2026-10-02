@@ -671,14 +671,6 @@ async fn the_client_and_the_service_agree_on_a_release_and_a_receipt() {
         available_at: 0.try_into().unwrap(),
     };
 
-    // Nothing has committed, so the recovery read says so as a fact.
-    let before = fixture
-        .client
-        .job_receipt::<AppJournal>(&job)
-        .await
-        .expect("an uncommitted job answers rather than refusing");
-    assert!(before.is_none(), "{before:?}");
-
     // A REAL CLAIM, because `LeasedJob` has no public constructor and should not:
     // delivery authority comes from the manager granting it, never from a struct a
     // caller fills in. So the release is driven against the job this same client
@@ -715,6 +707,17 @@ async fn the_client_and_the_service_agree_on_a_release_and_a_receipt() {
         token: assignment.token.clone(),
         remaining_ms,
     };
+
+    // Nothing has committed, so the recovery read says so as a fact. It is read
+    // once the claim has made this client the job's holder, which is the only
+    // worker a receipt is read for.
+    let before = fixture
+        .client
+        .job_receipt::<AppJournal>(&job)
+        .await
+        .expect("an uncommitted job answers its holder rather than refusing");
+    assert!(before.is_none(), "{before:?}");
+
     fixture
         .client
         .release_job::<AppJournal>(&lease, &claim)

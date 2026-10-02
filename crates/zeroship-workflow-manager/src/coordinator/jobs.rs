@@ -5,7 +5,9 @@ use crate::{Claimant, DeliveryGrant, Error};
 use std::future::Future;
 use zeroship_core::{
     workflow_coordination::{AssignedScope, Assignment, VerifyAssignment, WorkerId},
-    workflow_jobs::{Delivery, JobOperation, JobSpec, Settlement, SettlementReceipt, SubmitJob},
+    workflow_jobs::{
+        Delivery, JobOperation, JobSpec, JournalSettlement, SettlementReceipt, SubmitJob,
+    },
 };
 use zeroship_data_orm::orm::Database;
 
@@ -89,25 +91,22 @@ impl Coordinator {
 
     /// Settle an active delivery or recover its exact receipt after placement expires.
     /// Receipt replay revalidates the original enrolled signer without renewing
-    /// placement or granting fresh successor writes.
+    /// placement or writing anything a caller supplies.
     ///
     /// # Errors
-    /// Rejects foreign identities, conflicting settlements, unauthorized successors
-    /// and unavailable queue or enrollment storage.
+    /// Rejects foreign identities, conflicting settlements and unavailable queue
+    /// or enrollment storage.
     pub async fn settle_job<F, Fut>(
         &self,
         worker: &WorkerId,
-        settlement: &Settlement,
+        settlement: &JournalSettlement,
         authorize: F,
     ) -> Result<SettlementReceipt, Error>
     where
         F: Fn() -> Fut,
         Fut: Future<Output = Result<WorkerId, Error>>,
     {
-        let scope = delivery_selector(worker, &settlement.delivery)?;
-        for successor in &settlement.successors {
-            worker_operation(&successor.operation)?;
-        }
+        let scope = delivery_selector(worker, settlement.delivery())?;
         self.queue
             .settle_authorized(
                 &scope,

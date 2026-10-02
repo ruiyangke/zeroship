@@ -12,7 +12,10 @@ use ntex::web::{
 };
 use std::{
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
 };
 use zeroship_core::{
     service_assertion::{
@@ -29,6 +32,9 @@ use zeroship_workflow_manager::app_facts::AppFactsSource;
 pub struct Control {
     server: test::TestServer,
     pub key_file: PathBuf,
+    /// How many app-facts observations this peer has answered, so a case can
+    /// assert an app was never named to Control.
+    facts_requests: Arc<AtomicUsize>,
 }
 impl Control {
     pub async fn start(directory: &Path, name: &str, database: &str) -> Self {
@@ -55,16 +61,22 @@ impl Control {
         // credential that can. The workflow role no longer holds those grants,
         // which is the point of the route existing.
         let database = database.replacen("zeroship_workflow@", "postgres@", 1);
-        let server = test::server(move || {
-            let peer = peer.clone();
-            let database = database.clone();
-            async move {
-                // Opened on the serving thread: a compio-postgres connection
-                // belongs to the runtime that created it.
-                let facts = super::super::app_facts::DatabaseAppFacts::connect(&database).await;
-                web::App::new()
+        let facts_requests = Arc::new(AtomicUsize::new(0));
+        let server = test::server({
+            let facts_requests = facts_requests.clone();
+            move || {
+                let peer = peer.clone();
+                let database = database.clone();
+                let facts_requests = facts_requests.clone();
+                async move {
+                    // Opened on the serving thread: a compio-postgres connection
+                    // belongs to the runtime that created it.
+                    let facts =
+                        super::super::app_facts::DatabaseAppFacts::connect(&database).await;
+                    web::App::new()
                     .state(peer)
                     .state(facts)
+                    .state(facts_requests)
                     .service(
                         web::resource(
                             endpoints::CONTROL_QUEUE_DEPLOYMENT_HOLD_ACQUIRE.path_template(),
@@ -81,13 +93,22 @@ impl Control {
                         web::resource(endpoints::CONTROL_APP_FACTS.path_template())
                             .route(web::post().to(app_facts)),
                     )
+                }
             }
         })
         .await;
-        Self { server, key_file }
+        Self {
+            server,
+            key_file,
+            facts_requests,
+        }
     }
     pub fn url(&self) -> String {
         format!("http://{}/", self.server.addr())
+    }
+    /// How many app-facts observations this peer has answered.
+    pub fn facts_requests(&self) -> usize {
+        self.facts_requests.load(Ordering::SeqCst)
     }
 }
 
@@ -157,8 +178,10 @@ async fn app_facts(
     body: Json<AppFactsRequest>,
     peer: State<Arc<Peer>>,
     facts: State<std::rc::Rc<super::super::app_facts::DatabaseAppFacts>>,
+    requests: State<Arc<AtomicUsize>>,
 ) -> web::HttpResponse {
     let control = service_issuer(CONTROL_SERVICE_NAME).unwrap();
+    requests.fetch_add(1, Ordering::SeqCst);
     let authorization = request
         .headers()
         .get("authorization")

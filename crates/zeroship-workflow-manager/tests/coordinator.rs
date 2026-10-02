@@ -21,8 +21,8 @@ use zeroship_core::{
         RunOperation, RunState, WorkerId, WorkerState,
     },
     workflow_jobs::{
-        BroadcastId, DeploymentId, JobId, JobOperation, JobOutcome, JobSpec, PropagationId,
-        Settlement, SubmitJob,
+        BroadcastId, DeploymentId, JobId, JobOperation, JobOutcome, JobReceipt, JobSpec,
+        JournalSettlement, PropagationId, SettlementRefusal, SubmitJob,
     },
     workflow_schedules::ScheduleId,
 };
@@ -384,15 +384,11 @@ async fn management_receipts(fixture: &Fixture) {
     )
     .await;
     assert_eq!(stored["id"], value!(delivery.job.id.as_str()));
-    let settlement = Settlement {
-        delivery,
-        outcome: JobOutcome::Management {
+    let settlement = support::settlement_from(delivery, JobOutcome::Management {
             outcome: ManagementOutcome::Applied {
                 state: RunState::Paused,
             },
-        },
-        successors: vec![],
-    };
+        });
     replay_management_receipt(fixture, &queue, &lane, &request, &settlement).await;
     assert!(coordinator
         .manage(&actor, &command(&app))
@@ -435,7 +431,7 @@ async fn replay_management_receipt(
     queue: &Queue,
     lane: &MaintenanceAuthority,
     request: &ManageRun,
-    settlement: &Settlement,
+    settlement: &JournalSettlement,
 ) {
     let app = &request.app_id;
     // Another holder of the same lane did not take this delivery, so it cannot
@@ -467,12 +463,9 @@ async fn replay_management_receipt(
             .unwrap(),
         Some(closed)
     );
-    let changed = Settlement {
-        outcome: JobOutcome::Management {
+    let changed = support::settlement_from(settlement.clone().delivery().clone(), JobOutcome::Management {
             outcome: ManagementOutcome::NotFound {},
-        },
-        ..settlement.clone()
-    };
+        });
     assert_eq!(
         lane.settle(&reopened_queue, &changed).await,
         Err(Error::Conflict)
@@ -831,30 +824,18 @@ async fn worker_publication(fixture: &Fixture) {
         .unwrap()
         .unwrap();
     assert_eq!(&grant.lease().unwrap().delivery, grant.delivery());
-    for operation in manager_operations() {
-        let mut successor = job(&assigned.app_id);
-        successor.operation = operation;
-        let command = Settlement {
-            delivery: grant.delivery().clone(),
-            outcome: JobOutcome::Completed {},
-            successors: vec![successor.clone()],
-        };
-        assert_eq!(
-            coordinator
-                .settle_job(&worker, &command, || ready(Ok(worker.clone())))
-                .await,
-            Err(Error::Denied)
-        );
-        assert_eq!(
-            row(&database, "jobs", value!({"id":spec.id.as_str()})).await["state"],
-            value!("leased")
-        );
-        assert!(
-            rows(&database, "jobs", value!({"id":successor.id.as_str()}))
-                .await
-                .is_empty()
-        );
-    }
+    // A settlement carries no successor, so a worker cannot name a
+    // manager-owned operation through one at all; the delivery settles with the
+    // outcome the journal decides.
+    let command = support::settlement_from(grant.delivery().clone(), JobOutcome::Completed {});
+    assert_eq!(
+        coordinator
+            .settle_job(&worker, &command, || ready(Ok(worker.clone())))
+            .await
+            .unwrap()
+            .outcome,
+        JobOutcome::Completed {}
+    );
 }
 
 #[expect(
@@ -947,12 +928,7 @@ async fn delivery_enrollment(fixture: &Fixture) {
         .unwrap();
     assert_eq!(renewed.delivery().attempt, grant.delivery().attempt);
     assert!(renewed.delivery().deadline >= grant.delivery().deadline);
-    let successor = job(&assigned.app_id);
-    let command = Settlement {
-        delivery: renewed.delivery().clone(),
-        outcome: JobOutcome::Completed {},
-        successors: vec![successor.clone()],
-    };
+    let command = support::settlement_from(renewed.delivery().clone(), JobOutcome::Completed {});
     checks.set(0);
     assert_eq!(
         coordinator.settle_job(&worker, &command, enrollment).await,
@@ -962,11 +938,6 @@ async fn delivery_enrollment(fixture: &Fixture) {
     assert_eq!(
         row(&database, "jobs", value!({"id":spec.id.as_str()})).await["state"],
         value!("leased")
-    );
-    assert!(
-        rows(&database, "jobs", value!({"id":successor.id.as_str()}))
-            .await
-            .is_empty()
     );
     let receipt = coordinator
         .settle_job(&worker, &command, || ready(Ok(worker.clone())))
@@ -1037,19 +1008,12 @@ async fn delivery_enrollment(fixture: &Fixture) {
             .await,
         Err(Error::Denied)
     );
-    let mut changed = command.clone();
-    changed.outcome = JobOutcome::Waiting {};
+    let changed = support::settlement_from(command.delivery().clone(), JobOutcome::Waiting {});
     assert_eq!(
         coordinator
             .settle_job(&worker, &changed, || ready(Ok(worker.clone())))
             .await,
         Err(Error::Conflict)
-    );
-    assert_eq!(
-        rows(&database, "jobs", value!({"id":successor.id.as_str()}))
-            .await
-            .len(),
-        1
     );
 }
 
@@ -1118,8 +1082,8 @@ async fn postgres_job_enrollment_is_checked_after_waiting_for_scope_lock() {
 }
 
 case!(
-    sqlite_worker_publishes_scoped_fanout_and_successors,
-    postgres_worker_publishes_scoped_fanout_and_successors,
+    sqlite_worker_publishes_scoped_fanout,
+    postgres_worker_publishes_scoped_fanout,
     fanout_publication
 );
 
@@ -1137,8 +1101,8 @@ async fn fanout_publication(fixture: &Fixture) {
 }
 
 case!(
-    sqlite_worker_publishes_scoped_propagation_and_successors,
-    postgres_worker_publishes_scoped_propagation_and_successors,
+    sqlite_worker_publishes_scoped_propagation,
+    postgres_worker_publishes_scoped_propagation,
     propagation_publication
 );
 
@@ -1156,16 +1120,17 @@ async fn propagation_publication(fixture: &Fixture) {
 }
 
 /// A code-free page operation is worker-published, then delivered to the lane
-/// and settled with its successor page, without holds or executable and run
-/// projections.
+/// and settled with its own scheduling outcome, without holds or executable and
+/// run projections.
 ///
 /// Publication and delivery part company here: a worker may publish a page,
 /// because the page is a creator intent it produced, and may not run one,
-/// because the page is a sweep of the journal.
+/// because the page is a sweep of the journal. A page publishes its next page
+/// through the journal's frontier, never through the queue's settlement.
 async fn journal_pages(
     fixture: &Fixture,
-    kind: &str,
-    [first, next]: [JobOperation; 2],
+    _kind: &str,
+    [first, _next]: [JobOperation; 2],
     substitutes: [JobOperation; 2],
 ) {
     let (coordinator, queue) = host(fixture, Options::default()).await;
@@ -1192,38 +1157,25 @@ async fn journal_pages(
         .unwrap()
         .unwrap();
     assert_eq!(granted.delivery().job, spec);
-    let successor = JobSpec {
-        id: JobId::mint(),
-        operation: next,
-        ..spec.clone()
-    };
-    let mut settlement = Settlement {
-        delivery: granted.delivery().clone(),
-        outcome: JobOutcome::Management {
-            outcome: ManagementOutcome::Denied {},
-        },
-        successors: vec![successor.clone()],
-    };
     let db = fixture.database().await;
-    let before = rows(&db, "jobs", value!({"app_id":assigned.app_id.as_str()})).await;
+    // A management result does not answer a page, so it cannot become a
+    // settlement at all.
     assert_eq!(
-        lane.settle(&queue, &settlement).await,
-        Err(Error::Invalid)
+        JournalSettlement::from_receipt(
+            &JobReceipt {
+                job: granted.delivery().job.clone(),
+                outcome: JobOutcome::Management {
+                    outcome: ManagementOutcome::Denied {},
+                },
+            },
+            granted.delivery(),
+        )
+        .unwrap_err(),
+        SettlementRefusal::Invalid
     );
-    assert_eq!(
-        rows(&db, "jobs", value!({"app_id":assigned.app_id.as_str()})).await,
-        before
-    );
-    settlement.outcome = JobOutcome::Waiting {};
+    let settlement = support::settlement(granted.delivery(), JobOutcome::Waiting {});
     let receipt = lane.settle(&queue, &settlement).await.unwrap();
     assert_eq!(lane.settle(&queue, &settlement).await.unwrap(), receipt);
-    let stored = row(&db, "jobs", value!({"id":successor.id.as_str()})).await;
-    assert_eq!(stored["operation_kind"], value!(kind));
-    assert!(
-        stored["deployment_id"].is_null()
-            && stored["run_id"].is_null()
-            && stored["management_request_id"].is_null()
-    );
     assert!(rows(
         &db,
         "deployment_holds",

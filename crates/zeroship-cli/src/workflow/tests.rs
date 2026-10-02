@@ -1,9 +1,7 @@
 use super::{manager::LocalTransport, *};
 use serde_json::json;
 use std::sync::Mutex;
-use zeroship_core::workflow_jobs::{
-    JobId, JobOperation, JobOutcome, JobSpec, Settlement, SettlementReceipt,
-};
+use zeroship_core::workflow_jobs::{JobId, JobOperation, JobOutcome, JobSpec, SettlementReceipt};
 use zeroship_workflow::{
     backend::WorkflowBackend,
     operations::{RunState, RunStatus, SignalOptions, StartOptions},
@@ -932,10 +930,11 @@ impl JobTransport for LossyTransport {
 
     async fn settle(
         &self,
-        settlement: &Settlement,
+        journal: &zeroship_workflow::service::AppWorkflows,
+        lease: &DeliveryGrant,
     ) -> Result<SettlementReceipt, WorkflowServiceError> {
-        let job = &settlement.delivery.job;
-        let attempt = u32::try_from(settlement.delivery.attempt.get()).unwrap();
+        let job = &lease.delivery().job;
+        let attempt = u32::try_from(lease.delivery().attempt.get()).unwrap();
         let targeted = {
             let mut target = self.observed.target.lock().unwrap();
             if target.is_none() && matches!(job.operation, JobOperation::Advance { .. }) {
@@ -956,7 +955,7 @@ impl JobTransport for LossyTransport {
                 ));
             }
         }
-        self.inner.settle(settlement).await
+        self.inner.settle(journal, lease).await
     }
 
     /// The journal commits first, then the acknowledgement this fixture loses.
@@ -973,9 +972,8 @@ impl JobTransport for LossyTransport {
         let receipt = journal
             .complete_reported_job(task, lease, execution, &confirmed)
             .await?;
-        let settlement = receipt.settlement(lease)?;
         Ok(Completed {
-            settlement: JobTransport::settle(self, &settlement).await?,
+            settlement: JobTransport::settle(self, journal, lease).await?,
             receipt,
         })
     }

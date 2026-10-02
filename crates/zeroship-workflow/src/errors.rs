@@ -17,6 +17,11 @@ pub enum WorkflowServiceError {
     /// Retry after establishing it; `None` means no epoch was held and the
     /// journal has closed none. It is never a durable customer refusal.
     IngressFenced(Option<zeroship_core::workflow_coordination::Revision>),
+    /// A peer answered a call with a reply that contradicts the request it
+    /// answered, such as a settlement receipt whose outcome is not the one the
+    /// journal committed. It is a contract violation rather than a retryable
+    /// host condition, so a caller must not treat it as `Unavailable`.
+    InvalidResponse(String),
     Internal(String),
 }
 
@@ -34,6 +39,7 @@ impl WorkflowServiceError {
             Self::Unavailable(_) => "workflow_unavailable",
             Self::Timeout => "workflow_timeout",
             Self::IngressFenced(_) => "workflow_ingress_fenced",
+            Self::InvalidResponse(_) => "workflow_invalid_response",
             Self::Internal(_) => "workflow_internal_error",
         }
     }
@@ -47,6 +53,7 @@ impl std::fmt::Display for WorkflowServiceError {
             | Self::Conflict(message)
             | Self::ResourceExhausted(message)
             | Self::Unavailable(message)
+            | Self::InvalidResponse(message)
             | Self::Internal(message) => f.write_str(message),
             Self::Unauthenticated => f.write_str("workflow credentials are missing or expired"),
             Self::PermissionDenied => f.write_str("workflow operation is not permitted"),

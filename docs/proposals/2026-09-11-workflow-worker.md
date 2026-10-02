@@ -1082,7 +1082,7 @@ consumer still need to use them at cutover.
 | `POST /v1/jobs/submit` | Assigned app/revision and immutable job specification. | Current enrolled signer and stored placement; exact specification in the receipt. |
 | `POST /v1/jobs/claim` | Assigned app/revision. | Current enrolled signer and stored placement; delivered app, worker and assignment revision must match. |
 | `POST /v1/jobs/heartbeat` | Delivery identity. | Stored attempt and live lease; reply preserves the immutable job, worker, assignment revision and attempt. |
-| `POST /v1/jobs/settle` | Delivery, closed outcome and immutable successors. | Active delivery authority for writes, or original-worker enrollment for an exact stored receipt; reply matches app, job, attempt and outcome. |
+| `POST /v1/jobs/settle` | Delivery, and the execution to commit when the holder has one; never an outcome or successors. | The signing worker must be the delivery's; the journal decides the outcome, from the execution it commits or, with no execution, from the receipt it already holds once the queue's latest fence for the job has matched. Active delivery authority for writes, or original-worker enrollment for an exact stored receipt; reply matches app, job and attempt, and its outcome is a family the operation admits. |
 
 Derive worker identity from the verified instance signer. An echoed worker must
 match it. A request cannot supply its own assignment expiry. Resolve placement
@@ -1093,10 +1093,11 @@ an earlier key's pending request authorized. Revalidation queries registry state
 without consuming the signed assertion's replay token again.
 
 App placement grants scoped execution and publication, not manager scheduling
-authority. Worker submission and successors must reject manager-origin cron and
-management operations unless they resolve to matching authoritative manager
-records. Normal manager scheduling uses the trusted native submission path.
-Operation provenance is additional to the queue's app and identity checks.
+authority. Worker submission must reject manager-origin cron and management
+operations unless they resolve to matching authoritative manager records, and a
+worker settlement names no successors at all. Normal manager scheduling uses the
+trusted native submission path. Operation provenance is additional to the
+queue's app and identity checks.
 
 An exact settled receipt may outlive its original placement. Do not reject it in
 a current-placement preflight before the queue can select its receipt-replay
@@ -1162,13 +1163,13 @@ Manager/queue                  Worker                       Creator DB
       |                           |   + payload refs + intents    |
       |                           |<-- confirmed commit ----------|
       |<---- outcome + ACK -------|                              |
-      | lock app; verify fence; settle + insert successors        |
+      | lock app; verify fence; settle with the journal outcome   |
       |---- settlement receipt -->|                              |
       |                           |-- mark publication confirmed ->|
 ```
 
 The queue provides at-least-once delivery. It deduplicates immutable submission
-and settlement content, including the successor set. A heartbeat can update the
+and settlement content. A heartbeat can update the
 stored deadline; the mutable echoed deadline is not part of immutable delivery
 identity. Retrying after a lost heartbeat reply must remain possible.
 
@@ -1211,13 +1212,12 @@ ACK publication and outbox reconciliation use the same IDs and immutable
 specifications. They may race; manager submission and settlement share the same
 deduplication domain. Neither path substitutes a fresh ID after a lost response.
 
-The current creator delivery API settles the semantic outcome with an empty
-successor list. Its committed successor intents use the independent publication
-path above. Passing those same persisted specifications in ACKs remains a
-consumer integration option; this implementation does not yet capture or confirm
-successors through settlement. Delivered reconciliation publishes those records;
-production manager dispatch and scope-duty admission are still required to make
-eventual publication a production guarantee.
+The creator delivery API settles the semantic outcome the journal committed and
+publishes no successor through settlement. Committed successor intents use the
+independent publication path above, and a settlement neither captures nor
+confirms them. Delivered reconciliation publishes those records; production
+manager dispatch and scope-duty admission are still required to make eventual
+publication a production guarantee.
 
 Creator state commits before its ACK. If the manager is unavailable or full,
 intents remain pending. Marking publication confirmed happens only after a
@@ -2898,7 +2898,7 @@ The inventory includes required semantics beyond the currently available routes.
 | Submit job/intents | Assigned worker or native manager scheduling logic to manager queue. | Receipt for the stable immutable specification; changed content under the same job identity conflicts. |
 | Claim job | Enrolled worker with current assignment to manager queue. | A persisted delivery attempt and bounded authority, or no eligible work. |
 | Heartbeat delivery | Its worker to manager queue. | Current bounded lease authority after fresh identity/placement checks; cannot revive a replaced attempt, expired execution or elapsed execution budget. |
-| Settle delivery | Its worker to manager queue. | Atomic outcome, stable successors and scheduling/barrier changes, or replay of the matching receipt. |
+| Settle delivery | Its worker to manager queue. | Atomic outcome and scheduling/barrier changes, or replay of the matching receipt. |
 | Submit/read management command | Creator-authorized Control to manager. | Durable command acceptance or closed delivery outcome; no customer history or result body. |
 | Acquire/release deployment hold | Authorized queue or journal holder to Control. | Generation-fenced retention result for that holder class and app. |
 | Start/signal/read run | App code or Rust caller through an authorized creator-bound handle. | Creator-side acceptance or detailed state. Customer bodies stay on this path. |
@@ -2927,7 +2927,7 @@ fallbacks.
 | --- | --- |
 | Manager host | `WorkflowSettings` supplies listener, service peers, platform DB binding, body/page bounds and worker/assignment policy. `workflow.database_url` is a platform credential. |
 | Native coordinator | `coordinator::Options::{worker_ttl, assignment_ttl, batch_limit, max_pending_management}` bounds placement and command behavior. |
-| Native queue | `Options::{max_connections, lease, transaction_timeout, max_successors, max_metadata_bytes}` bounds storage concurrency, delivery and metadata transactions. |
+| Native queue | `Options::{max_connections, lease, transaction_timeout, max_metadata_bytes}` bounds storage concurrency, delivery and metadata transactions. |
 | Native manager driver | `driver::Options::{page_limit, lane_timeout, hold_grace, scheduling, recovery}` bounds each calendar, recovery, retention and closing lane; `hold_grace` is the minimum age before the [queue hold release policy](#queue-hold-release-policy) may release a hold, and `recovery::Options::{idle_after, closing_timeout, closing_backoff, closing_backoff_max}` pace closing. The server maps `workflow.batch_limit` to the candidate page, owns cadence through `workflow.driver_interval_ms` and derives the grace from `workflow.database_command_timeout_ms` so that it exceeds that budget; `workflow.driver_lane_timeout_ms` bounds each lane's complete turn, and the `workflow.closing_*` settings map to the closing bounds. |
 | Metadata client | Client `Options::{timeout, max_request_bytes, max_response_bytes}` bounds the complete exchange. Each call uses the host signer. |
 | Customer host | Normal creator DB/storage, trusted app identity and policy snapshot. `ConsumerOptions` bounds slots, assigned scopes, claim polling and backoff; `DeliveryOptions` bounds execution and finalization. Worker maintenance scheduling settings disappear with their loops. |
@@ -3141,7 +3141,7 @@ Control database credentials or another holder's platform authority.
 | Worker crashes before customer commit | Redelivery reclaims the frontier without assuming a result exists. |
 | Customer COMMIT is uncertain | Read the creator receipt after settlement; never infer rollback from timeout. |
 | Worker commits then loses ACK | Redelivery reads its customer outcome without executing the committed turn again. |
-| ACK and outbox both publish successors | Shared immutable IDs deduplicate; changed successor content conflicts atomically. |
+| Outbox publishes successors | Shared immutable IDs deduplicate; changed successor content conflicts atomically. |
 | Manager COMMIT is uncertain | Retry exact settlement; the stored receipt determines whether it committed. |
 | Placement changes or enrollment is revoked during a lock wait | Fresh authorization rejects new mutation; database clock and original budget remain binding. |
 | An old app handle or delayed policy reply survives binding replacement | The retained binding/ticket fails; neither captures the replacement's authority. |

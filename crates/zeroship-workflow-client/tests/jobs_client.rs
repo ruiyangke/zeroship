@@ -25,7 +25,7 @@ use zeroship_core::{
     },
     workflow_jobs::{
         BroadcastId, Delivery, DeploymentId, JobId, JobOperation, JobOutcome, JobSpec,
-        ManagementCommand, PropagationId, Settlement, SettlementReceipt, SubmitJob,
+        ManagementCommand, PropagationId, SettlementReceipt, SubmitJob,
     },
     workflow_schedules::ScheduleId,
 };
@@ -113,46 +113,54 @@ impl Fixture {
         }
     }
 
-    fn settlement(&self) -> Settlement {
-        Settlement {
-            delivery: self.delivery.clone(),
-            outcome: match &self.delivery.job.operation {
-                // The result has to answer the command the job carries, so a
-                // restart job settles restarted and a transition applied.
-                JobOperation::Management {
-                    command: ManagementCommand::Transition { .. },
-                    ..
-                } => JobOutcome::Management {
-                    outcome: ManagementOutcome::Applied {
-                        state: RunState::Paused,
-                    },
+    /// An outcome the service's journal could have committed for this job.
+    ///
+    /// The result has to answer the command the job carries, so a restart job
+    /// settles restarted and a transition applied.
+    fn outcome(&self) -> JobOutcome {
+        match &self.delivery.job.operation {
+            JobOperation::Management {
+                command: ManagementCommand::Transition { .. },
+                ..
+            } => JobOutcome::Management {
+                outcome: ManagementOutcome::Applied {
+                    state: RunState::Paused,
                 },
-                JobOperation::Management {
-                    command:
-                        ManagementCommand::RestartStarted { .. }
-                        | ManagementCommand::RestartLatest { .. },
-                    ..
-                } => JobOutcome::Management {
-                    outcome: ManagementOutcome::Restarted {
-                        state: RunState::Queued,
-                        restarted_from_ordinal: Some(2),
-                        pinned_to: DeploymentId::mint(),
-                    },
-                },
-                JobOperation::Close { .. } => JobOutcome::Closed { drained: true },
-                _ => JobOutcome::Waiting {},
             },
-            successors: Vec::new(),
+            JobOperation::Management {
+                command:
+                    ManagementCommand::RestartStarted { .. } | ManagementCommand::RestartLatest { .. },
+                ..
+            } => JobOutcome::Management {
+                outcome: ManagementOutcome::Restarted {
+                    state: RunState::Queued,
+                    restarted_from_ordinal: Some(2),
+                    pinned_to: DeploymentId::mint(),
+                },
+            },
+            JobOperation::Close { .. } => JobOutcome::Closed { drained: true },
+            _ => JobOutcome::Waiting {},
         }
+    }
+
+    /// The service's reply to this fixture's committed settlement.
+    fn receipt(&self) -> SettlementReceipt {
+        receipt(&self.delivery, self.outcome())
     }
 }
 
-fn receipt(command: &Settlement) -> SettlementReceipt {
+/// What a committed settlement sends: the delivery, and nothing that names an
+/// outcome or a successor.
+fn committed(delivery: &Delivery) -> Value {
+    json!({"delivery": delivery})
+}
+
+fn receipt(delivery: &Delivery, outcome: JobOutcome) -> SettlementReceipt {
     SettlementReceipt {
-        job_id: command.delivery.job.id.clone(),
-        app_id: command.delivery.job.app_id.clone(),
-        attempt: command.delivery.attempt,
-        outcome: command.outcome.clone(),
+        job_id: delivery.job.id.clone(),
+        app_id: delivery.job.app_id.clone(),
+        attempt: delivery.attempt,
+        outcome,
     }
 }
 
@@ -349,27 +357,22 @@ async fn request(stream: &mut compio::net::TcpStream) -> Request {
 
 #[compio::test]
 async fn job_methods_preserve_identity_and_use_remaining_authority() {
-    exercise_job_methods(&Fixture::new(), Vec::new()).await;
+    exercise_job_methods(&Fixture::new()).await;
 }
 
-async fn exercise_job_methods(fixture: &Fixture, successors: Vec<JobSpec>) {
+async fn exercise_job_methods(fixture: &Fixture) {
     let submit = fixture.submission();
     let mut renewed = fixture.delivery.clone();
     renewed.deadline = 0.try_into().unwrap();
-    let settlement = Settlement {
-        delivery: renewed.clone(),
-        successors,
-        ..fixture.settlement()
-    };
-    let settled = receipt(&settlement);
+    let settled = receipt(&renewed, fixture.outcome());
     peer(
         fixture,
         vec![
             Exchange::new(endpoints::WORKFLOW_JOB_SUBMIT, &submit, json!(fixture.spec)),
             Exchange::claimed(&fixture.scope, lease(&fixture.delivery, 60_000)),
             Exchange::granted(endpoints::WORKFLOW_JOB_HEARTBEAT, &renewal(&fixture.delivery), lease(&renewed, 60_000)),
-            Exchange::settled(&settlement, json!(settled)),
-            Exchange::settled(&settlement, json!(settled)),
+            Exchange::settled(&committed(&renewed), json!(settled)),
+            Exchange::settled(&committed(&renewed), json!(settled)),
             Exchange::new(endpoints::WORKFLOW_JOB_CLAIM, &fixture.scope, Value::Null),
         ],
         async |client| {
@@ -380,8 +383,8 @@ async fn exercise_job_methods(fixture: &Fixture, successors: Vec<JobSpec>) {
             let heartbeat = client.heartbeat_job::<AnyJournal>(&claimed.lease, None).await.unwrap();
             assert_eq!(heartbeat.lease.delivery(), &renewed);
             assert!(heartbeat.lease.remaining().unwrap() <= Duration::from_secs(60));
-            assert_eq!(client.settle_job(&settlement).await.unwrap(), settled);
-            assert_eq!(client.settle_job(&settlement).await.unwrap(), settled);
+            assert_eq!(client.settle_committed(&renewed).await.unwrap(), settled);
+            assert_eq!(client.settle_committed(&renewed).await.unwrap(), settled);
             assert!(client.claim_job::<AnyJournal>(&fixture.scope).await.unwrap().is_none());
         },
     )
@@ -446,18 +449,17 @@ async fn manager_dispatched_jobs_can_be_claimed_and_settled() {
         let mut fixture = Fixture::new();
         fixture.spec.operation = operation;
         fixture.delivery.job = fixture.spec.clone();
-        let command = fixture.settlement();
-        let settled = receipt(&command);
+        let settled = fixture.receipt();
         peer(
             &fixture,
             vec![
                 Exchange::claimed(&fixture.scope, lease(&fixture.delivery, 60_000)),
-                Exchange::settled(&command, json!(settled)),
+                Exchange::settled(&committed(&fixture.delivery), json!(settled)),
             ],
             async |client| {
                 let claimed = client.claim_job::<AnyJournal>(&fixture.scope).await.unwrap().unwrap();
                 assert_eq!(claimed.lease.delivery(), &fixture.delivery);
-                assert_eq!(client.settle_job(&command).await.unwrap(), settled);
+                assert_eq!(client.settle_committed(&fixture.delivery).await.unwrap(), settled);
             },
         )
         .await;
@@ -485,23 +487,21 @@ async fn submission_and_settlement_receipts_cannot_substitute_metadata() {
         },
     )
     .await;
-    let command = fixture.settlement();
-    let settled = receipt(&command);
+    let settled = fixture.receipt();
     for (field, value) in [
         ("jobId", json!(JobId::mint())),
         ("appId", json!(AppId::mint())),
         ("attempt", json!(2)),
-        ("outcome", json!({"kind":"completed"})),
         ("input", json!("private")),
     ] {
         let mut altered = json!(settled);
         altered[field] = value;
         peer(
             &fixture,
-            vec![Exchange::settled(&command, altered)],
+            vec![Exchange::settled(&committed(&fixture.delivery), altered)],
             async |client| {
                 assert_eq!(
-                    client.settle_job(&command).await.unwrap_err(),
+                    client.settle_committed(&fixture.delivery).await.unwrap_err(),
                     Error::InvalidResponse
                 );
             },
@@ -510,64 +510,80 @@ async fn submission_and_settlement_receipts_cannot_substitute_metadata() {
     }
 }
 
+/// A settlement's outcome arrives rather than being sent, so the only check this
+/// side can make on it is that the operation admits its family -- and it makes
+/// that check for every operation, on the reply path both settlement shapes share.
 #[compio::test]
-async fn incompatible_outcome_families_refuse_before_http() {
-    let fixture = Fixture::new();
-    let valid = fixture.settlement();
-    peer(
-        &fixture,
-        vec![Exchange::settled(&valid, json!(receipt(&valid)))],
-        async |client| {
-            let operations = [
-                fixture.spec.operation.clone(),
-                JobOperation::Reconcile {},
-                JobOperation::Collect {},
-                JobOperation::Fanout {
-                    broadcast_id: BroadcastId::mint(),
-                    revision: 1.try_into().unwrap(),
-                },
-                JobOperation::Propagate {
-                    propagation_id: PropagationId::mint(),
-                    revision: 1.try_into().unwrap(),
-                },
-            ]
-            .into_iter()
-            .chain(manager_operations());
-            for operation in operations {
-                let mut invalid = fixture.settlement();
-                invalid.delivery.job.operation = operation;
-                let outcomes = if matches!(
-                    invalid.delivery.job.operation,
-                    JobOperation::Management { .. }
-                ) {
-                    vec![
-                        JobOutcome::Completed {},
-                        JobOutcome::Waiting {},
-                        JobOutcome::Rejected {},
-                    ]
-                } else {
-                    vec![JobOutcome::Management {
-                        outcome: ManagementOutcome::Denied {},
-                    }]
-                };
-                for outcome in outcomes {
-                    invalid.outcome = outcome;
-                    assert_eq!(
-                        client.settle_job(&invalid).await,
-                        Err(Error::Refused(FailureCode::Invalid))
-                    );
-                }
-            }
-            assert_eq!(client.settle_job(&valid).await.unwrap(), receipt(&valid));
+async fn a_settlement_reply_in_a_family_the_operation_refuses_is_invalid() {
+    let operations = [
+        Fixture::new().spec.operation,
+        JobOperation::Reconcile {},
+        JobOperation::Collect {},
+        JobOperation::Fanout {
+            broadcast_id: BroadcastId::mint(),
+            revision: 1.try_into().unwrap(),
         },
-    )
-    .await;
+        JobOperation::Propagate {
+            propagation_id: PropagationId::mint(),
+            revision: 1.try_into().unwrap(),
+        },
+    ]
+    .into_iter()
+    .chain(manager_operations());
+    for operation in operations {
+        let mut fixture = Fixture::new();
+        fixture.spec.operation = operation;
+        fixture.delivery.job = fixture.spec.clone();
+        let refused = if matches!(fixture.spec.operation, JobOperation::Management { .. }) {
+            vec![
+                JobOutcome::Completed {},
+                JobOutcome::Waiting {},
+                JobOutcome::Rejected {},
+            ]
+        } else {
+            vec![JobOutcome::Management {
+                outcome: ManagementOutcome::Denied {},
+            }]
+        };
+        assert!(!refused.is_empty());
+        let mut exchanges: Vec<Exchange> = refused
+            .iter()
+            .map(|outcome| {
+                Exchange::settled(
+                    &committed(&fixture.delivery),
+                    json!(receipt(&fixture.delivery, outcome.clone())),
+                )
+            })
+            .collect();
+        // The control: the same exchange answering a family the operation
+        // admits is accepted, so each refusal above measures the family alone.
+        let accepted = fixture.receipt();
+        exchanges.push(Exchange::settled(
+            &committed(&fixture.delivery),
+            json!(accepted),
+        ));
+        peer(&fixture, exchanges, async |client| {
+            for _ in &refused {
+                assert_eq!(
+                    client.settle_committed(&fixture.delivery).await,
+                    Err(Error::InvalidResponse)
+                );
+            }
+            assert_eq!(
+                client.settle_committed(&fixture.delivery).await.unwrap(),
+                accepted
+            );
+        })
+        .await;
+    }
 }
 
+/// A settlement reply's outcome is a closed shape in a family the operation
+/// admits, and within that family it is the service's to choose: this side sent
+/// no outcome, so it has none to hold the reply to.
 #[compio::test]
-async fn settlement_receipts_reject_open_outcomes_and_changed_management_results() {
+async fn settlement_receipts_reject_open_outcomes_and_foreign_families() {
     let mut fixture = Fixture::new();
-    let command = fixture.settlement();
     for outcome in [
         json!("completed"),
         json!("waiting"),
@@ -580,14 +596,14 @@ async fn settlement_receipts_reject_open_outcomes_and_changed_management_results
         json!({"kind":"management","outcome":{"kind":"applied","state":"invented"}}),
         json!({"kind":"management","outcome":{"kind":"denied","history":[]}}),
     ] {
-        let mut response = json!(receipt(&command));
+        let mut response = json!(fixture.receipt());
         response["outcome"] = outcome;
         peer(
             &fixture,
-            vec![Exchange::settled(&command, response)],
+            vec![Exchange::settled(&committed(&fixture.delivery), response)],
             async |client| {
                 assert_eq!(
-                    client.settle_job(&command).await,
+                    client.settle_committed(&fixture.delivery).await,
                     Err(Error::InvalidResponse)
                 );
             },
@@ -603,48 +619,55 @@ async fn settlement_receipts_reject_open_outcomes_and_changed_management_results
         },
     };
     fixture.delivery.job = fixture.spec.clone();
-    let command = fixture.settlement();
     for outcome in [
         json!({"kind":"completed"}),
-        json!({"kind":"management","outcome":{"kind":"applied","state":"running"}}),
-        json!({"kind":"management","outcome":{"kind":"not_found"}}),
-        json!({"kind":"management","outcome":{"kind":"conflict"}}),
-        json!({"kind":"management","outcome":{"kind":"denied"}}),
+        json!({"kind":"management","outcome":{"kind":"applied","state":"invented"}}),
+        json!({"kind":"management","outcome":{"kind":"denied","history":[]}}),
     ] {
-        let mut response = json!(receipt(&command));
+        let mut response = json!(fixture.receipt());
         response["outcome"] = outcome;
         peer(
             &fixture,
-            vec![Exchange::settled(&command, response)],
+            vec![Exchange::settled(&committed(&fixture.delivery), response)],
             async |client| {
                 assert_eq!(
-                    client.settle_job(&command).await,
+                    client.settle_committed(&fixture.delivery).await,
                     Err(Error::InvalidResponse)
                 );
             },
         )
         .await;
     }
-    let mut response = json!(receipt(&command));
+    for outcome in [
+        ManagementOutcome::Applied {
+            state: RunState::Running,
+        },
+        ManagementOutcome::NotFound {},
+        ManagementOutcome::Conflict {},
+        ManagementOutcome::Denied {},
+    ] {
+        let answered = receipt(&fixture.delivery, JobOutcome::Management { outcome });
+        peer(
+            &fixture,
+            vec![Exchange::settled(&committed(&fixture.delivery), json!(answered))],
+            async |client| {
+                assert_eq!(
+                    client.settle_committed(&fixture.delivery).await.unwrap(),
+                    answered
+                );
+            },
+        )
+        .await;
+    }
+    let mut response = json!(fixture.receipt());
     response["managementOutcome"] = json!({"kind":"denied"});
     peer(
         &fixture,
-        vec![Exchange::settled(&command, response)],
+        vec![Exchange::settled(&committed(&fixture.delivery), response)],
         async |client| {
             assert_eq!(
-                client.settle_job(&command).await,
+                client.settle_committed(&fixture.delivery).await,
                 Err(Error::InvalidResponse)
-            );
-        },
-    )
-    .await;
-    peer(
-        &fixture,
-        vec![Exchange::settled(&command, json!(receipt(&command)))],
-        async |client| {
-            assert_eq!(
-                client.settle_job(&command).await.unwrap(),
-                receipt(&command)
             );
         },
     )
@@ -787,20 +810,10 @@ async fn forbidden_publication_is_rejected_without_http() {
             let mut command = fixture.submission();
             command.job.operation = operation;
             assert_eq!(client.submit_job(&command).await.unwrap_err(), denied);
-            let command = Settlement {
-                successors: vec![command.job],
-                ..fixture.settlement()
-            };
-            assert_eq!(client.settle_job(&command).await.unwrap_err(), denied);
         }
-        let mut command = fixture.settlement();
-        let mut foreign = fixture.spec.clone();
-        foreign.app_id = AppId::mint();
-        command.successors.push(foreign);
-        assert_eq!(client.settle_job(&command).await.unwrap_err(), denied);
-        let mut command = fixture.settlement();
-        command.delivery.worker_id = WorkerId::mint();
-        assert_eq!(client.settle_job(&command).await.unwrap_err(), denied);
+        let mut delivery = fixture.delivery.clone();
+        delivery.worker_id = WorkerId::mint();
+        assert_eq!(client.settle_committed(&delivery).await.unwrap_err(), denied);
     })
     .await;
 }
@@ -845,13 +858,12 @@ async fn heartbeat_reply_cannot_revive_expired_local_authority() {
 #[compio::test]
 async fn expired_handle_refuses_heartbeat_but_allows_receipt_replay() {
     let fixture = Fixture::new();
-    let command = fixture.settlement();
-    let settled = receipt(&command);
+    let settled = fixture.receipt();
     peer(
         &fixture,
         vec![
             Exchange::claimed(&fixture.scope, lease(&fixture.delivery, 200)),
-            Exchange::settled(&command, json!(settled)),
+            Exchange::settled(&committed(&fixture.delivery), json!(settled)),
         ],
         async |client| {
             let claimed = client.claim_job::<AnyJournal>(&fixture.scope).await.unwrap().unwrap();
@@ -863,7 +875,7 @@ async fn expired_handle_refuses_heartbeat_but_allows_receipt_replay() {
                 client.heartbeat_job::<AnyJournal>(&cloned, None).await.unwrap_err(),
                 Error::Timeout
             );
-            assert_eq!(client.settle_job(&command).await.unwrap(), settled);
+            assert_eq!(client.settle_committed(&fixture.delivery).await.unwrap(), settled);
         },
     )
     .await;
@@ -897,20 +909,8 @@ async fn job_refusals_keep_the_closed_error_contract() {
 }
 
 #[compio::test]
-async fn fanout_publication_and_successors_preserve_remaining_authority() {
-    let fixture = Fixture::fanout();
-    let JobOperation::Fanout { broadcast_id, .. } = &fixture.spec.operation else {
-        unreachable!()
-    };
-    let successor = JobSpec {
-        id: JobId::mint(),
-        operation: JobOperation::Fanout {
-            broadcast_id: broadcast_id.clone(),
-            revision: 2.try_into().unwrap(),
-        },
-        ..fixture.spec.clone()
-    };
-    exercise_job_methods(&fixture, vec![successor]).await;
+async fn fanout_publication_preserves_remaining_authority() {
+    exercise_job_methods(&Fixture::fanout()).await;
 }
 
 #[compio::test]
@@ -971,18 +971,6 @@ async fn fanout_replies_cannot_substitute_broadcast_or_revision() {
 }
 
 #[compio::test]
-async fn propagation_publication_and_successors_preserve_remaining_authority() {
-    let fixture = Fixture::propagation();
-    let JobOperation::Propagate { propagation_id, .. } = &fixture.spec.operation else {
-        unreachable!()
-    };
-    let successor = JobSpec {
-        id: JobId::mint(),
-        operation: JobOperation::Propagate {
-            propagation_id: propagation_id.clone(),
-            revision: 2.try_into().unwrap(),
-        },
-        ..fixture.spec.clone()
-    };
-    exercise_job_methods(&fixture, vec![successor]).await;
+async fn propagation_publication_preserves_remaining_authority() {
+    exercise_job_methods(&Fixture::propagation()).await;
 }

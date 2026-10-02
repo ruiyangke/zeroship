@@ -14,8 +14,7 @@ use zeroship_core::{
         ReadTaskPayload, ReservePayload, ResolveTaskExecutable,
     },
     workflow_jobs::{
-        Delivery, DeliveryLease, JobLease, JobOperation, JobSpec, Settlement, SettlementReceipt,
-        SubmitJob,
+        Delivery, DeliveryLease, JobLease, JobOperation, JobSpec, SettlementReceipt, SubmitJob,
     },
 };
 
@@ -187,43 +186,31 @@ impl WorkerCoordinator {
         })
     }
 
-    /// Settle only a creator-committed outcome, preserving its successor IDs.
-    /// An exact settled receipt may be retried after delivery expiry.
+    /// Settle a delivery whose job the journal has already committed, with the
+    /// outcome the journal holds for it. An exact settled receipt may be retried
+    /// after delivery expiry.
+    ///
+    /// NOTHING ABOUT THE OUTCOME IS SENT. The service reads the receipt from its
+    /// own journal and settles the queue with that, so this is the recovery for a
+    /// holder whose settlement reply was lost and for one whose claim found the
+    /// job already committed. A job the journal holds no receipt for is refused
+    /// as `Conflict`.
     ///
     /// # Errors
-    /// Refuses foreign worker/app identities, incompatible outcome families,
-    /// manager-owned successors, failed exchanges and substituted receipts.
-    pub async fn settle_job(&self, request: &Settlement) -> Result<SettlementReceipt, Error> {
-        if !request.outcome.valid_for(&request.delivery.job.operation) {
-            return Err(Error::Refused(FailureCode::Invalid));
-        }
-        for successor in &request.successors {
-            if successor.app_id != request.delivery.job.app_id {
-                return Err(denied());
-            }
-            worker_publication(successor)?;
-        }
-        let receipt = self
-            .settle::<()>(SettleDelivery {
-                delivery: request.delivery.clone(),
-                outcome: Some(request.outcome.clone()),
-                successors: request.successors.clone(),
-                execution: None,
-            })
-            .await?;
-        if receipt.outcome != request.outcome {
-            return Err(Error::InvalidResponse);
-        }
-        self.settled(&request.delivery, receipt)
+    /// Refuses another worker's delivery, failed exchanges, a receipt that does
+    /// not match the delivery sent, and an outcome family the operation does not
+    /// admit.
+    pub async fn settle_committed(&self, delivery: &Delivery) -> Result<SettlementReceipt, Error> {
+        self.settle::<()>(delivery, None).await
     }
 
     /// Commit an execution into the journal and settle the delivery with the
     /// outcome it produced, in one exchange.
     ///
     /// The outcome is NOT an argument: it is what the journal decides when it
-    /// commits the batch, and it comes back on the settlement receipt. A caller
-    /// that already holds a committed outcome settles it with
-    /// [`Self::settle_job`] instead.
+    /// commits the batch, and it comes back on the settlement receipt. A holder
+    /// whose execution already committed settles it with
+    /// [`Self::settle_committed`] instead.
     ///
     /// # Errors
     /// Refuses another worker's delivery, failed exchanges, a receipt that does
@@ -234,39 +221,41 @@ impl WorkerCoordinator {
         delivery: &Delivery,
         execution: &J::Execution,
     ) -> Result<SettlementReceipt, Error> {
-        let receipt = self
-            .settle(SettleDelivery {
-                delivery: delivery.clone(),
-                outcome: None,
-                successors: Vec::new(),
-                execution: Some(execution),
-            })
-            .await?;
-        // The outcome arrives rather than being sent, so it is checked against
-        // the operation it answers for: this is the one settlement shape where
-        // the caller cannot compare the reply to a value it chose.
-        if !receipt.outcome.valid_for(&delivery.job.operation) {
-            return Err(Error::InvalidResponse);
-        }
-        self.settled(delivery, receipt)
+        self.settle(delivery, Some(execution)).await
     }
 
-    /// The one bound-and-post both settlement shapes share.
+    /// The one bound, post and reply check both settlement shapes share.
     ///
     /// A settle body carries a journal quantity rather than a creator input, so
     /// it answers to `max_journal_request_bytes`. Every other exchange this
     /// client makes carries metadata or one creator input and answers to
     /// `max_request_bytes`.
+    ///
+    /// The outcome arrives rather than being sent, in both shapes, so it is
+    /// checked against the operation it answers for: the caller has no value of
+    /// its own to compare it with.
     async fn settle<C: serde::Serialize>(
         &self,
-        request: SettleDelivery<C>,
+        delivery: &Delivery,
+        execution: Option<&C>,
     ) -> Result<SettlementReceipt, Error> {
-        if request.delivery.worker_id != self.worker_id {
+        if delivery.worker_id != self.worker_id {
             return Err(denied());
         }
-        self.transport
-            .post_journal(endpoints::WORKFLOW_JOB_SETTLE, &request)
-            .await
+        let receipt: SettlementReceipt = self
+            .transport
+            .post_journal(
+                endpoints::WORKFLOW_JOB_SETTLE,
+                &SettleDelivery {
+                    delivery: delivery.clone(),
+                    execution,
+                },
+            )
+            .await?;
+        if !receipt.outcome.valid_for(&delivery.job.operation) {
+            return Err(Error::InvalidResponse);
+        }
+        self.settled(delivery, receipt)
     }
 
     /// Locate the object one replay edge of a live dispatch names.

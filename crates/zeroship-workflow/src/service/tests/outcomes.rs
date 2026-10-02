@@ -132,7 +132,7 @@ async fn stored_outcomes(store: Rc<OrmStore>) {
             };
             assert!(matches!(
                 fabricated.settlement(&case.lease),
-                Err(WorkflowServiceError::Internal(_))
+                Err(zeroship_core::workflow_jobs::SettlementRefusal::Invalid)
             ));
             assert_corruption(&fixture, case, serde_json::to_value(outcome).unwrap()).await;
         }
@@ -152,7 +152,7 @@ async fn stored_outcomes(store: Rc<OrmStore>) {
         );
         assert_eq!(Box::pin(case.replay(&fixture)).await.unwrap(), case.receipt);
         assert_eq!(
-            case.receipt.settlement(&case.lease).unwrap().outcome,
+            *case.receipt.settlement(&case.lease).unwrap().outcome(),
             case.receipt.outcome
         );
         assert_eq!(

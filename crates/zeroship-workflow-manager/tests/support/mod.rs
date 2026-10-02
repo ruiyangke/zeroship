@@ -13,7 +13,7 @@ use zeroship_core::{
     app_id::AppId,
     schema_name::SchemaName,
     workflow_deployments::{HoldGeneration, HoldReceipt, HoldScope, HoldState},
-    workflow_jobs::DeploymentId,
+    workflow_jobs::{Delivery, DeploymentId, JobOutcome, JobReceipt, JournalSettlement},
     workflow_policy::AppPolicy,
 };
 use zeroship_data_orm::{
@@ -28,6 +28,29 @@ use zeroship_workflow_manager::{
     retention::HoldClient,
     Error, Queue,
 };
+
+/// The settlement the journal decided for `delivery`'s logical job.
+///
+/// A settlement is constructible only from a receipt, so a contract that drives
+/// the queue directly builds that receipt here rather than naming an outcome a
+/// caller could have chosen.
+#[allow(dead_code, reason = "only queue-settling contracts build a settlement")]
+pub fn settlement(delivery: &Delivery, outcome: JobOutcome) -> JournalSettlement {
+    JournalSettlement::from_receipt(
+        &JobReceipt {
+            job: delivery.job.clone(),
+            outcome,
+        },
+        delivery,
+    )
+    .expect("a receipt built for its own delivery is a settlement")
+}
+
+/// The same, for a caller that already owns the delivery it settles.
+#[allow(dead_code, reason = "only queue-settling contracts build a settlement")]
+pub fn settlement_from(delivery: Delivery, outcome: JobOutcome) -> JournalSettlement {
+    settlement(&delivery, outcome)
+}
 
 /// Trusted single-zone facts for contracts that do not exercise eligibility:
 /// every app and worker is in the seeded zone and active.

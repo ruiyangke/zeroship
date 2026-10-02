@@ -1,5 +1,5 @@
 use super::*;
-use zeroship_core::{workflow_coordination::ManagementOutcome, workflow_jobs::BroadcastId};
+use zeroship_core::workflow_jobs::BroadcastId;
 
 fn fanout(fixture: &Fixture, broadcast: &BroadcastId, revision: i64) -> JobSpec {
     JobSpec {
@@ -11,34 +11,41 @@ fn fanout(fixture: &Fixture, broadcast: &BroadcastId, revision: i64) -> JobSpec 
     }
 }
 
+/// A fanout job is queued without a deployment, run or hold, and a worker it is
+/// delivered to can neither page it forward nor settle it with an outcome of its
+/// own: the next page is the journal's to publish, and this journal committed
+/// none.
 #[ntex::test]
-async fn fanout_delivery_and_receipts_preserve_scope_without_holds() {
-    let mut fixture = Fixture::new().await;
+async fn fanout_delivery_preserves_scope_without_holds_and_publishes_nothing() {
+    let fixture = Fixture::new().await;
     let broadcast = BroadcastId::mint();
     let job = fanout(&fixture, &broadcast, 1);
     fixture.submit(&job).await;
     fixture.submit(&job).await;
     assert_fanout_substitution_refused(&fixture, &job, &broadcast).await;
+    let stored: Value = serde_json::from_str(&fixture.job_snapshot(&job).await[0]).unwrap();
+    assert_eq!(stored["operation_kind"], "fanout");
+    assert!(stored["deployment_id"].is_null() && stored["run_id"].is_null());
     let delivery = fixture.sweep(&job).await;
     let successor = fanout(&fixture, &broadcast, 2);
-    let mut command = settlement(&delivery, vec![successor.clone()]);
-    command.outcome = JobOutcome::Management {
-        outcome: ManagementOutcome::Denied {},
-    };
     let before = fixture.job_snapshot(&job).await;
+    let forged = json!({
+        "delivery": delivery,
+        "outcome": {"kind":"waiting"},
+        "successors": [successor],
+    });
+    assert_eq!(
+        fixture.post(endpoints::WORKFLOW_JOB_SETTLE, &forged).await,
+        (StatusCode::BAD_REQUEST, json!({"code":"invalid"}))
+    );
     assert_eq!(
         fixture
-            .post(endpoints::WORKFLOW_JOB_SETTLE, &command)
-            .await
-            .0,
-        StatusCode::BAD_REQUEST
+            .post(endpoints::WORKFLOW_JOB_SETTLE, &committed(&delivery))
+            .await,
+        (StatusCode::CONFLICT, json!({"code":"conflict"}))
     );
     assert_eq!(fixture.job_snapshot(&job).await, before);
     assert!(fixture.job_snapshot(&successor).await.is_empty());
-    command.outcome = JobOutcome::Waiting {};
-    let (status, body) = fixture.post(endpoints::WORKFLOW_JOB_SETTLE, &command).await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["outcome"], json!({"kind":"waiting"}));
     let held = fixture
         .platform
         .admin
@@ -49,11 +56,7 @@ async fn fanout_delivery_and_receipts_preserve_scope_without_holds() {
         .await
         .unwrap();
     assert_eq!(held.get::<_, i64>(0), 0);
-    let stored: Value = serde_json::from_str(&fixture.job_snapshot(&successor).await[0]).unwrap();
-    assert_eq!(stored["operation_kind"], "fanout");
-    assert!(stored["deployment_id"].is_null() && stored["run_id"].is_null());
-    assert_foreign_worker_denied(&fixture, &command).await;
-    assert_receipt_replay(&mut fixture, &command, &successor, body).await;
+    assert_foreign_worker_denied(&fixture, &delivery).await;
 }
 
 async fn assert_fanout_substitution_refused(
@@ -112,9 +115,7 @@ async fn fanout_http_rejects_open_nested_metadata_and_invalid_identity() {
         job: successor.clone(),
     })
     .unwrap();
-    let mut command = settlement(&delivery, vec![successor.clone()]);
-    command.outcome = JobOutcome::Waiting {};
-    let settled = serde_json::to_value(&command).unwrap();
+    let settled = committed(&delivery);
     let before = fixture.job_snapshot(&job).await;
     for (endpoint, wire, path) in [
         (endpoints::WORKFLOW_JOB_SUBMIT, &submit, "/job/operation"),
@@ -123,22 +124,16 @@ async fn fanout_http_rejects_open_nested_metadata_and_invalid_identity() {
             &settled,
             "/delivery/job/operation",
         ),
-        (
-            endpoints::WORKFLOW_JOB_SETTLE,
-            &settled,
-            "/successors/0/operation",
-        ),
     ] {
         assert_invalid_fanout_fields(&fixture, endpoint, wire, path).await;
     }
     assert_eq!(fixture.job_snapshot(&job).await, before);
     assert!(fixture.job_snapshot(&successor).await.is_empty());
+    // The control: the unaltered settlement parses and is decided on what it
+    // says, which is a delivery whose job the journal holds no receipt for.
     assert_eq!(
-        fixture
-            .post(endpoints::WORKFLOW_JOB_SETTLE, &command)
-            .await
-            .0,
-        StatusCode::OK
+        fixture.post(endpoints::WORKFLOW_JOB_SETTLE, &settled).await,
+        (StatusCode::CONFLICT, json!({"code":"conflict"}))
     );
 }
 

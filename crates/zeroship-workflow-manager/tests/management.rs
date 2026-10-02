@@ -30,7 +30,7 @@ use zeroship_core::{
     },
     workflow_deployments::HoldGeneration,
     workflow_jobs::{
-        DeploymentId, JobId, JobOperation, JobOutcome, JobSpec, ManagementCommand, Settlement,
+        DeploymentId, JobId, JobOperation, JobOutcome, JobSpec, ManagementCommand, JournalSettlement,
     },
 };
 use zeroship_data_orm::{
@@ -313,7 +313,7 @@ async fn settle(
     authority: &Assignment,
     expected: &JobSpec,
     outcome: ManagementOutcome,
-) -> Settlement {
+) -> JournalSettlement {
     let delivery = claim_sweep(host, authority)
         .await
         .unwrap()
@@ -321,11 +321,7 @@ async fn settle(
         .delivery()
         .clone();
     assert_eq!(&delivery.job, expected);
-    let settlement = Settlement {
-        delivery,
-        outcome: JobOutcome::Management { outcome },
-        successors: vec![],
-    };
+    let settlement = support::settlement_from(delivery, JobOutcome::Management { outcome });
     host.queue.settle(authority, &settlement).await.unwrap();
     settlement
 }

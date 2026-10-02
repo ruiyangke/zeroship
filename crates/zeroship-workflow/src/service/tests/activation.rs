@@ -398,8 +398,8 @@ async fn replay_and_order(store: Rc<OrmStore>) {
     assert_eq!(snapshot(&service, "activation_scopes", &app).await, current);
     assert_eq!(selected(&service, &app).await, new.id);
     let settlement = old_receipt.settlement(&retry).unwrap();
-    assert_eq!(settlement.delivery.attempt, retry.delivery.attempt);
-    assert_eq!(settlement.outcome, JobOutcome::Completed {});
+    assert_eq!(settlement.delivery().attempt, retry.delivery.attempt);
+    assert_eq!(*settlement.outcome(), JobOutcome::Completed {});
     let run = scope
         .start(&RequestId::mint(), "Example", StartOptions::default())
         .await

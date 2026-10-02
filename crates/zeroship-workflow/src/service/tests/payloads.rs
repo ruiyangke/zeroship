@@ -1199,7 +1199,7 @@ async fn a_confirm_that_lost_its_reservation_is_refused() {
     }
     let lost = {
         let tx = service.begin().await.unwrap();
-        crate::service::payloads::confirm_reported(&tx, &app, &fenced, fenced_deadline).await
+        crate::service::payloads::confirm_reported(&tx, &app, &fenced, Some(&task.id), fenced_deadline).await
     };
     assert!(
         matches!(lost, Err(WorkflowServiceError::Conflict(_))),
@@ -1209,7 +1209,7 @@ async fn a_confirm_that_lost_its_reservation_is_refused() {
     // CONTROL ONE: the same call against an unfenced reservation.
     let (intact, intact_deadline) = reserve().await;
     let tx = service.begin().await.unwrap();
-    crate::service::payloads::confirm_reported(&tx, &app, &intact, intact_deadline)
+    crate::service::payloads::confirm_reported(&tx, &app, &intact, Some(&task.id), intact_deadline)
         .await
         .expect("an unclaimed reservation confirms");
     tx.commit().await.unwrap();
@@ -1218,9 +1218,38 @@ async fn a_confirm_that_lost_its_reservation_is_refused() {
     let (drifted, drifted_deadline) = reserve().await;
     let tx = service.begin().await.unwrap();
     let mismatched =
-        crate::service::payloads::confirm_reported(&tx, &app, &drifted, drifted_deadline + 1).await;
+        crate::service::payloads::confirm_reported(&tx, &app, &drifted, Some(&task.id), drifted_deadline + 1).await;
     assert!(
         matches!(mismatched, Err(WorkflowServiceError::Conflict(_))),
         "{mismatched:?}"
     );
+
+    // CONTROL THREE: another task cannot confirm this task's upload, even with
+    // the deadline the reservation returned. The task that reserved the row is
+    // part of the confirm's identity.
+    let (pending, pending_deadline) = reserve().await;
+    let tx = service.begin().await.unwrap();
+    let foreign = crate::service::payloads::confirm_reported(
+        &tx,
+        &app,
+        &pending,
+        Some("tsk_anotherholder0000000000000000"),
+        pending_deadline,
+    )
+    .await;
+    assert!(
+        matches!(foreign, Err(WorkflowServiceError::Conflict(_))),
+        "{foreign:?}"
+    );
+    let tx = service.begin().await.unwrap();
+    crate::service::payloads::confirm_reported(
+        &tx,
+        &app,
+        &pending,
+        Some(&task.id),
+        pending_deadline,
+    )
+    .await
+    .expect("the reserving task still confirms its own upload");
+    tx.commit().await.unwrap();
 }

@@ -34,9 +34,23 @@ use zeroship_core::{
         Assignment, ManageRun, ManagementOperation, ManagementOutcome, RequestId, RunId,
         RunOperation, WorkerId, AUDIENCE,
     },
-    workflow_jobs::{Delivery, JobOperation, JobOutcome, ManagementCommand, Settlement},
+    workflow_jobs::{
+        Delivery, JobOperation, JobOutcome, JobReceipt, JournalSettlement, ManagementCommand,
+    },
     workflow_policy::AppPolicy,
 };
+
+/// The settlement a management sweep's outcome produced.
+fn decided(delivery: Delivery, outcome: JobOutcome) -> JournalSettlement {
+    JournalSettlement::from_receipt(
+        &JobReceipt {
+            job: delivery.job.clone(),
+            outcome,
+        },
+        &delivery,
+    )
+    .unwrap()
+}
 
 /// The queue the spawned services own, opened a second time in this process so a
 /// sweep can be claimed the way the service's own maintenance lane claims one.
@@ -60,16 +74,14 @@ async fn queue(url: &str) -> Queue {
 ///
 /// THERE IS NO WIRE CLAIM FOR A SWEEP. `WORKFLOW_JOB_CLAIM` claims as
 /// `Claimant::Placed` (`Coordinator::claim_job`), and that claimant admits
-/// `advance` alone, so a management row is the lane's. What the cases below
-/// measure is the protocol from the settlement onwards, and `Queue::settle` is
-/// not claimant-scoped: it authorizes on the assignment and on
-/// `settlement.delivery.worker_id`. So the lease is taken here and discharged
-/// over the protocol.
+/// `advance` alone, so a management row is the lane's, and so is its settlement:
+/// an outcome reaches the queue from the journal that applied the command, never
+/// from the worker a lease names.
 ///
-/// The authority carries the placed worker's own id, because that is the
-/// identity the settle route authenticates. Its asserted revision is `1`, which
-/// is the revision `seed_placement` records, so the placement read behind that
-/// route resolves the same authority this lease names.
+/// A case that shows the worker refused at the settle route builds its lane with
+/// the placed worker's own id, so the request is refused by the route rather
+/// than by this client's own identity check. Its asserted revision is `1`, which
+/// is the revision `seed_placement` records.
 async fn sweep(
     queue: &Queue,
     lane: &MaintenanceAuthority,
@@ -274,15 +286,21 @@ async fn native_worker_client_uses_the_authenticated_coordinator_api() {
     // sweep is not redelivered to the lane that holds it either.
     assert!(client.claim_job::<AppJournal>(&scope).await.unwrap().is_none());
     assert!(claimed_sweep(&queue, &lane).await.is_none());
-    let settlement = Settlement {
+    // The worker the sweep was leased to cannot settle it: nothing has applied
+    // the command, so the journal holds no receipt to settle it from, and the
+    // settlement names no outcome of its own.
+    assert_eq!(
+        client.settle_committed(&delivery).await.unwrap_err(),
+        Error::Refused(FailureCode::Conflict)
+    );
+    let settlement = decided(
         delivery,
-        outcome: JobOutcome::Management {
+        JobOutcome::Management {
             outcome: ManagementOutcome::NotFound {},
         },
-        successors: vec![],
-    };
-    let receipt = client.settle_job(&settlement).await.unwrap();
-    assert_eq!(client.settle_job(&settlement).await.unwrap(), receipt);
+    );
+    let receipt = lane.settle(&queue, &settlement).await.unwrap();
+    assert_eq!(lane.settle(&queue, &settlement).await.unwrap(), receipt);
     assert!(client.claim_job::<AppJournal>(&scope).await.unwrap().is_none());
     let (status, receipt) = post(
         &http,
@@ -299,15 +317,15 @@ async fn native_worker_client_uses_the_authenticated_coordinator_api() {
             json!({"appId":scope.app_id,"requestId":command.request_id,"outcome":{"kind":"not_found"}})
         )
     );
-    let changed = Settlement {
-        outcome: JobOutcome::Management {
+    let changed = decided(
+        settlement.delivery().clone(),
+        JobOutcome::Management {
             outcome: ManagementOutcome::Conflict {},
         },
-        ..settlement
-    };
+    );
     assert_eq!(
-        client.settle_job(&changed).await.unwrap_err(),
-        Error::Refused(FailureCode::Conflict)
+        lane.settle(&queue, &changed).await.unwrap_err(),
+        zeroship_workflow_manager::Error::Conflict
     );
 
     verify_latest_management(
@@ -618,9 +636,8 @@ async fn verify_latest_management(
         .await,
         accepted
     );
-    // Management is a sweep: the lane claims it, and the client settles it over
-    // the protocol. The lane asserts the placed worker's own identity, which is
-    // the identity `settle_job` authenticates.
+    // Management is a sweep: the lane claims it and settles it in process, as the
+    // service's own lane does.
     let queue = queue(&fixture.runtime_url).await;
     let lane = MaintenanceAuthority::new(scope.app_id.clone(), client.worker_id().clone());
     let delivery = sweep(&queue, &lane, scope).await;
@@ -635,16 +652,17 @@ async fn verify_latest_management(
             },
         }
     );
-    client
-        .settle_job(&Settlement {
+    lane.settle(
+        &queue,
+        &decided(
             delivery,
-            outcome: JobOutcome::Management {
+            JobOutcome::Management {
                 outcome: ManagementOutcome::Denied {},
             },
-            successors: vec![],
-        })
-        .await
-        .unwrap();
+        ),
+    )
+    .await
+    .unwrap();
 }
 
 async fn verify_native_policy_source(
@@ -1008,29 +1026,47 @@ async fn replicas_authenticate_metadata_and_keep_customer_execution_off_the_prot
             },
         }
     );
-    let settlement = serde_json::to_value(Settlement {
+    // The worker the sweep was leased to decides nothing about the command, on
+    // either replica: a body naming an outcome is refused as a body, and one
+    // naming none finds no receipt, because no journal applied the command.
+    let settlement = decided(
         delivery,
-        outcome: JobOutcome::Management {
+        JobOutcome::Management {
             outcome: ManagementOutcome::Applied {
                 state: zeroship_core::workflow_coordination::RunState::Paused,
             },
         },
-        successors: vec![],
-    })
-    .unwrap();
-    let mut generic = settlement.clone();
-    generic["outcome"] = json!({"kind":"completed"});
-    assert_eq!(
-        post(
-            &client,
-            &second.url,
-            endpoints::WORKFLOW_JOB_SETTLE.path_template(),
-            &assertion(&worker_issuer, &worker_key),
-            &generic
-        )
-        .await,
-        (StatusCode::BAD_REQUEST, json!({"code":"invalid"}))
     );
+    let forged = serde_json::to_value(&settlement).unwrap();
+    let mut generic = forged.clone();
+    generic["outcome"] = json!({"kind":"completed"});
+    for body in [&generic, &forged] {
+        assert_eq!(
+            post(
+                &client,
+                &second.url,
+                endpoints::WORKFLOW_JOB_SETTLE.path_template(),
+                &assertion(&worker_issuer, &worker_key),
+                body
+            )
+            .await,
+            (StatusCode::BAD_REQUEST, json!({"code":"invalid"}))
+        );
+    }
+    let committed = json!({"delivery": settlement.delivery()});
+    for replica in [&second.url, &first.url] {
+        assert_eq!(
+            post(
+                &client,
+                replica,
+                endpoints::WORKFLOW_JOB_SETTLE.path_template(),
+                &assertion(&worker_issuer, &worker_key),
+                &committed
+            )
+            .await,
+            (StatusCode::CONFLICT, json!({"code":"conflict"}))
+        );
+    }
     assert_eq!(
         post(
             &client,
@@ -1045,26 +1081,10 @@ async fn replicas_authenticate_metadata_and_keep_customer_execution_off_the_prot
             json!({"appId":app,"requestId":request.request_id,"outcome":null})
         )
     );
-    let (status, receipt) = post(
-        &client,
-        &second.url,
-        endpoints::WORKFLOW_JOB_SETTLE.path_template(),
-        &assertion(&worker_issuer, &worker_key),
-        &settlement,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(
-        post(
-            &client,
-            &first.url,
-            endpoints::WORKFLOW_JOB_SETTLE.path_template(),
-            &assertion(&worker_issuer, &worker_key),
-            &settlement
-        )
-        .await,
-        (StatusCode::OK, receipt)
-    );
+    // The lane settles it in process, as the service's own lane does, and an
+    // exact retry replays the receipt.
+    let receipt = lane.settle(&queue, &settlement).await.unwrap();
+    assert_eq!(lane.settle(&queue, &settlement).await.unwrap(), receipt);
     let management_receipt = json!({"appId":app,"requestId":request.request_id,"outcome":{"kind":"applied","state":"paused"}});
     assert_eq!(
         post(
