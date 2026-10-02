@@ -253,7 +253,7 @@ pub(crate) async fn prepare(
     if compensating {
         return compensation_ready(tx, app, run, now).await;
     }
-    let progressed = journal::resolve(tx, app, run, now).await?;
+    let progressed = journal::resolve(tx, app, run, policy, now).await?;
     let steps = journal::load(tx, app, &run.text("id")?, run.integer("generation")?).await?;
     let pending = steps.iter().any(|step| step.state == "running");
     // A step whose next attempt is due is forward work, so the run is dispatched
@@ -460,7 +460,7 @@ pub(crate) async fn apply(
         park(tx, app, run).await?;
         return Ok(RunState::Paused);
     }
-    let progressed = journal::resolve(tx, app, run, now).await?;
+    let progressed = journal::resolve(tx, app, run, policy, now).await?;
     suspend(tx, app, run, now, progressed).await
 }
 

@@ -10,7 +10,7 @@ use zeroship_workflow_runner::{
 };
 use zeroship_workflow::{
     service::{delivery::PayloadConfirmation, TaskAssignment},
-    WorkflowExecution, WorkflowInvocation, WorkflowServiceError,
+    WorkflowExecution, WorkflowServiceError,
 };
 
 /// A trusted host binds the retained executable and the assignment's app context.
@@ -94,7 +94,6 @@ impl TaskExecutor for V8TaskExecutor {
         budget: ExecutionBudget,
     ) -> Result<Box<dyn TaskExecution>, WorkflowServiceError> {
         Ok(Box::new(V8Execution {
-            invocation: assignment.invocation.clone(),
             loader: (self.loader.clone(), assignment.clone()),
             loaded: None,
             cancel: CancelFlag::new(),
@@ -112,7 +111,6 @@ impl TaskExecutor for V8TaskExecutor {
 }
 
 struct V8Execution {
-    invocation: WorkflowInvocation,
     loader: (Rc<dyn WorkflowRuntimeLoader>, TaskAssignment),
     loaded: Option<LoadedWorkflow>,
     cancel: CancelFlag,
@@ -132,10 +130,13 @@ impl TaskExecution for V8Execution {
         }
         self.started = true;
         self.budget.check()?;
-        if let Some(input) = self.payloads.input().await? {
-            self.invocation.trigger.input = Some(input);
-            self.invocation.trigger.input_ref = None;
-        }
+        // Built before any isolate exists, so a child output this host cannot
+        // read stops the task before creator code runs. The reader hydrates the
+        // trigger's referenced input as it builds the envelope.
+        let envelope = self
+            .payloads
+            .replay_envelope(self.output.1.max_replay_bytes)
+            .await?;
         let (factory, assignment) = &self.loader;
         let executable = self.payloads.executable().await?;
         self.budget.check()?;
@@ -156,8 +157,6 @@ impl TaskExecution for V8Execution {
                 interrupt,
             });
         });
-        let envelope = serde_json::to_string(&self.invocation)
-            .map_err(|_| WorkflowServiceError::Internal("invalid workflow invocation".into()))?;
         loaded.runtime.start_pump();
         // Dispatch encodes a cached startup failure in the normal workflow outcome.
         let _ = loaded.runtime.initialize(&loaded.env).await;

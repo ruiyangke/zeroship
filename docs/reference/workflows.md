@@ -452,7 +452,9 @@ const risk = await step.call(RiskReview, {
 
 The child is an ordinary run. Its output is journaled into the parent step. If
 the child is cancelled, the parent receives `ChildCancelledError`. If the child
-does not finish before `timeout`, the parent receives `ChildTimeoutError`.
+does not finish before `timeout`, the parent receives `ChildTimeoutError`. If
+the child's output would carry the parent past the plan's `maxChildOutputBytes`,
+the parent receives `LimitExceededError`; see [Large Outputs](#large-outputs).
 
 `cascade: true` means cancelling the parent also requests cancellation of a live
 child. Without it, the child remains independent. The request reaches children
@@ -826,6 +828,24 @@ runs and handed over as `trigger.input`, so it is capped at 1 MiB and a start
 over that is refused. Being stored as a blob does not raise that cap, and a
 schedule answers to it at deploy time, where the deploy is what fails.
 
+A child's output is not read on demand either. `step.call` and `step.startMany`
+resolve to the value each child returned, so every replay of the parent reads
+each completed child's output in full before the body runs, the way it reads
+the run's input. The plan therefore bounds what one run carries of them:
+`maxChildOutputBytes` caps the sum of the outputs of every completed child in
+one run generation. The cap is applied as each child completes into its parent,
+in the order the parent's steps were issued. A child whose output would carry
+the sum past it is not attached: its join is recorded `failed` with
+`LimitExceededError` and `retryable: false`, and `await step.call(...)` throws
+it, so a `catch` there can take another path and an uncaught one fails the run.
+Children already attached stay attached. Under `step.startMany` the rejected
+child rejects the whole call, as any failing child does, so the values of the
+children that fit are not returned to it. A successor seeded by
+`step.continueAsNew` starts from nothing, and a restart counts the children
+its retained prefix keeps. When a child produces bulk data, keep it out of the
+value the child returns, for example by writing it to the app's storage and
+returning its key.
+
 ## Compensation
 
 A compensator is attached to a `step.run` with `config.compensate`. It is a
@@ -923,7 +943,7 @@ The SDK exports these workflow error classes:
 | `StalledError` | The platform reclaimed 4 consecutive dispatches of one frontier without the run reporting an outcome. | Not raised in your body: it is the platform's verdict. On a forward frontier it is recorded on the run, which rests `stalled`. On a rollback frontier it is recorded as `compensation.reason` and the run rests `failed` with the rollback abandoned. Terminal either way. No rollback. |
 | `ChildCancelledError` | A `step.call` child is cancelled before the parent join completes. | Yes around `step.call`; if uncaught, normal failure handling applies. |
 | `ChildTimeoutError` | A `step.call` child exceeds `ChildWorkflowOptions.timeout`. | Yes around `step.call`; if uncaught, normal failure handling applies. |
-| `LimitExceededError` | A platform cap is exceeded, such as an output over the blob cap. | Yes when one `step.run` output busted the cap: that step is recorded `failed` carrying this class with `retryable: false`, the run continues, and the body resumes at the row, so a `catch` around the step can take another path. Every other cap names no step and is the platform's verdict, recorded on the run, which rests `failed`: a `step.sideEffect` output, a whole dispatch result, a run output, a continuation seed. A cap the platform applies to a dispatch rather than to a payload, such as `maxFrontier`, refuses the dispatch without recording anything and raises no class here. |
+| `LimitExceededError` | A platform cap is exceeded, such as an output over the blob cap, or a child's output that would carry its parent past `maxChildOutputBytes`. | Yes when one `step.run` output busted the cap, or one `step.call` child's output would carry the parent's children past theirs: that step is recorded `failed` carrying this class with `retryable: false`, the run continues, and the body resumes at the row, so a `catch` around the step can take another path. Every other cap names no step and is the platform's verdict, recorded on the run, which rests `failed`: a `step.sideEffect` output, a whole dispatch result, a run output, a continuation seed. A cap the platform applies to a dispatch rather than to a payload, such as `maxFrontier`, refuses the dispatch without recording anything and raises no class here. |
 | `NestedStepError` | A `step.*` method is called from inside a step body or compensator. | Treat as terminal misuse. Fix the body rather than handling it. |
 | `CompensableCarryError` | `step.continueAsNew` is requested while the current generation still has pending compensators. | No. It is the platform's verdict: the transition is refused, no successor generation is created, the pending compensators run, and the generation rests `failed` carrying this name. |
 | `InvalidScheduleError` | A schedule registration is invalid — a malformed or unsupported cron expression, an unknown IANA timezone, or a non-positive interval count or backfill. Thrown when the schedule is compiled at build/deploy time, never at fire time or on a run. Exported from `@zeroship/workflows/schedule`. | Yes, at registration time; catch it beside the `schedule(...)` call that raised it. |

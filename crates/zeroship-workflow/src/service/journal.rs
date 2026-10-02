@@ -255,11 +255,19 @@ pub(super) fn validate_child_result(
             // checkpoint carries no inline value either way. A stored checkpoint
             // round-trips an inline JSON null as an absent output, so both
             // spellings of nothing are the same consumed result.
-            if step.state != "completed"
-                || step.output.as_ref().is_some_and(|value| !value.is_null())
-                || step.output_ref != reference
-                || step.error.is_some()
-            {
+            let attached = step.state == "completed"
+                && step.output.as_ref().is_none_or(Value::is_null)
+                && step.output_ref == reference
+                && step.error.is_none();
+            // Or the object would have carried the generation's child outputs
+            // past the policy bound, and the join holds the limit failure in
+            // its place. Only a result that names an object can be refused.
+            let refused = reference.is_some()
+                && step.state == "failed"
+                && step.error.as_ref() == Some(&child_output_limit())
+                && step.output.is_none()
+                && step.output_ref.is_none();
+            if !(attached || refused) {
                 return Err(invalid());
             }
         }
@@ -817,16 +825,35 @@ fn inspect_dependency(remaining: &mut usize) -> Result<(), WorkflowServiceError>
 
 /// Resolve durable waits using the service clock and app-scoped mailboxes.
 /// Returns whether a suspended frontier has made progress.
+///
+/// A completed child's output is attached to its step here, which is where
+/// the journal grows by it, so `AppPolicy::max_child_output_bytes` is held
+/// here too: a child whose output would carry the generation's child outputs
+/// past it is recorded failed with [`child_output_limit`] instead of attached.
 pub(crate) async fn resolve(
     tx: &mut Transaction,
     app: &AppId,
     run: &Row,
+    policy: &AppPolicy,
     now: i64,
 ) -> Result<bool, WorkflowServiceError> {
     let id = run.text("id")?;
     let generation = run.integer("generation")?;
     let mut progress = false;
-    for mut step in load(tx, app, &id, generation).await? {
+    let steps = load(tx, app, &id, generation).await?;
+    // What this generation's completed children already carry: the bytes one
+    // replay of it reads back in full.
+    let mut child_outputs = steps
+        .iter()
+        .filter(|step| step.kind == "child" && step.state == "completed")
+        .filter_map(|step| step.output_ref.as_ref())
+        .try_fold(0_usize, |total, reference| {
+            total.checked_add(usize::try_from(reference.size).ok()?)
+        })
+        .ok_or_else(|| {
+            WorkflowServiceError::Internal("workflow child output total is unrepresentable".into())
+        })?;
+    for mut step in steps {
         if step.state != "running" {
             continue;
         }
@@ -931,31 +958,50 @@ pub(crate) async fn resolve(
                 child_result = Some(child.current.id);
             }
             if state == crate::operations::RunState::Completed {
-                if outcome.output_ref.is_some() {
-                    step.output_ref = Some(
-                        super::payloads::inherit_child_output(
-                            tx,
-                            app,
-                            super::payloads::RunGeneration {
-                                id: step.child_run_id.as_deref().ok_or_else(|| {
-                                    WorkflowServiceError::Internal("missing workflow child".into())
-                                })?,
-                                generation: child.current.generation,
-                            },
-                            super::payloads::RunGeneration {
-                                id: &id,
-                                generation,
-                            },
-                            step.ordinal,
-                            now,
+                // The generation's child outputs once this one is attached, or
+                // nothing when that would carry them past the policy bound.
+                let carried = match outcome.output_ref.as_deref() {
+                    Some(reference) => {
+                        let size = decode::<crate::engine::WorkflowOutputRef>(reference)?.size;
+                        Some(
+                            usize::try_from(size)
+                                .ok()
+                                .and_then(|size| child_outputs.checked_add(size))
+                                .filter(|total| *total <= policy.max_child_output_bytes),
                         )
-                        .await?,
-                    );
-                } else {
+                    }
+                    None => None,
+                };
+                match carried {
+                    Some(None) => error = Some(child_output_limit()),
+                    Some(Some(total)) => {
+                        child_outputs = total;
+                        step.output_ref = Some(
+                            super::payloads::inherit_child_output(
+                                tx,
+                                app,
+                                super::payloads::RunGeneration {
+                                    id: step.child_run_id.as_deref().ok_or_else(|| {
+                                        WorkflowServiceError::Internal(
+                                            "missing workflow child".into(),
+                                        )
+                                    })?,
+                                    generation: child.current.generation,
+                                },
+                                super::payloads::RunGeneration {
+                                    id: &id,
+                                    generation,
+                                },
+                                step.ordinal,
+                                now,
+                            )
+                            .await?,
+                        );
+                    }
                     // No descriptor means the child returned nothing. The step
                     // still resolves: a JSON null is what the parent's body
                     // receives, and it is what marks this checkpoint completed.
-                    output = Some(Value::Null);
+                    None => output = Some(Value::Null),
                 }
             } else if state.is_terminal() {
                 error=Some(outcome.error.map(|value|decode(&value)).transpose()?.unwrap_or(json!({"type":"ChildCancelledError","message":"child workflow was cancelled"})));
@@ -999,6 +1045,19 @@ pub(crate) async fn clear_wait(
         }).await?;
     }
     Ok(())
+}
+/// The failure a child step records when its output would carry its run
+/// generation's child outputs past `AppPolicy::max_child_output_bytes`.
+///
+/// `LimitExceededError`, the class a step output over its cap already records,
+/// so a creator matches one class for every cap a step can hit. Not retryable:
+/// the output is the child's committed result, and it will not shrink.
+fn child_output_limit() -> Value {
+    json!({
+        "type": "LimitExceededError",
+        "message": "workflow child outputs exceed the configured limit",
+        "retryable": false,
+    })
 }
 pub(crate) fn invalid<T>(message: &str) -> Result<T, WorkflowServiceError> {
     Err(WorkflowServiceError::InvalidRequest(message.into()))

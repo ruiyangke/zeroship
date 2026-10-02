@@ -225,9 +225,15 @@ async fn direct_signal_order(service: &WorkflowService, scope: &AppWorkflows, ap
     ))
     .await
     .unwrap();
-    assert!(crate::service::journal::resolve(&mut tx, app, &row, now)
-        .await
-        .unwrap());
+    assert!(crate::service::journal::resolve(
+        &mut tx,
+        app,
+        &row,
+        &crate::service::AppPolicy::default(),
+        now
+    )
+    .await
+    .unwrap());
     let journal = crate::service::journal::load(&mut tx, app, &run.id, 0)
         .await
         .unwrap();

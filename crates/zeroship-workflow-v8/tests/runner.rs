@@ -161,6 +161,16 @@ impl Fixture {
         .await
     }
     async fn with_limits(source: &str, cpu_limit: Option<Duration>, policy: AppPolicy) -> Self {
+        Self::with_workflows(source, cpu_limit, policy, &["Example"]).await
+    }
+    /// The same fixture with the deploy declaring `workflows`, so a parent can
+    /// start the children it calls.
+    async fn with_workflows(
+        source: &str,
+        cpu_limit: Option<Duration>,
+        policy: AppPolicy,
+        workflows: &[&str],
+    ) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let app = AppId::mint();
         let policies = Arc::new(HostPolicies::default());
@@ -194,7 +204,7 @@ impl Fixture {
                 &DeployRegistration {
                     id: typed_id::generate("dep"),
                     hash: "a".repeat(64),
-                    workflows: ["Example".into()].into(),
+                    workflows: workflows.iter().map(|name| (*name).to_owned()).collect(),
                     schedules: Vec::new(),
                 },
                 &deployment_fixture::Sources::single(source),
@@ -549,6 +559,7 @@ const OUTPUT_LIMITS: TaskPayloadLimits = TaskPayloadLimits {
     max_inline_bytes: 32,
     max_payload_bytes: 256,
     max_result_bytes: 4096,
+    max_replay_bytes: 256,
 };
 
 struct UploadProbe {
@@ -1530,6 +1541,40 @@ impl Manager {
             app.publish_job(&job.id, self).await.unwrap();
         }
     }
+
+    /// Run every maintenance row the app's queue holds, as the workflow
+    /// service's lane does, so a child's completion reaches its parent.
+    async fn maintain(&self, fixture: &Fixture) {
+        use zeroship_workflow::service::maintenance::{MaintenanceOptions, MaintenanceOutcome};
+        let lane = zeroship_workflow_manager::maintenance::MaintenanceAuthority::new(
+            fixture.app.app_id().clone(),
+            zeroship_core::workflow_coordination::WorkerId::mint(),
+        );
+        let queue = self.coordinator.queue();
+        while let Some(grant) = lane
+            .claim(queue, Ok(AppPolicy::default().max_delivery_attempts))
+            .await
+            .unwrap()
+        {
+            let outcome = fixture
+                .app
+                .maintenance_job(
+                    &grant,
+                    self,
+                    &fixture.objects,
+                    &fixture.objects,
+                    MaintenanceOptions::default(),
+                )
+                .await
+                .unwrap();
+            let MaintenanceOutcome::Settled(receipt) = outcome else {
+                return;
+            };
+            lane.settle(queue, &receipt.settlement(&grant).unwrap())
+                .await
+                .unwrap();
+        }
+    }
 }
 
 fn manager_error(error: zeroship_workflow_manager::Error) -> WorkflowServiceError {
@@ -1946,6 +1991,555 @@ async fn a_step_timeout_over_the_execution_bound_never_fires() {
         settled, None,
         "the host's bound cut the job, so nothing may settle the run"
     );
+}
+
+/// A replay transport whose object reads answer after a host round-trip, each
+/// after a delay of its own, so the order they complete in is the case's choice
+/// rather than the scheduler's. Every other call reaches the real task host.
+struct DelayedReads {
+    tasks: WorkerTasks,
+    objects: Vec<(Vec<u8>, Duration)>,
+    reads: RefCell<Vec<String>>,
+}
+#[async_trait(?Send)]
+impl TaskPayloads for DelayedReads {
+    async fn executable(
+        &self,
+        task: &str,
+        token: &TaskToken,
+    ) -> Result<LoadedWorker, WorkflowServiceError> {
+        TaskPayloads::executable(&self.tasks, task, token).await
+    }
+    async fn stage(
+        &self,
+        task: &str,
+        token: &TaskToken,
+        request: &RequestId,
+        reference: zeroship_workflow::engine::WorkflowOutputRef,
+        body: zeroship_storage::backend::BoxChunkSource,
+    ) -> Result<zeroship_workflow_runner::UploadReceipt, WorkflowServiceError> {
+        self.tasks
+            .stage(task, token, request, reference, body)
+            .await
+    }
+    async fn read(
+        &self,
+        task: &str,
+        token: &TaskToken,
+        reference: &zeroship_workflow::engine::WorkflowOutputRef,
+    ) -> Result<PayloadRead, WorkflowServiceError> {
+        let Some((bytes, delay)) = self
+            .objects
+            .iter()
+            .find(|(bytes, _)| object_ref(bytes) == *reference)
+        else {
+            return self.tasks.read(task, token, reference).await;
+        };
+        self.reads
+            .borrow_mut()
+            .push(String::from_utf8_lossy(bytes).into_owned());
+        compio::time::sleep(*delay).await;
+        PayloadRead::checked(
+            reference.clone(),
+            Box::new(zeroship_storage::backend::OnceChunk::new(
+                bytes.clone().into(),
+            )),
+        )
+    }
+}
+
+fn object_ref(bytes: &[u8]) -> zeroship_workflow::engine::WorkflowOutputRef {
+    use sha2::{Digest, Sha256};
+    zeroship_workflow::engine::WorkflowOutputRef {
+        hash: format!("{:x}", Sha256::digest(bytes)),
+        size: i64::try_from(bytes.len()).unwrap(),
+        content_type: Some("application/json".into()),
+    }
+}
+
+/// A parent that calls two children at once and runs one step after each.
+/// Which step it issues first is decided by which child's value it has first.
+const SIBLINGS: &str = r"
+    export class A { async run() { return { from: 'A' }; } }
+    export class B { async run() { return { from: 'B' }; } }
+    export class Example {
+        async run(_trigger, step) {
+            await Promise.all([
+                step.call(A, {}).then((a) => step.run('x', () => a.from)),
+                step.call(B, {}).then((b) => step.run('y', () => b.from)),
+            ]);
+            return 'done';
+        }
+    }
+";
+
+const CHILD_A: &[u8] = br#"{"from":"A"}"#;
+const CHILD_B: &[u8] = br#"{"from":"B"}"#;
+/// Longer than any scheduling jitter between the two reads, so a read that
+/// waits this long completes after one that does not.
+const SLOW: Duration = Duration::from_millis(200);
+
+/// One delivery of `Example`, replaying `journal` under the host budgets
+/// `limits`, with the objects it names answered by [`DelayedReads`].
+struct Replayed {
+    /// The frontier the host would submit, or why it refused to run the task.
+    frontier: Result<Vec<serde_json::Value>, WorkflowServiceError>,
+    /// The objects [`DelayedReads`] was asked for.
+    reads: Vec<String>,
+    /// Whether an isolate was built for the task.
+    built: bool,
+}
+
+async fn replay_under(
+    fixture: &Fixture,
+    journal: serde_json::Value,
+    objects: Vec<(Vec<u8>, Duration)>,
+    limits: TaskPayloadLimits,
+) -> Replayed {
+    fixture
+        .app
+        .start(&RequestId::mint(), "Example", StartOptions::default())
+        .await
+        .unwrap();
+    let worker = WorkerIdentity::new("replay-order".into()).unwrap();
+    let mut task = fixture
+        .service
+        .poll(&worker)
+        .await
+        .unwrap()
+        .expect("a started run is deliverable");
+    task.invocation.journal = serde_json::from_value(journal).unwrap();
+    let transport = Rc::new(DelayedReads {
+        tasks: fixture.app.tasks(worker, fixture.objects.clone()),
+        objects,
+        reads: RefCell::default(),
+    });
+    let executor = V8TaskExecutor::new(fixture.loader.clone(), transport.clone(), limits).unwrap();
+    let guard = zeroship_workflow_runner::ExecutionGuard::new(Duration::from_secs(20)).unwrap();
+    let mut execution =
+        zeroship_workflow_runner::TaskExecutor::start(&executor, &task, guard.budget()).unwrap();
+    let frontier = execution.wait().await.map(|execution| {
+        execution
+            .outcomes
+            .iter()
+            .map(|outcome| serde_json::to_value(outcome).unwrap())
+            .collect()
+    });
+    execution.stop().await;
+    let reads = transport.reads.borrow().clone();
+    let built = !fixture.loader.probes.borrow().is_empty();
+    Replayed {
+        frontier,
+        reads,
+        built,
+    }
+}
+
+/// [`replay_under`] the default host budgets, for the cases they admit.
+async fn replay_over(
+    fixture: &Fixture,
+    journal: serde_json::Value,
+    objects: Vec<(Vec<u8>, Duration)>,
+) -> (Vec<serde_json::Value>, Vec<String>) {
+    let replayed = replay_under(fixture, journal, objects, TaskPayloadLimits::default()).await;
+    (replayed.frontier.unwrap(), replayed.reads)
+}
+
+fn child(ordinal: i32, name: &str, output: &[u8]) -> serde_json::Value {
+    json!({"ordinal":ordinal,"name":name,"kind":"child","state":"completed",
+        "output":null,"outputRef":object_ref(output),"error":null})
+}
+
+/// The frontier reduced to what identifies each outcome.
+fn shape(outcomes: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    outcomes
+        .iter()
+        .map(|outcome| {
+            json!([
+                outcome["kind"],
+                outcome["ordinal"],
+                outcome["name"],
+                outcome["output"]
+            ])
+        })
+        .collect()
+}
+
+/// A replay reaches its ordinals in the order the journal holds them, however
+/// the objects behind the children it resolves arrive.
+///
+/// The journal is what an earlier dispatch wrote: both children completed, and
+/// `x`, which follows `A`, at the ordinal after them. `A`'s object is the slow
+/// one, so a body that waited on the reads would have `B`'s value first, issue
+/// `y` at that ordinal, and find `x` journaled there.
+#[compio::test]
+async fn a_replay_issues_its_steps_in_journal_order_whatever_order_child_outputs_arrive() {
+    let fixture = Fixture::new(SIBLINGS).await;
+    let (outcomes, reads) = replay_over(
+        &fixture,
+        json!([
+            child(0, "A", CHILD_A),
+            child(1, "B", CHILD_B),
+            {"ordinal":2,"name":"x","kind":"run","state":"completed","output":"A","error":null},
+        ]),
+        vec![(CHILD_A.to_vec(), SLOW), (CHILD_B.to_vec(), Duration::ZERO)],
+    )
+    .await;
+    assert_eq!(
+        reads.len(),
+        2,
+        "both children's objects must be read: {reads:?}"
+    );
+    assert_eq!(
+        shape(&outcomes),
+        vec![json!(["StepCompleted", 3, "y", "B"])],
+        "{outcomes:?}"
+    );
+}
+
+/// THE CONTROL, differing in the delays alone: with `B`'s object the slow one,
+/// the reads complete in journal order, so the case above fails only because
+/// they did not.
+#[compio::test]
+async fn a_replay_whose_child_outputs_arrive_in_journal_order_issues_the_same_steps() {
+    let fixture = Fixture::new(SIBLINGS).await;
+    let (outcomes, _) = replay_over(
+        &fixture,
+        json!([
+            child(0, "A", CHILD_A),
+            child(1, "B", CHILD_B),
+            {"ordinal":2,"name":"x","kind":"run","state":"completed","output":"A","error":null},
+        ]),
+        vec![(CHILD_A.to_vec(), Duration::ZERO), (CHILD_B.to_vec(), SLOW)],
+    )
+    .await;
+    assert_eq!(
+        shape(&outcomes),
+        vec![json!(["StepCompleted", 3, "y", "B"])],
+        "{outcomes:?}"
+    );
+}
+
+/// A completed child's value is there in the round its record resolves in, so
+/// the step that follows it joins the same frontier as the sibling still
+/// running. A body that waited on the read would submit the frontier without
+/// that step and run its effect after the frontier was already sealed, where
+/// nothing records it.
+#[compio::test]
+async fn a_completed_childs_follow_on_step_joins_the_frontier_of_a_running_sibling() {
+    let fixture = Fixture::new(SIBLINGS).await;
+    let (outcomes, _) = replay_over(
+        &fixture,
+        json!([
+            child(0, "A", CHILD_A),
+            {"ordinal":1,"name":"B","kind":"child","state":"running","output":null,"error":null},
+        ]),
+        vec![(CHILD_A.to_vec(), SLOW)],
+    )
+    .await;
+    assert_eq!(
+        shape(&outcomes),
+        vec![
+            json!(["Child", 1, "B", null]),
+            json!(["StepCompleted", 2, "x", "A"]),
+        ],
+        "{outcomes:?}"
+    );
+}
+
+/// A child that returned nothing reached the journal as JSON null with no
+/// object. Its parent receives null, and nothing is read for it.
+#[compio::test]
+async fn a_child_that_returned_nothing_resolves_to_null_without_a_read() {
+    let fixture = Fixture::new(
+        r"
+        export class Quiet { async run() {} }
+        export class Example {
+            async run(_trigger, step) {
+                const quiet = await step.call(Quiet, {});
+                await step.run('saw', () => ({ quiet }));
+                return 'done';
+            }
+        }
+    ",
+    )
+    .await;
+    let (outcomes, reads) = replay_over(
+        &fixture,
+        json!([{"ordinal":0,"name":"Quiet","kind":"child","state":"completed",
+            "output":null,"error":null}]),
+        Vec::new(),
+    )
+    .await;
+    assert!(reads.is_empty(), "{reads:?}");
+    assert_eq!(
+        shape(&outcomes),
+        vec![json!(["StepCompleted", 1, "saw", {"quiet":null}])],
+        "{outcomes:?}"
+    );
+}
+
+/// A parent that calls one child and records what it saw of it.
+const ONE_CHILD: &str = r"
+    export class A { async run() { return {}; } }
+    export class Example {
+        async run(_trigger, step) {
+            const a = await step.call(A, {});
+            await step.run('saw', () => a.from);
+            return 'done';
+        }
+    }
+";
+
+/// A child output of exactly `size` bytes whose `from` is `A`.
+fn child_output_of(size: usize) -> Vec<u8> {
+    let frame = br#"{"from":"A","pad":""}"#.len();
+    let output =
+        serde_json::to_vec(&json!({"from": "A", "pad": "x".repeat(size - frame)})).unwrap();
+    assert_eq!(output.len(), size);
+    output
+}
+
+/// The largest child output the platform admits is replayed by a host on the
+/// default budgets: its bytes reach the parent, which reads a field of it.
+///
+/// The isolate runs with no CPU limit. Parsing an envelope this large is work
+/// the isolate does inside its dispatch, so under an app's CPU limit the same
+/// replay can be cut short; this case is about what the host reads and splices.
+#[compio::test]
+async fn a_child_output_at_the_payload_ceiling_is_replayed() {
+    let fixture = Fixture::with_limits(ONE_CHILD, None, AppPolicy::default()).await;
+    let output = child_output_of(zeroship_core::workflow_policy::MAX_PAYLOAD_BYTES_CEILING);
+    let replayed = replay_under(
+        &fixture,
+        json!([child(0, "A", &output)]),
+        vec![(output, Duration::ZERO)],
+        TaskPayloadLimits::default(),
+    )
+    .await;
+    let frontier = replayed.frontier.unwrap();
+    assert_eq!(
+        shape(&frontier),
+        vec![json!(["StepCompleted", 1, "saw", "A"])],
+        "{frontier:?}"
+    );
+    assert_eq!(replayed.reads.len(), 1);
+}
+
+/// Host budgets that read one child of `CHILD_SIZE` bytes and replay
+/// `max_replay_bytes` of children's outputs.
+const fn replay_limits(max_replay_bytes: usize) -> TaskPayloadLimits {
+    TaskPayloadLimits {
+        max_inline_bytes: 1024,
+        max_payload_bytes: CHILD_SIZE,
+        max_result_bytes: 1024 * 1024,
+        max_replay_bytes,
+    }
+}
+const CHILD_SIZE: usize = 3000;
+
+/// Replay two completed children of `CHILD_SIZE` bytes each under a host
+/// replay budget of `max_replay_bytes`.
+async fn replay_two_within(max_replay_bytes: usize) -> Replayed {
+    let fixture = Fixture::new(SIBLINGS).await;
+    let first = child_output_of(CHILD_SIZE);
+    let second = child_output_of(CHILD_SIZE)
+        .iter()
+        .map(|byte| if *byte == b'A' { b'B' } else { *byte })
+        .collect::<Vec<u8>>();
+    replay_under(
+        &fixture,
+        json!([child(0, "A", &first), child(1, "B", &second)]),
+        vec![(first, Duration::ZERO), (second, Duration::ZERO)],
+        replay_limits(max_replay_bytes),
+    )
+    .await
+}
+
+/// The replay budget is a boundary assertion: a journal whose children's
+/// outputs sum past it, which a correctly configured host never receives, is
+/// refused before anything is read and before an isolate is built.
+#[compio::test]
+async fn child_outputs_past_the_replay_budget_never_read_or_build_an_isolate() {
+    let replayed = replay_two_within(2 * CHILD_SIZE - 1).await;
+    assert!(
+        matches!(replayed.frontier, Err(WorkflowServiceError::Internal(_))),
+        "{:?}",
+        replayed.frontier
+    );
+    assert!(replayed.reads.is_empty(), "{:?}", replayed.reads);
+    assert!(
+        !replayed.built,
+        "an isolate was built past the replay budget"
+    );
+}
+
+/// THE CONTROL, differing in the budget alone: at the children's total, both
+/// outputs are read and replayed.
+#[compio::test]
+async fn child_outputs_inside_the_replay_budget_are_read_and_replayed() {
+    let replayed = replay_two_within(2 * CHILD_SIZE).await;
+    assert_eq!(
+        shape(&replayed.frontier.unwrap()),
+        vec![
+            json!(["StepCompleted", 2, "x", "A"]),
+            json!(["StepCompleted", 3, "y", "B"]),
+        ]
+    );
+    assert_eq!(replayed.reads.len(), 2);
+    assert!(replayed.built);
+}
+
+/// A child output the host cannot read stops the task before an isolate is
+/// built, so no creator code runs over a journal missing a value. The control
+/// is the case above, where the output is readable and an isolate is built.
+#[compio::test]
+async fn a_child_output_the_host_cannot_read_never_builds_an_isolate() {
+    let fixture = Fixture::new(ONE_CHILD).await;
+    // No object is held for this descriptor, so the read reaches the task
+    // host, which holds none either.
+    let replayed = replay_under(
+        &fixture,
+        json!([child(0, "A", CHILD_A)]),
+        Vec::new(),
+        TaskPayloadLimits::default(),
+    )
+    .await;
+    assert!(replayed.frontier.is_err(), "{:?}", replayed.frontier);
+    assert!(
+        !replayed.built,
+        "an isolate was built over an unreadable child output"
+    );
+}
+
+/// A replay whose children only partly read stops the task before an isolate is
+/// built, so no creator code runs over a journal missing a value. One child's
+/// object is held and the other names none; the read that succeeds must not
+/// build an envelope with a hole where the other value belongs.
+#[compio::test]
+async fn a_child_output_that_partly_fails_never_builds_an_isolate() {
+    let fixture = Box::pin(Fixture::new(SIBLINGS)).await;
+    let replayed = replay_under(
+        &fixture,
+        json!([child(0, "A", CHILD_A), child(1, "B", CHILD_B)]),
+        // Only `A`'s object is held, so `B`'s read reaches the task host, which
+        // holds none.
+        vec![(CHILD_A.to_vec(), Duration::ZERO)],
+        TaskPayloadLimits::default(),
+    )
+    .await;
+    assert!(replayed.frontier.is_err(), "{:?}", replayed.frontier);
+    assert_eq!(
+        replayed.reads,
+        vec![String::from_utf8_lossy(CHILD_A).into_owned()],
+        "the readable child's object must have been read"
+    );
+    assert!(
+        !replayed.built,
+        "an isolate was built over a journal with an unreadable child output"
+    );
+}
+
+/// A parent that calls a child whose output is wider than [`NARROW`], and
+/// either catches what `step.call` throws or lets it fail the run.
+fn parent_of_a_wide_child(catches: bool) -> String {
+    let call = if catches {
+        "try { await step.call(Wide, {}); return 'attached'; } \
+         catch (error) { return 'caught ' + error.name; }"
+    } else {
+        "return (await step.call(Wide, {})).length;"
+    };
+    format!(
+        "export class Wide {{ async run() {{ return 'x'.repeat(4096); }} }}
+        export class Example {{ async run(_trigger, step) {{ {call} }} }}"
+    )
+}
+
+/// A child-output bound the child above is wider than on its own.
+const NARROW: usize = 1024;
+
+/// Drive a run of `source` under a policy bounding child outputs at
+/// `max_child_output_bytes` until it settles.
+async fn settle_with_child_bound(
+    source: &str,
+    max_child_output_bytes: usize,
+) -> (Fixture, RunStatus, String) {
+    let fixture = Fixture::with_workflows(
+        source,
+        Some(Duration::from_millis(100)),
+        AppPolicy {
+            max_child_output_bytes,
+            ..AppPolicy::default()
+        },
+        &["Example", "Wide"],
+    )
+    .await;
+    let run = fixture.start(json!({})).await;
+    let manager = Manager::new(&fixture).await;
+    let mut consumer = manager.consumer(&fixture, 1);
+    // Terminal, not merely suspended: the parent suspends while its child
+    // runs, and the child reaches it through the maintenance lane.
+    let settled = RefCell::new(None);
+    let _ = compio::time::timeout(
+        Duration::from_mins(1),
+        consumer.run_until(async {
+            loop {
+                manager.publish(&fixture.app).await;
+                manager.maintain(&fixture).await;
+                let status = fixture.app.status(&run.id).await.unwrap();
+                if status.state.is_terminal() {
+                    *settled.borrow_mut() = Some(status);
+                    return;
+                }
+                compio::time::sleep(Duration::from_millis(2)).await;
+            }
+        }),
+    )
+    .await;
+    let settled = settled
+        .into_inner()
+        .expect("the parent settles rather than wedging on its child");
+    (fixture, settled, run.id)
+}
+
+/// A child whose output would carry its parent past the child-output bound
+/// fails the parent's `step.call` with `LimitExceededError`, which the parent
+/// catches and carries on from: the run settles rather than wedging.
+#[compio::test]
+async fn a_child_output_over_the_bound_is_thrown_into_the_parent() {
+    let (fixture, settled, run) =
+        settle_with_child_bound(&parent_of_a_wide_child(true), NARROW).await;
+    assert_eq!(settled.state, RunState::Completed, "{settled:?}");
+    assert_eq!(
+        returned_value(&fixture, &run).await,
+        json!("caught LimitExceededError")
+    );
+}
+
+/// Uncaught, the same failure settles the parent as failed with that class.
+#[compio::test]
+async fn an_uncaught_child_output_over_the_bound_fails_the_parent() {
+    let (_fixture, settled, _run) =
+        settle_with_child_bound(&parent_of_a_wide_child(false), NARROW).await;
+    assert_eq!(settled.state, RunState::Failed, "{settled:?}");
+    assert_eq!(
+        settled.error.as_ref().map(|error| error["type"].clone()),
+        Some(json!("LimitExceededError")),
+        "{settled:?}"
+    );
+}
+
+/// THE CONTROL, differing in the bound alone: under the default bound the same
+/// child's output is attached and `step.call` resolves.
+#[compio::test]
+async fn a_child_output_inside_the_bound_is_attached() {
+    let (fixture, settled, run) = settle_with_child_bound(
+        &parent_of_a_wide_child(true),
+        AppPolicy::default().max_child_output_bytes,
+    )
+    .await;
+    assert_eq!(settled.state, RunState::Completed, "{settled:?}");
+    assert_eq!(returned_value(&fixture, &run).await, json!("attached"));
 }
 
 #[path = "support/orm.rs"]

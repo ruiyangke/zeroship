@@ -842,3 +842,251 @@ async fn replay_refuses_a_payload_read_that_answers_with_another_descriptor() {
         WorkflowServiceError::PayloadTooLarge
     );
 }
+
+/// A transport holding a fixed set of objects, answering a read with the one
+/// whose descriptor it names and recording every read it is asked for.
+#[derive(Default)]
+struct HeldObjects {
+    objects: Vec<Vec<u8>>,
+    asked: RefCell<Vec<WorkflowOutputRef>>,
+}
+#[async_trait::async_trait(?Send)]
+impl TaskPayloads for HeldObjects {
+    async fn executable(
+        &self,
+        _task: &str,
+        _token: &TaskToken,
+    ) -> Result<zeroship_bundle::LoadedWorker, WorkflowServiceError> {
+        Err(WorkflowServiceError::Internal(
+            "replay reads no executable".into(),
+        ))
+    }
+    async fn stage(
+        &self,
+        _task: &str,
+        _token: &TaskToken,
+        _request: &RequestId,
+        _reference: WorkflowOutputRef,
+        _body: BoxChunkSource,
+    ) -> Result<crate::payloads::UploadReceipt, WorkflowServiceError> {
+        Err(WorkflowServiceError::Internal(
+            "replay stages nothing".into(),
+        ))
+    }
+    async fn read(
+        &self,
+        _task: &str,
+        _token: &TaskToken,
+        named: &WorkflowOutputRef,
+    ) -> Result<PayloadRead, WorkflowServiceError> {
+        self.asked.borrow_mut().push(named.clone());
+        let bytes = self
+            .objects
+            .iter()
+            .find(|bytes| reference(bytes) == *named)
+            .ok_or_else(|| WorkflowServiceError::NotFound("no such fixture object".into()))?;
+        PayloadRead::checked(
+            named.clone(),
+            Box::new(OnceChunk::new(bytes.clone().into())),
+        )
+    }
+}
+
+/// A delivered assignment replaying `journal`, as the service hands one out.
+fn replaying(journal: &serde_json::Value) -> zeroship_workflow::service::TaskAssignment {
+    serde_json::from_value(json!({
+        "id": "task_replay", "token": "0".repeat(64), "generation": 1, "epoch": 1,
+        "deadline": 0, "leaseMs": 60_000,
+        "invocation": {
+            "appId": AppId::mint().as_str(), "deployId": "dep_replay", "deployHash": "a".repeat(64),
+            "runId": "run_replay", "generation": 1, "workflowName": "Example", "phase": "running",
+            "trigger": {"input": null, "startedAt": "2026-09-30T00:00:00Z",
+                "runId": "run_replay", "workflowName": "Example"},
+            "journal": journal,
+        },
+    }))
+    .unwrap()
+}
+
+fn completed(ordinal: i32, name: &str, kind: &str, bytes: &[u8]) -> serde_json::Value {
+    json!({"ordinal":ordinal,"name":name,"kind":kind,"state":"completed",
+        "output":null,"outputRef":reference(bytes),"error":null})
+}
+
+const CHILD: &[u8] = br#"{"doubled":42}"#;
+const STEP: &[u8] = br#"{"stored":true}"#;
+/// The replay budget a configured host runs with, so only the cases about the
+/// budget are decided by it.
+const BUDGET: usize = zeroship_core::workflow_policy::MAX_CHILD_OUTPUT_BYTES_CEILING;
+
+/// A completed child's bytes take the place of its descriptor. A `run` step's
+/// descriptor stays, because its body asked for a reference, and a child that
+/// returned nothing stays JSON null. Only the child's object is read.
+#[compio::test]
+async fn a_replay_journal_carries_child_bytes_and_keeps_run_references() {
+    let transport = Rc::new(HeldObjects {
+        objects: vec![CHILD.to_vec(), STEP.to_vec()],
+        ..HeldObjects::default()
+    });
+    let assignment = replaying(&json!([
+        completed(0, "Child", "child", CHILD),
+        completed(1, "stored", "run", STEP),
+        {"ordinal":2,"name":"Quiet","kind":"child","state":"completed","output":null,"error":null},
+    ]));
+    let reader = TaskPayloadReader::new(transport.clone(), &assignment, 1024).unwrap();
+    let journal = reader
+        .replay_journal(BUDGET)
+        .await
+        .unwrap()
+        .expect("a journal naming a child's output is hydrated");
+    let child = serde_json::to_value(&journal[0]).unwrap();
+    assert_eq!(child["output"], json!({"doubled":42}), "{child}");
+    assert_eq!(child["outputRef"], serde_json::Value::Null, "{child}");
+    // The `run` step and the child that returned nothing are left exactly as
+    // assigned.
+    for index in [1, 2] {
+        assert_eq!(
+            serde_json::to_value(&journal[index]).unwrap(),
+            serde_json::to_value(&assignment.invocation.journal[index]).unwrap()
+        );
+    }
+    assert_eq!(journal[1].output_ref, Some(reference(STEP)));
+    assert_eq!(*transport.asked.borrow(), vec![reference(CHILD)]);
+}
+
+/// The envelope carries a stored child's bytes exactly as the object holds
+/// them: spliced, not parsed and encoded again, so the envelope grows by the
+/// size the descriptor names and no more.
+#[compio::test]
+async fn the_replay_envelope_carries_stored_child_bytes_verbatim() {
+    // Spacing and a trailing zero a parse and re-encode would both drop.
+    let stored = br#"{"b": 1,  "a": 2.50}"#;
+    let reencoded =
+        serde_json::to_vec(&serde_json::from_slice::<serde_json::Value>(stored).unwrap()).unwrap();
+    assert_ne!(
+        reencoded, stored,
+        "the bytes must tell a splice from a re-encode"
+    );
+    let transport = Rc::new(HeldObjects {
+        objects: vec![stored.to_vec()],
+        ..HeldObjects::default()
+    });
+    let assignment = replaying(&json!([completed(0, "Child", "child", stored)]));
+    let reader = TaskPayloadReader::new(transport, &assignment, 1024).unwrap();
+    let envelope = reader.replay_envelope(BUDGET).await.unwrap();
+    let spliced = format!("\"output\":{}", std::str::from_utf8(stored).unwrap());
+    assert!(envelope.contains(&spliced), "{envelope}");
+    assert!(!envelope.contains("outputRef\":{"), "{envelope}");
+    // The whole envelope is the assigned invocation with the child's output in
+    // place of its descriptor and nothing else moved, so the borrowed identity
+    // fields cannot drop out of the serialized form.
+    let mut expected = serde_json::to_value(&assignment.invocation).unwrap();
+    expected["journal"][0]["output"] = json!({"b": 1, "a": 2.5});
+    expected["journal"][0]["outputRef"] = serde_json::Value::Null;
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&envelope).unwrap(),
+        expected
+    );
+}
+
+/// A journal naming no child's output is already what the isolate replays: it
+/// comes back as nothing to replace, and nothing is read.
+#[compio::test]
+async fn a_journal_naming_no_child_output_is_replayed_as_assigned() {
+    let transport = Rc::new(HeldObjects {
+        objects: vec![STEP.to_vec()],
+        ..HeldObjects::default()
+    });
+    let assignment = replaying(&json!([completed(0, "stored", "run", STEP)]));
+    let reader = TaskPayloadReader::new(transport.clone(), &assignment, 1024).unwrap();
+    assert!(reader.replay_journal(BUDGET).await.unwrap().is_none());
+    assert!(transport.asked.borrow().is_empty());
+}
+
+/// A child object that is not JSON is refused as unavailable.
+#[compio::test]
+async fn a_child_output_that_is_not_json_is_unavailable() {
+    let garbage = b"not json".to_vec();
+    let transport = Rc::new(HeldObjects {
+        objects: vec![garbage.clone()],
+        ..HeldObjects::default()
+    });
+    let assignment = replaying(&json!([completed(0, "Child", "child", &garbage)]));
+    let reader = TaskPayloadReader::new(transport, &assignment, 1024).unwrap();
+    assert_eq!(
+        reader.replay_journal(BUDGET).await.unwrap_err(),
+        WorkflowServiceError::Unavailable("workflow child output payload is not valid JSON".into())
+    );
+}
+
+/// A child object over the read budget is refused before it is opened, and the
+/// reader stays failed, so the host abandons the execution.
+#[compio::test]
+async fn a_child_output_over_the_read_budget_fails_the_reader() {
+    let transport = Rc::new(HeldObjects {
+        objects: vec![CHILD.to_vec()],
+        ..HeldObjects::default()
+    });
+    let assignment = replaying(&json!([completed(0, "Child", "child", CHILD)]));
+    let reader = TaskPayloadReader::new(transport.clone(), &assignment, CHILD.len() - 1).unwrap();
+    assert_eq!(
+        reader.replay_journal(BUDGET).await.unwrap_err(),
+        WorkflowServiceError::PayloadTooLarge
+    );
+    assert_eq!(reader.check(), Err(WorkflowServiceError::PayloadTooLarge));
+    assert!(transport.asked.borrow().is_empty());
+}
+
+/// The replay budget bounds the stored bytes a replay splices in, summed over
+/// its children: at their total they are read, one byte under it nothing is
+/// read and the replay is refused as the internal fault it is, since the
+/// journal admits no more than a configured budget's floor.
+#[compio::test]
+async fn the_replay_budget_bounds_the_stored_bytes_of_every_child() {
+    let assignment = replaying(&json!([
+        completed(0, "First", "child", CHILD),
+        completed(1, "Second", "child", STEP),
+    ]));
+    let stored = CHILD.len() + STEP.len();
+    let transport = Rc::new(HeldObjects {
+        objects: vec![CHILD.to_vec(), STEP.to_vec()],
+        ..HeldObjects::default()
+    });
+    let reader = TaskPayloadReader::new(transport.clone(), &assignment, 1024).unwrap();
+    assert!(reader.replay_journal(stored).await.unwrap().is_some());
+    assert_eq!(transport.asked.borrow().len(), 2);
+
+    let transport = Rc::new(HeldObjects {
+        objects: vec![CHILD.to_vec(), STEP.to_vec()],
+        ..HeldObjects::default()
+    });
+    let reader = TaskPayloadReader::new(transport.clone(), &assignment, 1024).unwrap();
+    assert!(matches!(
+        reader.replay_journal(stored - 1).await.unwrap_err(),
+        WorkflowServiceError::Internal(_)
+    ));
+    assert!(transport.asked.borrow().is_empty());
+}
+
+/// A child-output total the host cannot represent is refused as unrepresentable,
+/// naming the overflow rather than a budget comparison it never made.
+#[compio::test]
+async fn a_child_output_total_the_host_cannot_represent_is_unrepresentable() {
+    let mut journal = json!([
+        completed(0, "First", "child", CHILD),
+        completed(1, "Second", "child", STEP),
+        completed(2, "Third", "child", CHILD),
+    ]);
+    // Each size fits the signed field a descriptor carries; their sum overflows
+    // the host's `usize`, so no budget can bound it.
+    for index in 0..3 {
+        journal[index]["outputRef"]["size"] = json!(i64::MAX);
+    }
+    let transport = Rc::new(HeldObjects::default());
+    let reader = TaskPayloadReader::new(transport.clone(), &replaying(&journal), BUDGET).unwrap();
+    assert_eq!(
+        reader.replay_journal(BUDGET).await.unwrap_err(),
+        WorkflowServiceError::Internal("workflow child output total is unrepresentable".into())
+    );
+    assert!(transport.asked.borrow().is_empty());
+}

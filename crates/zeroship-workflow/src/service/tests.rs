@@ -85,6 +85,7 @@ mod asserted_registrations;
 mod backend_journal;
 mod background_scope;
 mod child_errors;
+mod child_outputs;
 mod closure;
 mod compensation_summary;
 mod completion_batch;

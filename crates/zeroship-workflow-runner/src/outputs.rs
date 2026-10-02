@@ -16,25 +16,32 @@ use zeroship_workflow::{
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use zeroship_core::workflow_policy::MAX_PAYLOAD_BYTES_CEILING;
+use zeroship_core::workflow_policy::{MAX_CHILD_OUTPUT_BYTES_CEILING, MAX_PAYLOAD_BYTES_CEILING};
 use zeroship_storage::backend::OnceChunk;
 
 /// Host memory and inline-journal budgets. `max_payload_bytes` and the policy
 /// bound of the same name describe one quantity and answer to one platform
-/// ceiling; the other two are this host's own.
+/// ceiling, as `max_replay_bytes` and `AppPolicy::max_child_output_bytes` do;
+/// the other two are this host's own.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TaskPayloadLimits {
     pub max_inline_bytes: usize,
     pub max_payload_bytes: usize,
     pub max_result_bytes: usize,
+    /// The most child-output bytes one execution reads into its replay journal:
+    /// the sum over the completed children it replays, each read in full before
+    /// the isolate exists.
+    pub max_replay_bytes: usize,
 }
 impl Default for TaskPayloadLimits {
-    /// Only `max_payload_bytes` derives from a platform ceiling, because it is
-    /// the only one of these three measuring the same bytes as a policy bound:
-    /// it is the budget a staged payload is read back through, and
+    /// `max_payload_bytes` and `max_replay_bytes` derive from platform
+    /// ceilings, because each measures the same bytes as a policy bound. The
+    /// first is the budget a staged payload is read back through, and
     /// `AppPolicy::max_payload_bytes` is the budget the same payload was
-    /// admitted under, so one constant serves both.
+    /// admitted under. The second is what one replay reads of its children's
+    /// outputs, and `AppPolicy::max_child_output_bytes` is what the journal
+    /// admits of them. One constant serves each pair.
     ///
     /// `max_result_bytes` bounds the runtime's whole result text and no policy
     /// bound measures it. `max_inline_bytes` decides whether a value is carried
@@ -48,16 +55,21 @@ impl Default for TaskPayloadLimits {
             max_inline_bytes: 1024 * 1024,
             max_payload_bytes: MAX_PAYLOAD_BYTES_CEILING,
             max_result_bytes: 128 * 1024 * 1024,
+            max_replay_bytes: MAX_CHILD_OUTPUT_BYTES_CEILING,
         }
     }
 }
 impl TaskPayloadLimits {
+    /// A replay budget below the payload read budget is inverted: it would
+    /// refuse to replay one child whose output this host can read back.
+    ///
     /// # Errors
     /// Rejects empty, inverted or unrepresentable budgets.
     pub fn validate(self) -> Result<(), WorkflowServiceError> {
         if self.max_inline_bytes == 0
             || self.max_payload_bytes < self.max_inline_bytes
             || self.max_result_bytes < self.max_payload_bytes
+            || self.max_replay_bytes < self.max_payload_bytes
             || i64::try_from(self.max_payload_bytes).is_err()
         {
             return Err(invalid("invalid workflow payload limits"));
@@ -82,9 +94,14 @@ impl TaskPayloadLimits {
     /// itself and runs on every execution, including the deliberately narrow
     /// budgets that exercise the limit outcomes.
     ///
+    /// The replay budget has no ceiling comparison of its own: [`Self::validate`]
+    /// already rejects one below the payload read budget, and the check below
+    /// holds that budget at or above its platform ceiling, so a host that passes
+    /// carries no replay budget below the payload read floor.
+    ///
     /// # Errors
     /// Rejects an unusable budget, and one whose payload read budget is below
-    /// the platform ceiling.
+    /// its platform ceiling.
     pub fn validate_configured(self) -> Result<(), WorkflowServiceError> {
         self.validate()?;
         if self.max_payload_bytes < MAX_PAYLOAD_BYTES_CEILING {

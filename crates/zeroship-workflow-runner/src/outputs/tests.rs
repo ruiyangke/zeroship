@@ -31,6 +31,7 @@ const LIMITS: TaskPayloadLimits = TaskPayloadLimits {
     max_inline_bytes: 32,
     max_payload_bytes: 256,
     max_result_bytes: 4096,
+    max_replay_bytes: 256,
 };
 
 struct LostReceipt {
@@ -867,12 +868,14 @@ fn configured_host_budget_refuses_a_payload_read_below_the_platform_ceiling() {
         max_inline_bytes: 1024,
         max_payload_bytes: MAX_PAYLOAD_BYTES_CEILING,
         max_result_bytes: MAX_PAYLOAD_BYTES_CEILING,
+        max_replay_bytes: MAX_CHILD_OUTPUT_BYTES_CEILING,
     };
     at_ceiling.validate_configured().unwrap();
     // A host may carry more than the platform admits; only less is refused.
     TaskPayloadLimits {
         max_payload_bytes: MAX_PAYLOAD_BYTES_CEILING + 1,
         max_result_bytes: MAX_PAYLOAD_BYTES_CEILING + 1,
+        max_replay_bytes: MAX_CHILD_OUTPUT_BYTES_CEILING + 1,
         ..at_ceiling
     }
     .validate_configured()
@@ -902,6 +905,11 @@ fn output_budgets_reject_unusable_limits() {
         },
         TaskPayloadLimits {
             max_result_bytes: LIMITS.max_payload_bytes - 1,
+            ..LIMITS
+        },
+        // A replay budget that could not replay one child this host can read.
+        TaskPayloadLimits {
+            max_replay_bytes: LIMITS.max_payload_bytes - 1,
             ..LIMITS
         },
     ] {

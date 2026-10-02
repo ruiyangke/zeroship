@@ -1,7 +1,7 @@
 use serde_json::{json, Value};
 use zeroship_core::workflow_policy::{
-    AppPolicy, InvalidPolicy, MAX_INPUT_BYTES_CEILING, MAX_JOURNAL_BYTES_CEILING,
-    MAX_PAYLOAD_BYTES_CEILING, SIGNAL_CAPABILITY_MAX_LIFETIME_SECONDS,
+    AppPolicy, InvalidPolicy, MAX_CHILD_OUTPUT_BYTES_CEILING, MAX_INPUT_BYTES_CEILING,
+    MAX_JOURNAL_BYTES_CEILING, MAX_PAYLOAD_BYTES_CEILING, SIGNAL_CAPABILITY_MAX_LIFETIME_SECONDS,
 };
 
 fn document() -> Value {
@@ -81,6 +81,7 @@ fn shared_validation_rejects_invalid_resource_limits() {
         ("maxInputBytes", json!(0)),
         ("maxFrontier", json!(0)),
         ("maxJournalBytes", json!(0)),
+        ("maxChildOutputBytes", json!(0)),
         ("maxPayloadBytes", json!(0)),
         ("maxPayloadObjects", json!(0)),
         ("maxPayloadStorageBytes", json!(0)),
@@ -127,6 +128,7 @@ fn shared_bounds_refuse_a_policy_above_the_platform_ceiling() {
     let at_ceiling = AppPolicy {
         max_input_bytes: MAX_INPUT_BYTES_CEILING,
         max_journal_bytes: MAX_JOURNAL_BYTES_CEILING,
+        max_child_output_bytes: MAX_CHILD_OUTPUT_BYTES_CEILING,
         max_payload_bytes: signed_payload_ceiling,
         ..AppPolicy::default()
     };
@@ -136,6 +138,7 @@ fn shared_bounds_refuse_a_policy_above_the_platform_ceiling() {
     AppPolicy {
         max_input_bytes: MAX_INPUT_BYTES_CEILING / 2,
         max_journal_bytes: MAX_JOURNAL_BYTES_CEILING / 2,
+        max_child_output_bytes: MAX_CHILD_OUTPUT_BYTES_CEILING / 2,
         max_payload_bytes: signed_payload_ceiling / 2,
         ..at_ceiling
     }
@@ -155,6 +158,13 @@ fn shared_bounds_refuse_a_policy_above_the_platform_ceiling() {
             "maxJournalBytes",
             AppPolicy {
                 max_journal_bytes: MAX_JOURNAL_BYTES_CEILING + 1,
+                ..at_ceiling
+            },
+        ),
+        (
+            "maxChildOutputBytes",
+            AppPolicy {
+                max_child_output_bytes: MAX_CHILD_OUTPUT_BYTES_CEILING + 1,
                 ..at_ceiling
             },
         ),
@@ -200,6 +210,7 @@ fn unsigned_limits_reject_unrepresentable_values_without_clamping() {
         "maxInputBytes",
         "maxFrontier",
         "maxJournalBytes",
+        "maxChildOutputBytes",
         "maxSchedules",
         "maxScheduleBackfill",
     ];
@@ -208,7 +219,10 @@ fn unsigned_limits_reject_unrepresentable_values_without_clamping() {
         // Decoding preserves the raw value whatever its size; admissibility is
         // the separate question `validate` answers, and only the fields that
         // share a quantity with a host budget have a ceiling to exceed.
-        let bounded = matches!(field, "maxInputBytes" | "maxJournalBytes");
+        let bounded = matches!(
+            field,
+            "maxInputBytes" | "maxJournalBytes" | "maxChildOutputBytes"
+        );
         assert_eq!(boundary.validate().is_err(), bounded, "{field}");
         assert_eq!(
             serde_json::to_value(boundary).unwrap()[field],

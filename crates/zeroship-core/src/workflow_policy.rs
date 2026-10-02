@@ -36,6 +36,17 @@ pub const MAX_JOURNAL_BYTES_CEILING: usize = 16 * 1024 * 1024;
 /// admit a payload that can never be read back.
 pub const MAX_PAYLOAD_BYTES_CEILING: usize = 64 * 1024 * 1024;
 
+/// Largest sum of child outputs one run generation's journal admits.
+///
+/// The sum runs over every completed `step.call` and `step.startMany` child,
+/// and the replay budget a host that hydrates them derives from this value. A
+/// host budget below it could not replay a journal the platform admitted.
+///
+/// Never below [`MAX_PAYLOAD_BYTES_CEILING`], so the largest child output the
+/// platform admits always fits.
+pub const MAX_CHILD_OUTPUT_BYTES_CEILING: usize = MAX_PAYLOAD_BYTES_CEILING;
+const _: () = assert!(MAX_CHILD_OUTPUT_BYTES_CEILING >= MAX_PAYLOAD_BYTES_CEILING);
+
 /// [`MAX_PAYLOAD_BYTES_CEILING`] in the signed representation [`AppPolicy`]
 /// stores. One authority, two representations: the conversion is proved when
 /// the crate is compiled, so raising the ceiling beyond what the policy field
@@ -73,6 +84,15 @@ pub struct AppPolicy {
     pub max_input_bytes: usize,
     pub max_frontier: usize,
     pub max_journal_bytes: usize,
+    /// How many bytes of child outputs one run generation's journal carries,
+    /// summed over its completed `step.call` and `step.startMany` children.
+    ///
+    /// A child output is an object the parent's replay reads back in full, so
+    /// the sum is what one replay materializes. It is held where the journal
+    /// grows: a child whose output would carry the sum past this bound is
+    /// recorded failed with `LimitExceededError` instead of attached, and the
+    /// parent's `step.call` throws it.
+    pub max_child_output_bytes: usize,
     pub max_payload_bytes: i64,
     pub max_payload_objects: i64,
     pub max_payload_storage_bytes: i64,
@@ -128,6 +148,7 @@ impl Default for AppPolicy {
             max_input_bytes: 1024 * 1024,
             max_frontier: 256,
             max_journal_bytes: 16 * 1024 * 1024,
+            max_child_output_bytes: MAX_CHILD_OUTPUT_BYTES_CEILING,
             max_payload_bytes: 64 * 1024 * 1024,
             max_payload_objects: 100_000,
             max_payload_storage_bytes: 1024 * 1024 * 1024,
@@ -161,6 +182,8 @@ impl AppPolicy {
             || self.max_frontier == 0
             || self.max_journal_bytes == 0
             || self.max_journal_bytes > MAX_JOURNAL_BYTES_CEILING
+            || self.max_child_output_bytes == 0
+            || self.max_child_output_bytes > MAX_CHILD_OUTPUT_BYTES_CEILING
             || self.max_payload_bytes <= 0
             || self.max_payload_bytes > PAYLOAD_CEILING_SIGNED
             || self.max_payload_objects <= 0

@@ -253,6 +253,9 @@ export class Platform {
       ZEROSHIP_WORKFLOW_DATABASE_URL: `postgres://zeroship_workflow:zeroship_workflow@${authority}`,
       ZEROSHIP_WORKFLOW_CONTROL_URL: control.url,
       ZEROSHIP_WORKFLOW_SERVICE_KEY_FILE: keys.workflow, ZEROSHIP_WORKFLOW_SERVICE_PEERS_FILE: peers,
+      // The store the worker names below: this service stages run inputs an
+      // executing run reads back, so both processes name the one store.
+      ZEROSHIP_WORKFLOW_STORAGE_URL: payloads,
     });
     await this.waitFor("workflow manager", () => this.httpReady(`${manager.url}/readyz`));
     await service("worker", "zeroship-worker", worker, ["--port", `${worker.number}`, "--threads", "1", "--control-url", control.url, "--blob-store", blobs, "--poll-interval", "1", "--kv-config-file", kv], {
@@ -304,6 +307,7 @@ export class Platform {
       admission: true, dispatch: true, ingress: true,
       maxLiveRuns: 10000, maxChildDepth: 16, maxRunning: 16,
       maxInputBytes: 1048576, maxFrontier: 256, maxJournalBytes: 16777216,
+      maxChildOutputBytes: 67108864,
       maxPayloadBytes: 67108864, maxPayloadObjects: 100000,
       maxPayloadStorageBytes: 1073741824, payloadStagingRetentionMs: 86400000,
       maxStepAttempts: 8, retryDelayMs: 1000, maxDeliveryAttempts: 8,

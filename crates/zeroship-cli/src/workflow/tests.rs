@@ -89,7 +89,7 @@ fn local_configuration_refuses_a_payload_budget_below_the_platform_ceiling() {
     let ceiling = zeroship_core::workflow_policy::MAX_PAYLOAD_BYTES_CEILING;
     let at_ceiling = format!(
         "[payloads]\nmax_inline_bytes = 1024\nmax_payload_bytes = {ceiling}\n\
-         max_result_bytes = {ceiling}"
+         max_result_bytes = {ceiling}\nmax_replay_bytes = {ceiling}"
     );
     let config: LocalConfig = toml::from_str(&at_ceiling).unwrap();
     assert_eq!(
@@ -98,7 +98,7 @@ fn local_configuration_refuses_a_payload_budget_below_the_platform_ceiling() {
     );
     let below = format!(
         "[payloads]\nmax_inline_bytes = 1024\nmax_payload_bytes = {}\n\
-         max_result_bytes = {ceiling}",
+         max_result_bytes = {ceiling}\nmax_replay_bytes = {ceiling}",
         ceiling - 1
     );
     let config: LocalConfig = toml::from_str(&below).unwrap();

@@ -7,16 +7,22 @@ pub use zeroship_core::workflow_coordination::WorkflowOutputRef;
 
 pub const DEFAULT_TICK_SECS: u64 = 1;
 
+/// One replayed step, generic over how its output is held.
+///
+/// `O` is a parsed [`Value`] as the journal stores it, or another
+/// representation a host serializes in its place when it builds a replay
+/// envelope, such as stored bytes spliced verbatim. The wire shape is the same
+/// for every `O` that serializes as JSON.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct JournalStep {
+pub struct JournalStep<O = Value> {
     pub ordinal: i32,
     pub name: String,
     #[serde(default, rename = "nameOccurrence")]
     pub name_occurrence: i32,
     pub kind: String,
     pub state: String,
-    pub output: Option<Value>,
+    pub output: Option<O>,
     #[serde(default, rename = "outputRef")]
     pub output_ref: Option<WorkflowOutputRef>,
     pub error: Option<Value>,

@@ -10,10 +10,11 @@ use serde_json::Value;
 use crate::engine::{JournalStep, StepOutcome};
 use crate::WorkflowServiceError;
 
-/// Replay input without journal mutation authority.
+/// Replay input without journal mutation authority. `O` is how its journal
+/// holds step outputs; see [`JournalStep`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct WorkflowInvocation {
+pub struct WorkflowInvocation<O = Value> {
     pub app_id: String,
     pub deploy_id: String,
     pub deploy_hash: String,
@@ -25,7 +26,7 @@ pub struct WorkflowInvocation {
     pub workflow_name: String,
     pub phase: String,
     pub trigger: WorkflowTrigger,
-    pub journal: Vec<JournalStep>,
+    pub journal: Vec<JournalStep<O>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

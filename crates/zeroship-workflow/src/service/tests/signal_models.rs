@@ -66,7 +66,15 @@ async fn window_contract(store: Rc<OrmStore>) {
     journal::append(&mut tx, &app_id, &run, &policy, checkpoints, now)
         .await
         .unwrap();
-    assert!(journal::resolve(&mut tx, &app_id, &run, now).await.unwrap());
+    assert!(journal::resolve(
+        &mut tx,
+        &app_id,
+        &run,
+        &crate::service::AppPolicy::default(),
+        now
+    )
+    .await
+    .unwrap());
     let history = journal::load(&mut tx, &app_id, &started.id, 0)
         .await
         .unwrap();
@@ -104,7 +112,15 @@ async fn window_contract(store: Rc<OrmStore>) {
         .map(|row| (row.id, row.created_at))
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(pending, ignored);
-    assert!(!journal::resolve(&mut tx, &app_id, &run, now).await.unwrap());
+    assert!(!journal::resolve(
+        &mut tx,
+        &app_id,
+        &run,
+        &crate::service::AppPolicy::default(),
+        now
+    )
+    .await
+    .unwrap());
     tx.commit().await.unwrap();
 }
 
@@ -193,7 +209,15 @@ async fn forged_consumption_contract(store: Rc<OrmStore>) {
     journal::append(&mut tx, &app_id, &run, &policy, wait(None), now)
         .await
         .unwrap();
-    assert!(journal::resolve(&mut tx, &app_id, &run, now).await.unwrap());
+    assert!(journal::resolve(
+        &mut tx,
+        &app_id,
+        &run,
+        &crate::service::AppPolicy::default(),
+        now
+    )
+    .await
+    .unwrap());
     let history = journal::load(&mut tx, &app_id, &started.id, 0)
         .await
         .unwrap();
