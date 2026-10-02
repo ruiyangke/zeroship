@@ -164,6 +164,11 @@ async fn missing_bundle(store: Rc<OrmStore>) {
     assert_eq!(persisted(&service, &app_id).await, before);
     platform
         .source
+        .delete_manifest(&app_id, &target.hash)
+        .await
+        .unwrap();
+    platform
+        .source
         .put_manifest(&app_id, &target.hash, &manifest)
         .await
         .unwrap();
