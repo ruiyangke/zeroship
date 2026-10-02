@@ -23,9 +23,9 @@ import { table, t } from "@zeroship/migrate";
 //      `t.text().references(table, column)`. examples/db-todos and
 //      examples/db-e2e carry the same note.
 //
-// The inline `dbSchema` in src/server.ts stays as the QUERY-side type source
-// (it is what gives `db.messages.find(...)` its types); this file is what
-// creates the tables. db-todos has the same pair.
+// src/server.ts reads its QUERY-side types from
+// `generated/zeroship/env.db.ts`, which the toolchain folds from this file;
+// this file is what creates the tables. db-todos has the same pair.
 //
 // UNLIKE examples/db-e2e, this example's schema uses no encrypted columns, no
 // vector and no geoPoint, so all of it IS representable in

@@ -403,3 +403,25 @@ jobs:
       - name: zeroship-migrate-node suite
         if: ${{ !cancelled() }}
         run: pnpm --filter zeroship-migrate-node test
+      # Every example opts into static verification by declaring a `typecheck`
+      # script. The loop discovers those examples from package metadata, so a
+      # new example is gated without editing this workflow. A failing example
+      # does not stop the loop, so one run reports every example that fails
+      # rather than only the first.
+      - name: Example packages typecheck
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          failed=0
+          for dir in examples/*/; do
+            [ -f "$dir/package.json" ] || continue
+            if ! node -e "const s = require('./$dir/package.json').scripts; process.exit(s && s.typecheck ? 0 : 1)"; then
+              continue
+            fi
+            echo "::group::typecheck $dir"
+            if ! (cd "$dir" && pnpm typecheck); then
+              failed=1
+            fi
+            echo "::endgroup::"
+          done
+          exit "$failed"

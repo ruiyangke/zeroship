@@ -11,39 +11,17 @@
 // The client (src/App.tsx) uses the older @zeroship/react hook path
 // against `listMessages`.
 
-import { t, schema, type Db } from "@zeroship/db";
 import { env } from "zeroship";
+import type {} from "../generated/zeroship/env.db";
 import { query, mutation, action } from "@zeroship/rpc/server";
 import { runQuery, runMutation } from "@zeroship/server";
 
-// ---------------------------------------------------------------------------
-// Schema model used by this older example's local Db<> typing.
-// ---------------------------------------------------------------------------
+// The typed collections come from the generated runtime descriptor, which is
+// folded from the committed migrations in `migrations/`. The descriptor is the
+// one source of collection identity, the platform system columns
+// included, so it is also what types the query-side `db` handle here.
 
-const dbSchema = {
-  users: {
-    handle: t.string().required().unique().pattern(/^[a-z0-9_]+$/),
-    name:   t.string().required().max(100),
-  },
-
-  channels: schema({
-    slug:  t.string().required().unique().pattern(/^[a-z0-9-]+$/),
-    name:  t.string().required().max(120),
-    topic: t.string(),
-  }),
-
-  messages: schema({
-    channelId: t.ref("channels").required(),
-    authorId:  t.ref("users").required(),
-    body:      t.string().required().min(1).max(4000),
-    // For P8c moderation flow — content actions can flip this.
-    flagged:   t.boolean().default(false),
-  }),
-};
-
-export default { schema: dbSchema };
-
-const db = env.db as Db<typeof dbSchema>;
+const db = env.db;
 
 type UserId    = typeof db.users.Id;
 type ChannelId = typeof db.channels.Id;

@@ -60,7 +60,7 @@ export const boom = query(
   },
   {
     id: "boom",
-    output: z.object({ never: z.string() }),
+    output: z.never(),
   },
 );
 
