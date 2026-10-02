@@ -402,11 +402,21 @@ jobs:
       # Run SDK and migration package suites in the job that builds their
       # artifacts. The Vite plugin's manual-schema fixtures currently fail
       # during generation; focused Vite contracts run above. Example and browser
-      # suites require provisioned process-level harnesses and stay outside this
-      # SDK command.
-      - name: JavaScript suites
-        run: |
-          pnpm -r --no-bail --filter='./packages/*' --filter='!@zeroship/vite-plugin' --filter='!@zeroship/migrate' --filter='!zero-migrate-cli' --filter='!zeroship-migrate-node' test
-          pnpm --filter @zeroship/migrate test
-          pnpm --filter zero-migrate-cli test
-          pnpm --filter zeroship-migrate-node test
+      # suites require provisioned process-level harnesses and stay outside these
+      # SDK commands.
+      #
+      # One step per suite, each carrying `!cancelled()`: by default a failing
+      # suite skips the rest of the job, which would let one suite's failure
+      # hide every later suite's result. A cancelled run still stops.
+      - name: JavaScript package suites
+        if: ${{ !cancelled() }}
+        run: pnpm -r --no-bail --filter='./packages/*' --filter='!@zeroship/vite-plugin' --filter='!@zeroship/migrate' --filter='!zero-migrate-cli' --filter='!zeroship-migrate-node' test
+      - name: '@zeroship/migrate suite'
+        if: ${{ !cancelled() }}
+        run: pnpm --filter @zeroship/migrate test
+      - name: zero-migrate-cli suite
+        if: ${{ !cancelled() }}
+        run: pnpm --filter zero-migrate-cli test
+      - name: zeroship-migrate-node suite
+        if: ${{ !cancelled() }}
+        run: pnpm --filter zeroship-migrate-node test
