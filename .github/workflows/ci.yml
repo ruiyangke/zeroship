@@ -377,6 +377,11 @@ jobs:
       # mirroring the @zeroship/migrate pattern below.
       - run: pnpm --filter @zeroship/db run check
       - run: pnpm --filter @zeroship/migrate run check
+      # The dev-bundle fixture the CLI's workflow suite runs under tsx is a
+      # .ts file, and tsx strips types without checking them, so a
+      # buildDevBundle signature change would otherwise reach a Rust suite as
+      # a runtime TypeError. This tsc program typechecks the fixture.
+      - run: pnpm --filter @zeroship/vite-plugin run check
       # Package tests use their own fixtures, so they cannot detect drift in
       # committed generated artifacts under examples. Compare those artifacts
       # directly against the current policy, renderer, and migration engine.

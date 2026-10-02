@@ -1,0 +1,13 @@
+{
+  // The dev-bundle fixture the CLI's workflow suite runs under tsx lives
+  // outside this package, and the base tsconfig's `rootDir: "src"` rejects an
+  // included file outside it with TS6059. The wider rootDir puts the fixture
+  // in a noEmit-only program; `check` runs this so a buildDevBundle signature
+  // change fails at typecheck instead of as a runtime TypeError in the suite.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "../.."
+  },
+  "include": ["src", "../../crates/zeroship-cli/tests/fixtures/app-bundle.ts"]
+}

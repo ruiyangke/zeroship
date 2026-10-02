@@ -2,6 +2,7 @@ import { promises as fs } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildDevBundle } from "../../../../packages/vite-plugin/src/dev-bundle.js";
+import { zeroshipPlugins } from "../../../../packages/vite-plugin/src/plugins.js";
 import { defaultProjectConfig } from "../../../../packages/vite-plugin/src/project-config/index.js";
 
 const [root, version, cooldown = "10ms", timeout = "1h"] = process.argv.slice(2);
@@ -49,7 +50,15 @@ export default {
 };
 `);
 const bundle = await buildDevBundle({
-  root, entry, project: defaultProjectConfig(), databases: [],
+  config: {
+    root,
+    configFile: undefined,
+    inlineConfig: { root, logLevel: "silent" },
+    mode: "development",
+    plugins: () => zeroshipPlugins({}, {}),
+  },
+  project: defaultProjectConfig(),
+  databases: [],
 });
 const pending = join(root, "pending.zship");
 await fs.writeFile(pending, bundle.archive);
