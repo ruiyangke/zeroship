@@ -1,4 +1,4 @@
-//! The gateway → auth ("OP") HTTP connection-lifetime contract.
+//! The gateway -> auth ("OP") HTTP connection-lifetime contract.
 //!
 //! The auth service serves the OP endpoints the gateway brokers to
 //! (`POST /oauth2/token`, `POST /oauth2/revoke`). Its ntex server closes an

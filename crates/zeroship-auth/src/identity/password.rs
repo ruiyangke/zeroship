@@ -87,7 +87,7 @@ fn padding_blocking() -> &'static str {
 /// # Errors
 ///
 /// Returns `AuthError::Internal` on argon2 misconfiguration (shouldn't happen
-/// in practice — params are fixed at compile time) or if the blocking worker
+/// in practice - params are fixed at compile time) or if the blocking worker
 /// panics.
 pub async fn hash(password: &str) -> Result<String> {
     let password = password.to_owned();

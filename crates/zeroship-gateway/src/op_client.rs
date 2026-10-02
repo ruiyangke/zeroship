@@ -11,7 +11,7 @@
 //!    bound.** `cyper::Client`'s connector wraps its connect future in
 //!    `send_wrapper::SendWrapper` (cyper-0.8 `connector.rs`), which *panics* if
 //!    the client is used on a thread other than the one that created it. It is
-//!    therefore effectively `!Send` in practice — exactly like the
+//!    therefore effectively `!Send` in practice - exactly like the
 //!    compio-postgres [`compio_postgres::Pool`] in [`crate::db`]. We mirror that
 //!    crate's per-worker-thread `thread_local`: the first OP touch on a worker
 //!    thread builds the client and later touches reuse it, rebuilding it once it
@@ -83,8 +83,8 @@ pub fn default_idle_timeout() -> Duration {
 /// Get this worker thread's reused `cyper::Client`, rebuilding it once it has
 /// been alive for `idle_timeout` (or when a caller asks for a different bound).
 ///
-/// `idle_timeout` is [`default_idle_timeout`] in production — strictly shorter
-/// than the auth server's keep-alive — so a connection this pool hands out is
+/// `idle_timeout` is [`default_idle_timeout`] in production - strictly shorter
+/// than the auth server's keep-alive - so a connection this pool hands out is
 /// never older than the server's window. Bounding the CLIENT's age bounds every
 /// connection in it: a connection is created no earlier than its client, so at
 /// any call that keeps the client every pooled connection is younger than the

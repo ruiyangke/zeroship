@@ -1,4 +1,4 @@
-//! The two lifetime measurements the authn shared database fixture owes: a
+//! The lifetime measurements the authn shared database fixture owes: a
 //! container is gone after the owning process exits, and after that process is
 //! killed while the container is still starting or migrating.
 

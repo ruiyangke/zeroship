@@ -375,7 +375,7 @@ debug = "line-tables-only"
 # a rejected second factor verifies against every unused one. Unoptimized, each
 # evaluation costs many times what the product pays, so an auth case's
 # wall-clock budget goes to the KDF rather than to the flow it measures, and a
-# loaded machine turns that into a case timeout. The two crates that compute it
+# loaded machine turns that into a case timeout. The crates that compute it
 # are built optimized.
 [profile.dev.package.argon2]
 opt-level = 3

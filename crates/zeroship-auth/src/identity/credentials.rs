@@ -10,7 +10,7 @@
 //!
 //! 1. Rate-limit — 3 buckets (email+ip, email, ip), deepest scope first.
 //! 2. User lookup by normalised email.
-//! 3. Padding enumeration defense — when the user is absent / locked /
+//! 3. Padding enumeration defense - when the user is absent / locked /
 //!    disabled / has no `password_hash`, `password::verify_or_pad` verifies
 //!    against padding so the wall time matches a real verify (defeats email
 //!    enumeration by timing), and answers `false` whatever was submitted.

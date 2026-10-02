@@ -6,12 +6,12 @@
 //! `cyper::Client` per worker thread. A pool that is not retired before that
 //! window can hand a request a connection the server has already retired: the
 //! request is written, the server closes without answering, and the client
-//! reads EOF — an `IncompleteMessage` transport error. On a non-idempotent
+//! reads EOF - an `IncompleteMessage` transport error. On a non-idempotent
 //! `POST /oauth2/token` that error also counts against the breaker, and it
 //! cannot be retried away (the request was already on the wire).
 //!
-//! This drives the REAL `OidcRp` refresh path (`refresh_token_public` →
-//! `post_token` → `op_client::call`). The client's reuse bound is derived from
+//! This drives the REAL `OidcRp` refresh path (`refresh_token_public` ->
+//! `post_token` -> `op_client::call`). The client's reuse bound is derived from
 //! the server keep-alive through `op_link::op_client_idle_timeout`, so the
 //! pooled client is rebuilt before it can reuse a retired connection.
 //!
