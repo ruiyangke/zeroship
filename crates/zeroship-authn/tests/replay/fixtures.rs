@@ -1,4 +1,5 @@
 use super::{AuthError, Client, Database, ReplayStore, SystemTime};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use std::sync::Arc;
 use zeroship_core::service_assertion::{
     ClaimFuture, ReplayClaim, ReplayStoreError, ServiceAssertionMinter, ServiceAssertionVerifier,
@@ -16,6 +17,24 @@ pub struct Assertion {
 }
 
 impl Assertion {
+    /// The `<iss>|<jti>` key this assertion's store claim is settled under.
+    ///
+    /// A case reads back exactly its own row by this key rather than every row
+    /// the shared server holds.
+    pub fn replay_key(&self) -> String {
+        let payload = self.token.split('.').nth(1).expect("assertion payload");
+        let decoded = URL_SAFE_NO_PAD
+            .decode(payload)
+            .expect("assertion payload is base64url");
+        let claims: serde_json::Value =
+            serde_json::from_slice(&decoded).expect("assertion payload is JSON");
+        let jti = claims
+            .get("jti")
+            .and_then(serde_json::Value::as_str)
+            .expect("assertion carries a jti");
+        format!("{CALLER}|{jti}")
+    }
+
     pub fn new() -> Self {
         let signing = ServiceSigningKey::generate();
         let token = ServiceAssertionMinter::new(
@@ -63,6 +82,7 @@ impl Assertion {
 /// Gate the claim statements in `PostgreSQL` while the clients verify the same assertion.
 pub async fn race(
     database: &Database,
+    request: &Assertion,
     store: impl Fn(Client) -> Arc<dyn ReplayStore + Send + Sync>,
 ) -> [Result<ServiceIdentity, AuthError>; 2] {
     let first = database.connect_as("zeroship_control").await;
@@ -84,7 +104,6 @@ pub async fn race(
     held.batch_execute("LOCK TABLE service_authn.service_assertion_replay IN SHARE MODE")
         .await
         .unwrap();
-    let request = Assertion::new();
     let first = request.verifier(store(first));
     let second = request.verifier(store(second));
     let (left, right, blocked) =

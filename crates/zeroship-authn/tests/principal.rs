@@ -22,17 +22,24 @@ struct Principal {
 
 impl Principal {
     async fn seed(database: &Database) -> Self {
+        Self::seed_as(database, "zeroship_control").await
+    }
+
+    async fn seed_as(database: &Database, role: &str) -> Self {
         let admin = database.connect().await;
         let id = UserId::mint();
-        admin.execute(
-            "INSERT INTO zeroship.users (id, email, name) VALUES ($1, 'recipient@example.test', 'Principal fixture')",
-            &[&id.as_str()],
-        ).await.unwrap();
+        admin
+            .execute(
+                "INSERT INTO zeroship.users (id, email, name) VALUES ($1, $2, 'Principal fixture')",
+                &[&id.as_str(), &format!("{}@example.test", id.as_str())],
+            )
+            .await
+            .unwrap();
         let provider = AuthProvider::platform(PlatformProvider::new(
             PlatformConfig::new("https://auth.example.test", None).unwrap(),
         ));
         let verifier = BearerVerifier::new(
-            Arc::new(database.connect_as("zeroship_control").await),
+            Arc::new(database.connect_as(role).await),
             Arc::new(provider),
             HashSet::new(),
             "zeroship".to_owned(),
@@ -147,7 +154,26 @@ async fn a_soft_password_lockout_preserves_eligibility_but_a_missing_principal_i
 #[compio::test]
 async fn a_lookup_failure_is_a_server_error_and_the_same_principal_can_retry() {
     Database::run(async |database| {
-        let fixture = Principal::seed(database).await;
+        let admin = database.connect().await;
+        // A role private to this case holds the grant the case revokes, so
+        // revoking it cannot deny the lookups of every other case in the shared
+        // server.
+        let role = format!("authn_lookup_{}", UserId::mint().as_str());
+        admin
+            .batch_execute(&format!(
+                "CREATE ROLE \"{role}\" LOGIN PASSWORD '{role}'"
+            ))
+            .await
+            .unwrap();
+        admin
+            .batch_execute(&format!("GRANT USAGE ON SCHEMA zeroship TO \"{role}\""))
+            .await
+            .unwrap();
+        admin
+            .batch_execute(&format!("GRANT SELECT ON zeroship.users TO \"{role}\""))
+            .await
+            .unwrap();
+        let fixture = Principal::seed_as(database, &role).await;
         fixture
             .verifier
             .require_active_principal(&fixture.id)
@@ -155,7 +181,9 @@ async fn a_lookup_failure_is_a_server_error_and_the_same_principal_can_retry() {
             .unwrap();
         fixture
             .admin
-            .batch_execute("REVOKE SELECT ON zeroship.users FROM zeroship_control")
+            .batch_execute(&format!(
+                "REVOKE SELECT ON zeroship.users FROM \"{role}\""
+            ))
             .await
             .unwrap();
         assert_refusal(
@@ -169,7 +197,7 @@ async fn a_lookup_failure_is_a_server_error_and_the_same_principal_can_retry() {
         );
         fixture
             .admin
-            .batch_execute("GRANT SELECT ON zeroship.users TO zeroship_control")
+            .batch_execute(&format!("GRANT SELECT ON zeroship.users TO \"{role}\""))
             .await
             .unwrap();
         fixture

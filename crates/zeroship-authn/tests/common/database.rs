@@ -1,7 +1,14 @@
-//! Isolated platform databases for authn behavior tests.
+//! One migrated platform database shared by every authn case in this process.
 //!
-//! The seed is generated from the actual migration corpus in this process.
-//! Only its immutable dump bytes are shared; every case owns its server.
+//! The server is started and migrated the first time a case asks for it, and lives
+//! in a `static`, which libtest never drops. It is started through the shared
+//! [`container_reaper`]: a reaper spawned before the container exists removes it
+//! once this process has ended, however the process ends.
+//!
+//! Cases share the server, so every case owns the rows and names it creates -
+//! its ids, rate-limit keys, replay keys and per-case roles - and asserts only on
+//! those. [`Database::run`] opens the case's connections against the shared
+//! server and joins their driver tasks before the case's runtime ends.
 
 #![allow(
     clippy::future_not_send,
@@ -17,35 +24,31 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
-use testcontainers::core::{CmdWaitFor, ExecCommand, IntoContainerPort, WaitFor};
-use testcontainers::{runners::SyncRunner, Container, GenericImage, ImageExt};
+use testcontainers::core::{IntoContainerPort, WaitFor};
+use testcontainers::{Container, GenericImage, ImageExt};
+
+/// Containers this test binary owns, removed when its process ends.
+#[path = "../../../../tests/fixtures/container_reaper.rs"]
+pub mod container_reaper;
+
+use container_reaper::{start_owned, DockerCli, OwnedContainer, Ownership};
 
 type Driver = compio::runtime::JoinHandle<Result<(), compio_postgres::Error>>;
 
 pub struct Database {
-    postgres: Container<GenericImage>,
     url: url::Url,
     drivers: RefCell<Vec<Driver>>,
 }
 
 impl Database {
+    /// Run `test` against the shared migrated database.
+    ///
+    /// Connections the case opened are joined before its runtime ends, including
+    /// when an assertion unwinds, and the case's own panic is re-raised after
+    /// that.
     pub async fn run(test: impl AsyncFnOnce(&Self)) {
-        static SEED: OnceLock<Seed> = OnceLock::new();
-        let seed = SEED.get_or_init(Seed::build);
-        // Restore as the original grantor, so role membership keeps its
-        // authority and PostgreSQL accepts the dump's GRANTED BY clauses.
-        let postgres = image()
-            .with_env_var("POSTGRES_DB", "postgres")
-            .with_copy_to("/docker-entrypoint-initdb.d/roles.sql", seed.roles.clone())
-            .with_copy_to(
-                "/docker-entrypoint-initdb.d/schema.sql",
-                seed.database.clone(),
-            )
-            .start()
-            .expect("authn tests require Docker and PostgreSQL");
         let database = Self {
-            url: database_url(&postgres),
-            postgres,
+            url: shared_url().clone(),
             drivers: RefCell::default(),
         };
         let outcome = AssertUnwindSafe(async {
@@ -59,16 +62,16 @@ impl Database {
         // The case's clients and HTTP services drop before we wait on their
         // exact connection tasks, including when an assertion unwinds.
         let drivers = database.drivers.take();
-        let closed =
-            compio::time::timeout(Duration::from_secs(15), futures::future::join_all(drivers))
-                .await;
-        let removed = database.postgres.rm();
+        let closed = compio::time::timeout(
+            Duration::from_secs(15),
+            futures::future::join_all(drivers),
+        )
+        .await;
         for driver in closed.expect("fixture connections must close before their runtime") {
             driver
                 .expect("fixture driver task")
                 .expect("fixture PostgreSQL connection");
         }
-        removed.expect("remove the fixture's PostgreSQL container");
         if let Err(panic) = outcome {
             std::panic::resume_unwind(panic);
         }
@@ -135,44 +138,34 @@ impl Database {
     }
 }
 
-struct Seed {
-    roles: Vec<u8>,
-    database: Vec<u8>,
+/// The server this binary owns, started the first time anything asks for it.
+fn server() -> &'static OwnedContainer {
+    static SERVER: OnceLock<OwnedContainer> = OnceLock::new();
+    SERVER.get_or_init(|| {
+        start_owned(
+            &DockerCli::system(),
+            &Ownership::mint(),
+            image().with_env_var("POSTGRES_DB", "authn_tests"),
+        )
+        .unwrap_or_else(|error| panic!("authn tests require Docker and PostgreSQL: {error}"))
+    })
 }
 
-impl Seed {
-    fn build() -> Self {
-        eprintln!("authn fixture: preparing the platform database seed");
-        let postgres = image()
-            .with_env_var("POSTGRES_DB", "authn_tests")
-            .start()
-            .expect("prepare the migrated authn database seed");
-        apply_migrations(database_url(&postgres).as_str());
-        eprintln!("authn fixture: platform migrations applied; capturing the seed");
-        let roles = dump(
-            &postgres,
-            &["pg_dumpall", "-U", "postgres", "--globals-only"],
-        );
-        // initdb already created postgres. Preserve its dumped attributes
-        // and every other role; only the redundant creation is omitted.
-        let roles = String::from_utf8(roles)
-            .expect("UTF-8 role dump")
-            .replacen("CREATE ROLE postgres;\n", "", 1)
-            .into_bytes();
-        let database = dump(
-            &postgres,
-            &[
-                "pg_dump",
-                "-U",
-                "postgres",
-                "--create",
-                "--dbname",
-                "authn_tests",
-            ],
-        );
-        postgres.rm().expect("remove migration seed container");
-        Self { roles, database }
-    }
+/// The server's URL once the platform migrations are in. Every case connects
+/// here; none of them owns the server.
+fn shared_url() -> &'static url::Url {
+    static MIGRATED: OnceLock<url::Url> = OnceLock::new();
+    MIGRATED.get_or_init(|| {
+        let url = database_url(server().container());
+        apply_migrations(url.as_str());
+        url
+    })
+}
+
+/// The Docker id of this binary's server, starting it (without migrating it)
+/// if nothing has yet.
+pub fn container_id() -> String {
+    server().container().id().to_owned()
 }
 
 fn image() -> testcontainers::ContainerRequest<GenericImage> {
@@ -199,16 +192,6 @@ fn database_url(postgres: &Container<GenericImage>) -> url::Url {
     ))
     .unwrap();
     url
-}
-
-fn dump(postgres: &Container<GenericImage>, arguments: &[&str]) -> Vec<u8> {
-    let mut result = postgres
-        .exec(
-            ExecCommand::new(arguments.iter().copied())
-                .with_cmd_ready_condition(CmdWaitFor::exit_code(0)),
-        )
-        .expect("dump the migrated platform database");
-    result.stdout_to_vec().expect("read database seed")
 }
 
 fn root() -> PathBuf {
@@ -315,78 +298,4 @@ impl Drop for OwnedChild {
         let _ = self.0.kill();
         let _ = self.0.wait();
     }
-}
-
-#[compio::test]
-async fn a_failed_case_releases_its_server_and_cannot_change_the_next_database() {
-    let failed_id = RefCell::new(String::new());
-    let failed = AssertUnwindSafe(Database::run(async |database| {
-        *failed_id.borrow_mut() = database.postgres.id().to_owned();
-        assert!(container_ids().contains(&*failed_id.borrow()));
-        let client = database.connect().await;
-        client
-            .batch_execute("CREATE TABLE fixture_isolation (id integer)")
-            .await
-            .unwrap();
-        panic!("intentional fixture failure");
-    }))
-    .catch_unwind()
-    .await
-    .expect_err("case must propagate its assertion failure");
-    assert_eq!(
-        failed.downcast_ref::<&str>(),
-        Some(&"intentional fixture failure")
-    );
-    assert!(
-        !container_ids().contains(&*failed_id.borrow()),
-        "failed case leaked its PostgreSQL server"
-    );
-
-    let successful_id = RefCell::new(String::new());
-    Database::run(async |database| {
-        *successful_id.borrow_mut() = database.postgres.id().to_owned();
-        let client = database.connect().await;
-        let absent: bool = client
-            .query_one("SELECT to_regclass('fixture_isolation') IS NULL", &[])
-            .await
-            .unwrap()
-            .get(0);
-        assert!(absent, "a failed case changed the immutable seed");
-        let control = database.connect_as("zeroship_control").await;
-        let role: String = control
-            .query_one("SELECT current_user::text", &[])
-            .await
-            .unwrap()
-            .get(0);
-        assert_eq!(role, "zeroship_control");
-        control
-            .query(
-                "SELECT replay_key FROM service_authn.service_assertion_replay",
-                &[],
-            )
-            .await
-            .expect("restored role can read the migrated replay schema");
-    })
-    .await;
-    assert!(
-        !container_ids().contains(&*successful_id.borrow()),
-        "successful case leaked its PostgreSQL server"
-    );
-}
-
-fn container_ids() -> Vec<String> {
-    let output = Command::new("docker")
-        .args(["ps", "--all", "--quiet", "--no-trunc"])
-        .output()
-        .expect("query fixture container lifecycle");
-    assert!(
-        output.status.success(),
-        "Docker container listing failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout)
-        .unwrap()
-        .lines()
-        .map(str::to_owned)
-        .collect()
 }

@@ -6,3 +6,5 @@ mod common;
 mod principal;
 mod rate_limit;
 mod replay;
+mod shared_database;
+mod test_database_lifetime;
