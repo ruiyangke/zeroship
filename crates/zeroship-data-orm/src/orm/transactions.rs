@@ -35,7 +35,8 @@ impl Database {
     /// holds settlement until the transaction's execution deadline ends it.
     /// That fails with `transaction_deadline_expired` on SQLite; on PostgreSQL
     /// the parked statement is still on the wire, the session is withdrawn,
-    /// and the failure is `commit_failed_indeterminate`.
+    /// and the settle - a rollback, because the callback left work unfinished -
+    /// fails with `rollback_failed_indeterminate`.
     ///
     /// The callback chooses its own error type, so a domain refusal that must
     /// roll back is returned as itself: `Err(refusal)` rolls back and hands the

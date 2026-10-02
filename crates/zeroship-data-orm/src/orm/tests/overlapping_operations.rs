@@ -600,8 +600,10 @@ async fn a_parked_operation_holds_settlement_until_the_execution_deadline(postgr
         // SQLite rolls back once the held statement is let through. On
         // PostgreSQL the parked statement is still on the wire, so the session
         // is withdrawn instead and the outcome is reported as indeterminate.
+        // The settle is a ROLLBACK (the callback left work unfinished), so the
+        // unknown is a failed rollback, not a commit that may have happened.
         let expected = if postgres {
-            "commit_failed_indeterminate"
+            "rollback_failed_indeterminate"
         } else {
             "transaction_deadline_expired"
         };

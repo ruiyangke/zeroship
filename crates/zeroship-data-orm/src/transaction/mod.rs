@@ -303,10 +303,14 @@ impl AtomicWriteFrame {
         match (body, outcome) {
             (Ok(value), SettleOutcome::Ok) => Ok(value),
             (Err(error), SettleOutcome::Ok) => Err(error),
-            (_, SettleOutcome::CommitIndeterminate(error)) => {
-                Err(E::from(commit_failed_indeterminate(error)))
-            }
-            (_, SettleOutcome::SettleErr(error)) => Err(E::from(error)),
+            // The error already carries the code for the intent that was sent:
+            // `driver::outcome_error` maps a commit and a rollback to different
+            // codes, so re-wrapping it here would report a rolled-back settle
+            // under `commit_failed_indeterminate`.
+            (
+                _,
+                SettleOutcome::Indeterminate(error) | SettleOutcome::SettleErr(error),
+            ) => Err(E::from(error)),
         }
     }
 }
@@ -455,9 +459,12 @@ pub(crate) async fn run_on_tx_conn(route: &DbRoute, sql: &str) -> Result<(), DbE
 pub enum SettleOutcome {
     /// Settle SQL succeeded.
     Ok,
-    /// COMMIT failed after the body resolved — the tx state is
-    /// indeterminate; reject with `commit_failed_indeterminate`.
-    CommitIndeterminate(DbError),
+    /// A root terminal statement ended with an indeterminate outcome. The
+    /// error the driver's mapping produced already names the intent that was
+    /// sent: `commit_failed_indeterminate` for a commit,
+    /// `rollback_failed_indeterminate` for a rollback; see
+    /// [`driver::outcome_error`].
+    Indeterminate(DbError),
     /// A rollback / release / rollback-to failed. The frame state is no
     /// longer trustworthy, so this error governs how the outer settles.
     SettleErr(DbError),
@@ -574,12 +581,12 @@ async fn settle_frame(
                 return SettleOutcome::SettleErr(error);
             };
             // The driver's mapping already carries the right code for each
-            // outcome, so nothing here re-wraps it: a known outcome must
-            // never be reported as `commit_failed_indeterminate`.
+            // outcome and intent, so nothing here re-wraps it: a ROLLBACK whose
+            // outcome is unknown must never be reported as a failed commit.
             match driver::outcome_error(outcome, intent, driven.error) {
                 None => SettleOutcome::Ok,
                 Some(error) if matches!(outcome, reducer::TerminalOutcome::Indeterminate(_)) => {
-                    SettleOutcome::CommitIndeterminate(error)
+                    SettleOutcome::Indeterminate(error)
                 }
                 Some(error) => SettleOutcome::SettleErr(error),
             }
@@ -801,7 +808,10 @@ mod tests {
     ///
     /// A commit the server rolled back is NOT indeterminate: its outcome is
     /// known and its writes are gone. Collapsing the two hides a definite
-    /// failure behind a retryable-looking one.
+    /// failure behind a retryable-looking one. The indeterminate code also
+    /// follows the intent that was sent: a rollback whose fate is unknown must
+    /// not arrive under `commit_failed_indeterminate`, or a caller reconciles a
+    /// commit that was never issued.
     #[test]
     fn outcome_errors_do_not_collapse_rolled_back_into_indeterminate() {
         use reducer::{CleanupCause, SettleIntent, TerminalOutcome};
@@ -826,8 +836,23 @@ mod tests {
             None,
         )
         .expect("an unproved terminal is a failure");
+        let rollback_indeterminate = driver::outcome_error(
+            TerminalOutcome::Indeterminate(CleanupCause::BackendHealthUnknown),
+            SettleIntent::Rollback,
+            None,
+        )
+        .expect("an unproved rollback is a failure");
         assert_eq!(code_of(&rolled_back), "commit_rolled_back");
         assert_eq!(code_of(&indeterminate), "commit_failed_indeterminate");
+        assert_eq!(
+            code_of(&rollback_indeterminate),
+            "rollback_failed_indeterminate"
+        );
+        assert_ne!(
+            code_of(&rollback_indeterminate),
+            code_of(&indeterminate),
+            "an unknown ROLLBACK must not be reported under the commit code"
+        );
         assert_ne!(
             code_of(&rolled_back),
             code_of(&indeterminate),

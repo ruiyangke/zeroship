@@ -751,7 +751,7 @@ pub(crate) fn build_settle_resolve_value(
         // `commit_failed_indeterminate` labelled a definitively rolled-back
         // commit as an unknown one - the opposite of what the state machine
         // established.
-        SettleOutcome::CommitIndeterminate(e) | SettleOutcome::SettleErr(e) => {
+        SettleOutcome::Indeterminate(e) | SettleOutcome::SettleErr(e) => {
             ResolveValue::RejectError(e.to_op_error())
         }
     }
@@ -861,7 +861,7 @@ mod tests {
         use zeroship_runtime::state::ResolveValue;
 
         for outcome in [
-            SettleOutcome::CommitIndeterminate(DbError::Coded {
+            SettleOutcome::Indeterminate(DbError::Coded {
                 code: "commit_failed_indeterminate".to_string(),
                 message: "network drop".to_string(),
                 hint: None,
@@ -873,7 +873,7 @@ mod tests {
             }),
         ] {
             let expected = match &outcome {
-                SettleOutcome::CommitIndeterminate(_) => "commit_failed_indeterminate",
+                SettleOutcome::Indeterminate(_) => "commit_failed_indeterminate",
                 SettleOutcome::SettleErr(_) => "commit_rolled_back",
                 SettleOutcome::Ok => unreachable!(),
             };

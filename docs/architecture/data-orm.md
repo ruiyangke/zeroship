@@ -728,10 +728,10 @@ are generic over it with `E: From<DbError>`, so a host refusal that must roll
 back travels out of the transaction as itself rather than through a side
 channel: `Err(refusal)` rolls back and returns the refusal, `Ok(Err(refusal))`
 commits the work that preceded it. Settlement failures reach the caller through
-the same conversion, and a commit whose outcome the protocol could not
-establish still arrives as `commit_failed_indeterminate`. Nothing else fixes
-`E`, so a callback that only ever fails with `DbError` says so at one of its
-`Ok` arms.
+the same conversion. An outcome the protocol could not establish arrives under
+the code for the intent that was sent: a commit as `commit_failed_indeterminate`,
+a rollback as `rollback_failed_indeterminate`. Nothing else fixes `E`, so a
+callback that only ever fails with `DbError` says so at one of its `Ok` arms.
 
 ```rust,ignore
 enum Refusal { Rejected, Database(DbError) }

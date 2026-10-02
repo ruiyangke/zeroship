@@ -1247,13 +1247,23 @@ pub fn outcome_error(
                  writes were discarded{detail_text}"
             ),
         )),
-        (_, TerminalOutcome::Indeterminate(cause)) => Some(coded(
-            "commit_failed_indeterminate",
-            format!(
-                "transaction state indeterminate ({}){detail_text}",
-                cause.code()
-            ),
-        )),
+        // An indeterminate outcome is not evidence of a commit: the terminal
+        // statement may never have been sent. The intent decides which unknown
+        // the creator is told about, so a root ROLLBACK whose fate is unknown
+        // does not read as a failed commit for a caller to reconcile.
+        (_, TerminalOutcome::Indeterminate(cause)) => {
+            let indeterminate = coded(
+                cause.code(),
+                format!(
+                    "transaction state indeterminate ({}){detail_text}",
+                    cause.code()
+                ),
+            );
+            Some(match intent {
+                SettleIntent::Rollback => super::rollback_failed_indeterminate(indeterminate),
+                SettleIntent::Commit => super::commit_failed_indeterminate(indeterminate),
+            })
+        }
         (_, TerminalOutcome::Cancelled(cause)) => Some(coded(
             cause.code(),
             format!("db.transaction: {}{detail_text}", cause.code()),
