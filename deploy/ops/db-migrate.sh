@@ -9,12 +9,9 @@
 # for running that one-shot by hand against a running dev DB; the compose
 # `migrate` service runs the same command inside the image.
 #
-# IT REPLACED A RUST BINARY, and the difference is worth knowing. Until
-# 2026-08-28 this ran `zeroship-platform-migrate`, which authored the same files
-# in zeroship-runtime's own V8. That binary is deleted. What you gain is the rest
-# of the CLI's verbs against the same journal - `status`, `plan`, `history`,
-# `baseline`, `rollback` - which the one-shot never exposed. What you need that
-# you did not before is NODE and a built CLI:
+# IT RUNS THE CLI, whose other verbs against the same journal - `status`,
+# `plan`, `history`, `baseline`, `rollback` - are available here too. It needs
+# NODE and a built CLI:
 #
 #   pnpm install && pnpm build
 #
@@ -38,13 +35,12 @@
 #   ZEROSHIP_MIGRATE_VERB    (default apply; any zero-migrate verb, e.g. status)
 #   ZEROSHIP_MIGRATE_CLI     (a prebuilt cli-bin.js; default the in-tree build)
 #
-# ZEROSHIP_PROJECT_SCHEMA AND ZEROSHIP_PROJECT_ID ARE GONE, and they were never
-# knobs. The corpus spells its own schema - 562 `schema: "zeroship"` and one
-# `schema: "public"` - so a different project schema produces a charter that
-# refuses every file in it. The project id was the retired runner's advisory-lock
-# key; the CLI derives that key from the schema alone
-# (`owner_app_project` in crates/zeroship-migrate-node/src/verbs.rs), so there is
-# nothing left for a second name to select.
+# ZEROSHIP_PROJECT_SCHEMA AND ZEROSHIP_PROJECT_ID ARE NOT KNOBS. The corpus
+# spells its own schema, so a different project schema produces a charter that
+# refuses every file in it. The CLI derives the advisory-lock key from the
+# schema alone (`owner_app_project` in
+# crates/zeroship-migrate-node/src/verbs.rs), so there is nothing for a second
+# name to select.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

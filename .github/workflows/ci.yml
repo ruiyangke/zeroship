@@ -147,11 +147,10 @@ jobs:
             -c 'CREATE EXTENSION IF NOT EXISTS postgis'
       # The provisioner stands the servers up and writes the overlay; it does
       # not apply the platform corpus, and says so in its own "what it does not
-      # provision" header. That was survivable while a target without a migrated
-      # database announced a skip. It is not survivable now: those targets
-      # REFUSE, so an unmigrated server takes this job red rather than green
-      # over tests that never ran. The corpus is a prerequisite of the suite,
-      # so it is provisioned like one.
+      # provision" header. A target without a migrated database REFUSES, so an
+      # unmigrated server takes this job red rather than green over tests that
+      # never ran. The corpus is a prerequisite of the suite, so it is
+      # provisioned like one.
       #
       # The DSN is the provisioner's own default (`PG_DSN` there, from PG_HOST /
       # PG_PORT / PG_USER / PG_PASS / PG_DB). If those defaults move, this moves
@@ -168,18 +167,11 @@ jobs:
       # unchanged either way - the job still fails if anything fails - but
       # without this the run only tells you about the first thing that broke.
       #
-      # THE `| tee` THAT STOOD ON THIS LINE AND FIVE OTHERS IS GONE. It wrote a
-      # combined log for the skip census at the end of this job to read; the
-      # census was deleted and nothing else ever read the file, so what was left
-      # was a pipeline whose only remaining effect was to put a second command
-      # between cargo and its exit status.
-      #
-      # `set -o pipefail` stays on every one of those steps, because the reason
-      # it was added outlives the pipe: GitHub's default shell is `bash -e`
-      # WITHOUT pipefail, so the moment anyone pipes cargo into anything the
-      # status reported is the LAST command's - 0 whenever it could write - and
-      # every failing test in the workspace sails through as a pass. The billing
-      # gate hit that trap and solved it with PIPESTATUS.
+      # `set -o pipefail` stays on every such step, because GitHub's default
+      # shell is `bash -e` WITHOUT pipefail: the moment anyone pipes cargo into
+      # anything the status reported is the LAST command's - 0 whenever it could
+      # write - and every failing test in the workspace sails through as a pass.
+      # The billing gate hit that trap and solved it with PIPESTATUS.
       - run: |
           set -o pipefail
           cargo test --workspace --no-fail-fast
@@ -197,16 +189,13 @@ jobs:
       # than skipping, which is louder and correct - each gate then names itself
       # instead of hiding behind whichever step failed first.
       # The step above resolves citations that name a FILE. This one resolves
-      # citations that name an ITEM, which nothing checked until now: no job ran
-      # `cargo doc`, so a rustdoc link pointing at a deleted or renamed symbol
-      # was invisible. Two survived that way until 2026-08-07 - `refund.rs`
-      # citing a provider module deleted in f975eae8b, and `billing_read.rs`
-      # promising a `RegistryError::Pricing` variant that never existed.
+      # citations that name an ITEM: no job runs `cargo doc`, so a rustdoc link
+      # pointing at a deleted or renamed symbol is otherwise invisible.
       #
       # Runs through a script rather than inline because the measurement has
-      # three failure modes that each produce a confident wrong number (warm
-      # cache, `-D` truncating the count, and a build that did not run reporting
-      # zero warnings). The script's header documents all three and asserts the
+      # failure modes that each produce a confident wrong number (warm cache,
+      # `-D` truncating the count, and a build that did not run reporting zero
+      # warnings). The script's header documents each and asserts the
       # documented-crate count as the control; see it before touching the floors.
       - name: Rustdoc links resolve with default features
         if: ${{ !cancelled() }}
@@ -232,15 +221,10 @@ jobs:
       - name: Playwright matches the development shell's browsers
         if: ${{ !cancelled() }}
         run: cargo xtask test playwright-browsers
-      # deploy/compose/docker-compose.yml HAS NO AUTOMATED CHECK as of
-      # 2026-08-21. Four steps stood here - named volumes on stateful services,
-      # 0.0.0.0 published only by the edge, secret strength, and a worker flag
-      # that no longer exists - and were deleted with the
-      # crates/zeroship-gatekit gates behind them, as a complexity-budget
-      # decision about that crate rather than a finding that the checks were
-      # wrong. The properties they held are unguarded; each had caught a real
-      # defect (PGDATA in the container's writable layer; a 10-byte shared secret
-      # against a 32-byte minimum).
+      # deploy/compose/docker-compose.yml HAS NO AUTOMATED CHECK. The
+      # properties a check would hold - named volumes on stateful services,
+      # 0.0.0.0 published only by the edge, secret strength, and worker flags -
+      # are unguarded.
       #
       # THE ONE STEP IN THIS JOB THAT USES DOCKER, and it has to.
       # crates/control/src/reserved_names.rs decides which app names creators
@@ -263,27 +247,26 @@ jobs:
           set -o pipefail
           cargo test -p zeroship-data-v8 --lib tests::sqlite::
           cargo test -p zeroship-data-orm
-      # compio-postgres' `tls` feature has never been compiled by any workflow,
-      # let alone run: `tls` appeared ZERO times in .github/ until this step.
-      # The default feature set is empty, so `cargo test --workspace` above
-      # builds none of it - the rustls connector, the six-mode verification
-      # policy and its unit tests are otherwise only type-checked by the
-      # all-features rustdoc invocation above.
+      # compio-postgres' `tls` feature is absent from the default feature set,
+      # so `cargo test --workspace` above builds none of it - the rustls
+      # connector, the certificate-verification policy and its unit tests are
+      # otherwise only type-checked by the all-features rustdoc invocation
+      # above.
       #
       # This is the step that runs the certificate-verifier proofs. They need no
       # server: they drive the real verifiers, through the real mode-to-verifier
       # selection, against certificates committed under tests/data/. That is
-      # deliberate - the live suite below needs Docker and four containers,
-      # and the one thing that must never regress unnoticed is which verifier
+      # deliberate - the live suite below needs Docker and its containers, and
+      # the one thing that must never regress unnoticed is which verifier
       # `verify-full` gets.
       - run: |
           set -o pipefail
           cargo test -p compio-postgres --features tls
-      # The live half: the four servers `tls_live_setup.sh` stands up, and the
-      # 22 checks that read `pg_stat_ssl` to find out what transport the SERVER
-      # thinks it is serving. `--features live-tls-tests` is what builds the
-      # target at all; without it cargo skips it silently, which is why it is
-      # named here rather than left to the feature unification above.
+      # The live half: the servers `tls_live_setup.sh` stands up, and the checks
+      # that read `pg_stat_ssl` to find out what transport the SERVER thinks it
+      # is serving. `--features live-tls-tests` is what builds the target at
+      # all; without it cargo skips it silently, which is why it is named here
+      # rather than left to the feature unification above.
       #
       # `sudo` is used by the setup script to chmod the server keys to
       # root:<postgres gid> 0640, which PostgreSQL insists on. GitHub runners

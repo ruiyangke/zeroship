@@ -91,16 +91,17 @@
 //   a server answered, no corpus    -> apply the corpus to THAT database
 //   a server answered, corpus there -> proceed
 //
-// The ledger question used to collapse the first two. It was ONE statement
-// guarding the count with `to_regclass`, and `PostgreSQL` resolves every
-// relation a statement names at PARSE time, before any `CASE` in it is
-// evaluated -- so on a database with no journal table the statement ERRORED
-// rather than returning zero, the error surfaced as "the server did not
-// answer", and the remedy printed was `tests/provision_test_backends.sh`:
-// restart a server that was already running, for a database that only needed
-// `deploy/ops/db-migrate.sh`. The guard now takes the table name as a VALUE in
-// its own round trip ([`count_journal`]), which is the only form that survives
-// the table's absence.
+// The ledger question keeps the first two apart, and that is why it is two
+// round trips. `PostgreSQL` resolves every relation a statement names at PARSE
+// time, before any `CASE` in it is evaluated, so a single statement guarding
+// the count with `to_regclass` ERRORS on a database with no journal table
+// rather than returning zero; that error surfaces as "the server did not
+// answer", and the remedy printed is `tests/provision_test_backends.sh`:
+// restart a server that is already running, for a database that only needs
+// `deploy/ops/db-migrate.sh`. The guard takes the table name as a VALUE in its
+// own round trip ([`count_journal`]), which is the only form that survives the
+// table's absence, and the count is issued only once the table is known to be
+// there.
 
 use std::io::Write as _;
 
@@ -606,9 +607,6 @@ const RUNTIME_REMEDY: &str = "\
 /// CLI's own `--database-url <value>` flag would put a superuser DSN in this
 /// process list. Printing the wrapper is therefore the safe instruction as well
 /// as the short one.
-///
-/// It replaced a `cargo run -p zeroship-migrate-adapter --features platform-cli
-/// --bin zeroship-platform-migrate` line on 2026-08-28. That binary is deleted.
 const UNMIGRATED_REMEDY: &str = "\
     Apply the platform schema to THAT database:\n\
     \x20     ZEROSHIP_MIGRATE_DSN='<dsn>' deploy/ops/db-migrate.sh\n\

@@ -4,12 +4,13 @@
 //! tempting to treat that as a redundant copy of the chunk's own xid and check
 //! the two agree. They do not have to agree: a change made after a SAVEPOINT
 //! carries the SUBTRANSACTION's xid, and the enclosing StreamStart carries the
-//! top-level one. Measured on 16.14, one streamed transaction with a savepoint
-//! in the middle:
+//! top-level one. A streamed transaction with a savepoint in the middle has
+//! this shape:
 //!
 //! ```text
-//! S (StreamStart)   21 messages, 1 distinct xid: 000ab400
-//! I (Insert)      4000 messages, 2 distinct xids: 000ab400, 000ab401
+//! S (StreamStart)   one distinct xid: the top-level transaction's
+//! I (Insert)        two distinct xids: the top-level one and the
+//!                   subtransaction's
 //! ```
 //!
 //! So the repeated xid is INFORMATION, not a checksum. A decoder that compares

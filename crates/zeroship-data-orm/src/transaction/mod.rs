@@ -1062,7 +1062,7 @@ mod tests {
                 )),
                 "the actor rolls back and retires the reservation before it \
                  acknowledges, so the cleanup goal is PROVED - answering \
-                 Indeterminate here is what used to abandon a live session"
+                 Indeterminate here would abandon a live session"
             );
             assert!(
                 !crate::tx_lanes::with(|l| l.tx_session_withdrawn(&crate::tests::fixtures::harness_route("app_sqlite"))),
@@ -1084,8 +1084,8 @@ mod tests {
         });
     }
 
-    /// **SC-2 Decision 1, stated as an assertion**: `op_conn` and `tx_conn` are
-    /// different connections, so autocommit work is not inside the app's own
+    /// **The connection split, stated as an assertion**: `op_conn` and `tx_conn`
+    /// are different connections, so autocommit work is not inside the app's own
     /// explicit transaction.
     ///
     /// This is bound through a READ, because a write cannot express it:
