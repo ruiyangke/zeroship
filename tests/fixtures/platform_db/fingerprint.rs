@@ -40,11 +40,12 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// The set hashed is exactly `discover_ts_files`'s
-/// (`crates/zeroship-migrate-adapter/src/platform.rs`, DELETED 2026-08-28 in
-/// `58db329f4` with the rest of the platform-migrate binary; neither the file
-/// nor that function is in the tree today): `*.ts` in this directory, ordered
-/// by filename.
+/// The set hashed is `*.ts` in this directory, ordered by filename. The
+/// platform runner (`discover` in `packages/zero-migrate-cli/src/cli.ts`)
+/// selects by a different rule - it also admits `.mts`, `.cts`, `.js`, `.mjs`
+/// and `.cjs`, and skips `.d.ts` - and this directory holds only `.ts`
+/// migrations, so the two sets agree; a migration added under another
+/// extension would apply without moving this hash.
 pub const MIGRATIONS_DIR: &str = "db/migrations-ts";
 
 /// The migration files a working tree would apply, by basename.

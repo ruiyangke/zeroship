@@ -3,37 +3,32 @@
 # do not survive transaction pooling, so these failures are the contract,
 # not a regression.
 #
-# commit:   5191d56bd
 # features: tls,live-tls-tests,live-unix-socket   target: --test suite
-# observed: two full runs at THIS commit, 69 failures and 65 failures.
 #
 # Two flapper entries, and both are UNLISTED so a run with or without them
 # still matches this file:
 #
 #   read_timeout::copy_input_time_is_not_charged_as_server_read_silence
-#       2 of 3 runs at d77af0819, 0 of 1 at 444dae431.
+#       Fails on some runs and passes on others at the same commit.
 #
 #   differential_tokio::a_copy_without_a_producer_costs_tokio_the_connection_and_not_this_one
 #   differential_tokio::both_drivers_agree_on_binary_copy_roundtrip
 #   differential_tokio::both_drivers_agree_on_copy_in_results
 #   differential_tokio::both_drivers_agree_on_copy_out_bytes
-#       These four move AS A GROUP - all four fail or all four pass - and
-#       did exactly that across two runs at 672600859 (absent, then present).
-#       They looked like four tests fixed by the intervening 38 commits; only
-#       11 production lines changed in those, none touching COPY, and a second
-#       run at the same commit brought all four back. Each also passes on its
-#       own every time (3 of 3), which proves nothing: running alone is the
-#       case pgbouncer handles, so isolation cannot rank a pooling flapper.
+#       These four move AS A GROUP - all four fail or all four pass - across
+#       runs at the same commit. A run where all four pass is not a fix: a
+#       rerun brings them back. Each also passes on its own every time, which
+#       proves nothing: running alone is the case pgbouncer handles, so
+#       isolation cannot rank a pooling flapper.
 #
-# Growth rule, still holding: every name this list has gained was a test
-# ADDED since the previous baseline meeting the pooler for the first time,
-# never an existing test starting to fail. The newest entry,
-# transaction_forwarding::a_transactions_cancel_token_cancels_that_transactions_query,
-# is the tenth cancellation test here and fails the same way as the nine
-# cancel_request ones: a CancelRequest names a backend PID and secret, and a
-# transaction pooler does not route it to the backend that holds the query.
-# It panics on its own 20s deadline, and passes against the direct server at
-# the same commit.
+# Growth rule: a name joins this list as a newly added test meeting the
+# pooler for the first time, never as an existing test starting to fail; an
+# existing test appearing here is a finding, not residue.
+# transaction_forwarding::a_transactions_cancel_token_cancels_that_transactions_query
+# fails the same way as the cancel_request entries: a CancelRequest names a
+# backend PID and secret, and a transaction pooler does not route it to the
+# backend that holds the query. It panics on its own deadline, and passes
+# against the direct server.
 backend_termination::a_checked_out_idle_pool_backend_is_discarded_after_termination
 backend_termination::a_checked_out_pool_backend_killed_mid_query_is_discarded
 backend_termination::all_idle_pool_backends_are_replaced_after_mass_termination

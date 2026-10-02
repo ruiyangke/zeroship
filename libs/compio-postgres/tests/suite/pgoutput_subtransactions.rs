@@ -18,8 +18,8 @@
 //! EXCEPTION handler opens an implicit subtransaction, so it reaches code that
 //! never types the word SAVEPOINT.
 //!
-//! This file exists because that check shipped. `4911bdba8` added
-//! `DecodeError::StreamXidMismatch` and errored on it.
+//! This file pins that the decoder accepts the mismatch, so a check that
+//! compares the two xids fails here against a live server.
 
 use compio_postgres::Client;
 use compio_postgres::replication::pgoutput::{self, PgOutputMessage};
@@ -115,9 +115,9 @@ async fn a_streamed_transaction_with_a_savepoint_decodes() {
         loop {
             match stream.next().await.expect("replication stream failed") {
                 Some(ReplicationMessage::XLogData { body, .. }) => {
-                    // The assertion is here, not below: before the fix this
-                    // decode FAILED with StreamXidMismatch on the first
-                    // message that followed the savepoint.
+                    // The assertion is here, not below: a decoder that
+                    // compares the two xids fails this decode on the first
+                    // message that follows the savepoint.
                     let message = decoder.decode(&body).unwrap_or_else(|error| {
                         panic!(
                             "a streamed transaction with a savepoint must decode; \

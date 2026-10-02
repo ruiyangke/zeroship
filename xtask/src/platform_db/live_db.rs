@@ -7,15 +7,11 @@ mod tests {
     /// The refusal has to carry the three things a reader needs: WHICH
     /// database, WHAT was missing, and WHAT TO DO. Asserting on all three is
     /// the point -- a refusal that says only "not migrated" sends the reader
-    /// back to guessing which of the eleven databases on :5440 it meant.
+    /// back to guessing which of the databases on :5440 it meant.
     ///
-    /// THE APPLIER ASSERTION USED TO NAME A DELETED BINARY. It asked for
-    /// `zeroship-platform-migrate`, which `58db329f4` removed on 2026-08-28 in
-    /// the same change that rewrote `UNMIGRATED_REMEDY` to name
-    /// `deploy/ops/db-migrate.sh`. The constant's own doc comment recorded the
-    /// swap; the test did not, and stayed red from that day. It now asks for
-    /// the wrapper the remedy actually prints, which is the string a reader
-    /// would paste.
+    /// The applier assertion asks for `deploy/ops/db-migrate.sh`, the wrapper
+    /// `UNMIGRATED_REMEDY` prints, because that is the string a reader would
+    /// paste.
     #[test]
     fn a_refusal_names_the_database_the_gap_and_the_remedy() {
         let where_ = Coordinates::of("postgres://postgres:hunter2@127.0.0.1:5440/zeroship");

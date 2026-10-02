@@ -85,28 +85,22 @@ jobs:
       # addon exports its registrar.
       - name: napi addon symbol shape
         run: cargo test --locked -p zeroship-migrate-node --test shipped_symbol_shape
-      # WPT BEFORE `cargo test`, for exactly the reason the SDK dist files are
-      # built before any cargo command above, and discovered the same way.
+      # WPT BEFORE `cargo test`, for the reason the JavaScript packages are
+      # built before any cargo command above: a test target `include_str!`s a
+      # gitignored tree that a fresh checkout does not have.
       #
-      # crates/runtime declares a `wpt` test target whose 23 modules
-      # `include_str!` crates/runtime/tests/wpt/. That directory is fetched on
-      # demand by setup-wpt.sh, is in .gitignore, and `git ls-files` reports it
-      # in no ref - so a fresh checkout does not have it, and nothing here made
-      # one. rust-cache restores ~/.cargo and target/, not source trees.
+      # crates/zeroship-runtime declares a `wpt` test target whose modules
+      # `include_str!` crates/zeroship-runtime/tests/wpt/. That directory is
+      # fetched on demand by setup-wpt.sh and is in .gitignore, so no ref
+      # carries it. rust-cache restores ~/.cargo and target/, not source trees.
       #
-      # MEASURED 2026-08-20 on cc51e8337: with the directory absent,
-      # `cargo test --workspace --no-run` fails with 207 `couldn't read
-      # crates/runtime/tests/wpt/...` errors and builds no test binary at all
-      # for the crate; with it present the same command exits 0 and builds 122.
+      # With the directory absent, `cargo test --workspace --no-run` fails on
+      # `couldn't read crates/zeroship-runtime/tests/wpt/...` and builds no test
+      # binary for the crate, so no cargo test step in this job can run.
       # `cargo check --workspace` above does NOT catch this, because without
       # --all-targets it never looks at a test target.
       #
-      # So every cargo test step in this job could
-      # not run. This is not new - the wpt_*.rs files date to 2026-05-01 and
-      # were 23 separate auto-discovered targets before 85a21c6b4 consolidated
-      # them, each equally uncompilable.
-      #
-      # Cached on the pin, so the ~1.1 GB working tree is fetched when the pin
+      # Cached on the pin, so the WPT working tree is fetched when the pin
       # moves and not once per run. setup-wpt.sh is idempotent: given an
       # existing clone it fetches the pin and resets, which is what makes a
       # restored cache safe rather than merely fast.

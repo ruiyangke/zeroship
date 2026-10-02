@@ -1,8 +1,8 @@
-// The explicit-database-creation step (3bbba5708) added another await to `main`'s
-// already-large async block, and rustc's layout query for it now exceeds the
-// default 128 depth: "query depth increased by 130 when computing layout of
-// {async block ...dev_provision.rs:92}". RELEASE ONLY - `cargo check` in debug
-// compiles this file fine, so only a release build of this binary shows it.
+// rustc's layout query for the async state machine `main` drives, the `run`
+// future included, exceeds the default recursion limit of 128: "query depth
+// increased by ... when computing layout of {async block ...}". RELEASE ONLY -
+// `cargo check` in debug compiles this file fine, so only a release build of
+// this binary shows it.
 #![recursion_limit = "256"]
 
 //! DEV/LOCAL/CI ONLY internal app provisioning tool.

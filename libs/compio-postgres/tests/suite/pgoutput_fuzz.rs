@@ -522,9 +522,9 @@ struct SequenceReach {
 ///
 /// One assertion here is about BEHAVIOUR rather than robustness, and it is the
 /// reason this file bothers with sequences: an in-chunk xid that DIFFERS from
-/// the chunk's must be accepted. Commit 4911bdba8 added a check that the two
-/// must agree and shipped it; a transaction with a SAVEPOINT carries its
-/// subtransaction's xid and was rejected. `libs/compio-postgres/tests/suite/pgoutput_subtransactions.rs`
+/// the chunk's must be accepted. A change made after a SAVEPOINT carries its
+/// subtransaction's xid, so a decoder that requires the two to agree rejects
+/// an ordinary transaction. `libs/compio-postgres/tests/suite/pgoutput_subtransactions.rs`
 /// pins that against a live server. This pins it against a corpus.
 ///
 /// WHAT THIS DOES NOT CATCH: transaction lifecycle policy beyond the currently

@@ -3,28 +3,12 @@
 # the single root lockfile. `cargo build -p zeroship-migrate-node` (or `napi build`)
 # compiles it, and so does a plain workspace-wide `cargo build` / `cargo test`.
 #
-# THIS COMMENT CLAIMED A PROTECTION THAT NEVER EXISTED, from `5706b07fd` until
-# 2026-09-04. It said: "The root keeps it OUT of the default build/test flow via
-# `default-members`, so a plain `cargo build`/`cargo test` never pulls the napi
-# toolchain path." Every clause of that is false, and checking took one command:
-# `grep -n default-members Cargo.toml` at the repo root exits 1. The root declares
-# `members = ["crates/*", "libs/*"]` with `resolver = "3"` and an `exclude` list of
-# three unrelated paths; `cargo metadata` puts this package in BOTH
-# `workspace_members` and `workspace_default_members`, 44 of 44 either way.
-#
-# The claim was not merely inaccurate, it was load-bearing in the wrong direction: it
-# described the reason a workspace-wide `cargo test` was safe, while that command was
-# in fact selecting a package that could not link. Two other documents repeated it
-# (`docs/proposals/2026-07-11-migrate-napi-shell-design.md`,
-# `docs/proposals/2026-07-12-zero-migrate-redesign-plan.md`) and two open-question
-# lists had already flagged the mismatch without anyone acting on it. A comment
-# asserting an isolation mechanism is worth less than nothing when the mechanism is
-# absent, because it stops the next reader looking.
-#
-# It is recorded rather than quietly deleted so the belief is closed instead of
-# deferred. The isolation is not restored and is not wanted: the package builds and
-# tests as a default member. CI also compiles the shipped library and binary
-# targets without test targets in the unit graph.
+# NOTHING KEEPS IT OUT OF THE DEFAULT BUILD, and nothing should. The root declares no
+# `default-members`, so `cargo metadata` lists this package among the
+# `workspace_default_members` and a workspace-wide `cargo test` selects it. Its test
+# targets therefore have to link, which the `napi` entry in `[dev-dependencies]` below
+# provides. CI also compiles the shipped library and binary targets without test
+# targets in the unit graph.
 [package]
 name = "zeroship-migrate-node"
 version.workspace = true
@@ -48,26 +32,19 @@ crate-type = ["cdylib", "rlib"]
 # defines `napi_build_metadata` / links against the Node ABI). `napi` gates them
 # (`#[napi]` fns, ThreadsafeFunction, JsDeferred).
 #
-# **A bare `cargo test -p zeroship-migrate-node` WORKS**, with `napi` ON. Two
-# earlier versions of this comment were both wrong, in opposite directions: one
-# said the bare command worked when it did not, and its correction said no test
-# binary could ever link the Node ABI. The second was true of the manifest as it
-# then stood, not of the linker. Measured at 154b019c6: the bare command exited
-# 101 with 1719 `undefined reference` lines, the first `napi_create_function`
-# from src/bridge.rs:1222 in `_napi_rs_internal_register_status`.
+# **A bare `cargo test -p zeroship-migrate-node` WORKS**, with `napi` ON, because of
+# the `napi` entry in `[dev-dependencies]` below, which turns on `dyn-symbols`. Node
+# ABI symbols are exported by the host process and resolve only at `.node` dlopen
+# time, so a test binary built against the extern block fails to link with
+# `undefined reference` to `napi_*` symbols such as `napi_create_function`.
+# `dyn-symbols` replaces the extern block with a libloading-populated pointer table,
+# so a test binary has nothing to resolve at link. `napi` therefore STAYS a default
+# feature, and src/bridge.rs is compiled and type-checked by `cargo test` and by
+# `cargo check --workspace`.
 #
-# What resolves it is the `napi` entry in `[dev-dependencies]` below, which turns
-# on `dyn-symbols`. Node ABI symbols are exported by the host process and resolve
-# only at `.node` dlopen time; `dyn-symbols` replaces the extern block with a
-# libloading-populated pointer table, so a test binary has nothing to resolve at
-# link. `napi` therefore STAYS a default feature, and src/bridge.rs is compiled
-# and type-checked by `cargo test` and by `cargo check --workspace` - which it
-# never was before, because the only configuration that built was the one that
-# excluded it.
-#
-# `--no-default-features` still builds the napi-free core and is still a valid
-# way to compile this crate without the N-API surface, but it is NO LONGER
-# REQUIRED and is no longer the recommended path: it type-checks 1486 fewer lines.
+# `--no-default-features` builds the napi-free core and is a valid way to compile
+# this crate without the N-API surface, but it is neither required nor the
+# recommended path: it leaves src/bridge.rs unchecked.
 #
 # No Rust test process may call an N-API function; it has no Node host. The
 # platform corpus test launches the real CLI in a Node subprocess, while the
@@ -171,15 +148,14 @@ napi = { version = "3", default-features = false, features = ["napi6", "serde-js
 # `napi_build::setup()` needs NO Node headers at build time, so it is safe to run
 # for both `napi build` and a plain `cargo test`.
 #
-# IT DOES NOT MAKE TEST BINARIES LINK, and this comment claimed otherwise until
-# 2026-09-04 ("only emits cdylib link args (allow-undefined for the Node ABI
-# symbols)"), which reads as an explanation for why undefined `napi_*` symbols are
-# tolerated. Read in napi-build 2.2.4, the version Cargo.lock resolves: on Linux
-# `setup()` matches `CARGO_CFG_TARGET_OS` and takes its `_ => {}` arm (src/lib.rs:39),
-# emitting NO link args at all. The cdylib links only because GNU ld permits
-# undefined symbols in `-shared` by default. The allow-undefined flags are macOS
-# ONLY (src/macos.rs: `-undefined dynamic_lookup`) and are `rustc-cdylib-link-arg`,
-# which by definition never reaches a test binary on any platform.
+# IT DOES NOT MAKE TEST BINARIES LINK, and it does not explain why undefined
+# `napi_*` symbols are tolerated. Read in napi-build 2.2.4, the version Cargo.lock
+# resolves: on Linux `setup()` matches `CARGO_CFG_TARGET_OS` and takes its
+# `_ => {}` arm (src/lib.rs:39), emitting NO link args at all. The cdylib links
+# only because GNU ld permits undefined symbols in `-shared` by default. The
+# allow-undefined flags are macOS ONLY (src/macos.rs: `-undefined dynamic_lookup`)
+# and are `rustc-cdylib-link-arg`, which by definition never reaches a test binary
+# on any platform.
 #
 # What makes test binaries link is `napi/dyn-symbols` on the dev-dependency above.
 napi-build = "2"

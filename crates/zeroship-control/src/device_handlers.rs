@@ -1,17 +1,11 @@
 //! RFC 9728 protected-resource metadata.
 //!
-//! Control used to own a SECOND RFC 8628 device flow here: `/api/device/auth`
-//! wrote `provider = 'platform'` rows, `/api/device/approve` bound a principal
-//! to one, and `/api/device/token` minted a deploy token through the auth
-//! service's `/internal/platform-token`. `zeroship login` moved onto the OP's
-//! own device grant in `7240dc589`, which hands the CLI a bounded access token
-//! plus a rotating refresh family that this flow could never issue, and both
-//! halves were deleted once nothing drove them.
-//!
-//! What control still owes a CLI holding no credential is the RFC 9728
-//! document naming the authorization server it trusts. That is the whole of
-//! the device story on this side now; the OP owns the grant itself
-//! (`crates/zeroship-auth/src/oidc/device_token.rs`).
+//! Control runs no device flow of its own. `zeroship login` uses the OP's RFC
+//! 8628 device grant (`crates/zeroship-auth/src/oidc/device_token.rs`), which
+//! hands the CLI a bounded access token plus a rotating refresh family. What
+//! control owes a CLI holding no credential is the RFC 9728 document naming
+//! the authorization server it trusts, and that is the whole of the device
+//! story on this side.
 
 use std::sync::Arc;
 

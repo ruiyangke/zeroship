@@ -1088,11 +1088,11 @@ mod tests {
     /// different connections, so autocommit work is not inside the app's own
     /// explicit transaction.
     ///
-    /// This is bound through a READ. The write formulation it replaces is no
-    /// longer expressible: `BEGIN IMMEDIATE` (`e609c54cc`) takes the write lock
-    /// at BEGIN, so a concurrent autocommit WRITE is refused whether the
-    /// connections are split or not, and the refusal tells you nothing about
-    /// which. `a_transaction_holds_the_write_lock_from_begin_before_any_statement`
+    /// This is bound through a READ, because a write cannot express it:
+    /// `BEGIN IMMEDIATE` takes the write lock at BEGIN, so a concurrent
+    /// autocommit WRITE is refused whether the connections are split or not,
+    /// and the refusal tells you nothing about which.
+    /// `a_transaction_holds_the_write_lock_from_begin_before_any_statement`
     /// in `src/tests/sqlite/transactions.rs` binds that refusal; this binds the
     /// separation the refusal hides.
     ///
