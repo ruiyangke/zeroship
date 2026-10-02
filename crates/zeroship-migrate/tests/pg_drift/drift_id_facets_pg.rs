@@ -384,38 +384,6 @@ async fn snapshot_after_mutation(
     }
 }
 
-async fn format_constraint_name(
-    session: &support::PgDevSession,
-    schema: &str,
-    table: &str,
-    column: &str,
-) -> Result<String, String> {
-    let rows = session
-        .query(
-            "SELECT con.conname \
-             FROM pg_constraint con \
-             JOIN pg_class c ON c.oid = con.conrelid \
-             JOIN pg_namespace n ON n.oid = c.relnamespace \
-             JOIN pg_attribute a \
-               ON a.attrelid = c.oid AND a.attnum = con.conkey[1] \
-             WHERE n.nspname = $1 AND c.relname = $2 AND a.attname = $3 \
-               AND con.contype = 'c' AND array_length(con.conkey, 1) = 1 \
-             ORDER BY con.conname",
-            &[schema.into(), table.into(), column.into()],
-        )
-        .await
-        .map_err(|error| format!("query {table}.{column} format constraint: {error}"))?;
-    if rows.len() != 1 {
-        return Err(format!(
-            "expected one format CHECK for {table}.{column}, got {}",
-            rows.len()
-        ));
-    }
-    rows[0]
-        .try_get("conname")
-        .map_err(|error| format!("decode {table}.{column} format constraint: {error}"))
-}
-
 fn foreign_key_name(expected: &SchemaSnapshot, table: &str) -> Result<String, String> {
     let foreign_keys = expected
         .tables
@@ -468,22 +436,17 @@ fn require_missing(drift: &StructuralDrift, object: &str) -> Result<(), String> 
 }
 
 #[compio::test]
-async fn live_postgres_introspects_identity_default_format_and_reference_drift() {
+async fn live_postgres_introspects_identity_default_and_reference_drift() {
     let url = crate::support::pg_database();
     let session = support::PgDevSession::connect(&url);
     let schema = token();
     let quoted_schema = quote_ident(&schema);
-    // The same four schemas the explicit cleanup below removes, dropped on an unwind
-    // that never reaches it. The three shadows are created inside later blocks, so
-    // their names are derived once here rather than guarded where they appear.
+    // The same two schemas the explicit cleanup below removes, dropped on an unwind
+    // that never reaches it. The shadow is created inside a later block, so its
+    // name is derived once here rather than guarded where it appears.
     let _schema_guard = support::SchemaGuard::arm(
         &session,
-        [
-            schema.clone(),
-            format!("{schema}_clean_shadow"),
-            format!("{schema}_reference_shadow"),
-            format!("{schema}_shadow"),
-        ],
+        [schema.clone(), format!("{schema}_clean_shadow")],
     );
     session
         .batch(&format!("CREATE SCHEMA {quoted_schema}"))
@@ -535,8 +498,8 @@ async fn live_postgres_introspects_identity_default_format_and_reference_drift()
 
         // PostgreSQL qualifies pinned pg_catalog objects when search_path would
         // otherwise resolve the authored spelling to a user object. Those
-        // qualifications and OPERATOR(...) wrappers are deparser decoration,
-        // not drift in the already-created defaults and format CHECKs.
+        // qualifications are deparser decoration, not drift in the
+        // already-created defaults.
         let clean_shadow_schema = format!("{schema}_clean_shadow");
         let quoted_clean_shadow_schema = quote_ident(&clean_shadow_schema);
         let clean_shadowed_builtins = format!(
@@ -545,13 +508,6 @@ async fn live_postgres_introspects_identity_default_format_and_reference_drift()
              LANGUAGE sql IMMUTABLE AS $$ SELECT 42::bigint $$; \
              CREATE FUNCTION {quoted_clean_shadow_schema}.lower(text) RETURNS text \
              LANGUAGE sql IMMUTABLE AS $$ SELECT $1 $$; \
-             CREATE FUNCTION {quoted_clean_shadow_schema}.octet_length(text) RETURNS integer \
-             LANGUAGE sql IMMUTABLE AS $$ SELECT 1 $$; \
-             CREATE FUNCTION {quoted_clean_shadow_schema}.regex_shadow(text, text) \
-             RETURNS boolean LANGUAGE sql IMMUTABLE AS $$ SELECT false $$; \
-             CREATE OPERATOR {quoted_clean_shadow_schema}.~ (\
-                 FUNCTION = {quoted_clean_shadow_schema}.regex_shadow, \
-                 LEFTARG = text, RIGHTARG = text); \
              SET LOCAL search_path TO {quoted_clean_shadow_schema}, {quoted_schema}, pg_catalog"
         );
         let shadow_clean =
@@ -561,9 +517,9 @@ async fn live_postgres_introspects_identity_default_format_and_reference_drift()
         // out-of-band - no migration authored `nextval(regclass)` - and drift now
         // reports it, which is the point of comparing `pg_proc` at all. It is
         // subtracted rather than tolerated: this check is about deparser DECORATION
-        // in defaults and CHECK bodies, and everything else still has to be clean,
-        // including the four objects created in the SEPARATE shadow schema, which
-        // this snapshot does not read.
+        // in defaults, and everything else still has to be clean, including the
+        // function created in the SEPARATE shadow schema, which this snapshot does
+        // not read.
         let expected_unexpected = format!("function {schema}.nextval(regclass)");
         let subtracted = shadow_clean_drift
             .unexpected_objects
@@ -725,6 +681,11 @@ async fn live_postgres_introspects_identity_default_format_and_reference_drift()
             "call:nextval(",
         )?;
 
+        // A typed id is an ordinary bounded string column, so none of these defaults
+        // is on the ID-default surface: each is an expression default the differ
+        // declines to compare by SPELLING. Dropping it still changes what a silent
+        // write stores, and an expression against no default at all is reported
+        // whatever the expression's text (`comparable_column_default`).
         for (table, column) in [
             ("type_keys", "id"),
             ("case_default_keys", "id"),
@@ -746,105 +707,6 @@ async fn live_postgres_introspects_identity_default_format_and_reference_drift()
                 "absent",
             )?;
         }
-
-        // A typed reference has no local format CHECK, so FK recovery must also
-        // retain the default's pg_depend provenance. The shadowed function
-        // deparses exactly like the expected built-in lower() call.
-        let typed_reference_table =
-            format!("{quoted_schema}.{}", quote_ident("single_child"));
-        let reference_shadow_schema = format!("{schema}_reference_shadow");
-        let quoted_reference_shadow_schema = quote_ident(&reference_shadow_schema);
-        let shadowed_reference_default = format!(
-            "CREATE SCHEMA {quoted_reference_shadow_schema}; \
-             CREATE FUNCTION {quoted_reference_shadow_schema}.lower(text) \
-             RETURNS text LANGUAGE sql IMMUTABLE AS $$ SELECT $1 $$; \
-             SET LOCAL search_path TO {quoted_reference_shadow_schema}, pg_catalog; \
-             ALTER TABLE {typed_reference_table} ALTER COLUMN parent_id \
-             SET DEFAULT lower('ACCOUNT_00000000000000000000000000')"
-        );
-        let actual_snapshot =
-            snapshot_after_mutation(&session, &schema, &shadowed_reference_default).await?;
-        require_altered(
-            &diff_snapshots(zeroship_migrate::shipping_vendors(), &expected, &actual_snapshot),
-            "single_child",
-            "column parent_id",
-            "default",
-            "user-defined:call:lower(",
-        )?;
-
-        let type_check = format_constraint_name(&session, &schema, "type_keys", "id").await?;
-        let type_table = format!("{quoted_schema}.{}", quote_ident("type_keys"));
-        let drop_type_check = format!(
-            "ALTER TABLE {type_table} DROP CONSTRAINT {}",
-            quote_ident(&type_check)
-        );
-        let actual_snapshot =
-            snapshot_after_mutation(&session, &schema, &drop_type_check).await?;
-        require_altered(
-            &diff_snapshots(zeroship_migrate::shipping_vendors(), &expected, &actual_snapshot),
-            "type_keys",
-            "column id",
-            "format",
-            "",
-        )?;
-
-        let prefix_mismatch = format!(
-            "ALTER TABLE {type_table} DROP CONSTRAINT {}; \
-             ALTER TABLE {type_table} ADD CONSTRAINT {} \
-             CHECK (id IS NULL OR (octet_length(id) = 31 AND \
-             (id COLLATE \"C\") ~ '^team_[0-7][0123456789abcdefghjkmnpqrstvwxyz]{{25}}$'))",
-            quote_ident(&type_check),
-            quote_ident(&type_check),
-        );
-        let actual_snapshot =
-            snapshot_after_mutation(&session, &schema, &prefix_mismatch).await?;
-        require_altered(
-            &diff_snapshots(zeroship_migrate::shipping_vendors(), &expected, &actual_snapshot),
-            "type_keys",
-            "column id",
-            "format",
-            "typeId(team)",
-        )?;
-
-        // pg_get_constraintdef resolves names through the active search_path.
-        // A user function with the same spelling as a pinned builtin therefore
-        // deparses to the engine-authored text unless CHECK recovery also proves
-        // catalog provenance. The replacement deliberately rejects every
-        // non-NULL TypeID while preserving the exact surface spelling.
-        let shadow_schema = format!("{schema}_shadow");
-        let quoted_shadow_schema = quote_ident(&shadow_schema);
-        let shadowed_type_check = format!(
-            "CREATE SCHEMA {quoted_shadow_schema}; \
-             CREATE FUNCTION {quoted_shadow_schema}.octet_length(text) \
-             RETURNS integer LANGUAGE sql IMMUTABLE AS $$ SELECT 1 $$; \
-             CREATE FUNCTION {quoted_shadow_schema}.lower(text) \
-             RETURNS text LANGUAGE sql IMMUTABLE AS $$ SELECT $1 $$; \
-             SET LOCAL search_path TO {quoted_shadow_schema}, pg_catalog; \
-             ALTER TABLE {type_table} ALTER COLUMN id \
-             SET DEFAULT lower('ACCOUNT_00000000000000000000000000'); \
-             ALTER TABLE {type_table} DROP CONSTRAINT {}; \
-             ALTER TABLE {type_table} ADD CONSTRAINT {} \
-             CHECK (id IS NULL OR (octet_length(id) = 34 AND \
-             (id COLLATE \"C\") ~ '^account_[0-7][0123456789abcdefghjkmnpqrstvwxyz]{{25}}$'))",
-            quote_ident(&type_check),
-            quote_ident(&type_check),
-        );
-        let actual_snapshot =
-            snapshot_after_mutation(&session, &schema, &shadowed_type_check).await?;
-        require_altered(
-            &diff_snapshots(zeroship_migrate::shipping_vendors(), &expected, &actual_snapshot),
-            "type_keys",
-            "column id",
-            "format",
-            "",
-        )?;
-        require_altered(
-            &diff_snapshots(zeroship_migrate::shipping_vendors(), &expected, &actual_snapshot),
-            "type_keys",
-            "column id",
-            "default",
-            "user-defined:call:lower(",
-        )?;
 
         let single_fk = foreign_key_name(&expected, "single_child")?;
         let single_table = format!("{quoted_schema}.{}", quote_ident("single_child"));
@@ -975,12 +837,8 @@ async fn live_postgres_introspects_identity_default_format_and_reference_drift()
     let cleanup = session
         .batch(&format!(
             "DROP SCHEMA IF EXISTS {quoted_schema} CASCADE; \
-             DROP SCHEMA IF EXISTS {} CASCADE; \
-             DROP SCHEMA IF EXISTS {} CASCADE; \
              DROP SCHEMA IF EXISTS {} CASCADE",
             quote_ident(&format!("{schema}_clean_shadow")),
-            quote_ident(&format!("{schema}_reference_shadow")),
-            quote_ident(&format!("{schema}_shadow")),
         ))
         .await;
     match (result, cleanup) {

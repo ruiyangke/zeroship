@@ -2,10 +2,10 @@
 //! the defaults that carry no ID semantics at all.
 //!
 //! `drift_id_facets_pg` already pins the ID-bearing defaults (identity, UUID
-//! generators, `nextval`, TypeID keys), which reach the differ through
+//! generators, `nextval`), which reach the differ through
 //! `ColumnSnapshot::id_default`. This file pins the other half: a plain
-//! `DEFAULT 42` / `DEFAULT 'active'` on a column with no ID facet, where the only
-//! evidence either side carries is the raw SQL text.
+//! `DEFAULT 42` / `DEFAULT 'active'` / `DEFAULT now()` on a column with no ID facet,
+//! where the only evidence either side carries is the raw SQL text.
 //!
 //! Both halves matter for the same reason. A default is what a row gets when the
 //! writer says nothing, so an out-of-band `SET DEFAULT` silently changes what the
@@ -285,6 +285,41 @@ async fn live_postgres_reports_ordinary_column_default_drift() {
                 format!("ALTER TABLE {table} ALTER COLUMN label DROP DEFAULT"),
                 "active",
                 "absent",
+            ),
+        ] {
+            let actual = snapshot_after_mutation(&session, &schema, &mutation).await?;
+            require_altered(
+                &diff_snapshots(zeroship_migrate::shipping_vendors(), &expected, &actual),
+                column,
+                expected_key,
+                actual_key,
+            )?;
+        }
+
+        // PRESENCE. An expression default DROPPED, or ADDED to a column that had
+        // none, is a different answer to what a silent write stores whatever the
+        // expression's text, so the spelling refusal below does not apply: one side
+        // has no default at all. `now()` and the `{}` container are both shapes the
+        // differ declines to compare by spelling, which is what makes them the
+        // probes here.
+        for (column, mutation, expected_key, actual_key) in [
+            (
+                "stamp",
+                format!("ALTER TABLE {table} ALTER COLUMN stamp DROP DEFAULT"),
+                "now",
+                "absent",
+            ),
+            (
+                "payload",
+                format!("ALTER TABLE {table} ALTER COLUMN payload DROP DEFAULT"),
+                "{}",
+                "absent",
+            ),
+            (
+                "undefaulted",
+                format!("ALTER TABLE {table} ALTER COLUMN undefaulted SET DEFAULT abs(-3)"),
+                "absent",
+                "abs",
             ),
         ] {
             let actual = snapshot_after_mutation(&session, &schema, &mutation).await?;

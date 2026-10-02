@@ -494,63 +494,6 @@ fn comparable_nextval_default(expr: Option<&str>) -> Option<String> {
     Some(crate::render::declarative::nextval_default_expr(&sequence))
 }
 
-/// One column's ORDINARY `DEFAULT` reduced to a semantic key when comparing the
-/// two sides' spellings is meaningful, and `None` when it is not.
-///
-/// The FOURTH member of the family [`constraint_definition_is_comparable`],
-/// [`index_expression_bodies_are_comparable`], [`comparable_vendor_objects`],
-/// [`comparable_generated_column`] and [`comparable_function_body`] belong to,
-/// answering the same question - is this
-/// text worth comparing across an offline render and a live catalog read? - for the
-/// default on a column that
-/// carries no ID facet at all. Those columns never populate
-/// [`ColumnSnapshot::id_default`], so the raw SQL text in
-/// [`ColumnSnapshot::default`] is the only evidence either side holds: without
-/// this comparison an out-of-band `ALTER COLUMN ... SET DEFAULT` changes what
-/// every silent write stores and no drift line says so.
-///
-/// WHAT PostgreSQL NORMALISES. `pg_get_expr` deparses from the parse tree rather
-/// than replaying the authored text. Measured on PostgreSQL 18.4:
-///
-/// | authored             | read back from the catalog |
-/// |----------------------|----------------------------|
-/// | `DEFAULT 'active'`   | `'active'::text`           |
-/// | `DEFAULT '{}'`       | `'{}'::jsonb`              |
-/// | `DEFAULT current_user` | `CURRENT_USER`           |
-///
-/// So a byte compare of authored text against catalog text reports drift on every
-/// text and JSON default that exists, on every comparison, on a schema nobody has
-/// touched. What this returns instead is the SAME semantic key the ID-default
-/// surface already uses: [`catalog_id_default`] strips the cast parse analysis
-/// inferred, canonicalises quoting, decimal spelling and boolean form, and lands
-/// `'active'` and `'active'::text` on one fingerprint. Both sides go through it, so
-/// the normalisation is applied to the authored render and the catalog read alike -
-/// which is sound precisely because `pg_get_expr` is idempotent.
-///
-/// WHEN THE COMPARISON IS SKIPPED, and why each skip is not an oversight:
-///
-/// * `None` vendor. [`introspected_table_vendor`] recognises a live catalog read
-///   by the evidence only introspection leaves; a snapshot without it is not one,
-///   and the literal fingerprint is dialect-sensitive (a MySQL `COLUMN_DEFAULT`
-///   arrives with its SQL quotes already stripped). A `nextval` still compares,
-///   because its key is a sequence identity rather than a spelling.
-/// * Either side reduces to [`IdDefaultSnapshot::Expression`]. That arm is a
-///   fingerprint of DEPARSED TEXT, and the two sides do not produce text the same
-///   way: the offline renderer quotes every identifier and knows no column types,
-///   so it cannot reproduce PostgreSQL's inferred casts or keyword rewriting. This
-///   is the same refusal [`constraint_definition_is_comparable`] makes for a CHECK
-///   body and [`index_expression_bodies_are_comparable`] makes for an index
-///   expression key, for the same reason.
-///
-/// WHAT THIS GIVES UP: an expression default rewritten out of band is not reported.
-/// `DEFAULT now()` swapped for `DEFAULT clock_timestamp()`, or a `DEFAULT '{}'`
-/// swapped for `DEFAULT '[]'`, leaves this differ silent - and so does an
-/// expression default ADDED to a column that had none, because the added side
-/// reduces to `Expression` even though the absent side is unambiguous. That is a
-/// real loss, the same one the CHECK, index-expression and vendor-object
-/// exemptions already take, and recovering it needs the same treatment foreign
-/// keys get: parse the catalog text back to the closed AST and compare
-/// structurally rather than comparing spellings.
 /// The two sides' GENERATED-column facet reduced to a comparable key, and `None`
 /// when comparing them is not meaningful.
 ///
@@ -615,7 +558,93 @@ fn format_generated_kind(kind: GeneratedKindSnapshot) -> &'static str {
     }
 }
 
+/// One column's ORDINARY `DEFAULT`, on both sides, reduced to a pair of semantic keys
+/// when comparing them is meaningful, and `None` when it is not.
+///
+/// The FOURTH member of the family [`constraint_definition_is_comparable`],
+/// [`index_expression_bodies_are_comparable`], [`comparable_vendor_objects`],
+/// [`comparable_generated_column`] and [`comparable_function_body`] belong to,
+/// answering the same question - is this
+/// text worth comparing across an offline render and a live catalog read? - for the
+/// default on a column that
+/// carries no ID facet at all. Those columns never populate
+/// [`ColumnSnapshot::id_default`], so the raw SQL text in
+/// [`ColumnSnapshot::default`] is the only evidence either side holds: without
+/// this comparison an out-of-band `ALTER COLUMN ... SET DEFAULT` or `DROP DEFAULT`
+/// changes what every silent write stores and no drift line says so.
+///
+/// WHAT PostgreSQL NORMALISES. `pg_get_expr` deparses from the parse tree rather
+/// than replaying the authored text. Measured on PostgreSQL 18.4:
+///
+/// | authored             | read back from the catalog |
+/// |----------------------|----------------------------|
+/// | `DEFAULT 'active'`   | `'active'::text`           |
+/// | `DEFAULT '{}'`       | `'{}'::jsonb`              |
+/// | `DEFAULT current_user` | `CURRENT_USER`           |
+///
+/// So a byte compare of authored text against catalog text reports drift on every
+/// text and JSON default that exists, on every comparison, on a schema nobody has
+/// touched. What each side reduces to instead is the SAME semantic key the ID-default
+/// surface already uses: [`catalog_id_default`] strips the cast parse analysis
+/// inferred, canonicalises quoting, decimal spelling and boolean form, and lands
+/// `'active'` and `'active'::text` on one fingerprint. Both sides go through it, so
+/// the normalisation is applied to the authored render and the catalog read alike -
+/// which is sound precisely because `pg_get_expr` is idempotent.
+///
+/// WHEN THE COMPARISON IS SKIPPED, and why each skip is not an oversight:
+///
+/// * `None` vendor. [`introspected_table_vendor`] recognises a live catalog read
+///   by the evidence only introspection leaves; a snapshot without it is not one,
+///   and the literal fingerprint is dialect-sensitive (a MySQL `COLUMN_DEFAULT`
+///   arrives with its SQL quotes already stripped). A `nextval` still compares,
+///   because its key is a sequence identity rather than a spelling.
+/// * BOTH sides hold a default and either reduces to
+///   [`IdDefaultSnapshot::Expression`]. That arm is a fingerprint of DEPARSED TEXT,
+///   and the two sides do not produce text the same way: the offline renderer quotes
+///   every identifier and knows no column types, so it cannot reproduce PostgreSQL's
+///   inferred casts or keyword rewriting. This is the same refusal
+///   [`constraint_definition_is_comparable`] makes for a CHECK body and
+///   [`index_expression_bodies_are_comparable`] makes for an index expression key,
+///   for the same reason.
+///
+/// PRESENCE IS NOT SKIPPED. When one side reduces to [`IdDefaultSnapshot::Absent`],
+/// the other side's spelling no longer matters: an `Expression` against `Absent` is a
+/// different answer to "what does a write that names no value store", whatever the
+/// expression's text. This is the rule [`effective_index_predicate`] keeps for an
+/// index that loses its predicate. It is sound because `Absent` is a reduction, not a
+/// spelling: a missing default and a NULL literal (`NULL`, `NULL::text`) both land
+/// there, so a default the server stores nothing for cannot be reported against one
+/// it does.
+///
+/// WHAT THIS GIVES UP: an expression default rewritten out of band is not reported.
+/// `DEFAULT now()` swapped for `DEFAULT clock_timestamp()`, a `DEFAULT '{}'`
+/// swapped for `DEFAULT '[]'`, or a literal default replaced by an expression, keeps
+/// a default on both sides and leaves this differ silent. That is a real loss, the
+/// same one the CHECK, index-expression and vendor-object exemptions already take,
+/// and recovering it needs the same treatment foreign keys get: parse the catalog
+/// text back to the closed AST and compare structurally rather than comparing
+/// spellings.
 fn comparable_column_default(
+    vendors: VendorSet,
+    expected: Option<&str>,
+    actual: Option<&str>,
+    vendor: Option<&zeroship_migrate_backend::registry::BackendVendor>,
+    actual_expression_default: Option<bool>,
+) -> Option<(IdDefaultSnapshot, IdDefaultSnapshot)> {
+    // The authored side has no catalog marker and does not need one: its text still
+    // carries its quotes.
+    let expected = column_default_key(vendors, expected, vendor, None)?;
+    let actual = column_default_key(vendors, actual, vendor, actual_expression_default)?;
+    let absent = |key: &IdDefaultSnapshot| matches!(key, IdDefaultSnapshot::Absent);
+    let expression = |key: &IdDefaultSnapshot| matches!(key, IdDefaultSnapshot::Expression(_));
+    (absent(&expected) || absent(&actual) || !(expression(&expected) || expression(&actual)))
+        .then_some((expected, actual))
+}
+
+/// One side of [`comparable_column_default`]: the raw default reduced to its semantic
+/// key, or `None` when no registered vendor claims the snapshot and the text is not a
+/// spelling-free `nextval`.
+fn column_default_key(
     vendors: VendorSet,
     raw: Option<&str>,
     vendor: Option<&zeroship_migrate_backend::registry::BackendVendor>,
@@ -633,17 +662,17 @@ fn comparable_column_default(
     // quotes, so the two sides only meet once the authored key is projected into
     // that same storage spelling. `expression_default` is the authoritative
     // literal-vs-expression bit, carried by whichever backend declares its catalog
-    // marker authoritative rather than by a named dialect; the authored side has
-    // none and does not need one, because its text still carries its quotes.
-    let key = if vendor
-        .value_format
-        .catalog_default_marker_is_authoritative()
-    {
-        catalog_text_id_default(vendors, Some(raw), dialect, expression_default)
-    } else {
-        catalog_id_default(vendors, Some(raw), dialect, None)
-    };
-    (!matches!(key, IdDefaultSnapshot::Expression(_))).then_some(key)
+    // marker authoritative rather than by a named dialect.
+    Some(
+        if vendor
+            .value_format
+            .catalog_default_marker_is_authoritative()
+        {
+            catalog_text_id_default(vendors, Some(raw), dialect, expression_default)
+        } else {
+            catalog_id_default(vendors, Some(raw), dialect, None)
+        },
+    )
 }
 
 fn diff_sequence_attrs(
@@ -1125,19 +1154,19 @@ fn diff_attrs(
                     &format_id_default(Some(expected_default)),
                     &format_id_default(Some(&actual_default)),
                 );
-            } else if let (Some(expected_default), Some(actual_default)) = (
-                // The ordinary-default surface: no ID facet, so the raw SQL text
-                // is all either side holds. `comparable_column_default` documents
-                // which spellings that text can be compared through and which it
-                // cannot; a `None` on either side is that refusal, not an absence.
-                comparable_column_default(vendors, ec.default.as_deref(), actual_vendor, None),
+            } else if let Some((expected_default, actual_default)) =
+                // The ordinary-default surface: no ID facet, so the raw SQL text is
+                // all either side holds. `comparable_column_default` documents which
+                // pairs that text can be compared through and which it cannot; a
+                // `None` is that refusal, not an absence.
                 comparable_column_default(
                     vendors,
+                    ec.default.as_deref(),
                     ac.default.as_deref(),
                     actual_vendor,
                     ac.expression_default,
-                ),
-            ) {
+                )
+            {
                 push(
                     &obj,
                     "default",
@@ -2279,5 +2308,109 @@ mod unattributed_snapshot_tests {
              on the line, and it reads {:?}",
             line.actual
         );
+    }
+}
+
+/// The ordinary-default surface compares PRESENCE even where it declines to compare
+/// SPELLING (`comparable_column_default`). These run on an offline pair whose actual
+/// side carries PostgreSQL's provenance marker, so the vendor that reduces both sides
+/// is the one a live read would select.
+#[cfg(test)]
+mod ordinary_default_presence_tests {
+    use super::{diff_snapshots, ColumnSnapshot, SchemaSnapshot, TableSnapshot};
+    use crate::TableRuntimeOptions;
+
+    fn snapshot_with(default: Option<&str>, provenance_marker: Option<&str>) -> SchemaSnapshot {
+        let mut snapshot = SchemaSnapshot::default();
+        snapshot.tables.insert(
+            "notes".to_string(),
+            TableSnapshot {
+                columns: vec![ColumnSnapshot {
+                    name: "label".to_string(),
+                    data_type: "text".to_string(),
+                    nullable: true,
+                    default: default.map(str::to_string),
+                    ddl_type_override: provenance_marker.map(str::to_string),
+                    ..Default::default()
+                }],
+                indexes: Vec::new(),
+                constraints: Vec::new(),
+                runtime_options: TableRuntimeOptions::default(),
+                attributes: zeroship_migrate_ir::attribute::Attributes::new(),
+                partition_by: None,
+                comment: None,
+                stored_create_sql: None,
+            },
+        );
+        snapshot
+    }
+
+    /// The `default` line for `notes.label` as `(expected, actual)`, if any.
+    fn default_line(
+        expected: Option<&str>,
+        actual: Option<&str>,
+        provenance_marker: Option<&str>,
+    ) -> Option<(String, String)> {
+        diff_snapshots(
+            crate::test_fixtures::VENDORS,
+            &snapshot_with(expected, None),
+            &snapshot_with(actual, provenance_marker),
+        )
+        .altered_objects
+        .iter()
+        .find(|line| line.object == "column label" && line.field == "default")
+        .map(|line| (line.expected.clone(), line.actual.clone()))
+    }
+
+    const POSTGRES_READ: Option<&str> = Some("text");
+
+    #[test]
+    fn an_expression_default_dropped_out_of_band_is_reported() {
+        let (expected, actual) = default_line(Some("lower('DRAFT'::text)"), None, POSTGRES_READ)
+            .expect("an expression default against no default at all must be reported");
+        assert_ne!(expected, "absent", "the authored side holds a default");
+        assert_eq!(actual, "absent");
+    }
+
+    #[test]
+    fn an_expression_default_added_out_of_band_is_reported() {
+        let (expected, actual) = default_line(None, Some("lower('DRAFT'::text)"), POSTGRES_READ)
+            .expect("an expression default where none was authored must be reported");
+        assert_eq!(expected, "absent");
+        assert_ne!(actual, "absent", "the live side holds a default");
+    }
+
+    #[test]
+    fn a_null_default_is_no_default_at_all() {
+        // CONTROL for the two above: presence is a reduction, not a spelling, so a
+        // default the server stores nothing for is not reported against a missing one.
+        for null in ["NULL", "NULL::text", "(NULL)"] {
+            assert_eq!(
+                default_line(Some(null), None, POSTGRES_READ),
+                None,
+                "an authored {null} against no default is the same answer"
+            );
+            assert_eq!(
+                default_line(None, Some(null), POSTGRES_READ),
+                None,
+                "a live {null} against no authored default is the same answer"
+            );
+        }
+    }
+
+    #[test]
+    fn a_rewritten_expression_default_is_still_declined() {
+        // Both sides hold a default, so only the spellings differ, and those are what
+        // the offline renderer cannot reproduce.
+        assert_eq!(
+            default_line(Some("now()"), Some("clock_timestamp()"), POSTGRES_READ),
+            None
+        );
+    }
+
+    #[test]
+    fn an_unattributed_actual_reports_no_presence_difference() {
+        // No vendor claims the actual side, so neither side's text is reduced at all.
+        assert_eq!(default_line(Some("lower('DRAFT'::text)"), None, None), None);
     }
 }

@@ -692,9 +692,30 @@ async fn snapshot_schema_recovers_mysql_identity_id_defaults_and_format_checks()
     );
     assert_eq!(column("ordinary").id_default, None);
     let clean_drift = diff_snapshots(zeroship_migrate::shipping_vendors(), &expected, &snapshot);
+    // The ID columns are clean. `ordinary` is the one line: the catalog holds a
+    // `uuid()` default the authored column never declares, and an expression against
+    // no default at all is reported whatever its spelling (`comparable_column_default`).
+    // It stays on the ORDINARY surface - no ID-default key - which is the point of the
+    // column.
+    let altered: Vec<(&str, &str, &str, &str, &str)> = clean_drift
+        .altered_objects
+        .iter()
+        .map(|altered| {
+            (
+                altered.table.as_str(),
+                altered.object.as_str(),
+                altered.field.as_str(),
+                altered.expected.as_str(),
+                altered.actual.as_str(),
+            )
+        })
+        .collect();
     assert!(
-        clean_drift.is_clean(),
-        "the portable auto-increment and exact format/default catalog shape must stay clean: {clean_drift:?}"
+        clean_drift.missing_objects.is_empty()
+            && clean_drift.unexpected_objects.is_empty()
+            && altered == [("ids", "column ordinary", "default", "absent", "call:uuid()")],
+        "the portable auto-increment and exact format/default catalog shape must stay clean, \
+         and the undeclared ordinary default must be its only line: {clean_drift:?}"
     );
     assert!(
         rec.log

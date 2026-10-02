@@ -526,6 +526,45 @@ async fn uuid_id_defaults_detect_add_remove_and_swap_without_cosmetic_drift() {
         "\"draft\"",
         "\"published\"",
     );
+
+    // An EXPRESSION default is declined by spelling, but not by presence: one
+    // dropped out of band leaves no default at all, which changes what a silent
+    // write stores whatever the expression's text (`comparable_column_default`).
+    let p = paths("ordinary_expression_default_presence");
+    let be = backend(&p);
+    be.apply_one_additive(
+        &mig(
+            "ordinary_expression_default",
+            "CREATE TABLE notes (id INTEGER PRIMARY KEY, label TEXT DEFAULT (lower('DRAFT')));",
+        ),
+        "d",
+    )
+    .await
+    .expect("apply expression default fixture");
+    let expected = be
+        .snapshot_schema_sqlite()
+        .await
+        .expect("expected snapshot");
+    drop(be);
+    replace_table(
+        &p,
+        "notes",
+        "CREATE TABLE notes (id INTEGER PRIMARY KEY, label TEXT);",
+    );
+    let actual = backend(&p)
+        .snapshot_schema_sqlite()
+        .await
+        .expect("dropped default snapshot");
+    let drift = diff_snapshots(zeroship_migrate::shipping_vendors(), &expected, &actual);
+    assert!(
+        drift.altered_objects.iter().any(|altered| {
+            altered.object == "column label"
+                && altered.field == "default"
+                && altered.expected.contains("lower")
+                && altered.actual == "absent"
+        }),
+        "a dropped expression default must report default: <expression> -> absent: {drift:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
