@@ -1,6 +1,7 @@
 //! WPT runner for `streams/readable-streams/`.
 //! Source: https://github.com/web-platform-tests/wpt
-//! Files vendored under `crates/runtime/tests/wpt/streams/`.
+//! Files live in the pinned WPT tree the development shell links under
+//! `crates/zeroship-runtime/tests/wpt/streams/`.
 //!
 //! Mirrors the `wpt_headers.rs` pattern: minimal testharness.js shim,
 //! per-file isolate, per-test pass/fail/skip classification. The Rust

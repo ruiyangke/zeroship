@@ -29,10 +29,11 @@
 //!
 //!   wpt              `wpt_*.rs` files, merged into `tests/wpt.rs`. Their
 //!                    `include_str!`s read `tests/wpt/`, which is NOT tracked
-//!                    in git - `tests/setup-wpt.sh` fetches it on demand.
-//!                    A checkout that has not run it cannot compile them. Kept
-//!                    as its own target so that stays true of ONE target
-//!                    instead of every integration test in the crate.
+//!                    in git and comes from the development shell's pinned
+//!                    `wpt` flake input. A checkout outside the shell cannot
+//!                    compile them. Kept as its own target so that stays true
+//!                    of ONE target instead of every integration test in the
+//!                    crate.
 //!
 //!   node_realworld   the `node_*_e2e.rs` files, merged into
 //!                    `tests/node_realworld.rs`. They mutate process

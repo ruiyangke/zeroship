@@ -13,9 +13,9 @@
 //! that went stale.
 
 use super::repo;
+use serde_json::Value;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::SystemTime;
 use xtask::build_chain::BUILD_CHAIN;
 
@@ -412,56 +412,61 @@ fn the_host_chain_rebuilds_every_consumer_of_the_artifacts_it_writes() {
     );
 }
 
-/// The WPT tree under `crates/zeroship-runtime/tests/wpt` is FETCHED, not
-/// generated: `setup-wpt.sh` shallow-clones one pinned upstream commit into a
-/// gitignored directory with no tracked file in it. It is built from nothing in
-/// this repository, so the mtime rule above has nothing to say about it. What
-/// it does have is the pin the script declares, and a tree that must sit on it.
-fn wpt_pin(script: &str) -> Option<&str> {
-    let (_, rest) = script.split_once("WPT_COMMIT:-")?;
-    let (pin, _) = rest.split_once('}')?;
-    (!pin.is_empty() && pin.chars().all(|c| c.is_ascii_hexdigit())).then_some(pin)
+/// The `wpt` flake input pins one upstream Web Platform Tests commit, and the
+/// development shell links that input at `crates/zeroship-runtime/tests/wpt`
+/// for the runtime's `wpt` test target to `include_str!`. The tree is built from
+/// nothing in this repository, so the mtime rule above has nothing to say about
+/// it. What it does have is the revision `flake.nix` declares and the revision
+/// `flake.lock` resolved; the two must agree, or the shell links a tree nobody
+/// asked for while the lock says otherwise.
+fn wpt_input_rev(flake: &str) -> Option<&str> {
+    let (_, rest) = flake.split_once("github:web-platform-tests/wpt/")?;
+    let rev = rest.split(['"', '\n', ' ', ';']).next()?;
+    (rev.len() == 40 && rev.chars().all(|c| c.is_ascii_hexdigit())).then_some(rev)
 }
 
 #[test]
-fn the_fetched_wpt_tree_sits_on_the_pin_its_setup_script_declares() {
-    let script = "crates/zeroship-runtime/tests/setup-wpt.sh";
-    let source = repo::read(script);
-    let pin = wpt_pin(&source).unwrap_or_else(|| panic!("{script} declares no WPT_COMMIT default"));
-    let tree = repo::root().join("crates/zeroship-runtime/tests/wpt");
-    if !tree.join(".git").exists() {
-        return;
-    }
-    let output = Command::new("git")
-        .current_dir(&tree)
-        .args(["rev-parse", "HEAD"])
-        .output()
-        .expect("git rev-parse");
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let head = String::from_utf8(output.stdout).expect("utf-8 revision");
+fn the_wpt_input_is_pinned_to_the_revision_the_lock_resolves() {
+    let flake = repo::read("flake.nix");
+    let pin = wpt_input_rev(&flake)
+        .unwrap_or_else(|| panic!("flake.nix declares no wpt input pinned to a full commit"));
+    let lock: Value = serde_json::from_str(&repo::read("flake.lock")).expect("parse flake.lock");
+    let node = &lock["nodes"]["wpt"];
     assert_eq!(
-        head.trim(),
-        pin,
-        "the WPT tree is at a different commit from the pin {script} declares, \
-         so the wpt test target compiles against vectors nobody asked for. \
-         Refetch with `{script}`"
+        node["flake"], false,
+        "the wpt input must stay a non-flake source tree"
+    );
+    assert_eq!(node["locked"]["type"], "github");
+    assert_eq!(node["locked"]["owner"], "web-platform-tests");
+    assert_eq!(node["locked"]["repo"], "wpt");
+    assert_eq!(
+        node["locked"]["rev"], pin,
+        "flake.nix pins wpt at {pin} but flake.lock resolved {} - run `nix flake lock`",
+        node["locked"]["rev"]
+    );
+    assert_eq!(
+        lock["nodes"]["root"]["inputs"]["wpt"], "wpt",
+        "flake.lock does not wire the wpt input into the root"
     );
 }
 
 #[test]
-fn the_wpt_pin_reader_rejects_a_script_that_declares_none() {
+fn the_wpt_input_reader_rejects_a_pin_that_is_not_a_full_commit() {
     assert_eq!(
-        wpt_pin("WPT_COMMIT=\"${WPT_COMMIT:-e053afbbd005bed4}\"\n"),
-        Some("e053afbbd005bed4")
+        wpt_input_rev(
+            "url = \"github:web-platform-tests/wpt/e053afbbd005bed4b6100f98f0de744da8d1d09d\";\n"
+        ),
+        Some("e053afbbd005bed4b6100f98f0de744da8d1d09d")
     );
-    assert_eq!(wpt_pin("WPT_COMMIT=\"${WPT_COMMIT}\"\n"), None);
-    assert_eq!(wpt_pin("WPT_COMMIT=\"${WPT_COMMIT:-}\"\n"), None);
-    assert_eq!(wpt_pin("WPT_COMMIT=\"${WPT_COMMIT:-$OTHER}\"\n"), None);
-    assert_eq!(wpt_pin("nothing here\n"), None);
+    assert_eq!(wpt_input_rev("nothing here\n"), None);
+    assert_eq!(
+        wpt_input_rev("url = \"github:web-platform-tests/wpt/master\";\n"),
+        None
+    );
+    assert_eq!(
+        wpt_input_rev("url = \"github:web-platform-tests/wpt/e053afbb\";\n"),
+        None
+    );
 }
 
 /// Every `packages/*/dist` bundle a crate embeds with `include_str!` must be

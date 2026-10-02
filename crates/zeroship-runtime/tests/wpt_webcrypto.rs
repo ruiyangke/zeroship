@@ -1,6 +1,7 @@
 //! Run the W3C Web Platform Tests for WebCryptoAPI against the native
 //! impl. Source: https://github.com/web-platform-tests/wpt/tree/master/WebCryptoAPI.
-//! Files are vendored under `crates/runtime/tests/wpt/WebCryptoAPI/`.
+//! Files live in the pinned WPT tree the development shell links under
+//! `crates/zeroship-runtime/tests/wpt/WebCryptoAPI/`.
 //!
 //! Each WPT file is run in a fresh V8 isolate with:
 //!   1. Native Crypto / SubtleCrypto / CryptoKey installed.

@@ -1,6 +1,7 @@
 //! WPT runner for `streams/piping/`.
 //! Source: https://github.com/web-platform-tests/wpt
-//! Files vendored under `crates/runtime/tests/wpt/streams/piping/`.
+//! Files live in the pinned WPT tree the development shell links under
+//! `crates/zeroship-runtime/tests/wpt/streams/piping/`.
 //!
 //! Mirrors `wpt_streams_transform.rs` shape. Per-file isolate, per-test
 //! pass/fail/skip classification.

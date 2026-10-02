@@ -2,7 +2,8 @@
 //! the native impl.
 //!
 //! Source: https://github.com/web-platform-tests/wpt/tree/master/dom/events
-//! Files are vendored at `crates/runtime/tests/wpt/dom/events/` (sparse-checkout).
+//! Files live in the pinned WPT tree the development shell links at
+//! `crates/zeroship-runtime/tests/wpt/dom/events/`.
 //!
 //! Mirrors `wpt_headers.rs` — minimal testharness.js shim, fresh V8
 //! isolate per file, per-test pass/fail. The Rust `#[test]` fails iff

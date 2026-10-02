@@ -4,14 +4,12 @@ Get a working zeroship stack on your machine. Build the JS SDKs first, then the 
 
 ## Prerequisites
 
-- Rust toolchain
-- Node.js 20+
-- `pnpm` 9+
+- Nix, for the `nix develop` shell that provides the Rust toolchain, Node.js,
+  pnpm, `xtask` and the Playwright browsers
 - PostgreSQL running locally if you run the control plane, full platform, or
   Postgres-backed tests
-- Docker only if you want the compose stack
-- Nix for the Playwright browser suites, which run inside `nix develop`, and
-  for `cargo xtask test playwright-browsers`
+- Docker for the compose stack and for the tests that own containers; it stays a
+  host service rather than a shell entry
 
 ## First-time bootstrap
 

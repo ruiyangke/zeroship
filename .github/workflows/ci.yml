@@ -8,9 +8,11 @@ on: [push, pull_request]
 # `curl.dev`. Anything that builds the workspace needs those inputs, which is why
 # every job opts in instead of only the Rust steps.
 #
-# pnpm comes from the devShell as well. It is a devShell entry, so it is first on
-# PATH, and pnpm then switches itself to the `package.json#packageManager`
-# version, which is what keeps that field the pin CI runs.
+# Node.js and pnpm come from the devShell as well. pnpm is a devShell entry, so
+# it is first on PATH, and pnpm then switches itself to the
+# `package.json#packageManager` version, which is what keeps that field the pin
+# CI runs. Docker is the one tool the flake does not carry: it stays a host
+# service, and the jobs that own containers use the runner's daemon.
 
 defaults:
   run:
@@ -28,9 +30,6 @@ jobs:
       # gitignored, so a fresh checkout has neither. The root `build` script is the
       # one definition of the package build order: the schema leaf comes before
       # the migration DSL and the DB SDK that inline it.
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
       # This is the no-hoist condition the gate must survive. Prove the root
@@ -85,42 +84,12 @@ jobs:
       # addon exports its registrar.
       - name: napi addon symbol shape
         run: cargo test --locked -p zeroship-migrate-node --test shipped_symbol_shape
-      # WPT BEFORE `cargo test`, for the reason the JavaScript packages are
-      # built before any cargo command above: a test target `include_str!`s a
-      # gitignored tree that a fresh checkout does not have.
-      #
       # crates/zeroship-runtime declares a `wpt` test target whose modules
-      # `include_str!` crates/zeroship-runtime/tests/wpt/. That directory is
-      # fetched on demand by setup-wpt.sh and is in .gitignore, so no ref
-      # carries it. rust-cache restores ~/.cargo and target/, not source trees.
+      # `include_str!` crates/zeroship-runtime/tests/wpt/. The development shell
+      # links its pinned `wpt` flake input there (flake.nix shellHook), so the
+      # directory exists before `cargo test` runs and no fetch step or cache
+      # entry is needed here. Nix resolves the tree from flake.lock.
       #
-      # With the directory absent, `cargo test --workspace --no-run` fails on
-      # `couldn't read crates/zeroship-runtime/tests/wpt/...` and builds no test
-      # binary for the crate, so no cargo test step in this job can run.
-      # `cargo check --workspace` above does NOT catch this, because without
-      # --all-targets it never looks at a test target.
-      #
-      # Cached on the pin, so the WPT working tree is fetched when the pin
-      # moves and not once per run. setup-wpt.sh is idempotent: given an
-      # existing clone it fetches the pin and resets, which is what makes a
-      # restored cache safe rather than merely fast.
-      - name: Pin the WPT commit for the cache key
-        id: wpt-pin
-        run: |
-          set -o pipefail
-          pin=$(grep -oP 'WPT_COMMIT="\$\{WPT_COMMIT:-\K[0-9a-f]{40}' \
-            crates/zeroship-runtime/tests/setup-wpt.sh)
-          if [ -z "$pin" ]; then
-            echo "::error::could not read the WPT pin out of setup-wpt.sh; the cache key would be a constant and would serve a stale tree forever"
-            exit 1
-          fi
-          echo "pin=$pin" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@v4
-        with:
-          path: crates/zeroship-runtime/tests/wpt
-          key: wpt-${{ steps.wpt-pin.outputs.pin }}
-      - name: Fetch the WPT tree the runtime test target include_str!s
-        run: ./crates/zeroship-runtime/tests/setup-wpt.sh
       # PROVISION BEFORE TESTING, and this step is what makes the deletion of
       # `ZEROSHIP_REQUIRE_LIVE_BACKENDS` safe here rather than merely correct.
       #
@@ -293,9 +262,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/nix-toolchain
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
       - name: Run billing tests with owned services
@@ -307,9 +273,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/nix-toolchain
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
       - name: Run native auth tests with owned services
@@ -322,9 +285,6 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/nix-toolchain
       # Build the SDK modules embedded by the V8 runtime.
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
       - name: Run native data tests with owned PostgreSQL
@@ -342,9 +302,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/nix-toolchain
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
       - name: Run native worker tests with owned services
@@ -359,9 +316,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/nix-toolchain
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
       - run: pnpm install --frozen-lockfile
       # The checks below resolve workspace packages through their built types:
       # @zeroship/migrate's `check` reads @zeroship/schema's.

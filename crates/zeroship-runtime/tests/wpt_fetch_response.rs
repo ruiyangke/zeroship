@@ -1,7 +1,8 @@
 //! Run W3C Web Platform Tests for `Response` against the native impl.
 //!
 //! Source: https://github.com/web-platform-tests/wpt/tree/master/fetch/api/response
-//! Files vendored at `crates/runtime/tests/wpt/fetch/api/response/`.
+//! Files live in the pinned WPT tree the development shell links at
+//! `crates/zeroship-runtime/tests/wpt/fetch/api/response/`.
 //!
 //! Mirrors the `wpt_fetch_request.rs` pattern: minimal testharness.js
 //! shim, per-file V8 isolate, per-test pass/fail/skip. The Rust

@@ -37,7 +37,8 @@
     "root": {
       "inputs": {
         "flake-utils": "flake-utils",
-        "nixpkgs": "nixpkgs"
+        "nixpkgs": "nixpkgs",
+        "wpt": "wpt"
       }
     },
     "systems": {
@@ -52,6 +53,23 @@
       "original": {
         "owner": "nix-systems",
         "repo": "default",
+        "type": "github"
+      }
+    },
+    "wpt": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1777652841,
+        "narHash": "sha256-B8OTbn++mvzkTqq/aduHlWCIfSpPXMcflAOX06c3AKc=",
+        "owner": "web-platform-tests",
+        "repo": "wpt",
+        "rev": "e053afbbd005bed4b6100f98f0de744da8d1d09d",
+        "type": "github"
+      },
+      "original": {
+        "owner": "web-platform-tests",
+        "repo": "wpt",
+        "rev": "e053afbbd005bed4b6100f98f0de744da8d1d09d",
         "type": "github"
       }
     }

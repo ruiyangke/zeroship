@@ -1,6 +1,7 @@
 //! WPT runner for `encoding/streams/`.
 //! Source: https://github.com/web-platform-tests/wpt
-//! Files vendored under `crates/runtime/tests/wpt/encoding/streams/`.
+//! Files live in the pinned WPT tree the development shell links under
+//! `crates/zeroship-runtime/tests/wpt/encoding/streams/`.
 //!
 //! Targets the native TextEncoderStream / TextDecoderStream classes
 //! installed by `crate::init::install_text_encoding_streams`. Mirrors

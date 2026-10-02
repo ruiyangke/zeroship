@@ -35,11 +35,13 @@ the full stance.
 
 ## Development
 
-Prerequisites: a stable Rust toolchain, plus Node.js and pnpm at the versions
-declared by `package.json`. Live database and end-to-end suites use the services
-and ports declared by `deploy/compose/docker-compose.yml`; Docker is required.
-The Playwright browser suites and `cargo xtask test playwright-browsers` also
-need Nix: the suites run inside `nix develop`, and the check reads `flake.nix`
+Prerequisites: Docker, which stays a host service. Live database and end-to-end
+suites use the services and ports declared by
+`deploy/compose/docker-compose.yml`. Everything else comes from the `flake.nix`
+development shell: the Rust toolchain (`rustc`, `cargo`, `clippy`, `rustfmt`,
+`cargo-nextest`), Node.js and pnpm at the versions declared by `package.json`,
+the `xtask` command, and the browsers the Playwright suites launch. Enter it with
+`nix develop`. `cargo xtask test playwright-browsers` reads `flake.nix` directly
 (`xtask/README.md` lists what it needs).
 
 **Build the JavaScript packages before the Rust workspace.** The data V8 crate
@@ -85,12 +87,11 @@ under their example directory. Repository test commands and CI invoke those
 local entry points. Keep example-specific acceptance logic out of shared test
 helpers and platform crate test suites.
 
-Web Platform Tests (only when you touch the runtime's web surface) are fetched on
-demand and are not tracked in git:
-
-```
-./crates/zeroship-runtime/tests/setup-wpt.sh
-```
+Web Platform Tests (only when you touch the runtime's web surface) come from the
+development shell's pinned `wpt` flake input, which the shell links at
+`crates/zeroship-runtime/tests/wpt` (see `flake.nix`). Enter `nix develop` before
+running that target; the tree is not tracked in git and nothing is fetched into
+the checkout.
 
 The native auth suite builds the platform migration host and runs the complete
 auth, authn, authz, mailer and gateway packages. Tests own their PostgreSQL,

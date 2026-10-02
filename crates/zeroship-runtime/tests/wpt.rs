@@ -5,13 +5,12 @@
 //! `tests/main.rs` (see its header for the measurement), and kept OUT of
 //! `main.rs` for one reason:
 //!
-//! every module here `include_str!`s files under `tests/wpt/`, which is not
-//! tracked in git. `tests/setup-wpt.sh` shallow-clones a pinned WPT commit
-//! (~930 MB working tree) on demand and `.gitignore` keeps it out of the
-//! index. On a checkout that has not run that script these modules do not
-//! COMPILE - `include_str!` fails at macro expansion, not at run time. Folding
-//! them into `main.rs` would mean a fresh clone could not build a single
-//! runtime integration test. Here it means it cannot build this one target.
+//! every module here `include_str!`s files under `tests/wpt/`, which the
+//! development shell links from its pinned `wpt` flake input and does not track
+//! in git. On a checkout outside that shell these modules do not COMPILE -
+//! `include_str!` fails at macro expansion, not at run time. Folding them into
+//! `main.rs` would mean a checkout could not build a single runtime integration
+//! test. Here it means it cannot build this one target.
 //!
 //! WHAT THIS DOES NOT PROTECT AGAINST
 //! ----------------------------------

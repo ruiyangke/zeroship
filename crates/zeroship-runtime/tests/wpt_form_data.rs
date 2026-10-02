@@ -1,8 +1,8 @@
 //! Run W3C Web Platform Tests for `FormData` against the native impl.
 //!
 //! Source: https://github.com/web-platform-tests/wpt/tree/master/xhr/formdata
-//! Files are vendored at `crates/runtime/tests/wpt/xhr/formdata/` (sparse-checkout
-//! includes `/xhr/formdata/`).
+//! Files live in the pinned WPT tree the development shell links at
+//! `crates/zeroship-runtime/tests/wpt/xhr/formdata/`.
 //!
 //! Mirrors `wpt_event_target.rs` / `wpt_headers.rs`: minimal
 //! testharness.js shim, fresh V8 isolate per file, per-test pass/fail.

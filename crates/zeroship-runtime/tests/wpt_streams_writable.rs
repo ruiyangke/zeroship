@@ -1,6 +1,7 @@
 //! WPT runner for `streams/writable-streams/`.
 //! Source: https://github.com/web-platform-tests/wpt
-//! Files vendored under `crates/runtime/tests/wpt/streams/writable-streams/`.
+//! Files live in the pinned WPT tree the development shell links under
+//! `crates/zeroship-runtime/tests/wpt/streams/writable-streams/`.
 //!
 //! Mirrors `wpt_streams_readable.rs`. Per-file isolate, per-test
 //! pass/fail/skip classification.

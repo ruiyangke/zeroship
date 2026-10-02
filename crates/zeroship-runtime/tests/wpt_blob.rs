@@ -1,7 +1,7 @@
 //! Run the W3C Web Platform Tests for `Blob` and `File` against the
 //! native impl. Source: https://github.com/web-platform-tests/wpt
-//! (FileAPI/blob and FileAPI/file). Files are vendored under
-//! `crates/runtime/tests/wpt/FileAPI/`.
+//! (FileAPI/blob and FileAPI/file). Files live in the pinned WPT tree the
+//! development shell links under `crates/zeroship-runtime/tests/wpt/FileAPI/`.
 //!
 //! Pattern mirrors `wpt_headers.rs` — minimal testharness.js shim,
 //! one V8 isolate per file, per-test pass/skip/fail tally. The Rust
@@ -470,9 +470,8 @@ impl Totals {
     }
 }
 
-/// Minimum pass-rate threshold across the suite. Tests below this
-/// indicate a regression. Set conservatively — the implementation
-/// targets ≥85% on the vendored files.
+/// Minimum pass rate across the suite. A run below it is a regression; the
+/// threshold is set conservatively below what the implementation passes.
 const MIN_PASS_RATE: f64 = 0.85;
 
 #[test]

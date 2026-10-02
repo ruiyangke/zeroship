@@ -1,6 +1,7 @@
 //! Run the W3C Web Platform Tests for TextEncoder/TextDecoder against
 //! our native impl. Source: https://github.com/web-platform-tests/wpt
-//! (encoding/ subdirectory). Files are vendored under `crates/runtime/tests/wpt/`.
+//! (encoding/ subdirectory). Files live in the pinned WPT tree the development shell links under
+//! `crates/zeroship-runtime/tests/wpt/`.
 //!
 //! Each WPT file uses the testharness.js framework — `test(fn, name)`,
 //! `assert_equals`, `assert_array_equals`, etc. We provide a minimal

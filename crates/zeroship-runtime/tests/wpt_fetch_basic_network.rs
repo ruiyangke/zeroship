@@ -3,7 +3,7 @@
 //! WPT's `basic/` directory tests fetch behaviour against the Python
 //! testserver. We re-create the relevant scenarios in-process via a
 //! flexible TCP server and run the algorithm chain
-//! (`crates/runtime/src/fetch_native/`) directly. The runner does not
+//! (`crates/zeroship-runtime/src/web/fetch/`) directly. The runner does not
 //! load testharness.js — instead it mirrors the spec coverage WPT
 //! exercises.
 //!
