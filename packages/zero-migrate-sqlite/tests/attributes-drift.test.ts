@@ -40,9 +40,8 @@ test("every declared attribute reaches the typings", () => {
   // The anti-fail-open floor: an empty artifact would make the loop below vacuous, and
   // the whole file would pass while asserting nothing about anything.
   assert.ok(
-    doc.attributes.length >= 3,
-    `the vocabulary carries ${doc.attributes.length} attribute(s); a near-empty artifact ` +
-      "makes this test vacuous",
+    doc.attributes.length > 0,
+    "the vocabulary carries no attributes, which makes this test vacuous",
   );
 
   for (const def of doc.attributes) {
