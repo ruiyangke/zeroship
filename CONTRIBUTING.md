@@ -74,6 +74,20 @@ tree-wide reformat plus a CI step, landed when nothing else is in flight.
 Per-crate iteration is faster; run the full per-crate suite (not just `--lib`) for the
 crate you touched, e.g. `cargo test -p zeroship-gateway`.
 
+Coverage-guided fuzzing for the `compio-postgres` wire decoders lives in
+`libs/compio-postgres/fuzz` (a cargo-fuzz crate, excluded from the Cargo
+workspace). Run a target from the crate root through the flake's `fuzz` shell,
+which carries the nightly toolchain the sanitizer needs:
+
+```
+nix develop .#fuzz --command bash -c \
+  'cd libs/compio-postgres && cargo fuzz run pgoutput -- -max_total_time=120'
+```
+
+The `backend_message` target drives the backend frame decoder and `pgoutput`
+the logical-replication payload decoder. A panic or hang is a decoder bug; a
+decoding error on arbitrary bytes is not.
+
 JavaScript:
 
 ```

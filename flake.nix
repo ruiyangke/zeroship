@@ -4,6 +4,13 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
     flake-utils.url = "github:numtide/flake-utils";
+    # Nightly Rust for cargo-fuzz's `-Zsanitizer`. Applied only to the `fuzz`
+    # development shell below, so the default shell keeps the nixpkgs stable
+    # toolchain. `follows` pins the overlay's nixpkgs to this flake's.
+    rust-overlay = {
+      url = "github:oxalica/rust-overlay";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
     # Web Platform Tests, pinned to one upstream commit. The runtime's `wpt`
     # test target `include_str!`s a WPT checkout under
     # `crates/zeroship-runtime/tests/wpt`, which is gitignored and has no
@@ -17,11 +24,21 @@
     };
   };
 
-  outputs = { self, nixpkgs, flake-utils, wpt }:
+  outputs = { self, nixpkgs, flake-utils, rust-overlay, wpt }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
         inherit (pkgs) lib stdenv;
+
+        # cargo-fuzz needs a nightly compiler for `-Zsanitizer=address`, which
+        # stable cannot accept. The overlay is applied to its OWN package set so
+        # the default shell's `rustc`/`cargo` stay exactly the nixpkgs stable
+        # versions. The date pins the toolchain; `rust-src` and `llvm-tools` are
+        # the components cargo-fuzz's sanitizer build reads.
+        fuzzPkgs = pkgs.extend rust-overlay.overlays.default;
+        fuzzToolchain = fuzzPkgs.rust-bin.nightly."2026-10-02".default.override {
+          extensions = [ "rust-src" "llvm-tools" ];
+        };
 
         # bindgen (libsqlite3-sys, pg_query, v8) drives libclang directly, so
         # the cc wrapper's flags never reach it: name the system headers here.
@@ -130,6 +147,43 @@
               ln -s -- "$target" "$link"
             )
           '';
+        };
+
+        # Fuzzing only. Nowhere else may take the nightly toolchain: the
+        # sanitizer it exists for is a cargo-fuzz build detail, and the shipped
+        # workspace keeps the stable shell. Run a target from the crate root:
+        #
+        #   nix develop .#fuzz --command \
+        #     cargo fuzz run backend_message -- -max_total_time=60
+        devShells.fuzz = fuzzPkgs.mkShell {
+          buildInputs = with fuzzPkgs; [
+            fuzzToolchain
+            cargo-fuzz
+            # libfuzzer-sys compiles the bundled runtime with a C++ compiler,
+            # and the sanitizer link needs this LLVM.
+            llvmPackages.clang
+            llvmPackages.libclang
+
+            # The crate under test builds with the same native inputs as the
+            # default shell.
+            cmake
+            pkg-config
+            openssl
+            curl.dev
+            git
+            which
+            zstd
+          ];
+
+          RUST_BACKTRACE = "1";
+          LIBCLANG_PATH = "${fuzzPkgs.llvmPackages.libclang.lib}/lib";
+          # LeakSanitizer suspends threads through ptrace, which the kernel
+          # refuses to a process that is not the tracer when
+          # kernel.yama.ptrace_scope is 2: it aborts at exit with "fatal error"
+          # on a run that otherwise completed. These targets exist for panics
+          # and hangs, so leak detection is off rather than reporting the
+          # sandbox's ptrace policy as a decoder crash.
+          ASAN_OPTIONS = "detect_leaks=0";
         };
       });
 }

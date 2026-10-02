@@ -106,6 +106,90 @@ pub(crate) fn paired_loopback_port() -> u16 {
     panic!("no port free on both 127.0.0.1 and 127.0.0.2 after 64 attempts: {last:?}");
 }
 
+/// An in-memory `ReadFramer` over one fixed byte slice, so the connection's
+/// frame decoder can be driven with no socket.
+struct WireFramer {
+    buffer: BytesMut,
+    max_message_size: usize,
+}
+
+impl WireFramer {
+    fn new(bytes: &[u8]) -> Self {
+        Self {
+            buffer: BytesMut::from(bytes),
+            max_message_size: crate::buf_stream::DEFAULT_MAX_MESSAGE_SIZE,
+        }
+    }
+}
+
+impl crate::buf_stream::ReadFramer for WireFramer {
+    async fn fill(&mut self, min_bytes: usize) -> Result<(), Error> {
+        if self.buffer.len() >= min_bytes {
+            Ok(())
+        } else {
+            // The input is all there is: asking for more is the shortest
+            // possible read, which the decoder handles as EOF.
+            Err(Error::io(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "fuzz input exhausted",
+            )))
+        }
+    }
+
+    fn buf(&mut self) -> &mut BytesMut {
+        &mut self.buffer
+    }
+
+    fn peek_u32_be(&self, offset: usize) -> Option<u32> {
+        let end = offset.checked_add(4)?;
+        let slice = self.buffer.get(offset..end)?;
+        Some(u32::from_be_bytes([slice[0], slice[1], slice[2], slice[3]]))
+    }
+
+    fn validate_length(&self, length: u32) -> Result<(), Error> {
+        let total = 1u64 + u64::from(length);
+        if total > self.max_message_size as u64 {
+            return Err(Error::io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "fuzz message over the connection ceiling",
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// Drive the backend wire-protocol decoder over arbitrary bytes without a
+/// socket, through the same entry the connection loop uses: `read_backend`
+/// applies the per-frame length ceiling, the startup-tag limits, the
+/// ReadyForQuery and COPY validators, and only then hands complete frames to
+/// the message parser.
+///
+/// `#[doc(hidden)]` because it is not API. The cargo-fuzz targets call it so
+/// the decoder can be fuzzed on untrusted input from the server. A panic here
+/// is a real finding; decoding errors are expected and discarded.
+#[doc(hidden)]
+pub fn decode_backend_frames(bytes: &[u8]) {
+    let mut framer = WireFramer::new(bytes);
+    while let Ok(_message) = block_on(crate::codec::read_backend(&mut framer)) {}
+}
+
+/// Poll a future that never yields on this thread to completion using a no-op
+/// waker. `read_backend`'s only await is `ReadFramer::fill`, and `WireFramer`
+/// answers every fill without suspending, so the future is always ready on the
+/// first poll.
+fn block_on<F: std::future::Future>(future: F) -> F::Output {
+    use std::task::{Context, Poll, Waker};
+    let mut future = std::pin::pin!(future);
+    let waker = Waker::noop();
+    let mut context = Context::from_waker(waker);
+    match future.as_mut().poll(&mut context) {
+        Poll::Ready(output) => output,
+        // Unreachable by construction above. Panicking rather than spinning
+        // keeps a future that did suspend a loud failure, not a fuzz hang.
+        Poll::Pending => panic!("WireFramer::fill suspended"),
+    }
+}
+
 /// Construct a [`Column`] for tests. Mirrors the `pub(crate)` field
 /// layout used internally; `table_oid` / `column_id` default to `None`
 /// (the values Postgres sends for an ad-hoc expression with no

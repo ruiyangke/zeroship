@@ -1,0 +1,29 @@
+[package]
+name = "compio-postgres-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+compio-postgres = { path = ".." }
+
+[[bin]]
+name = "backend_message"
+path = "fuzz_targets/backend_message.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pgoutput"
+path = "fuzz_targets/pgoutput.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]
