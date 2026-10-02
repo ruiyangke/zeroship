@@ -16,10 +16,11 @@ the full stance.
 
 - `crates/` - the Rust workspace: platform services and the runtime kernel
   (`gateway`, `runtime`, `runtime-macros`, `control`, `worker`, `auth`/`authn`/`authz`,
-  `plugin-{db,kv,storage,workflow}`, `workflow-scheduler`, `metering`, `stream`,
-  `bundle`, `core`, `mailer`, `cli`, and the migration crates
-  `migrated`/`zeroship-migrate-adapter`/`zeroship-schema`). Run `ls crates/` rather
-  than trusting this list; a prose inventory has nothing that fails when it rots.
+  the `kv`/`storage`/`workflow` families with their V8 bindings, `data-orm`/`data-v8`,
+  `metering`, `stream`, `bundle`, `core`, `mailer`, `cli`, and the migration crates
+  `migrate`, `migrate-core`/`migrate-backend`/`migrate-ir`, `migrate-server` and the
+  per-dialect backends). Run `ls crates/` rather than trusting this list; a prose
+  inventory has nothing that fails when it rots.
 - `libs/` - standalone, zeroship-independent driver libraries: `compio-postgres`,
   `compio-redis`, `compio-s3`. Publishable on their own.
 - `packages/` - the npm workspace packages: the `@zeroship/*` SDKs and the
@@ -31,7 +32,6 @@ the full stance.
   `verdaccio/`, `policies/` (Cedar), `scripts/`.
 - `examples/` - creator-app demos. `tests/` - end-to-end shell suites.
 - `docs/` - architecture, reference contracts, decisions (ADRs), proposals, runbooks.
-- `third_party/zero-migrate` - the vendored migration engine (a git submodule).
 
 ## Development
 
@@ -41,12 +41,6 @@ and ports declared by `deploy/compose/docker-compose.yml`; Docker is required.
 The Playwright browser suites and `cargo xtask test playwright-browsers` also
 need Nix: the suites run inside `nix develop`, and the check reads `flake.nix`
 (`xtask/README.md` lists what it needs).
-
-**First, initialize the submodule** - the workspace won't resolve without it:
-
-```
-git submodule update --init third_party/zero-migrate
-```
 
 **Build the JavaScript packages before the Rust workspace.** The data V8 crate
 embeds `crates/zeroship-data-v8/dist/adapter.js`, so `pnpm build` must run before
@@ -71,18 +65,12 @@ sets lint severity. Preserve those levels; a blanket `-D warnings` would turn
 intentionally warning-level groups into errors. A failed Cargo command means
 the lint run failed; fix the errors and rerun it.
 
-**There is no `cargo fmt` gate.** CI runs no formatting step, and the tree does
-not currently satisfy `cargo fmt --all -- --check` - it reports diffs in 888
-files (measured 2026-08-23 under the `nix develop` toolchain, and confirmed with
-the newer rustfmt in the same store). This block used to list that command and
-say the block mirrored CI; both halves were false, which is worse than saying
-nothing: a checklist whose gate cannot pass trains you to read red as normal.
-If you want formatting enforced, that is a one-off tree-wide reformat plus a CI
-step, and it wants to land when nothing else is in flight.
+**There is no `cargo fmt` gate.** CI runs no formatting step and the tree is not
+rustfmt-clean, so `cargo fmt --all -- --check` fails. Enforcing it is a one-off
+tree-wide reformat plus a CI step, landed when nothing else is in flight.
 
 Per-crate iteration is faster; run the full per-crate suite (not just `--lib`) for the
-crate you touched, e.g. `cargo test -p zeroship-gateway`. Driver tests that need a live
-database run single-threaded, e.g. `cargo test -p compio-postgres -- --test-threads=1`.
+crate you touched, e.g. `cargo test -p zeroship-gateway`.
 
 JavaScript:
 

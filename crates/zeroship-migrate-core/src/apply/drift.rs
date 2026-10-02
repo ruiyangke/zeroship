@@ -608,7 +608,7 @@ fn format_generated_kind(kind: GeneratedKindSnapshot) -> &'static str {
 ///   for the same reason.
 ///
 /// PRESENCE IS NOT SKIPPED. When one side reduces to [`IdDefaultSnapshot::Absent`],
-/// the other side's spelling no longer matters: an `Expression` against `Absent` is a
+/// the other side's spelling does not matter: an `Expression` against `Absent` is a
 /// different answer to "what does a write that names no value store", whatever the
 /// expression's text. This is the rule [`effective_index_predicate`] keeps for an
 /// index that loses its predicate. It is sound because `Absent` is a reduction, not a

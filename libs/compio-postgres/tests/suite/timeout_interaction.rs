@@ -1018,7 +1018,7 @@ async fn a_warm_up_slower_than_the_checkout_budget_still_constructs_the_pool() {
         let pool_config = pool_config(None, CHECKOUT_BUDGET);
         assert!(
             pool_config.get_warm_up_timeout() > SLOW_HANDSHAKE,
-            "the default warm-up budget is no longer than the scripted handshake, so \
+            "the default warm-up budget does not exceed the scripted handshake, so \
              this test cannot tell the budgets apart"
         );
         let started = Instant::now();
