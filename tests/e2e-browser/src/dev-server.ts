@@ -20,6 +20,7 @@ import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { demoDir, missingRequirements, REPO_ROOT, type Demo } from "./demos.js";
+import { zeroshipBin } from "./zeroship-bin.js";
 
 const BOOT_TIMEOUT_MS = Number(process.env.ZEROSHIP_E2E_BOOT_TIMEOUT_MS ?? 90_000);
 const CRASH_LOOP_THRESHOLD = 3;
@@ -111,7 +112,7 @@ export async function startDemo(demo: Demo): Promise<RunningDemo> {
     ...(demo.requires.includes("DATABASE_URL")
       ? {}
       : { DATABASE_URL: `sqlite:${resolve(stateDir, "dev.sqlite")}` }),
-    ZEROSHIP_BIN: process.env.ZEROSHIP_BIN ?? resolve(REPO_ROOT, "target/release/zeroship"),
+    ZEROSHIP_BIN: process.env.ZEROSHIP_BIN ?? zeroshipBin(),
     // Keep vite from stealing a neighbouring port when ours is taken: we want a
     // loud bind failure, not a silent move to a port nobody is watching.
     FORCE_COLOR: "0",

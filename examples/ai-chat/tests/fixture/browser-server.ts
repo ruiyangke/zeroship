@@ -12,6 +12,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { APP_ORIGIN, GATE_ORIGIN, STUB_API_BASE, STUB_API_KEY, STUB_ORIGIN } from "./settings.ts";
 import { startProviderStub } from "./provider-stub.ts";
+import { buildZeroshipBin } from "./zeroship-cli.ts";
 
 const appRoot = fileURLToPath(new URL("../..", import.meta.url));
 const stubUrl = new URL(STUB_ORIGIN);
@@ -43,10 +44,16 @@ function stop(code: number): void {
 process.on("SIGTERM", () => stop(0));
 process.on("SIGINT", () => stop(0));
 
+// The vite-plugin runs the binary ZEROSHIP_BIN names, so the suite names one
+// it built from this tree instead of inheriting whatever is on PATH.
+const zeroshipBin = buildZeroshipBin();
+console.log(`[fixture] zeroship CLI at ${zeroshipBin}`);
+
 const child = spawn("pnpm", ["exec", "vite", "--host", "127.0.0.1"], {
   cwd: appRoot,
   env: {
     ...process.env,
+    ZEROSHIP_BIN: zeroshipBin,
     ZS_VAR_OPENAI_BASE_URL: STUB_API_BASE,
     ZS_VAR_OPENAI_API_KEY: STUB_API_KEY,
   },
