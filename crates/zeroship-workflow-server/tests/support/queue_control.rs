@@ -107,6 +107,7 @@ impl Control {
         format!("http://{}/", self.server.addr())
     }
     /// How many app-facts observations this peer has answered.
+    #[allow(dead_code, reason = "the http binary shares this support but counts no app facts")]
     pub fn facts_requests(&self) -> usize {
         self.facts_requests.load(Ordering::SeqCst)
     }

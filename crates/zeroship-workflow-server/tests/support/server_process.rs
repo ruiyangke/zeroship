@@ -60,6 +60,7 @@ impl ServerProcess {
     }
 
     /// How many app-facts observations the Control peer has answered.
+    #[allow(dead_code, reason = "the http binary shares this support but counts no app facts")]
     pub fn control_facts_requests(&self) -> usize {
         self._control.facts_requests()
     }

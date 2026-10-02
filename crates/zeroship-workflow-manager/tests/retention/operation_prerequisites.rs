@@ -79,7 +79,7 @@ async fn journal_jobs(fixture: &Fixture) {
     ] {
         exercise_journal_job(fixture, &queue, operation).await;
     }
-    journal_commands(fixture, &queue).await;
+    journal_commands(&queue).await;
 
     let app = AppId::mint();
     let recovery = Recovery::new(queue.clone(), RecoveryOptions::default()).unwrap();
@@ -148,7 +148,7 @@ async fn exercise_journal_job(fixture: &Fixture, queue: &Queue, operation: JobOp
     assert!(stored.iter().all(|row| row["deployment_id"] == Value::Null));
 }
 
-async fn journal_commands(fixture: &Fixture, queue: &Queue) {
+async fn journal_commands(queue: &Queue) {
     let coordinator = support::coordinator(queue, CoordinatorOptions::default());
     let actor = service_issuer(CONTROL_SERVICE_NAME).unwrap();
     let mut commands: Vec<_> = [
