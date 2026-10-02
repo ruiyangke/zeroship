@@ -5,8 +5,8 @@
  * WHY REPO-LEVEL. The gen-types emitter has generator INPUTS that live in this
  * package (`src/gen-types/confined-ceiling.ts`, `src/gen-types/render-env-db.ts`,
  * the `zeroship-migrate-node` fold). Changing one of them stales EVERY committed
- * artifact in the repo at once — that is exactly what 17cd17b46 did when it
- * added `default = "1"` to the injected `version` column. Only two of those
+ * artifact in the repo at once, as adding `default = "1"` to the injected
+ * `version` column does. Only two of those
  * artifact sets are gated by a test (`test/gen-types/generated-source.test.ts`),
  * so the rest drift silently. A per-app script would just wait for the next
  * input change; this walks them all.
@@ -32,10 +32,9 @@
  * `schema.ts` means the MANUAL source (`genTypesFromSchemaFile`). Neither present
  * is a hard error, not a silent skip.
  *
- * IT READS THE CONFIG NOW, which is the point of `zeroship.jsonc`. Before, this
- * runner REFUSED to run against any app whose vite config mentioned
- * `migrations:` or `genTypesOut` - by regex over the config source text,
- * because there was no machine-readable place to look. See `runOne`.
+ * EACH APP READS ITS OWN FILE. `runOne` reads the `zeroship.jsonc` at the app
+ * root with an empty process environment, so a `ZEROSHIP_CONFIG` set in the
+ * shell cannot redirect the whole walk at one app's file; see `runOne`.
  *
  *   pnpm --filter @zeroship/vite-plugin gen-types:all             # regenerate
  *   pnpm --filter @zeroship/vite-plugin gen-types:all -- --check  # drift gate
@@ -48,7 +47,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, statSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { dirname, join, relative, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
   ENV_DB_FILE,
@@ -118,16 +117,13 @@ function appRootFor(outDir: string, root: string): string {
 
 /** Regenerate (or `--check`) one app's artifacts through the in-process API. */
 async function runOne(app: ArtifactApp, check: boolean): Promise<string> {
-  // The app's own `zeroship.jsonc` when it has one, schema defaults otherwise.
-  //
-  // THIS REPLACES A HARD REFUSAL. `assertNoConfigOverride` used to throw for any
-  // app whose vite config mentioned `migrations:` or `genTypesOut`, detected by
-  // regex over the config SOURCE TEXT, because there was no machine-readable
-  // place to look. That refusal was the clearest single piece of evidence that
-  // `zeroship.jsonc` needed to exist; with the file in place it has nothing
-  // left to protect, and the regex (which would match a comment and miss a
-  // spread) goes with it.
-  const { config } = readProjectConfig(app.root, { processEnv: process.env });
+  // Read THIS app's own `zeroship.jsonc`. The runner is repo-wide and may be
+  // invoked with `ZEROSHIP_CONFIG` set in the shell; that variable names one
+  // config file for a single build, so passing it through would point every app
+  // in the walk at that one file. An empty process environment keeps config
+  // discovery local to `app.root`, so each app's database label, migrations dir
+  // and out dir come from its own file.
+  const { config } = readProjectConfig(app.root, { processEnv: {} });
   // The artifacts were discovered by directory, and a workspace has one
   // directory per DATABASE, so the sources are the ones of the database whose
   // `out` is this directory.
@@ -163,10 +159,8 @@ async function runOne(app: ArtifactApp, check: boolean): Promise<string> {
   );
 }
 
-async function main(): Promise<void> {
-  const check = process.argv.slice(2).includes("--check");
-  const root = repoRoot();
-
+/** Regenerate (or `--check`) every artifact set under `root`. */
+export async function regenerateAll(root: string, check: boolean): Promise<void> {
   const outDirs = (await findArtifactDirs(root)).sort();
   if (outDirs.length === 0) {
     throw new Error(`gen-types-all: found no ${RUNTIME_DESCRIPTOR_FILE} anywhere under ${root}`);
@@ -197,4 +191,11 @@ async function main(): Promise<void> {
   console.log(`[gen-types-all] ${check ? "no drift" : "done"} — ${apps.length} artifact set(s)`);
 }
 
-await main();
+async function main(): Promise<void> {
+  const check = process.argv.slice(2).includes("--check");
+  await regenerateAll(repoRoot(), check);
+}
+
+if (process.argv[1] != null && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  await main();
+}
