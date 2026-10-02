@@ -85,7 +85,7 @@ mod tests {
         let empty = scratch();
         std::fs::create_dir_all(empty.path().join(MIGRATIONS_DIR)).unwrap();
         let err = of_dir(empty.path()).unwrap_err();
-        assert!(err.contains("holds no *.ts migrations"), "{err}");
+        assert!(err.contains("holds no migrations"), "{err}");
 
         let nodir = scratch();
         let err = of_dir(nodir.path()).unwrap_err();
@@ -169,10 +169,16 @@ mod tests {
         // set that the real repository does not have. The space matters: the
         // git side splits its listing on the TAB rather than on whitespace
         // precisely so a path with a space survives, and nothing tested it.
+        // The `.mts` and `.d.ts` names hold both sides to the CLI's filter.
         let repo = scratch();
         tree(
             repo.path(),
-            &[("20260101_one.ts", "one"), ("20260202 two.ts", "two")],
+            &[
+                ("20260101_one.ts", "one"),
+                ("20260202 two.ts", "two"),
+                ("20260303_three.mts", "three"),
+                ("20260404_four.d.ts", "declaration"),
+            ],
         );
         init_repo(repo.path());
         let from_ref = of_ref(repo.path(), &write_tree(repo.path())).expect("a tree");
@@ -217,9 +223,9 @@ mod tests {
     }
 
     #[test]
-    fn a_non_ts_file_is_not_part_of_the_set() {
-        // `discover_ts_files` takes `*.ts` only, so a README dropped in the
-        // directory must not change which database the branch lands in.
+    fn a_file_outside_the_module_extensions_is_not_part_of_the_set() {
+        // `discover` admits only the six module extensions, so a README dropped
+        // in the directory must not change which database the branch lands in.
         let (a, b) = (scratch(), scratch());
         tree(a.path(), &[("20260101_one.ts", "one")]);
         tree(
@@ -227,5 +233,82 @@ mod tests {
             &[("20260101_one.ts", "one"), ("README.md", "hello")],
         );
         assert_eq!(of_dir(a.path()).unwrap(), of_dir(b.path()).unwrap());
+    }
+
+    /// The exact set `discover` selects, in `discover`'s order.
+    ///
+    /// The CLI admits six extensions and excludes only `.d.ts`, so a `.mts` or
+    /// `.js` migration applies while a fingerprint that read only `.ts` would
+    /// never see it move. This is that pair's input.
+    #[test]
+    fn the_selected_set_is_the_cli_discovery_set_in_cli_order() {
+        let root = scratch();
+        tree(
+            root.path(),
+            &[
+                ("a.ts", "a"),
+                ("b.mts", "b"),
+                ("c.js", "c"),
+                ("d.d.ts", "declaration"),
+            ],
+        );
+
+        let names: Vec<String> = files_in(root.path())
+            .unwrap()
+            .iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["a.ts", "b.mts", "c.js"]);
+    }
+
+    /// The fingerprint moves for every extension an apply runs, and for nothing
+    /// the apply skips.
+    #[test]
+    fn the_fingerprint_follows_every_extension_the_cli_applies_and_no_declaration() {
+        let base = scratch();
+        tree(
+            base.path(),
+            &[
+                ("a.ts", "a"),
+                ("b.mts", "b"),
+                ("c.js", "c"),
+                ("d.d.ts", "one"),
+            ],
+        );
+        let fingerprint = of_dir(base.path()).unwrap();
+
+        // `.mts` is in the applied set, so editing it is a schema change.
+        let edited = scratch();
+        tree(
+            edited.path(),
+            &[
+                ("a.ts", "a"),
+                ("b.mts", "b, changed"),
+                ("c.js", "c"),
+                ("d.d.ts", "one"),
+            ],
+        );
+        assert_ne!(
+            fingerprint,
+            of_dir(edited.path()).unwrap(),
+            "an edited .mts migration"
+        );
+
+        // `.d.ts` is not in the applied set, so editing it is not.
+        let declaration = scratch();
+        tree(
+            declaration.path(),
+            &[
+                ("a.ts", "a"),
+                ("b.mts", "b"),
+                ("c.js", "c"),
+                ("d.d.ts", "two"),
+            ],
+        );
+        assert_eq!(
+            fingerprint,
+            of_dir(declaration.path()).unwrap(),
+            "a changed declaration file"
+        );
     }
 }

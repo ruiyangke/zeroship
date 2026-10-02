@@ -40,13 +40,28 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// The set hashed is `*.ts` in this directory, ordered by filename. The
-/// platform runner (`discover` in `packages/zero-migrate-cli/src/cli.ts`)
-/// selects by a different rule - it also admits `.mts`, `.cts`, `.js`, `.mjs`
-/// and `.cjs`, and skips `.d.ts` - and this directory holds only `.ts`
-/// migrations, so the two sets agree; a migration added under another
-/// extension would apply without moving this hash.
+/// The directory holding the platform migration set.
+///
+/// The set is the one `discover` in `packages/zero-migrate-cli/src/cli.ts`
+/// selects: every file named `*.{ts,mts,cts,js,mjs,cjs}` (case-insensitively)
+/// except `*.d.ts`, ordered by filename. [`files_in`] and [`of_ref`] apply that
+/// same rule, so a migration written under any of the six extensions moves the
+/// hash the same way it moves the set an apply runs.
 pub const MIGRATIONS_DIR: &str = "db/migrations-ts";
+
+/// Whether `name` is a file `discover` admits, to the letter of its filter.
+///
+/// One of the six module extensions, case-insensitively, and not `.d.ts`. The
+/// CLI's exclusion pattern is only `\.d\.ts$`, so a `.d.mts` or `.d.cts` passes
+/// its filter and passes this one too; skipping more here would fingerprint a
+/// smaller corpus than an apply runs.
+fn is_migration_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    [".ts", ".mts", ".cts", ".js", ".mjs", ".cjs"]
+        .iter()
+        .any(|extension| lower.ends_with(extension))
+        && !lower.ends_with(".d.ts")
+}
 
 /// The migration files a working tree would apply, by basename.
 ///
@@ -55,9 +70,8 @@ pub const MIGRATIONS_DIR: &str = "db/migrations-ts";
 /// have to agree on membership or the two answers describe different corpora,
 /// so the selection rule lives here and neither caller restates it.
 ///
-/// Order is the directory's, not sorted: [`of_dir`] sorts the digest lines it
-/// builds and the ledger check only needs the cardinality. A caller that needs
-/// an order must impose one.
+/// The order is `discover`'s: filenames sorted, the migration order contract
+/// the CLI applies in.
 pub fn files_in(root: &Path) -> Result<Vec<PathBuf>, String> {
     let dir = root.join(MIGRATIONS_DIR);
     if !dir.is_dir() {
@@ -75,17 +89,17 @@ pub fn files_in(root: &Path) -> Result<Vec<PathBuf>, String> {
     for entry in entries {
         let entry = entry.map_err(|e| format!("FATAL: could not read {}: {e}\n", dir.display()))?;
         let name = entry.file_name().to_string_lossy().into_owned();
-        // The shell's glob was `"$dir"/*.ts`, which does not match a leading
-        // dot, followed by `[ -f "$file" ] || continue`.
-        if name.starts_with('.') || !name.ends_with(".ts") || !entry.path().is_file() {
-            continue;
+        if is_migration_name(&name) {
+            files.push(entry.path());
         }
-        files.push(entry.path());
     }
+    // `discover` sorts the names it admits and applies them in that order, so
+    // the ledger counts and the hash are built from the same sequence.
+    files.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
 
     if files.is_empty() {
         return Err(format!(
-            "FATAL: {} holds no *.ts migrations\n\
+            "FATAL: {} holds no migrations\n\
              \x20      An empty set would hash to a fixed value, so every broken\n\
              \x20      checkout would share one database and call it fresh.\n",
             dir.display()
@@ -164,7 +178,11 @@ pub fn of_ref(repo: &Path, reference: &str) -> Option<String> {
         else {
             continue;
         };
-        if kind != "blob" || !path.ends_with(".ts") {
+        if kind != "blob" {
+            continue;
+        }
+        let basename = path.rsplit('/').next().unwrap_or(path);
+        if !is_migration_name(basename) {
             continue;
         }
         let blob = Command::new("git")
@@ -175,7 +193,6 @@ pub fn of_ref(repo: &Path, reference: &str) -> Option<String> {
         if !blob.status.success() {
             return None;
         }
-        let basename = path.rsplit('/').next().unwrap_or(path);
         lines.push(sha256sum_line(basename, &blob.stdout));
     }
 
