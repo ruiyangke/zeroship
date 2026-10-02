@@ -3,6 +3,9 @@ name = "zeroship-gateway"
 version = "0.1.0"
 edition = "2021"
 description = "zeroship gateway — auth, rate limit, proxy to workers"
+# Integration suites are modules of one `tests/main.rs` target, so the crate
+# links one test executable instead of one per file.
+autotests = false
 
 [[package.metadata.zeroship-config.targets]]
 target = "zeroship-gate"
@@ -12,6 +15,10 @@ reason = "Initial long-running gateway service in the server configuration scope
 [[bin]]
 name = "zeroship-gate"
 path = "src/main.rs"
+
+[[test]]
+name = "main"
+path = "tests/main.rs"
 
 [[bench]]
 name = "dispatch_lookup"
