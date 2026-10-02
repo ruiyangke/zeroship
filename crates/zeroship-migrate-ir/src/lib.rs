@@ -45,3 +45,6 @@ pub mod policy_registry;
 pub mod precondition;
 pub mod probe;
 pub mod validate;
+
+#[cfg(test)]
+mod invariants;

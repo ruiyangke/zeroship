@@ -166,6 +166,11 @@ deno_core_icudata = "0.77"
 # workspace (`crates/runtime/benches/rpc_dispatch.rs`).
 criterion = { version = "0.5", features = ["html_reports"] }
 
+# Property-based testing. `zeroship-migrate-ir` dev-depends on it through this
+# entry for the IR round-trip / checksum / typed-id invariants. Pure Rust, no
+# async runtime: `cargo tree` proves no tokio lands in the workspace graph.
+proptest = "1.11"
+
 # WHATWG Encoding spec — Henri Sivonen's reference impl, also the
 # encoding library used by Firefox. Replaces hand-rolled UTF-8 decode
 # with a spec-correct state machine (matches WPT). 30+ encodings

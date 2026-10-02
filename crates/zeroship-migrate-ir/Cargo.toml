@@ -39,5 +39,11 @@ zeroship-migrate-policy = { workspace = true }
 # property.
 toml = { workspace = true }
 
+[dev-dependencies]
+# Property-based tests for the invariants the crate's types and docs promise:
+# wire round-trips, canonical checksum stability/sensitivity, and the typed-id
+# codec. Dev-only; the crate itself stays a zero-I/O leaf.
+proptest = { workspace = true }
+
 [lints]
 workspace = true
