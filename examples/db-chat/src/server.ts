@@ -12,7 +12,6 @@
 // against `listMessages`.
 
 import { env } from "zeroship";
-import type {} from "../generated/zeroship/env.db";
 import { query, mutation, action } from "@zeroship/rpc/server";
 import { runQuery, runMutation } from "@zeroship/server";
 

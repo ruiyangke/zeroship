@@ -13,5 +13,5 @@
     "lib": ["ES2022", "DOM"],
     "types": ["@zeroship/types"]
   },
-  "include": ["src/**/*"]
+  "include": ["src/**/*", "generated/zeroship/env.db.ts"]
 }

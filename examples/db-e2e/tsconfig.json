@@ -11,5 +11,5 @@
     "resolveJsonModule": true,
     "types": ["@zeroship/types"]
   },
-  "include": ["src/**/*"]
+  "include": ["src/**/*", "generated/zeroship/env.db.ts"]
 }

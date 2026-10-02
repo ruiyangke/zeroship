@@ -31,7 +31,6 @@ test("packaged transaction inputs preserve declared identity and relation types"
   const file = resolve(root, "src/__transaction_type_control.ts");
   const source = `
 import { env } from "zeroship";
-import type {} from "../generated/zeroship/env.db";
 async function useTransaction() {
   return env.db.transaction(async tx => {
     const task = await tx.tasks.find().with({ owner: true, workspace: true }).unique();
@@ -55,7 +54,7 @@ void useTransaction;
   host.getSourceFile = (name, version, ...args) => name === file
     ? ts.createSourceFile(file, source, version, true)
     : getSourceFile(name, version, ...args);
-  const program = ts.createProgram([file], options, host);
+  const program = ts.createProgram([...parsed.fileNames, file], options, host);
   assert.ok(program.getSourceFile(file));
   assert.deepEqual(messages(ts.getPreEmitDiagnostics(program)), []);
 });

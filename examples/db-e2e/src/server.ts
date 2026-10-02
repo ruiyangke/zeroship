@@ -6,7 +6,6 @@ import {
   type Result,
 } from "@zeroship/db";
 import { env } from "zeroship";
-import type {} from "../generated/zeroship/env.db";
 import { action, stream } from "@zeroship/rpc/server";
 
 defineMaskPolicy({

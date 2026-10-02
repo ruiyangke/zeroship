@@ -1,6 +1,5 @@
 import { ValidationError, type InferRow, type InferRowInput } from "@zeroship/db";
 import type { env } from "zeroship";
-import type {} from "../generated/zeroship/env.db";
 
 export type User = InferRow<typeof env.db.users>;
 export type Todo = InferRow<typeof env.db.todos>;
