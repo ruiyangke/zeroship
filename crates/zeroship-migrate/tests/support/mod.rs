@@ -25,11 +25,6 @@
 /// The PostgreSQL and MySQL servers this binary starts and owns.
 pub mod server;
 
-/// Containers a test process owns, removed when that process ends. Shared with the
-/// other crates' fixtures, so it lives beside them under the workspace `tests/`.
-#[path = "../../../../tests/fixtures/container_reaper.rs"]
-pub mod container_reaper;
-
 /// The live-MySQL sibling of everything below: `MysqlDevSession`, `DatabaseGuard`,
 /// and [`mysql::mysql_url`], the DSN of this binary's owned MySQL server.
 pub mod mysql;

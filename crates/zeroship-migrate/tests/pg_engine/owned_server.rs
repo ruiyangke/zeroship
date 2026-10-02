@@ -3,16 +3,16 @@
 //! its guard.
 //!
 //! `support::server` keeps the server in a `static`, which libtest never drops, and
-//! leaves its removal to the shared `container_reaper`. Three of that module's paths
-//! are measured here against real processes and a real daemon: a child test process
-//! that exits normally, a child SIGKILLed while its server is still starting (both
-//! through `container_reaper::lifetime`), and a `docker` program that cannot see the
-//! container the daemon started.
+//! leaves its removal to the shared reaper in `zeroship_testkit::docker`. Three of
+//! that module's paths are measured here against real processes and a real daemon: a
+//! child test process that exits normally, a child SIGKILLed while its server is
+//! still starting (both through `zeroship_testkit::lifetime`), and a `docker` program
+//! that cannot see the container the daemon started.
 
 use std::os::unix::fs::PermissionsExt as _;
 
-use crate::support::container_reaper::lifetime::{self, container_status};
-use crate::support::container_reaper::{
+use zeroship_testkit::docker::lifetime::{self, container_status};
+use zeroship_testkit::docker::{
     process_owner, start_owned, DockerCli, Ownership, OWNER_LABEL, REAPER_LABEL,
 };
 use crate::support::server;

@@ -43,7 +43,7 @@
     reason = "each crate that includes this fixture uses its own subset of it"
 )]
 
-#[path = "container_lifetime.rs"]
+#[path = "lifetime.rs"]
 pub mod lifetime;
 
 use std::ffi::OsString;

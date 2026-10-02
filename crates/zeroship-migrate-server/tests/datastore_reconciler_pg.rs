@@ -1504,10 +1504,10 @@ async fn two_services_on_one_cluster_converge_on_one_row_and_a_zone_change_is_re
 /// has ended - after a normal exit, and after a SIGKILL while it is still starting or
 /// migrating. Both run
 /// [`migrated_server_lifetime::the_migrated_server_reports_its_container`] alone in a
-/// child process; see `container_reaper::lifetime`.
+/// child process; see `zeroship_testkit::lifetime`.
 mod migrated_server_lifetime {
     use crate::fixture;
-    use crate::fixture::container_reaper::lifetime;
+    use zeroship_testkit::lifetime;
 
     /// The child test, by its full path in this binary.
     const CHILD_TEST: &str =

@@ -5,6 +5,8 @@ mod build_inputs;
 mod repo;
 #[path = "repository/tls_provider.rs"]
 mod tls_provider;
+#[path = "repository/testkit_versions.rs"]
+mod testkit_versions;
 #[path = "repository/tokio_boundary.rs"]
 mod tokio_boundary;
 

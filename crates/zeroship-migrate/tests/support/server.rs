@@ -15,8 +15,8 @@
 //! There is no skip.
 //!
 //! THE SERVER DOES NOT OUTLIVE THE PROCESS. The server lives in a `static`, which
-//! libtest never drops, so it is started through the shared
-//! [`container_reaper`](super::container_reaper): a reaper spawned before the
+//! libtest never drops, so it is started through the shared reaper in
+//! [`zeroship_testkit::docker`]: a reaper spawned before the
 //! container exists removes it once this process has ended, and the start is refused
 //! when the `docker` CLI that reaper runs cannot see the container. That module's doc
 //! says what this covers and what it does not. `pg_engine/owned_server.rs` measures
@@ -30,7 +30,7 @@ use std::time::Duration;
 use testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers::{ContainerRequest, GenericImage, ImageExt};
 
-use super::container_reaper::{start_owned, DockerCli, OwnedContainer, Ownership};
+use zeroship_testkit::docker::{start_owned, DockerCli, OwnedContainer, Ownership};
 
 /// The password of the superuser on both owned servers. The servers listen on a
 /// loopback-mapped port for the life of one test process, so this is a fixture value,

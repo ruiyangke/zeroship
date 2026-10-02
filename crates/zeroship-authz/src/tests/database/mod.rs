@@ -1,29 +1,21 @@
-//! Own one migrated `PostgreSQL` server for the whole test binary, and hand each
-//! case its own pair of connections to it.
+//! The one migrated platform database this test binary shares, and each case's
+//! pair of connections to it.
 //!
-//! The server lives in a `static`, started and migrated the first time a case asks
-//! for it. It is started through the shared [`container_reaper`], so it is removed
-//! once this process has ended, however the process ends.
+//! The server is owned by [`zeroship_testkit::postgres`], started and migrated
+//! the first time a case asks for it; see that module for why it is removed
+//! once this process has ended however the process ends.
 
 #![allow(
     clippy::future_not_send,
     reason = "fixtures stay on their compio runtime"
 )]
 
-use compio_postgres::{Client, NoTls};
+use compio_postgres::Client;
 use futures::FutureExt;
 use std::panic::AssertUnwindSafe;
-use std::sync::OnceLock;
 use std::time::Duration;
-use testcontainers::core::{IntoContainerPort, WaitFor};
-use testcontainers::{Container, GenericImage, ImageExt};
 
-mod migrations;
-
-#[path = "../../../../../tests/fixtures/container_reaper.rs"]
-mod container_reaper;
-
-use container_reaper::{start_owned, DockerCli, OwnedContainer, Ownership};
+use zeroship_testkit::postgres::platform;
 
 pub struct Database {
     pub admin: Client,
@@ -32,36 +24,10 @@ pub struct Database {
     service_driver: compio::runtime::JoinHandle<Result<(), compio_postgres::Error>>,
 }
 
-/// The server this test binary owns, started the first time anything asks for it.
-fn server() -> &'static OwnedContainer {
-    static SERVER: OnceLock<OwnedContainer> = OnceLock::new();
-    SERVER.get_or_init(|| {
-        start_owned(&DockerCli::system(), &Ownership::mint(), image()).unwrap_or_else(|error| {
-            panic!("authorization database tests require Docker and PostgreSQL: {error}")
-        })
-    })
-}
-
-/// The server's URL once the platform migrations and the shared reference rows
-/// are in. Every case connects here; none of them owns the server.
-fn migrated() -> &'static url::Url {
-    static MIGRATED: OnceLock<url::Url> = OnceLock::new();
-    MIGRATED.get_or_init(|| {
-        let container = server().container();
-        let url = database_url(container);
-        migrations::apply(url.as_str());
-        migrations::seed_plan(container);
-        url
-    })
-}
-
 impl Database {
     pub async fn run(test: impl AsyncFnOnce(&Self)) {
-        let mut url = migrated().clone();
-        let (admin, admin_driver) = connect(&url).await;
-        url.set_username("zeroship_control").unwrap();
-        url.set_password(Some("zeroship_control")).unwrap();
-        let (service, service_driver) = connect(&url).await;
+        let (admin, admin_driver) = platform().admin_connect().await;
+        let (service, service_driver) = platform().connect("zeroship_control").await;
         let database = Self {
             admin,
             service,
@@ -102,69 +68,24 @@ impl Database {
     }
 }
 
-async fn connect(
-    url: &url::Url,
-) -> (
-    Client,
-    compio::runtime::JoinHandle<Result<(), compio_postgres::Error>>,
-) {
-    let mut config: compio_postgres::Config = url.as_str().parse().unwrap();
-    config.connect_timeout(Duration::from_secs(10));
-    let (client, connection) = config
-        .connect(NoTls)
-        .await
-        .expect("connect authorization fixture");
-    (
-        client,
-        compio::runtime::spawn(async move { connection.run().await }),
-    )
-}
-
-fn image() -> testcontainers::ContainerRequest<GenericImage> {
-    GenericImage::new("postgres", "17")
-        .with_exposed_port(5432.tcp())
-        .with_wait_for(WaitFor::message_on_stdout(
-            "PostgreSQL init process complete; ready for start up.",
-        ))
-        .with_wait_for(WaitFor::message_on_stderr(
-            "database system is ready to accept connections",
-        ))
-        .with_env_var("POSTGRES_PASSWORD", "fixture")
-        .with_env_var("POSTGRES_DB", "authz_tests")
-        .with_startup_timeout(Duration::from_secs(120))
-}
-
-fn database_url(postgres: &Container<GenericImage>) -> url::Url {
-    let mut url = url::Url::parse("postgresql://postgres:fixture@localhost/authz_tests").unwrap();
-    url.set_host(Some(
-        &postgres.get_host().expect("database host").to_string(),
-    ))
-    .unwrap();
-    url.set_port(Some(
-        postgres.get_host_port_ipv4(5432).expect("database port"),
-    ))
-    .unwrap();
-    url
-}
-
 /// The child test the lifetime measurements drive, by its full path in this binary.
 const CHILD_TEST: &str = "tests::database::the_shared_database_reports_its_container";
 
 #[test]
 fn the_shared_database_reports_its_container() {
-    container_reaper::lifetime::report_owner();
-    let id = server().container().id().to_owned();
-    container_reaper::lifetime::report_container(&id);
+    zeroship_testkit::lifetime::report_owner();
+    let id = zeroship_testkit::postgres::server_container_id();
+    zeroship_testkit::lifetime::report_container(&id);
 }
 
 #[test]
 fn the_shared_database_is_removed_when_its_process_ends() {
-    container_reaper::lifetime::assert_removed_after_the_child_exits(CHILD_TEST);
+    zeroship_testkit::lifetime::assert_removed_after_the_child_exits(CHILD_TEST);
 }
 
 #[test]
 fn the_shared_database_is_removed_when_its_process_is_killed_while_starting() {
-    container_reaper::lifetime::assert_removed_after_a_kill_during_startup(CHILD_TEST);
+    zeroship_testkit::lifetime::assert_removed_after_a_kill_during_startup(CHILD_TEST);
 }
 
 #[compio::test]

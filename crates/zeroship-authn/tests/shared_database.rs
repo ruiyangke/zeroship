@@ -7,14 +7,14 @@
     reason = "fixtures belong to their compio runtime"
 )]
 
-use crate::common::database::{container_id, Database};
+use crate::common::database::Database;
 use futures::FutureExt;
 use std::panic::AssertUnwindSafe;
 use zeroship_core::UserId;
 
 #[compio::test]
 async fn a_failed_case_re_raises_its_failure_and_closes_its_connections() {
-    let shared = container_id();
+    let shared = zeroship_testkit::postgres::server_container_id();
     let role = format!("authn_failed_{}", UserId::mint().as_str());
     let failure = AssertUnwindSafe(Database::run(async |database| {
         let admin = database.connect().await;
@@ -72,7 +72,7 @@ async fn a_failed_case_re_raises_its_failure_and_closes_its_connections() {
         "a failed case must close its connections before re-raising"
     );
     assert_eq!(
-        container_id(),
+        zeroship_testkit::postgres::server_container_id(),
         shared,
         "every case must reach the one shared server"
     );

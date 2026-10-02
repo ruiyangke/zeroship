@@ -18,6 +18,8 @@ tracing = { workspace = true }
 [dev-dependencies]
 futures = { workspace = true }
 testcontainers = { version = "0.28", default-features = false, features = ["blocking", "watchdog"] }
+# The shared reaper-owned broker container this binary runs against.
+zeroship-testkit = { path = "../../tests/testkit" }
 
 [lints]
 workspace = true

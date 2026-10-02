@@ -1,8 +1,8 @@
 //! The PostgreSQL server the migration server's unit tests share.
 //!
 //! One server per test binary, kept in a `static`, which libtest never drops, so it
-//! is started through the shared [`container_reaper`]: a reaper spawned before the
-//! container exists removes it once this process has ended.
+//! is started through the shared reaper in [`zeroship_testkit::docker`]: a reaper
+//! spawned before the container exists removes it once this process has ended.
 
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -11,11 +11,7 @@ use compio_postgres::{Client, NoTls};
 use testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers::{GenericImage, ImageExt};
 
-/// Containers a test process owns, removed when that process ends.
-#[path = "../../../tests/fixtures/container_reaper.rs"]
-mod container_reaper;
-
-use container_reaper::{start_owned, DockerCli, OwnedContainer, Ownership};
+use zeroship_testkit::{start_owned, DockerCli, OwnedContainer, Ownership};
 
 struct Postgres {
     owned: OwnedContainer,
@@ -70,10 +66,10 @@ pub(crate) async fn connect() -> Client {
 /// This binary's server is removed once the process that started it has ended -
 /// after a normal exit, and after a SIGKILL while it is still starting. Both run
 /// [`server_lifetime::the_unit_test_server_reports_its_container`] alone in a child
-/// process; see `container_reaper::lifetime`.
+/// process; see `zeroship_testkit::lifetime`.
 mod server_lifetime {
-    use super::container_reaper::lifetime;
     use super::{Postgres, POSTGRES};
+    use zeroship_testkit::lifetime;
 
     /// The child test, by its full path in this binary.
     const CHILD_TEST: &str =

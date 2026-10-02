@@ -13,8 +13,9 @@ use testcontainers::{GenericImage, ImageExt};
 
 mod migrations;
 
-/// Containers a test process owns, removed when that process ends.
-#[path = "../../../../tests/fixtures/container_reaper.rs"]
+/// Containers a test process owns, removed when that process ends. Included
+/// from the shared testkit copy so the reaper exists once in the tree.
+#[path = "../../../../tests/testkit/src/docker.rs"]
 pub(crate) mod container_reaper;
 
 use container_reaper::{start_owned, DockerCli, OwnedContainer, Ownership};

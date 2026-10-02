@@ -7793,13 +7793,10 @@ dependencies = [
  "futures",
  "ntex",
  "serde_json",
- "tempfile",
- "testcontainers",
- "toml 0.8.23",
  "tracing",
- "url",
  "zeroship-authz",
  "zeroship-core",
+ "zeroship-testkit",
 ]
 
 [[package]]
@@ -7814,12 +7811,9 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
- "tempfile",
- "testcontainers",
- "toml 0.8.23",
  "tracing",
- "url",
  "zeroship-id",
+ "zeroship-testkit",
 ]
 
 [[package]]
@@ -8293,6 +8287,7 @@ dependencies = [
  "zeroship-migrate-postgres",
  "zeroship-migrate-postgres-recording",
  "zeroship-migrate-sqlite",
+ "zeroship-testkit",
 ]
 
 [[package]]
@@ -8480,6 +8475,7 @@ dependencies = [
  "zeroship-migrate-policy",
  "zeroship-migrate-postgres",
  "zeroship-runtime",
+ "zeroship-testkit",
 ]
 
 [[package]]
@@ -8601,6 +8597,21 @@ dependencies = [
  "testcontainers",
  "thiserror 2.0.18",
  "tracing",
+ "zeroship-testkit",
+]
+
+[[package]]
+name = "zeroship-testkit"
+version = "0.1.0"
+dependencies = [
+ "compio",
+ "compio-postgres",
+ "serde_json",
+ "tempfile",
+ "testcontainers",
+ "toml 0.8.23",
+ "url",
+ "zeroship-id",
 ]
 
 [[package]]

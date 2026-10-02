@@ -3,11 +3,7 @@
 //! The broker lives in a `static`, which libtest never drops, so it is started through
 //! the shared container reaper, which removes it once this process has ended.
 
-#[path = "../../../tests/fixtures/container_reaper.rs"]
-mod container_reaper;
-
-use std::collections::BTreeMap;
-use std::net::{Ipv4Addr, TcpListener};
+use std::collections::BTreeMap;use std::net::{Ipv4Addr, TcpListener};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -18,8 +14,8 @@ use testcontainers::{GenericImage, ImageExt};
 use zeroship_stream::adapters;
 use zeroship_stream::{StreamConfig, StreamOffset, StreamRegistry};
 
-use container_reaper::lifetime;
-use container_reaper::{start_owned, DockerCli, OwnedContainer, Ownership};
+use zeroship_testkit::lifetime;
+use zeroship_testkit::{start_owned, DockerCli, OwnedContainer, Ownership};
 
 struct Redpanda {
     owned: OwnedContainer,

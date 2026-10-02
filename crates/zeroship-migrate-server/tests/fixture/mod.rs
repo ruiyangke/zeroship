@@ -2,9 +2,9 @@
 //!
 //! [`Postgres::start`] hands a test a server of its own; [`migrated_url`] shares one
 //! migrated server across the binary, kept in a `static` that libtest never drops.
-//! Both are started through the shared [`container_reaper`], whose reaper - spawned
-//! before the container exists - removes the container once this process has ended,
-//! so neither outlives the test process however it ends.
+//! Both are started through the shared reaper in [`zeroship_testkit::docker`]: a
+//! reaper spawned before the container exists removes the container once this
+//! process has ended, so neither outlives the test process however it ends.
 
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -15,11 +15,7 @@ use testcontainers::{GenericImage, ImageExt};
 mod migrations;
 pub mod world;
 
-/// Containers a test process owns, removed when that process ends.
-#[path = "../../../../tests/fixtures/container_reaper.rs"]
-pub mod container_reaper;
-
-use container_reaper::{start_owned, DockerCli, OwnedContainer, Ownership};
+use zeroship_testkit::docker::{start_owned, DockerCli, OwnedContainer, Ownership};
 
 pub struct Postgres {
     #[allow(
