@@ -344,6 +344,17 @@ function wfOutputReader(envelope) {
     return (name, occurrence) => run.readStepOutput(name, occurrence);
 }
 
+// The reader a referenced child's output is read through. The native
+// `readChildOutput` parses the object's bytes once and hands back the value, so
+// the bridge never parses them again. A run object without it cannot serve the
+// referenced set.
+function wfChildOutputReader(envelope) {
+    const workflows = globalThis.__zs_env?.()?.workflows;
+    const run = workflows?.[envelope.workflowName]?.get(String(envelope.runId ?? ""));
+    if (typeof run?.readChildOutput !== "function") return undefined;
+    return (name, occurrence) => run.readChildOutput(name, occurrence);
+}
+
 function wfOutputConfig(config) {
     if (!config || typeof config !== "object") return {};
     const output = config.output;
@@ -438,6 +449,42 @@ async function wfReadStepOutputBytes(outputRead, name, occurrence) {
         throw wfErr("workflow output reader is unavailable", 500, "WORKFLOW_DEFINITION_ERROR");
     }
     return outputRead(name, occurrence);
+}
+
+// A completed child's output over the host's inline threshold reaches the
+// journal as the descriptor of the object holding it, not as its value. Every
+// such output is read here, before the body runs, through the native
+// `readChildOutput` that parses the object's bytes once, and its row then
+// carries the value in place of the descriptor. The reads are batched to
+// `concurrency` at a time, the bound the host publishes from the same constant
+// its own splice path reads with, so a journal naming many referenced children
+// cannot open one object per row at once.
+//
+// Each batch is awaited before the next is issued, and the whole set before the
+// body runs, so `step.call` resolves to the value in the round its row replays
+// whichever read finishes first: the body cannot start until every read has
+// settled, and the rows keep their journal order. A read the body awaited would
+// settle in I/O completion order, and the steps issued after it could take each
+// other's ordinals on replay.
+async function wfReadChildOutputs(journal, childOutputRead, concurrency) {
+    const rows = journal.filter(
+        (row) => row.kind === "child" && row.state === "completed" && row.outputRef,
+    );
+    if (rows.length === 0) return journal;
+    if (typeof childOutputRead !== "function") {
+        throw wfErr("workflow output reader is unavailable", 500, "WORKFLOW_DEFINITION_ERROR");
+    }
+    if (!Number.isSafeInteger(concurrency) || concurrency <= 0) {
+        throw wfErr("workflow child output read bound is unavailable", 500, "WORKFLOW_DEFINITION_ERROR");
+    }
+    const batch = concurrency;
+    for (let start = 0; start < rows.length; start += batch) {
+        await Promise.all(rows.slice(start, start + batch).map(async (row) => {
+            row.output = await childOutputRead(row.name, row.nameOccurrence);
+            row.outputRef = undefined;
+        }));
+    }
+    return journal;
 }
 
 // Runtime workflow drain barrier. The workflow SDK owns the related journal
@@ -1268,6 +1315,12 @@ export async function dispatch(userNamespace, envelope, _ctx) {
     try {
         const registry = workflowClasses(userNamespace);
         const WorkflowClass = resolveWorkflow(registry, workflowName);
+        const outputRead = wfOutputReader(envelope);
+        const journal = await wfReadChildOutputs(
+            wfJournal(envelope),
+            wfChildOutputReader(envelope),
+            envelope.childOutputReads,
+        );
         const workflow = new WorkflowClass();
         if (typeof workflow.run !== "function") {
             throw wfErr(`Workflow ${workflowName} has no run(trigger, step) method`, 500, "WORKFLOW_DEFINITION_ERROR");
@@ -1275,10 +1328,10 @@ export async function dispatch(userNamespace, envelope, _ctx) {
         const quiescence = new ZsDispatchMicrotaskQuiescenceBarrier();
         const trigger = wfTrigger(envelope);
         const step = new ZsJournalBackedStep(
-            wfJournal(envelope),
+            journal,
             quiescence,
             String(envelope.runId ?? ""),
-            wfOutputReader(envelope),
+            outputRead,
             String(envelope.phase ?? "running"),
             trigger,
             registry.names,

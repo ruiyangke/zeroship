@@ -16,6 +16,7 @@ use compio_postgres::Row;
 use zeroship_core::types::{
     AppNetPolicyLimits, AppRuntimeLimits, FREE_TIER_NET_POLICY_LIMITS, FREE_TIER_RUNTIME_LIMITS,
 };
+use zeroship_core::workflow_policy::{AppPolicy, FREE_TIER_MAX_CHILD_OUTPUT_BYTES};
 
 use crate::pricing::PlanPrice;
 use crate::registry::{Registry, RegistryError};
@@ -212,6 +213,34 @@ impl PlanCatalog {
             .ok_or_else(|| RegistryError::Database("upsert ok but read-back failed".into()))?
     }
 
+    /// Seed a built-in tier's workflow policy where the row carries none.
+    ///
+    /// [`seed_plans`] re-runs on every boot, and an operator may have
+    /// provisioned a policy for a plan. Writing one only where the column is
+    /// NULL keeps the operator's authority while giving a fresh deployment a
+    /// policy for every built-in tier. `upsert` deliberately leaves the column
+    /// alone, so this is the only seed-side writer.
+    ///
+    /// # Errors
+    /// [`RegistryError::InvalidInput`] if the policy cannot be encoded, or the
+    /// driver error if the write fails.
+    pub async fn seed_workflow_policy(
+        &self,
+        plan: &str,
+        policy: &AppPolicy,
+    ) -> Result<(), RegistryError> {
+        let json = serde_json::to_value(policy)
+            .map_err(|e| RegistryError::InvalidInput(format!("workflow_policy_json: {e}")))?;
+        let conn = self.registry.conn().await?;
+        conn.execute(
+            "UPDATE zeroship.plans SET workflow_policy_json = $2, updated_at = NOW() \
+             WHERE id = $1 AND workflow_policy_json IS NULL",
+            &[&plan, &json],
+        )
+        .await?;
+        Ok(())
+    }
+
     /// Archive a plan (soft delete — `archived = true`). The row stays so
     /// existing `apps.plan_id` FKs and historical billing runs keep resolving.
     /// Returns `true` if a row was updated. There is NO hard DELETE.
@@ -375,77 +404,110 @@ pub fn unlimited_plan_id() -> String {
     builtin_plan_id("unlimited")
 }
 
+/// A built-in tier and the workflow policy a fresh catalog seeds for it.
+///
+/// The policy is not part of [`Plan`]: the catalog's read and write paths price
+/// a plan and leave this Control-owned column to the operator, so the seed
+/// carries it beside the plan rather than on it.
+struct BuiltinPlan {
+    plan: Plan,
+    workflow_policy: AppPolicy,
+}
+
+/// The workflow policy a built-in tier is seeded with.
+///
+/// Free grants the free-tier child-output bound; a paid tier reaches the
+/// platform ceiling through [`AppPolicy::default`].
+fn builtin_workflow_policy(tier: &str) -> AppPolicy {
+    if tier == "free" {
+        return AppPolicy {
+            max_child_output_bytes: FREE_TIER_MAX_CHILD_OUTPUT_BYTES,
+            ..AppPolicy::default()
+        };
+    }
+    AppPolicy::default()
+}
+
 /// Build the three built-in tiers, `[free, pro, unlimited]`.
 ///
 /// `runtime_limits_json` is the tier matrix: free = 50ms/5s/64MB,
 /// pro = 30s/30s/256MB, unlimited = None/None/None. Under compute-unit pricing
 /// the price model is scalar: `base_fee_cents`, `included_units`, and an FX
 /// where `None` inherits the global `pricing_config` default.
-fn builtin_plans() -> Vec<Plan> {
+fn builtin_plans() -> Vec<BuiltinPlan> {
     // Free: spend_limit == base (0) means quota-capped with no card. Runtime
     // limits come from the shared const so the seed and the registry's
     // missing-plan fallback cannot drift.
-    let free = Plan {
-        id: free_plan_id(),
-        name: "free".to_string(),
-        price: PlanPrice {
-            base_fee_cents: 0,
-            included_units: 100_000,
-            fx_pico_cents_per_unit: None,
-            spend_limit_default_cents: 0,
+    let free = BuiltinPlan {
+        plan: Plan {
+            id: free_plan_id(),
+            name: "free".to_string(),
+            price: PlanPrice {
+                base_fee_cents: 0,
+                included_units: 100_000,
+                fx_pico_cents_per_unit: None,
+                spend_limit_default_cents: 0,
+            },
+            runtime: FREE_TIER_RUNTIME_LIMITS,
+            net: FREE_TIER_NET_POLICY_LIMITS,
+            archived: false,
+            assignable_by_creator: true,
         },
-        runtime: FREE_TIER_RUNTIME_LIMITS,
-        net: FREE_TIER_NET_POLICY_LIMITS,
-        archived: false,
-        assignable_by_creator: true,
+        workflow_policy: builtin_workflow_policy("free"),
     };
 
-    let pro = Plan {
-        id: pro_plan_id(),
-        name: "pro".to_string(),
-        price: PlanPrice {
-            base_fee_cents: 500,
-            included_units: 1_000_000,
-            fx_pico_cents_per_unit: None,
-            spend_limit_default_cents: 5_000,
+    let pro = BuiltinPlan {
+        plan: Plan {
+            id: pro_plan_id(),
+            name: "pro".to_string(),
+            price: PlanPrice {
+                base_fee_cents: 500,
+                included_units: 1_000_000,
+                fx_pico_cents_per_unit: None,
+                spend_limit_default_cents: 5_000,
+            },
+            runtime: AppRuntimeLimits {
+                cpu_limit_ms: Some(30_000),
+                wall_timeout_ms: Some(30_000),
+                heap_limit_mb: Some(256),
+            },
+            net: AppNetPolicyLimits {
+                max_sockets: 32,
+                egress_ceiling_bytes: 256 * 1024 * 1024,
+                max_grants: 50,
+            },
+            archived: false,
+            assignable_by_creator: true,
         },
-        runtime: AppRuntimeLimits {
-            cpu_limit_ms: Some(30_000),
-            wall_timeout_ms: Some(30_000),
-            heap_limit_mb: Some(256),
-        },
-        net: AppNetPolicyLimits {
-            max_sockets: 32,
-            egress_ceiling_bytes: 256 * 1024 * 1024,
-            max_grants: 50,
-        },
-        archived: false,
-        assignable_by_creator: true,
+        workflow_policy: builtin_workflow_policy("pro"),
     };
 
     // Unlimited / enterprise: no runtime caps, no included CU, no spend cap.
     // OPERATOR-only: a creator self-assigning it would escape every cap.
-    let unlimited = Plan {
-        id: unlimited_plan_id(),
-        name: "unlimited".to_string(),
-        price: PlanPrice {
-            base_fee_cents: 0,
-            included_units: 0,
-            fx_pico_cents_per_unit: None,
-            spend_limit_default_cents: 0,
+    let unlimited = BuiltinPlan {
+        plan: Plan {
+            id: unlimited_plan_id(),
+            name: "unlimited".to_string(),
+            price: PlanPrice {
+                base_fee_cents: 0,
+                included_units: 0,
+                fx_pico_cents_per_unit: None,
+                spend_limit_default_cents: 0,
+            },
+            runtime: AppRuntimeLimits {
+                cpu_limit_ms: None,
+                wall_timeout_ms: None,
+                heap_limit_mb: None,
+            },
+            net: AppNetPolicyLimits {
+                max_sockets: 256,
+                egress_ceiling_bytes: 1024 * 1024 * 1024,
+                max_grants: 512,
+            },
+            archived: false,
+            assignable_by_creator: false,
         },
-        runtime: AppRuntimeLimits {
-            cpu_limit_ms: None,
-            wall_timeout_ms: None,
-            heap_limit_mb: None,
-        },
-        net: AppNetPolicyLimits {
-            max_sockets: 256,
-            egress_ceiling_bytes: 1024 * 1024 * 1024,
-            max_grants: 512,
-        },
-        archived: false,
-        assignable_by_creator: false,
+        workflow_policy: builtin_workflow_policy("unlimited"),
     };
 
     vec![free, pro, unlimited]
@@ -479,9 +541,17 @@ impl std::error::Error for PlanSeedError {}
 /// [`PlanSeedError::Db`] if the catalog upsert fails.
 pub async fn seed_plans(registry: &Registry) -> Result<(), PlanSeedError> {
     let catalog = PlanCatalog::new(registry.clone());
-    for plan in builtin_plans() {
+    for BuiltinPlan {
+        plan,
+        workflow_policy,
+    } in builtin_plans()
+    {
         catalog
             .upsert(&plan, None)
+            .await
+            .map_err(|e| PlanSeedError::Db(format!("seed plan '{}': {e}", plan.id)))?;
+        catalog
+            .seed_workflow_policy(&plan.id, &workflow_policy)
             .await
             .map_err(|e| PlanSeedError::Db(format!("seed plan '{}': {e}", plan.id)))?;
     }
@@ -496,7 +566,10 @@ pub async fn seed_plans(registry: &Registry) -> Result<(), PlanSeedError> {
 
 #[cfg(test)]
 mod builtin_tier_tests {
-    use super::{free_plan_id, pro_plan_id, unlimited_plan_id};
+    use super::{builtin_plans, free_plan_id, pro_plan_id, unlimited_plan_id};
+    use zeroship_core::workflow_policy::{
+        AppPolicy, FREE_TIER_MAX_CHILD_OUTPUT_BYTES, MAX_CHILD_OUTPUT_BYTES_CEILING,
+    };
 
     /// The built-in tier ids are a FROZEN wire value, not an implementation
     /// detail: `zeroship.apps.plan_id` is an FK onto them, so a change orphans
@@ -515,5 +588,32 @@ mod builtin_tier_tests {
         assert_eq!(free_plan_id(), "pln_0pmepeesn0v30md0sick7lo65");
         assert_eq!(pro_plan_id(), "pln_7einr1yv1u9nabqjohrit3f7y");
         assert_eq!(unlimited_plan_id(), "pln_4cklt6kbysmsugjft40bdetjx");
+    }
+
+    /// The seed gives free the free-tier child-output bound and every paid tier
+    /// the platform ceiling, so the effective limit follows the tier rather
+    /// than a plan row a fresh deployment has not provisioned yet. The values
+    /// are spelled out rather than read back from the constants, so the case
+    /// binds the platform decision.
+    #[test]
+    fn builtin_tiers_seed_their_workflow_policy() {
+        let plans = builtin_plans();
+        let policy = |name: &str| {
+            plans
+                .iter()
+                .find(|builtin| builtin.plan.name == name)
+                .map(|builtin| &builtin.workflow_policy)
+                .unwrap_or_else(|| panic!("built-in tier {name} is seeded"))
+        };
+        assert_eq!(policy("free").max_child_output_bytes, 64 * 1024);
+        assert_eq!(policy("free").max_child_output_bytes, FREE_TIER_MAX_CHILD_OUTPUT_BYTES);
+        for name in ["pro", "unlimited"] {
+            assert_eq!(
+                policy(name).max_child_output_bytes,
+                MAX_CHILD_OUTPUT_BYTES_CEILING,
+                "{name}"
+            );
+            assert_eq!(policy(name), &AppPolicy::default(), "{name}");
+        }
     }
 }

@@ -130,13 +130,10 @@ impl TaskExecution for V8Execution {
         }
         self.started = true;
         self.budget.check()?;
-        // Built before any isolate exists, so a child output this host cannot
-        // read stops the task before creator code runs. The reader hydrates the
-        // trigger's referenced input as it builds the envelope.
-        let envelope = self
-            .payloads
-            .replay_envelope(self.output.1.max_replay_bytes)
-            .await?;
+        // Built before any isolate exists, so a spliced child output this host
+        // cannot read stops the task before creator code runs. The reader
+        // hydrates the trigger's referenced input as it builds the envelope.
+        let envelope = self.payloads.replay_envelope(self.output.1).await?;
         let (factory, assignment) = &self.loader;
         let executable = self.payloads.executable().await?;
         self.budget.check()?;

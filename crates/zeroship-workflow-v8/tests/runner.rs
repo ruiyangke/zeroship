@@ -2000,6 +2000,8 @@ struct DelayedReads {
     tasks: WorkerTasks,
     objects: Vec<(Vec<u8>, Duration)>,
     reads: RefCell<Vec<String>>,
+    in_flight: Cell<usize>,
+    max_in_flight: Cell<usize>,
 }
 #[async_trait(?Send)]
 impl TaskPayloads for DelayedReads {
@@ -2038,7 +2040,11 @@ impl TaskPayloads for DelayedReads {
         self.reads
             .borrow_mut()
             .push(String::from_utf8_lossy(bytes).into_owned());
+        let in_flight = self.in_flight.get() + 1;
+        self.in_flight.set(in_flight);
+        self.max_in_flight.set(self.max_in_flight.get().max(in_flight));
         compio::time::sleep(*delay).await;
+        self.in_flight.set(self.in_flight.get() - 1);
         PayloadRead::checked(
             reference.clone(),
             Box::new(zeroship_storage::backend::OnceChunk::new(
@@ -2088,6 +2094,8 @@ struct Replayed {
     reads: Vec<String>,
     /// Whether an isolate was built for the task.
     built: bool,
+    /// The most reads [`DelayedReads`] held open together.
+    max_in_flight: usize,
 }
 
 async fn replay_under(
@@ -2113,6 +2121,8 @@ async fn replay_under(
         tasks: fixture.app.tasks(worker, fixture.objects.clone()),
         objects,
         reads: RefCell::default(),
+        in_flight: Cell::default(),
+        max_in_flight: Cell::default(),
     });
     let executor = V8TaskExecutor::new(fixture.loader.clone(), transport.clone(), limits).unwrap();
     let guard = zeroship_workflow_runner::ExecutionGuard::new(Duration::from_secs(20)).unwrap();
@@ -2132,6 +2142,7 @@ async fn replay_under(
         frontier,
         reads,
         built,
+        max_in_flight: transport.max_in_flight.get(),
     }
 }
 
@@ -2247,6 +2258,214 @@ async fn a_completed_childs_follow_on_step_joins_the_frontier_of_a_running_sibli
     );
 }
 
+/// A parent that calls three children at once and runs one step after each,
+/// so the ordinals those steps take are the order the three values reach it.
+const TRIPLETS: &str = r"
+    export class A { async run() { return { from: 'A' }; } }
+    export class B { async run() { return { from: 'B' }; } }
+    export class C { async run() { return { from: 'C' }; } }
+    export class Example {
+        async run(_trigger, step) {
+            await Promise.all([
+                step.call(A, {}).then((a) => step.run('x', () => a.from)),
+                step.call(B, {}).then((b) => step.run('y', () => b.from)),
+                step.call(C, {}).then((c) => step.run('z', () => c.from)),
+            ]);
+            return 'done';
+        }
+    }
+";
+
+/// The size of the outputs [`SPLIT`] leaves as references.
+const REFERENCED: usize = 128;
+
+/// Host budgets that splice [`CHILD_A`] and nothing larger. The replay budget
+/// is exactly `A`'s size, so a host that spliced any other child would refuse
+/// the replay instead of running it: a case under these budgets that runs has
+/// read every larger output through its reference.
+const SPLIT: TaskPayloadLimits = TaskPayloadLimits {
+    max_inline_bytes: CHILD_A.len(),
+    max_payload_bytes: 1024,
+    max_result_bytes: 1024 * 1024,
+    max_replay_bytes: CHILD_A.len(),
+};
+
+/// One replay of [`TRIPLETS`] over a journal holding all three children
+/// completed, `B` and `C` with outputs of [`REFERENCED`] bytes, answered after
+/// the given delays, under the host budgets `limits`.
+async fn replay_triplets(
+    b_delay: Duration,
+    c_delay: Duration,
+    limits: TaskPayloadLimits,
+) -> Vec<serde_json::Value> {
+    let fixture = Box::pin(Fixture::new(TRIPLETS)).await;
+    let b = child_output_of("B", REFERENCED);
+    let c = child_output_of("C", REFERENCED);
+    let replayed = replay_under(
+        &fixture,
+        json!([child(0, "A", CHILD_A), child(1, "B", &b), child(2, "C", &c)]),
+        vec![
+            (CHILD_A.to_vec(), Duration::ZERO),
+            (b, b_delay),
+            (c, c_delay),
+        ],
+        limits,
+    )
+    .await;
+    assert_eq!(replayed.reads.len(), 3, "{:?}", replayed.reads);
+    shape(&replayed.frontier.unwrap())
+}
+
+/// `step.call` promises settle in the same order on every replay, whichever
+/// children's outputs are spliced and whichever referenced output's read lands
+/// first.
+///
+/// `A` is spliced into the envelope; `B` and `C` are read through their
+/// references. A parent that waited on those reads would issue `z` before `y`
+/// whenever `C`'s object arrived first, and a later replay would find each at
+/// the other's ordinal. The three orders are `C` first, `B` first, and both
+/// reads landing in one turn of the host's event loop; the control replays the
+/// same journal with every output spliced, the representation in which every
+/// value is there in the round its record resolves in.
+#[compio::test]
+async fn inline_and_referenced_children_settle_in_journal_order_whichever_read_lands_first() {
+    let spliced = Box::pin(replay_triplets(
+        Duration::ZERO,
+        Duration::ZERO,
+        TaskPayloadLimits::default(),
+    ))
+    .await;
+    assert_eq!(
+        spliced,
+        vec![
+            json!(["StepCompleted", 3, "x", "A"]),
+            json!(["StepCompleted", 4, "y", "B"]),
+            json!(["StepCompleted", 5, "z", "C"]),
+        ]
+    );
+    for (order, b_delay, c_delay) in [
+        ("C lands first", SLOW, Duration::ZERO),
+        ("B lands first", Duration::ZERO, SLOW),
+        ("both land together", Duration::ZERO, Duration::ZERO),
+    ] {
+        assert_eq!(
+            Box::pin(replay_triplets(b_delay, c_delay, SPLIT)).await,
+            spliced,
+            "{order}"
+        );
+    }
+}
+
+/// A referenced child's value is there in the round its record resolves in, as
+/// a spliced one's is, so the step that follows it joins the frontier of the
+/// sibling still running, exactly as in
+/// `a_completed_childs_follow_on_step_joins_the_frontier_of_a_running_sibling`.
+#[compio::test]
+async fn a_referenced_childs_follow_on_step_joins_the_frontier_of_a_running_sibling() {
+    let fixture = Box::pin(Fixture::new(SIBLINGS)).await;
+    let a = child_output_of("A", REFERENCED);
+    let replayed = replay_under(
+        &fixture,
+        json!([
+            child(0, "A", &a),
+            {"ordinal":1,"name":"B","kind":"child","state":"running","output":null,"error":null},
+        ]),
+        vec![(a, SLOW)],
+        SPLIT,
+    )
+    .await;
+    let outcomes = replayed.frontier.unwrap();
+    assert_eq!(
+        shape(&outcomes),
+        vec![
+            json!(["Child", 1, "B", null]),
+            json!(["StepCompleted", 2, "x", "A"]),
+        ],
+        "{outcomes:?}"
+    );
+    assert_eq!(replayed.reads.len(), 1);
+}
+
+/// A referenced child output the host cannot read ends the task without an
+/// outcome, as an unreadable spliced one does before any isolate exists: the
+/// isolate already runs when this read fails, and the failure it raises there
+/// is not something the run may journal. The control is
+/// `a_referenced_childs_follow_on_step_joins_the_frontier_of_a_running_sibling`,
+/// where the same journal's object is held and the task submits a frontier.
+#[compio::test]
+async fn a_referenced_child_output_the_host_cannot_read_submits_no_outcome() {
+    let fixture = Box::pin(Fixture::new(SIBLINGS)).await;
+    let a = child_output_of("A", REFERENCED);
+    // No object is held for this descriptor, so the read reaches the task
+    // host, which holds none either.
+    let replayed = replay_under(
+        &fixture,
+        json!([
+            child(0, "A", &a),
+            {"ordinal":1,"name":"B","kind":"child","state":"running","output":null,"error":null},
+        ]),
+        Vec::new(),
+        SPLIT,
+    )
+    .await;
+    assert!(replayed.frontier.is_err(), "{:?}", replayed.frontier);
+    assert!(replayed.built, "the read under test is the isolate's");
+}
+
+/// A parent that calls `count` distinct children at once, each with its own
+/// output, and runs a step after each.
+fn fan_out(count: usize) -> String {
+    let mut source = String::new();
+    for index in 0..count {
+        source.push_str(&format!(
+            "export class C{index} {{ async run() {{ return {{ n: {index} }}; }} }}\n"
+        ));
+    }
+    let names = (0..count)
+        .map(|index| format!("C{index}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    source.push_str(&format!(
+        "export class Example {{ async run(_trigger, step) {{\n\
+         const classes = [{names}];\n\
+         await Promise.all(classes.map((C, i) => step.call(C, {{}}).then((v) => step.run(`s${{i}}`, () => v))));\n\
+         return 'done';\n\
+         }} }}\n"
+    ));
+    source
+}
+
+/// A dispatch reads the referenced children `CHILD_OUTPUT_READS` at a time, the
+/// bound the host publishes in the replay envelope from the same constant its
+/// splice path reads with. A parent that calls more children than that cannot
+/// hold every object open at once: the first batch must settle before the next
+/// is issued. The control is that every output is read.
+#[compio::test]
+async fn referenced_children_are_read_at_the_hosts_concurrency_bound() {
+    const COUNT: usize = zeroship_workflow_runner::CHILD_OUTPUT_READS + 4;
+    let source = fan_out(COUNT);
+    let fixture = Box::pin(Fixture::new(&source)).await;
+    let outputs: Vec<Vec<u8>> = (0..COUNT)
+        .map(|index| child_output_of(&format!("C{index}"), REFERENCED))
+        .collect();
+    let journal = serde_json::Value::Array(
+        outputs
+            .iter()
+            .enumerate()
+            .map(|(index, output)| child(index as i32, &format!("C{index}"), output))
+            .collect(),
+    );
+    let objects = outputs.iter().map(|output| (output.clone(), SLOW)).collect();
+    let replayed = replay_under(&fixture, journal, objects, SPLIT).await;
+    assert!(replayed.frontier.is_ok(), "{:?}", replayed.frontier);
+    assert_eq!(replayed.reads.len(), COUNT);
+    assert_eq!(
+        replayed.max_in_flight,
+        zeroship_workflow_runner::CHILD_OUTPUT_READS,
+        "the bridge batches its referenced reads"
+    );
+}
+
 /// A child that returned nothing reached the journal as JSON null with no
 /// object. Its parent receives null, and nothing is read for it.
 #[compio::test]
@@ -2291,25 +2510,34 @@ const ONE_CHILD: &str = r"
     }
 ";
 
-/// A child output of exactly `size` bytes whose `from` is `A`.
-fn child_output_of(size: usize) -> Vec<u8> {
-    let frame = br#"{"from":"A","pad":""}"#.len();
+/// A child output of exactly `size` bytes whose `from` is `from`.
+fn child_output_of(from: &str, size: usize) -> Vec<u8> {
+    let frame = serde_json::to_vec(&json!({"from": from, "pad": ""}))
+        .unwrap()
+        .len();
     let output =
-        serde_json::to_vec(&json!({"from": "A", "pad": "x".repeat(size - frame)})).unwrap();
+        serde_json::to_vec(&json!({"from": from, "pad": "x".repeat(size - frame)})).unwrap();
     assert_eq!(output.len(), size);
     output
 }
 
-/// The largest child output the platform admits is replayed by a host on the
-/// default budgets: its bytes reach the parent, which reads a field of it.
+/// The largest child output the platform admits is replayed by a host on its
+/// default budgets: the output is over the default inline threshold, so it
+/// stays out of the replay envelope, is read through its reference before the
+/// body runs, and reaches the parent, which reads a field of it.
 ///
-/// The isolate runs with no CPU limit. Parsing an envelope this large is work
-/// the isolate does inside its dispatch, so under an app's CPU limit the same
-/// replay can be cut short; this case is about what the host reads and splices.
+/// The isolate runs with no CPU limit. Decoding and parsing an output this
+/// large is work the isolate does inside the dispatch, so whether it fits an
+/// app's CPU limit is a question about the plan and the build, not about what
+/// the host reads and hands the isolate, which is what this case binds.
 #[compio::test]
-async fn a_child_output_at_the_payload_ceiling_is_replayed() {
+async fn a_child_output_at_the_ceiling_is_replayed_through_its_reference() {
     let fixture = Fixture::with_limits(ONE_CHILD, None, AppPolicy::default()).await;
-    let output = child_output_of(zeroship_core::workflow_policy::MAX_PAYLOAD_BYTES_CEILING);
+    let output = child_output_of(
+        "A",
+        zeroship_core::workflow_policy::MAX_CHILD_OUTPUT_BYTES_CEILING,
+    );
+    assert!(output.len() > TaskPayloadLimits::default().max_inline_bytes);
     let replayed = replay_under(
         &fixture,
         json!([child(0, "A", &output)]),
@@ -2326,11 +2554,11 @@ async fn a_child_output_at_the_payload_ceiling_is_replayed() {
     assert_eq!(replayed.reads.len(), 1);
 }
 
-/// Host budgets that read one child of `CHILD_SIZE` bytes and replay
-/// `max_replay_bytes` of children's outputs.
+/// Host budgets that splice and read one child of `CHILD_SIZE` bytes and
+/// splice `max_replay_bytes` of children's outputs.
 const fn replay_limits(max_replay_bytes: usize) -> TaskPayloadLimits {
     TaskPayloadLimits {
-        max_inline_bytes: 1024,
+        max_inline_bytes: CHILD_SIZE,
         max_payload_bytes: CHILD_SIZE,
         max_result_bytes: 1024 * 1024,
         max_replay_bytes,
@@ -2342,11 +2570,8 @@ const CHILD_SIZE: usize = 3000;
 /// replay budget of `max_replay_bytes`.
 async fn replay_two_within(max_replay_bytes: usize) -> Replayed {
     let fixture = Fixture::new(SIBLINGS).await;
-    let first = child_output_of(CHILD_SIZE);
-    let second = child_output_of(CHILD_SIZE)
-        .iter()
-        .map(|byte| if *byte == b'A' { b'B' } else { *byte })
-        .collect::<Vec<u8>>();
+    let first = child_output_of("A", CHILD_SIZE);
+    let second = child_output_of("B", CHILD_SIZE);
     replay_under(
         &fixture,
         json!([child(0, "A", &first), child(1, "B", &second)]),
@@ -2356,9 +2581,10 @@ async fn replay_two_within(max_replay_bytes: usize) -> Replayed {
     .await
 }
 
-/// The replay budget is a boundary assertion: a journal whose children's
-/// outputs sum past it, which a correctly configured host never receives, is
-/// refused before anything is read and before an isolate is built.
+/// The replay budget is a boundary assertion: a journal whose spliced
+/// children's outputs sum past it, which a correctly configured host never
+/// receives, is refused before anything is read and before an isolate is
+/// built.
 #[compio::test]
 async fn child_outputs_past_the_replay_budget_never_read_or_build_an_isolate() {
     let replayed = replay_two_within(2 * CHILD_SIZE - 1).await;
@@ -2463,6 +2689,7 @@ const NARROW: usize = 1024;
 async fn settle_with_child_bound(
     source: &str,
     max_child_output_bytes: usize,
+    limits: TaskPayloadLimits,
 ) -> (Fixture, RunStatus, String) {
     let fixture = Fixture::with_workflows(
         source,
@@ -2476,7 +2703,7 @@ async fn settle_with_child_bound(
     .await;
     let run = fixture.start(json!({})).await;
     let manager = Manager::new(&fixture).await;
-    let mut consumer = manager.consumer(&fixture, 1);
+    let mut consumer = manager.consumer_with_limits(&fixture, 1, limits);
     // Terminal, not merely suspended: the parent suspends while its child
     // runs, and the child reaches it through the maintenance lane.
     let settled = RefCell::new(None);
@@ -2507,8 +2734,12 @@ async fn settle_with_child_bound(
 /// catches and carries on from: the run settles rather than wedging.
 #[compio::test]
 async fn a_child_output_over_the_bound_is_thrown_into_the_parent() {
-    let (fixture, settled, run) =
-        settle_with_child_bound(&parent_of_a_wide_child(true), NARROW).await;
+    let (fixture, settled, run) = Box::pin(settle_with_child_bound(
+        &parent_of_a_wide_child(true),
+        NARROW,
+        TaskPayloadLimits::default(),
+    ))
+    .await;
     assert_eq!(settled.state, RunState::Completed, "{settled:?}");
     assert_eq!(
         returned_value(&fixture, &run).await,
@@ -2519,8 +2750,12 @@ async fn a_child_output_over_the_bound_is_thrown_into_the_parent() {
 /// Uncaught, the same failure settles the parent as failed with that class.
 #[compio::test]
 async fn an_uncaught_child_output_over_the_bound_fails_the_parent() {
-    let (_fixture, settled, _run) =
-        settle_with_child_bound(&parent_of_a_wide_child(false), NARROW).await;
+    let (_fixture, settled, _run) = Box::pin(settle_with_child_bound(
+        &parent_of_a_wide_child(false),
+        NARROW,
+        TaskPayloadLimits::default(),
+    ))
+    .await;
     assert_eq!(settled.state, RunState::Failed, "{settled:?}");
     assert_eq!(
         settled.error.as_ref().map(|error| error["type"].clone()),
@@ -2536,10 +2771,31 @@ async fn a_child_output_inside_the_bound_is_attached() {
     let (fixture, settled, run) = settle_with_child_bound(
         &parent_of_a_wide_child(true),
         AppPolicy::default().max_child_output_bytes,
+        TaskPayloadLimits::default(),
     )
     .await;
     assert_eq!(settled.state, RunState::Completed, "{settled:?}");
     assert_eq!(returned_value(&fixture, &run).await, json!("attached"));
+}
+
+/// A child output over the host's inline threshold reaches its parent through
+/// the object's reference, end to end: the parent's replay leaves it out of
+/// the envelope, the isolate reads it through the task host, and `step.call`
+/// resolves to the value the child returned rather than to a reference.
+#[compio::test]
+async fn a_child_output_over_the_inline_threshold_reaches_the_parent_as_its_value() {
+    let limits = TaskPayloadLimits {
+        max_inline_bytes: NARROW,
+        ..TaskPayloadLimits::default()
+    };
+    let (fixture, settled, run) = Box::pin(settle_with_child_bound(
+        &parent_of_a_wide_child(false),
+        AppPolicy::default().max_child_output_bytes,
+        limits,
+    ))
+    .await;
+    assert_eq!(settled.state, RunState::Completed, "{settled:?}");
+    assert_eq!(returned_value(&fixture, &run).await, json!(4096));
 }
 
 #[path = "support/orm.rs"]

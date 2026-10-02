@@ -29,7 +29,7 @@ pub use budget::{BudgetEnd, ExecutionBudget, ExecutionGuard};
 mod payloads;
 pub use payloads::{
     AppPayloads, HostPayloads, ObjectStepOutputs, PayloadObjects, PayloadRead, RunPayloads,
-    TaskPayloadReader, TaskPayloads, UploadReceipt, WorkerPayloads,
+    TaskPayloadReader, TaskPayloads, UploadReceipt, WorkerPayloads, CHILD_OUTPUT_READS,
 };
 mod outputs;
 pub use outputs::{PreparedExecution, TaskPayloadLimits};

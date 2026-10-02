@@ -1,7 +1,8 @@
 use serde_json::{json, Value};
 use zeroship_core::workflow_policy::{
-    AppPolicy, InvalidPolicy, MAX_CHILD_OUTPUT_BYTES_CEILING, MAX_INPUT_BYTES_CEILING,
-    MAX_JOURNAL_BYTES_CEILING, MAX_PAYLOAD_BYTES_CEILING, SIGNAL_CAPABILITY_MAX_LIFETIME_SECONDS,
+    AppPolicy, InvalidPolicy, FREE_TIER_MAX_CHILD_OUTPUT_BYTES, MAX_CHILD_OUTPUT_BYTES_CEILING,
+    MAX_INPUT_BYTES_CEILING, MAX_JOURNAL_BYTES_CEILING, MAX_PAYLOAD_BYTES_CEILING,
+    SIGNAL_CAPABILITY_MAX_LIFETIME_SECONDS,
 };
 
 fn document() -> Value {
@@ -181,6 +182,48 @@ fn shared_bounds_refuse_a_policy_above_the_platform_ceiling() {
     // The shipped default is admissible, so every host taking the derived
     // budgets can carry what a default policy admits.
     AppPolicy::default().validate().unwrap();
+}
+
+/// A parent's child outputs are held to eight mebibytes, the size every
+/// dispatch of the parent can read and parse under the app's limits. The bound
+/// is spelled out rather than taken from the constant, so the case binds the
+/// platform decision and not whatever the constant happens to hold.
+#[test]
+fn child_outputs_are_held_to_eight_mebibytes() {
+    const EIGHT_MEBIBYTES: usize = 8 * 1024 * 1024;
+    assert_eq!(AppPolicy::default().max_child_output_bytes, EIGHT_MEBIBYTES);
+    AppPolicy {
+        max_child_output_bytes: EIGHT_MEBIBYTES,
+        ..AppPolicy::default()
+    }
+    .validate()
+    .unwrap();
+    assert_eq!(
+        AppPolicy {
+            max_child_output_bytes: EIGHT_MEBIBYTES + 1,
+            ..AppPolicy::default()
+        }
+        .validate(),
+        Err(InvalidPolicy)
+    );
+}
+
+/// The free tier grants a 64 KiB child-output bound, distinct from the platform
+/// ceiling a paid plan may reach. The value is spelled out rather than taken
+/// from the constant, so the case binds the platform decision. The control is
+/// the default policy, which reaches the ceiling.
+#[test]
+fn the_free_tier_grants_a_sixty_four_kibibyte_child_output_bound() {
+    const SIXTY_FOUR_KIBIBYTES: usize = 64 * 1024;
+    assert_eq!(FREE_TIER_MAX_CHILD_OUTPUT_BYTES, SIXTY_FOUR_KIBIBYTES);
+    assert_eq!(
+        AppPolicy::default().max_child_output_bytes,
+        MAX_CHILD_OUTPUT_BYTES_CEILING
+    );
+    // Read through the runtime default rather than the constant twice, so the
+    // comparison is a value the case establishes and not a compile-time
+    // tautology the lint would reject.
+    assert!(FREE_TIER_MAX_CHILD_OUTPUT_BYTES < AppPolicy::default().max_child_output_bytes);
 }
 
 /// The creator engine's stall verdict is only reachable while the manager is

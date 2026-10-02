@@ -36,16 +36,31 @@ pub const MAX_JOURNAL_BYTES_CEILING: usize = 16 * 1024 * 1024;
 /// admit a payload that can never be read back.
 pub const MAX_PAYLOAD_BYTES_CEILING: usize = 64 * 1024 * 1024;
 
-/// Largest sum of child outputs one run generation's journal admits.
+/// Largest sum of child outputs one run generation's journal admits, and so the
+/// largest single child output a parent can receive.
 ///
-/// The sum runs over every completed `step.call` and `step.startMany` child,
-/// and the replay budget a host that hydrates them derives from this value. A
-/// host budget below it could not replay a journal the platform admitted.
+/// The sum runs over every completed `step.call` and `step.startMany` child.
+/// It bounds the sum rather than each output because every dispatch of the
+/// parent replays from the top: it reads and parses the output of every child
+/// it has completed, inside one execution under the app's CPU and heap limits,
+/// so what one dispatch pays is the sum.
 ///
-/// Never below [`MAX_PAYLOAD_BYTES_CEILING`], so the largest child output the
-/// platform admits always fits.
-pub const MAX_CHILD_OUTPUT_BYTES_CEILING: usize = MAX_PAYLOAD_BYTES_CEILING;
-const _: () = assert!(MAX_CHILD_OUTPUT_BYTES_CEILING >= MAX_PAYLOAD_BYTES_CEILING);
+/// A host's replay budget derives from this value. The outputs a host splices
+/// into a replay envelope are a part of the sum, so a budget at the ceiling
+/// carries every journal the platform admits.
+///
+/// Never above [`MAX_PAYLOAD_BYTES_CEILING`]: an output the host does not
+/// splice is read back through the payload read budget, which a configured
+/// host holds at that ceiling.
+pub const MAX_CHILD_OUTPUT_BYTES_CEILING: usize = 8 * 1024 * 1024;
+const _: () = assert!(MAX_CHILD_OUTPUT_BYTES_CEILING <= MAX_PAYLOAD_BYTES_CEILING);
+
+/// The child-output bound the free tier's workflow policy grants.
+///
+/// Far below the platform ceiling: every dispatch of a parent reads its
+/// children's outputs inside one app execution, so the free tier, whose app
+/// runs under the smallest CPU and heap limits, carries a bound that fits them.
+pub const FREE_TIER_MAX_CHILD_OUTPUT_BYTES: usize = 64 * 1024;
 
 /// [`MAX_PAYLOAD_BYTES_CEILING`] in the signed representation [`AppPolicy`]
 /// stores. One authority, two representations: the conversion is proved when
@@ -87,11 +102,12 @@ pub struct AppPolicy {
     /// How many bytes of child outputs one run generation's journal carries,
     /// summed over its completed `step.call` and `step.startMany` children.
     ///
-    /// A child output is an object the parent's replay reads back in full, so
-    /// the sum is what one replay materializes. It is held where the journal
-    /// grows: a child whose output would carry the sum past this bound is
-    /// recorded failed with `LimitExceededError` instead of attached, and the
-    /// parent's `step.call` throws it.
+    /// Every dispatch of the parent reads each of those outputs back before
+    /// its body runs, spliced into the replay envelope or read through the
+    /// output's reference, so the sum is what one dispatch materializes. It is
+    /// held where the journal grows: a child whose output would carry the sum
+    /// past this bound is recorded failed with `LimitExceededError` instead of
+    /// attached, and the parent's `step.call` throws it.
     pub max_child_output_bytes: usize,
     pub max_payload_bytes: i64,
     pub max_payload_objects: i64,

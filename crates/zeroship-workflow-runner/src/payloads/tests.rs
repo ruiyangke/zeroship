@@ -29,7 +29,7 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use zeroship_core::app_id::AppId;
+use zeroship_core::{app_id::AppId, workflow_policy::MAX_CHILD_OUTPUT_BYTES_CEILING};
 use zeroship_storage::{
     backend::{
         BoxByteStream, BoxChunkSource, ChunkResult, ChunkSource, ListPage, ListRequest, ObjectMeta,
@@ -915,9 +915,24 @@ fn completed(ordinal: i32, name: &str, kind: &str, bytes: &[u8]) -> serde_json::
 
 const CHILD: &[u8] = br#"{"doubled":42}"#;
 const STEP: &[u8] = br#"{"stored":true}"#;
-/// The replay budget a configured host runs with, so only the cases about the
-/// budget are decided by it.
-const BUDGET: usize = zeroship_core::workflow_policy::MAX_CHILD_OUTPUT_BYTES_CEILING;
+/// A child output one byte wider than [`CHILD`].
+const WIDE: &[u8] = br#"{"doubled":420}"#;
+
+/// The budgets a configured host runs with, so only the cases about a budget
+/// are decided by one.
+fn configured() -> crate::TaskPayloadLimits {
+    crate::TaskPayloadLimits::default()
+}
+
+/// Budgets whose inline threshold is exactly [`CHILD`]'s size, splicing up to
+/// `max_replay_bytes` of children's outputs.
+fn splicing_child(max_replay_bytes: usize) -> crate::TaskPayloadLimits {
+    crate::TaskPayloadLimits {
+        max_inline_bytes: CHILD.len(),
+        max_replay_bytes,
+        ..configured()
+    }
+}
 
 /// A completed child's bytes take the place of its descriptor. A `run` step's
 /// descriptor stays, because its body asked for a reference, and a child that
@@ -935,7 +950,7 @@ async fn a_replay_journal_carries_child_bytes_and_keeps_run_references() {
     ]));
     let reader = TaskPayloadReader::new(transport.clone(), &assignment, 1024).unwrap();
     let journal = reader
-        .replay_journal(BUDGET)
+        .replay_journal(configured())
         .await
         .unwrap()
         .expect("a journal naming a child's output is hydrated");
@@ -952,6 +967,56 @@ async fn a_replay_journal_carries_child_bytes_and_keeps_run_references() {
     }
     assert_eq!(journal[1].output_ref, Some(reference(STEP)));
     assert_eq!(*transport.asked.borrow(), vec![reference(CHILD)]);
+}
+
+/// The inline threshold decides which child outputs are spliced: one at the
+/// threshold is, one a byte over it keeps its descriptor exactly as assigned
+/// and is not read here, since the isolate reads it through its reference.
+#[compio::test]
+async fn a_child_output_over_the_inline_threshold_keeps_its_reference() {
+    let transport = Rc::new(HeldObjects {
+        objects: vec![CHILD.to_vec(), WIDE.to_vec()],
+        ..HeldObjects::default()
+    });
+    let assignment = replaying(&json!([
+        completed(0, "AtThreshold", "child", CHILD),
+        completed(1, "OverThreshold", "child", WIDE),
+    ]));
+    assert_eq!(WIDE.len(), CHILD.len() + 1);
+    let reader = TaskPayloadReader::new(transport.clone(), &assignment, 1024).unwrap();
+    let journal = reader
+        .replay_journal(splicing_child(1024))
+        .await
+        .unwrap()
+        .expect("a journal naming a spliced child's output is hydrated");
+    assert_eq!(
+        serde_json::to_value(&journal[0]).unwrap()["output"],
+        json!({"doubled":42})
+    );
+    assert_eq!(journal[0].output_ref, None);
+    assert_eq!(
+        serde_json::to_value(&journal[1]).unwrap(),
+        serde_json::to_value(&assignment.invocation.journal[1]).unwrap()
+    );
+    assert_eq!(*transport.asked.borrow(), vec![reference(CHILD)]);
+}
+
+/// A journal whose only child outputs are over the inline threshold is already
+/// what the isolate replays: nothing to replace, and nothing read.
+#[compio::test]
+async fn a_journal_naming_only_referenced_child_outputs_is_replayed_as_assigned() {
+    let transport = Rc::new(HeldObjects {
+        objects: vec![WIDE.to_vec()],
+        ..HeldObjects::default()
+    });
+    let assignment = replaying(&json!([completed(0, "OverThreshold", "child", WIDE)]));
+    let reader = TaskPayloadReader::new(transport.clone(), &assignment, 1024).unwrap();
+    assert!(reader
+        .replay_journal(splicing_child(1024))
+        .await
+        .unwrap()
+        .is_none());
+    assert!(transport.asked.borrow().is_empty());
 }
 
 /// The envelope carries a stored child's bytes exactly as the object holds
@@ -973,16 +1038,18 @@ async fn the_replay_envelope_carries_stored_child_bytes_verbatim() {
     });
     let assignment = replaying(&json!([completed(0, "Child", "child", stored)]));
     let reader = TaskPayloadReader::new(transport, &assignment, 1024).unwrap();
-    let envelope = reader.replay_envelope(BUDGET).await.unwrap();
+    let envelope = reader.replay_envelope(configured()).await.unwrap();
     let spliced = format!("\"output\":{}", std::str::from_utf8(stored).unwrap());
     assert!(envelope.contains(&spliced), "{envelope}");
     assert!(!envelope.contains("outputRef\":{"), "{envelope}");
     // The whole envelope is the assigned invocation with the child's output in
-    // place of its descriptor and nothing else moved, so the borrowed identity
-    // fields cannot drop out of the serialized form.
+    // place of its descriptor and nothing else moved, plus the one host field
+    // the bridge batches its referenced reads by. The borrowed identity fields
+    // cannot drop out of the serialized form.
     let mut expected = serde_json::to_value(&assignment.invocation).unwrap();
     expected["journal"][0]["output"] = json!({"b": 1, "a": 2.5});
     expected["journal"][0]["outputRef"] = serde_json::Value::Null;
+    expected["childOutputReads"] = json!(crate::CHILD_OUTPUT_READS);
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&envelope).unwrap(),
         expected
@@ -999,13 +1066,15 @@ async fn a_journal_naming_no_child_output_is_replayed_as_assigned() {
     });
     let assignment = replaying(&json!([completed(0, "stored", "run", STEP)]));
     let reader = TaskPayloadReader::new(transport.clone(), &assignment, 1024).unwrap();
-    assert!(reader.replay_journal(BUDGET).await.unwrap().is_none());
+    assert!(reader.replay_journal(configured()).await.unwrap().is_none());
     assert!(transport.asked.borrow().is_empty());
 }
 
-/// A child object that is not JSON is refused as unavailable.
+/// A spliced child object that is not JSON is a permanent data fault, so it is
+/// refused as internal rather than unavailable: a retry would read the same
+/// bytes and fail the same way.
 #[compio::test]
-async fn a_child_output_that_is_not_json_is_unavailable() {
+async fn a_child_output_that_is_not_json_is_internal() {
     let garbage = b"not json".to_vec();
     let transport = Rc::new(HeldObjects {
         objects: vec![garbage.clone()],
@@ -1014,9 +1083,47 @@ async fn a_child_output_that_is_not_json_is_unavailable() {
     let assignment = replaying(&json!([completed(0, "Child", "child", &garbage)]));
     let reader = TaskPayloadReader::new(transport, &assignment, 1024).unwrap();
     assert_eq!(
-        reader.replay_journal(BUDGET).await.unwrap_err(),
-        WorkflowServiceError::Unavailable("workflow child output payload is not valid JSON".into())
+        reader.replay_journal(configured()).await.unwrap_err(),
+        WorkflowServiceError::Internal("workflow child output payload is not valid JSON".into())
     );
+}
+
+/// A referenced child output is read through the reader as the JSON it holds.
+/// One that is not JSON fails the reader as internal, so the host abandons the
+/// execution instead of letting the isolate hand the body a parse failure it
+/// could catch. The control is a `run` step's object: a by-reference step
+/// output may hold any bytes, and the same garbage reads back as itself.
+#[compio::test]
+async fn a_referenced_child_output_that_is_not_json_fails_the_reader() {
+    let garbage = b"not json".to_vec();
+    let assignment = replaying(&json!([
+        completed(0, "Child", "child", CHILD),
+        completed(1, "Broken", "child", &garbage),
+        completed(2, "stored", "run", &garbage),
+    ]));
+    let held = || {
+        Rc::new(HeldObjects {
+            objects: vec![CHILD.to_vec(), garbage.clone()],
+            ..HeldObjects::default()
+        })
+    };
+
+    let reader = TaskPayloadReader::new(held(), &assignment, 1024).unwrap();
+    assert_eq!(
+        reader.read_child_output("Child", 0).await.unwrap(),
+        json!({"doubled":42})
+    );
+    assert_eq!(reader.read_step_output("stored", 0).await.unwrap(), garbage);
+    reader.check().unwrap();
+
+    let reader = TaskPayloadReader::new(held(), &assignment, 1024).unwrap();
+    let refused =
+        WorkflowServiceError::Internal("workflow child output payload is not valid JSON".into());
+    assert_eq!(
+        reader.read_child_output("Broken", 0).await.unwrap_err(),
+        refused
+    );
+    assert_eq!(reader.check(), Err(refused));
 }
 
 /// A child object over the read budget is refused before it is opened, and the
@@ -1030,11 +1137,80 @@ async fn a_child_output_over_the_read_budget_fails_the_reader() {
     let assignment = replaying(&json!([completed(0, "Child", "child", CHILD)]));
     let reader = TaskPayloadReader::new(transport.clone(), &assignment, CHILD.len() - 1).unwrap();
     assert_eq!(
-        reader.replay_journal(BUDGET).await.unwrap_err(),
+        reader.replay_journal(configured()).await.unwrap_err(),
         WorkflowServiceError::PayloadTooLarge
     );
     assert_eq!(reader.check(), Err(WorkflowServiceError::PayloadTooLarge));
     assert!(transport.asked.borrow().is_empty());
+}
+
+/// A journal whose completed child refs sum past the platform ceiling is
+/// refused before any object is opened. Admission enforces the bound where the
+/// journal grows, so this is the host's independent boundary assertion over a
+/// corrupt or pre-ceiling journal rather than a limit a creator meets.
+#[compio::test]
+async fn child_outputs_past_the_platform_ceiling_are_refused_before_any_read() {
+    let half = MAX_CHILD_OUTPUT_BYTES_CEILING / 2 + 1;
+    let assignment = replaying(&json!([
+        {"ordinal":0,"name":"First","kind":"child","state":"completed","output":null,
+         "outputRef":{"hash":"a".repeat(64),"size":half,"contentType":"application/json"},
+         "error":null},
+        {"ordinal":1,"name":"Second","kind":"child","state":"completed","output":null,
+         "outputRef":{"hash":"b".repeat(64),"size":half,"contentType":"application/json"},
+         "error":null},
+    ]));
+    let transport = Rc::new(HeldObjects::default());
+    let reader = TaskPayloadReader::new(transport.clone(), &assignment, 1024).unwrap();
+    assert_eq!(
+        reader.replay_journal(configured()).await.unwrap_err(),
+        WorkflowServiceError::Internal("workflow child outputs exceed the platform ceiling".into())
+    );
+    assert!(transport.asked.borrow().is_empty());
+}
+
+/// A selector the assigned journal cannot answer is a lost replay dependency:
+/// it fails the reader as an unreadable reference does, so the host abandons
+/// the execution instead of letting the isolate journal a fabricated outcome
+/// past it. The three refusals are a malformed name, an occurrence the wire
+/// cannot carry and a step absent from the assigned journal, and both reads
+/// share them.
+#[compio::test]
+async fn selector_failures_fail_the_reader() {
+    let assignment = replaying(&json!([completed(0, "Child", "child", CHILD)]));
+    for (name, occurrence) in [("", 0u32), ("Child", u32::MAX), ("Absent", 0)] {
+        for child in [false, true] {
+            let transport = Rc::new(HeldObjects {
+                objects: vec![CHILD.to_vec()],
+                ..HeldObjects::default()
+            });
+            let reader = TaskPayloadReader::new(transport, &assignment, 1024).unwrap();
+            let result = if child {
+                reader.read_child_output(name, occurrence).await.map(|_| ())
+            } else {
+                reader.read_step_output(name, occurrence).await.map(|_| ())
+            };
+            assert!(result.is_err(), "child={child} {name:?}/{occurrence}");
+            assert!(
+                reader.check().is_err(),
+                "child={child} {name:?}/{occurrence}: a selector the journal cannot answer must fail the reader"
+            );
+        }
+    }
+}
+
+/// Reading a step that is not a child through the child reader is a caller
+/// fault, and it fails the reader too, so no path can read a `run` step's
+/// bytes as a child's value.
+#[compio::test]
+async fn reading_a_non_child_as_a_child_output_fails_the_reader() {
+    let assignment = replaying(&json!([completed(0, "stored", "run", STEP)]));
+    let transport = Rc::new(HeldObjects {
+        objects: vec![STEP.to_vec()],
+        ..HeldObjects::default()
+    });
+    let reader = TaskPayloadReader::new(transport, &assignment, 1024).unwrap();
+    assert!(reader.read_child_output("stored", 0).await.is_err());
+    assert!(reader.check().is_err());
 }
 
 /// The replay budget bounds the stored bytes a replay splices in, summed over
@@ -1048,12 +1224,20 @@ async fn the_replay_budget_bounds_the_stored_bytes_of_every_child() {
         completed(1, "Second", "child", STEP),
     ]));
     let stored = CHILD.len() + STEP.len();
+    let budget = |max_replay_bytes| crate::TaskPayloadLimits {
+        max_replay_bytes,
+        ..configured()
+    };
     let transport = Rc::new(HeldObjects {
         objects: vec![CHILD.to_vec(), STEP.to_vec()],
         ..HeldObjects::default()
     });
     let reader = TaskPayloadReader::new(transport.clone(), &assignment, 1024).unwrap();
-    assert!(reader.replay_journal(stored).await.unwrap().is_some());
+    assert!(reader
+        .replay_journal(budget(stored))
+        .await
+        .unwrap()
+        .is_some());
     assert_eq!(transport.asked.borrow().len(), 2);
 
     let transport = Rc::new(HeldObjects {
@@ -1062,13 +1246,45 @@ async fn the_replay_budget_bounds_the_stored_bytes_of_every_child() {
     });
     let reader = TaskPayloadReader::new(transport.clone(), &assignment, 1024).unwrap();
     assert!(matches!(
-        reader.replay_journal(stored - 1).await.unwrap_err(),
+        reader.replay_journal(budget(stored - 1)).await.unwrap_err(),
         WorkflowServiceError::Internal(_)
     ));
     assert!(transport.asked.borrow().is_empty());
 }
 
-/// A child-output total the host cannot represent is refused as unrepresentable,
+/// The replay budget counts only what is spliced: a child output over the
+/// inline threshold adds nothing to it, so a budget of exactly the spliced
+/// child's size replays a journal that also names a wider one. The control is
+/// the same journal a byte under that budget, which is refused.
+#[compio::test]
+async fn the_replay_budget_counts_only_spliced_child_outputs() {
+    let assignment = replaying(&json!([
+        completed(0, "AtThreshold", "child", CHILD),
+        completed(1, "OverThreshold", "child", WIDE),
+    ]));
+    let transport = Rc::new(HeldObjects {
+        objects: vec![CHILD.to_vec(), WIDE.to_vec()],
+        ..HeldObjects::default()
+    });
+    let reader = TaskPayloadReader::new(transport.clone(), &assignment, 1024).unwrap();
+    assert!(reader
+        .replay_journal(splicing_child(CHILD.len()))
+        .await
+        .unwrap()
+        .is_some());
+    assert_eq!(*transport.asked.borrow(), vec![reference(CHILD)]);
+
+    let reader = TaskPayloadReader::new(transport, &assignment, 1024).unwrap();
+    assert!(matches!(
+        reader
+            .replay_journal(splicing_child(CHILD.len() - 1))
+            .await
+            .unwrap_err(),
+        WorkflowServiceError::Internal(_)
+    ));
+}
+
+/// A spliced total the host cannot represent is refused as unrepresentable,
 /// naming the overflow rather than a budget comparison it never made.
 #[compio::test]
 async fn a_child_output_total_the_host_cannot_represent_is_unrepresentable() {
@@ -1077,15 +1293,23 @@ async fn a_child_output_total_the_host_cannot_represent_is_unrepresentable() {
         completed(1, "Second", "child", STEP),
         completed(2, "Third", "child", CHILD),
     ]);
-    // Each size fits the signed field a descriptor carries; their sum overflows
-    // the host's `usize`, so no budget can bound it.
+    // Each size fits the signed field a descriptor carries and a threshold
+    // this wide splices it; their sum overflows the host's `usize`, so no
+    // budget can bound it.
     for index in 0..3 {
         journal[index]["outputRef"]["size"] = json!(i64::MAX);
     }
+    let limits = crate::TaskPayloadLimits {
+        max_inline_bytes: usize::MAX,
+        max_payload_bytes: usize::MAX,
+        max_result_bytes: usize::MAX,
+        max_replay_bytes: usize::MAX,
+    };
     let transport = Rc::new(HeldObjects::default());
-    let reader = TaskPayloadReader::new(transport.clone(), &replaying(&journal), BUDGET).unwrap();
+    let reader =
+        TaskPayloadReader::new(transport.clone(), &replaying(&journal), usize::MAX).unwrap();
     assert_eq!(
-        reader.replay_journal(BUDGET).await.unwrap_err(),
+        reader.replay_journal(limits).await.unwrap_err(),
         WorkflowServiceError::Internal("workflow child output total is unrepresentable".into())
     );
     assert!(transport.asked.borrow().is_empty());

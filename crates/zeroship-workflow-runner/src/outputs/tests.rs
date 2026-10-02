@@ -891,9 +891,45 @@ fn configured_host_budget_refuses_a_payload_read_below_the_platform_ceiling() {
     assert!(below.validate_configured().is_err());
 }
 
+/// The same startup half for the replay budget: a configured host whose budget
+/// is below the child-output ceiling could be handed a journal the platform
+/// admitted and refuse to replay it, so it refuses to serve instead.
+#[test]
+fn configured_host_budget_refuses_a_replay_budget_below_the_child_output_ceiling() {
+    assert_eq!(
+        TaskPayloadLimits::default().max_replay_bytes,
+        MAX_CHILD_OUTPUT_BYTES_CEILING
+    );
+    let at_ceiling = TaskPayloadLimits {
+        max_inline_bytes: 1024,
+        max_payload_bytes: MAX_PAYLOAD_BYTES_CEILING,
+        max_result_bytes: MAX_PAYLOAD_BYTES_CEILING,
+        max_replay_bytes: MAX_CHILD_OUTPUT_BYTES_CEILING,
+    };
+    at_ceiling.validate_configured().unwrap();
+    let below = TaskPayloadLimits {
+        max_replay_bytes: MAX_CHILD_OUTPUT_BYTES_CEILING - 1,
+        ..at_ceiling
+    };
+    // The control: internally consistent, so only the ceiling comparison can
+    // account for the refusal.
+    below.validate().unwrap();
+    assert!(below.validate_configured().is_err());
+}
+
 #[test]
 fn output_budgets_reject_unusable_limits() {
     TaskPayloadLimits::default().validate().unwrap();
+    LIMITS.validate().unwrap();
+    // A replay budget measures only what is spliced, each piece at most the
+    // inline threshold, so one at the threshold is usable even below the read
+    // budget a referenced output is read through.
+    TaskPayloadLimits {
+        max_replay_bytes: LIMITS.max_inline_bytes,
+        ..LIMITS
+    }
+    .validate()
+    .unwrap();
     for limits in [
         TaskPayloadLimits {
             max_inline_bytes: 0,
@@ -907,9 +943,9 @@ fn output_budgets_reject_unusable_limits() {
             max_result_bytes: LIMITS.max_payload_bytes - 1,
             ..LIMITS
         },
-        // A replay budget that could not replay one child this host can read.
+        // A replay budget that could not replay one child this host splices.
         TaskPayloadLimits {
-            max_replay_bytes: LIMITS.max_payload_bytes - 1,
+            max_replay_bytes: LIMITS.max_inline_bytes - 1,
             ..LIMITS
         },
     ] {

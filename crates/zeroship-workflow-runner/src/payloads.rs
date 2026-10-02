@@ -14,7 +14,7 @@ pub use objects::{
 };
 pub(crate) use objects::ObjectWriter;
 
-use crate::WorkerTasks;
+use crate::{TaskPayloadLimits, WorkerTasks};
 use zeroship_workflow::{
     engine::{JournalStep, WorkflowOutputRef},
     service::{delivery::PayloadConfirmation, RequestId, TaskAssignment, TaskToken},
@@ -30,7 +30,10 @@ use std::{
     task::{Poll, Waker},
 };
 use zeroship_bundle::LoadedWorker;
-use zeroship_core::app_id::AppId;
+use zeroship_core::{
+    app_id::AppId,
+    workflow_policy::MAX_CHILD_OUTPUT_BYTES_CEILING,
+};
 use zeroship_storage::backend::BoxChunkSource;
 
 /// Host-only payload authority; task credentials never enter the app isolate.
@@ -103,10 +106,14 @@ impl TaskPayloads for WorkerTasks {
     }
 }
 
-/// How many child outputs [`TaskPayloadReader::replay_journal`] reads at once.
-/// The replay budget bounds what the outputs add up to; this bounds how many
-/// reads are open against the transport together.
-const CHILD_OUTPUT_READS: usize = 8;
+/// How many child outputs one dispatch reads at once. The replay budget bounds
+/// what the outputs add up to; this bounds how many reads are open against the
+/// transport together.
+///
+/// The splice path applies it with `buffer_unordered`. The isolate reads the
+/// larger child outputs itself, so the host publishes this bound in the replay
+/// envelope and the bridge batches its reads by it: one number, both paths.
+pub const CHILD_OUTPUT_READS: usize = 8;
 
 /// A journal step's output as a replay envelope carries it.
 #[derive(Debug, Clone, Serialize)]
@@ -114,20 +121,41 @@ const CHILD_OUTPUT_READS: usize = 8;
 pub enum ReplayOutput {
     /// A value the journal holds inline.
     Inline(Value),
-    /// A completed child's output: the bytes its object holds, spliced into
-    /// the envelope verbatim, so they are neither parsed into a tree nor
-    /// encoded again.
+    /// A completed child's output at or under the inline threshold: the bytes
+    /// its object holds, spliced into the envelope verbatim, so they are
+    /// neither parsed into a tree nor encoded again.
     Stored(Box<RawValue>),
+}
+
+/// The refusal a child output that is not the JSON its run returned earns.
+///
+/// It is a permanent data fault, not a transient one: the bytes in the object
+/// store will not become JSON on a later attempt. `Internal` is not retried, so
+/// the run rests on the fault instead of spending its delivery budget on it.
+fn child_output_error() -> WorkflowServiceError {
+    WorkflowServiceError::Internal("workflow child output payload is not valid JSON".into())
+}
+
+/// `bytes` as the JSON a child output must be, or [`child_output_error`]. A
+/// child's output is the JSON its run returned, so any other bytes are a fault
+/// in what holds them rather than a value the parent can be handed.
+fn child_output(bytes: Vec<u8>) -> Result<Box<RawValue>, WorkflowServiceError> {
+    String::from_utf8(bytes)
+        .ok()
+        .and_then(|text| RawValue::from_string(text).ok())
+        .ok_or_else(child_output_error)
 }
 
 /// A [`WorkflowInvocation`] as the replay envelope serializes it: its borrowed
 /// identity and hydrated trigger, with the replay journal in place of the
 /// assigned one.
 ///
-/// The field order, names and `camelCase` spelling mirror
-/// [`WorkflowInvocation`], so the envelope is byte-identical to serializing an
-/// invocation whose journal is `journal`. Borrowing the invocation keeps the
-/// assigned journal from being cloned only to be discarded.
+/// The field order and `camelCase` spelling mirror [`WorkflowInvocation`], and
+/// the host adds one field of its own: `child_output_reads`, the bound the
+/// bridge batches the referenced child outputs by. The invocation fields are
+/// byte-identical to serializing an invocation whose journal is `journal`.
+/// Borrowing the invocation keeps the assigned journal from being cloned only
+/// to be discarded.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ReplayEnvelope<'a, O> {
@@ -140,6 +168,7 @@ struct ReplayEnvelope<'a, O> {
     phase: &'a str,
     trigger: &'a zeroship_workflow::WorkflowTrigger,
     journal: &'a [JournalStep<O>],
+    child_output_reads: usize,
 }
 
 fn replay_envelope<'a, O>(
@@ -157,6 +186,7 @@ fn replay_envelope<'a, O>(
         phase: &invocation.phase,
         trigger,
         journal,
+        child_output_reads: CHILD_OUTPUT_READS,
     }
 }
 
@@ -271,8 +301,8 @@ impl TaskPayloadReader {
     }
 
     /// The replay envelope for this reader's assignment: its JSON, replaying
-    /// the assigned journal with each completed child's output in place of its
-    /// descriptor ([`Self::replay_journal`]).
+    /// the assigned journal with each completed child's output at or under the
+    /// inline threshold in place of its descriptor ([`Self::replay_journal`]).
     ///
     /// The identity and trigger come from the assigned invocation the reader
     /// already holds, never from a caller, so a caller cannot name another run
@@ -283,14 +313,14 @@ impl TaskPayloadReader {
     /// Whatever [`Self::input`] or [`Self::replay_journal`] refuses.
     pub async fn replay_envelope(
         &self,
-        max_replay_bytes: usize,
+        limits: TaskPayloadLimits,
     ) -> Result<String, WorkflowServiceError> {
         let mut trigger = self.invocation.trigger.clone();
         if let Some(input) = self.input().await? {
             trigger.input = Some(input);
             trigger.input_ref = None;
         }
-        self.replay_journal(max_replay_bytes)
+        self.replay_journal(limits)
             .await?
             .map_or_else(
                 || {
@@ -311,50 +341,86 @@ impl TaskPayloadReader {
             .map_err(|_| WorkflowServiceError::Internal("invalid workflow invocation".into()))
     }
 
-    /// The assigned journal as the isolate replays it, when it names a child's
-    /// output: each completed child carries the bytes it returned in place of
-    /// the descriptor of the object holding them. `None` when it names none,
-    /// since the assigned journal is then already what the isolate replays.
+    /// The assigned journal as the isolate replays it, when it names a child
+    /// output this host splices: each completed child whose output is at or
+    /// under `limits.max_inline_bytes` carries the bytes it returned in place
+    /// of the descriptor of the object holding them. `None` when it names
+    /// none, since the assigned journal is then already what the isolate
+    /// replays.
     ///
-    /// `step.call` resolves to that value, and it must resolve in the same
-    /// microtask round as every other journal value. A read the body awaited
-    /// would settle in I/O completion order, so which step the body issued next
-    /// would depend on which object arrived first, and a replay could reach its
-    /// ordinals in another order than the dispatch that journaled them. Reading
-    /// every child's object here, before any isolate exists, keeps replay a
-    /// function of the journal alone, as [`Self::input`] does for the trigger.
+    /// A larger child output keeps its descriptor and stays out of the
+    /// envelope. The isolate reads it through [`Self::read_step_output`], all
+    /// of them before the body runs, so `step.call` resolves to either kind of
+    /// output in the same microtask round as every other journal value. A read
+    /// the body awaited would settle in I/O completion order, so which step the
+    /// body issued next would depend on which object arrived first, and a
+    /// replay could reach its ordinals in another order than the dispatch that
+    /// journaled them. Splicing here and reading the rest before the body keep
+    /// replay a function of the journal alone, as [`Self::input`] does for the
+    /// trigger, and leave the threshold the host's own choice, since which side
+    /// of it an output falls on changes nothing the body observes.
     ///
-    /// The bytes are spliced verbatim ([`ReplayOutput::Stored`]), so the
-    /// envelope grows by exactly the sizes the descriptors name. Their sum is
-    /// held to `max_replay_bytes` before anything is read. That is a boundary
-    /// assertion rather than a limit a creator meets: the journal admits child
-    /// outputs only up to `AppPolicy::max_child_output_bytes`, while
-    /// [`TaskPayloadLimits::validate`] holds a replay budget at or above the
-    /// payload read budget and a configured host holds that at the payload
-    /// ceiling, so a journal the service admitted cannot reach it. The reads run
-    /// [`CHILD_OUTPUT_READS`] at a time.
+    /// The spliced bytes are carried verbatim ([`ReplayOutput::Stored`]), so
+    /// the envelope grows by exactly the sizes the descriptors name. Their sum
+    /// is held to `limits.max_replay_bytes` before anything is read. That is a
+    /// boundary assertion rather than a limit a creator meets: the journal
+    /// admits child outputs only up to `AppPolicy::max_child_output_bytes`, and
+    /// [`TaskPayloadLimits::validate_configured`] holds a configured host's
+    /// replay budget at that bound's ceiling, so a journal the service admitted
+    /// cannot reach it. The reads run [`CHILD_OUTPUT_READS`] at a time.
     ///
     /// A child that returned nothing reached the journal as JSON null with no
     /// object, and is left as it is. A `run` step's object stays a reference:
     /// the body asked for one, and reads it through [`Self::read_step_output`].
     ///
     /// # Errors
-    /// Refuses a child output total the host cannot represent, and one over
-    /// `max_replay_bytes`, as internal faults; and oversized, unavailable,
-    /// corrupt or non-JSON child outputs.
+    /// Refuses a spliced total the host cannot represent, and one over
+    /// `limits.max_replay_bytes`, as internal faults; and oversized,
+    /// unavailable, corrupt or non-JSON child outputs.
     pub(crate) async fn replay_journal(
         &self,
-        max_replay_bytes: usize,
+        limits: TaskPayloadLimits,
     ) -> Result<Option<Vec<JournalStep<ReplayOutput>>>, WorkflowServiceError> {
-        let child_output = |step: &JournalStep| step.kind == "child" && step.output_ref.is_some();
-        if !self.invocation.journal.iter().any(child_output) {
+        let spliced = |step: &JournalStep| {
+            step.kind == "child"
+                && step.output_ref.as_ref().is_some_and(|reference| {
+                    usize::try_from(reference.size)
+                        .is_ok_and(|size| size <= limits.max_inline_bytes)
+                })
+        };
+        // Every completed child output is read in full, spliced here or read by
+        // the isolate through its descriptor, so the platform's child-output
+        // ceiling bounds the whole set. Admission enforces it where the journal
+        // grows; the host asserts it independently before it reads any of them,
+        // so a journal admitted before the ceiling existed, or one that is
+        // otherwise corrupt, is refused rather than read in full.
+        let child_total = self
+            .invocation
+            .journal
+            .iter()
+            .filter(|step| step.kind == "child")
+            .filter_map(|step| step.output_ref.as_ref())
+            .try_fold(0_usize, |total, reference| {
+                total.checked_add(usize::try_from(reference.size).ok()?)
+            });
+        let Some(child_total) = child_total else {
+            return Err(WorkflowServiceError::Internal(
+                "workflow child output total is unrepresentable".into(),
+            ));
+        };
+        if child_total > MAX_CHILD_OUTPUT_BYTES_CEILING {
+            return Err(WorkflowServiceError::Internal(
+                "workflow child outputs exceed the platform ceiling".into(),
+            ));
+        }
+        if !self.invocation.journal.iter().any(spliced) {
             return Ok(None);
         }
         let stored = self
             .invocation
             .journal
             .iter()
-            .filter_map(|step| step.output_ref.as_ref().filter(|_| child_output(step)))
+            .filter_map(|step| step.output_ref.as_ref().filter(|_| spliced(step)))
             .try_fold(0_usize, |total, reference| {
                 total.checked_add(usize::try_from(reference.size).ok()?)
             });
@@ -363,7 +429,7 @@ impl TaskPayloadReader {
                 "workflow child output total is unrepresentable".into(),
             ));
         };
-        if stored > max_replay_bytes {
+        if stored > limits.max_replay_bytes {
             return Err(WorkflowServiceError::Internal(
                 "workflow child outputs exceed this host's replay budget".into(),
             ));
@@ -374,17 +440,9 @@ impl TaskPayloadReader {
             .iter()
             .enumerate()
             .filter_map(|(index, step)| {
-                let reference = step.output_ref.as_ref().filter(|_| child_output(step))?;
+                let reference = step.output_ref.as_ref().filter(|_| spliced(step))?;
                 Some(async move {
-                    let bytes = self.bytes(reference).await?;
-                    let raw = String::from_utf8(bytes)
-                        .ok()
-                        .and_then(|text| RawValue::from_string(text).ok())
-                        .ok_or_else(|| {
-                            WorkflowServiceError::Unavailable(
-                                "workflow child output payload is not valid JSON".into(),
-                            )
-                        })?;
+                    let raw = child_output(self.bytes(reference).await?)?;
                     Ok::<_, WorkflowServiceError>((index, raw))
                 })
             });
@@ -425,7 +483,11 @@ impl TaskPayloadReader {
         ))
     }
 
-    /// Read a completed occurrence from the assigned journal.
+    /// Read a completed occurrence's bytes from the assigned journal.
+    ///
+    /// A `run` step's by-reference output is arbitrary bytes the body asked
+    /// for, so nothing here parses it. A child's output is read as its JSON by
+    /// [`Self::read_child_output`] instead.
     ///
     /// # Errors
     /// Rejects invalid selectors, absent outputs, expired task authority and
@@ -435,22 +497,7 @@ impl TaskPayloadReader {
         name: &str,
         occurrence: u32,
     ) -> Result<Vec<u8>, WorkflowServiceError> {
-        validation::step_name(name)?;
-        let occurrence = i32::try_from(occurrence).map_err(|_| {
-            WorkflowServiceError::InvalidRequest("invalid step name occurrence".into())
-        })?;
-        let step = self
-            .invocation
-            .journal
-            .iter()
-            .find(|step| {
-                step.name == name && step.name_occurrence == occurrence && step.state == "completed"
-            })
-            .ok_or_else(|| {
-                WorkflowServiceError::NotFound(
-                    "workflow step output not found in assigned journal".into(),
-                )
-            })?;
+        let step = self.completed_step(name, occurrence)?;
         if let Some(reference) = &step.output_ref {
             return self.bytes(reference).await;
         }
@@ -463,21 +510,100 @@ impl TaskPayloadReader {
         Ok(bytes)
     }
 
+    /// Read a completed child occurrence as the JSON its run returned.
+    ///
+    /// The value is parsed once, here, so the isolate never parses it again.
+    /// Bytes that are not the JSON the child returned fail this reader as an
+    /// unreadable reference does, so the host abandons the execution instead of
+    /// letting the isolate hand the body a parse failure it could catch and
+    /// journal past.
+    ///
+    /// # Errors
+    /// Rejects invalid selectors, a step that is not a child, expired task
+    /// authority and a child output that is not JSON.
+    pub async fn read_child_output(
+        &self,
+        name: &str,
+        occurrence: u32,
+    ) -> Result<Value, WorkflowServiceError> {
+        let step = self.completed_step(name, occurrence)?;
+        if step.kind != "child" {
+            let error =
+                WorkflowServiceError::InvalidRequest("workflow step output is not a child's".into());
+            self.fail(&error);
+            return Err(error);
+        }
+        let Some(reference) = &step.output_ref else {
+            return Ok(step.output.clone().unwrap_or(Value::Null));
+        };
+        let bytes = self.bytes(reference).await?;
+        serde_json::from_slice(&bytes).map_err(|_| {
+            let error = child_output_error();
+            self.fail(&error);
+            error
+        })
+    }
+
+    /// Resolve a completed occurrence from the assigned journal, failing this
+    /// reader for any selector it cannot answer.
+    ///
+    /// A selector the assigned journal does not answer is a lost replay
+    /// dependency, the same as an unreadable reference: the host must abandon
+    /// the execution rather than let the isolate journal past the failure.
+    fn completed_step(
+        &self,
+        name: &str,
+        occurrence: u32,
+    ) -> Result<&JournalStep, WorkflowServiceError> {
+        if let Err(error) = validation::step_name(name) {
+            self.fail(&error);
+            return Err(error);
+        }
+        let occurrence = match i32::try_from(occurrence) {
+            Ok(occurrence) => occurrence,
+            Err(_) => {
+                let error =
+                    WorkflowServiceError::InvalidRequest("invalid step name occurrence".into());
+                self.fail(&error);
+                return Err(error);
+            }
+        };
+        self.invocation
+            .journal
+            .iter()
+            .find(|step| {
+                step.name == name && step.name_occurrence == occurrence && step.state == "completed"
+            })
+            .ok_or_else(|| {
+                let error = WorkflowServiceError::NotFound(
+                    "workflow step output not found in assigned journal".into(),
+                );
+                self.fail(&error);
+                error
+            })
+    }
+
     async fn bytes(&self, reference: &WorkflowOutputRef) -> Result<Vec<u8>, WorkflowServiceError> {
         self.check()?;
         let result = self.read_verified(reference).await;
         if let Err(error) = &result {
-            self.failure
-                .borrow_mut()
-                .get_or_insert_with(|| error.clone());
-            let waker = self.failure_waker.borrow_mut().take();
-            if let Some(waker) = waker {
-                waker.wake();
-            }
+            self.fail(error);
         }
         // Another concurrent read may have failed while this one was pending.
         self.check()?;
         result
+    }
+
+    /// Hold this reader failed from now on, keeping the first failure, and
+    /// wake the host waiting in [`Self::failed`].
+    fn fail(&self, error: &WorkflowServiceError) {
+        self.failure
+            .borrow_mut()
+            .get_or_insert_with(|| error.clone());
+        let waker = self.failure_waker.borrow_mut().take();
+        if let Some(waker) = waker {
+            waker.wake();
+        }
     }
 
     async fn read_verified(

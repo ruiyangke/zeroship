@@ -13,6 +13,7 @@
 
 use super::*;
 use crate::service::{AppWorkflows, WorkerIdentity};
+use zeroship_core::workflow_policy::FREE_TIER_MAX_CHILD_OUTPUT_BYTES;
 
 macro_rules! paired {
     ($sqlite:ident, $postgres:ident, $contract:ident, $limit:expr) => {
@@ -72,6 +73,12 @@ paired!(
     restarted,
     OVER
 );
+paired!(
+    sqlite_free_plan_bound_refuses_a_child_output_over_sixty_four_kibibytes,
+    postgres_free_plan_bound_refuses_a_child_output_over_sixty_four_kibibytes,
+    free_bound,
+    FREE_TIER_MAX_CHILD_OUTPUT_BYTES
+);
 
 /// A service whose app bounds child outputs at `limit`, and a parent run's id.
 async fn parent_under(
@@ -129,9 +136,21 @@ async fn complete_children(
     objects: &objects::Objects,
     count: usize,
 ) {
+    complete_children_of(service, scope, worker, objects, count, OUTPUT).await;
+}
+
+/// Complete every child task now runnable, each returning `output`.
+async fn complete_children_of(
+    service: &WorkflowService,
+    scope: &AppWorkflows,
+    worker: &WorkerIdentity,
+    objects: &objects::Objects,
+    count: usize,
+    output: &[u8],
+) {
     for _ in 0..count {
         let task = service.poll(worker).await.unwrap().unwrap();
-        let result = output_reference(OUTPUT);
+        let result = output_reference(output);
         service
             .stage_payload(
                 worker,
@@ -139,7 +158,7 @@ async fn complete_children(
                 &task.token,
                 &RequestId::mint(),
                 result.clone(),
-                objects.upload(OUTPUT),
+                objects.upload(output),
             )
             .await
             .unwrap();
@@ -318,4 +337,21 @@ async fn restarted(store: Rc<OrmStore>, limit: usize) {
     let journal = replayed(&service, &worker, &parent).await;
     assert_join(&journal[0], true);
     assert_join(&journal[1], limit >= BOTH);
+}
+
+/// The free plan's child-output bound is 64 KiB. A child whose output is one
+/// byte over it is recorded failed with `LimitExceededError`, the class a
+/// creator's `catch` matches, rather than attached. Admission holds the same
+/// bound from the plan policy the seed gives the free tier.
+async fn free_bound(store: Rc<OrmStore>, limit: usize) {
+    let (service, scope, _deployments, parent) = parent_under(store, limit).await;
+    let objects = objects::Objects::new();
+    let worker = WorkerIdentity::new("children-free-bound".into()).unwrap();
+    dispatch_parent(&service, &worker, &parent, json!([child(0, "a")])).await;
+    // A JSON string one byte over the bound: the quotes are part of its size.
+    let over = format!("\"{}\"", "x".repeat(limit - 1)).into_bytes();
+    assert_eq!(over.len(), limit + 1);
+    complete_children_of(&service, &scope, &worker, &objects, 1, &over).await;
+    let journal = replayed(&service, &worker, &parent).await;
+    assert_join(&journal[0], false);
 }

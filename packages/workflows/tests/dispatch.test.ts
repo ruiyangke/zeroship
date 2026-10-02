@@ -113,6 +113,7 @@ function replay(
     generation?: number;
     children?: WorkflowClass[];
     phase?: "running" | "compensating";
+    childOutputReads?: number;
   } = {},
 ): Promise<DispatchResult> {
   const exports: Record<string, WorkflowClass> = { Checkout: Main };
@@ -131,6 +132,7 @@ function replay(
       input: TRIGGER_INPUT,
     },
     journal,
+    childOutputReads: options.childOutputReads ?? 8,
   }) as Promise<DispatchResult>;
 }
 
@@ -866,6 +868,278 @@ test("an uncommitted child call suspends and a committed one returns its output"
     { children: [EchoChildWorkflow] },
   );
   assertRunCompleted(completed, { value: "child-output" });
+});
+
+/**
+ * A run reader serving the stored outputs of the children named in `outputs`.
+ * It holds every read until all of them have been asked for, then answers in
+ * `order`, one per turn of the event loop, or every one in a single turn.
+ */
+function heldChildOutputs(
+  outputs: Record<string, unknown>,
+  order: readonly string[] | "together",
+) {
+  const asked: string[] = [];
+  const answers = new Map<string, () => void>();
+  const release = async (): Promise<void> => {
+    for (const name of order === "together" ? Object.keys(outputs) : order) {
+      answers.get(name)!();
+      if (order !== "together") await new Promise((resolve) => setImmediate(resolve));
+    }
+  };
+  const reader = {
+    workflows: {
+      Checkout: {
+        get(id: string) {
+          assert.equal(id, RUN_ID);
+          return {
+            readChildOutput(name: string, occurrence: number): Promise<unknown> {
+              assert.equal(occurrence, 0);
+              asked.push(name);
+              const read = new Promise<unknown>((resolve) => {
+                answers.set(name, () => resolve(outputs[name]));
+              });
+              if (answers.size === Object.keys(outputs).length) void release();
+              return read;
+            },
+          };
+        },
+      },
+    },
+  };
+  return { asked, reader };
+}
+
+/** A completed child row naming the object that holds its output. */
+function storedChildRow(ordinal: number, name: string, output: unknown): JournalRow {
+  return {
+    ordinal,
+    name,
+    nameOccurrence: 0,
+    kind: "child",
+    state: "completed",
+    outputRef: {
+      hash: name.toLowerCase().repeat(64),
+      size: Buffer.byteLength(JSON.stringify(output)),
+      contentType: "application/json",
+    },
+  };
+}
+
+/** Replays `Main` with `reader` installed as the run's native reader. */
+async function replayReading(
+  reader: unknown,
+  Main: WorkflowClass,
+  journal: JournalRow[],
+  children: WorkflowClass[],
+  childOutputReads?: number,
+): Promise<DispatchResult> {
+  const host = globalThis as { __zs_env?: () => unknown };
+  host.__zs_env = () => reader;
+  try {
+    return await replay(Main, journal, { children, childOutputReads });
+  } finally {
+    delete host.__zs_env;
+  }
+}
+
+test("a child row naming its output's object resolves step.call to the child's value", { timeout: TEST_TIMEOUT_MS }, async () => {
+  class Report extends Workflow<unknown, { rows: number[] }> {
+    run(): { rows: number[] } {
+      return { rows: [] };
+    }
+  }
+  class Checkout extends Workflow<unknown, unknown> {
+    async run(_trigger: WorkflowTrigger<unknown>, step: WorkflowStep) {
+      const report = await step.call(Report, {});
+      return { first: report.rows[0], count: report.rows.length };
+    }
+  }
+  const { asked, reader } = heldChildOutputs({ Report: { rows: [7, 8, 9] } }, "together");
+
+  const result = await replayReading(
+    reader,
+    Checkout,
+    [storedChildRow(0, "Report", { rows: [7, 8, 9] })],
+    [Report],
+  );
+
+  assertRunCompleted(result, { first: 7, count: 3 });
+  assert.deepEqual(asked, ["Report"]);
+});
+
+test("step.call settles in journal order whichever children are stored and whichever read lands first", { timeout: TEST_TIMEOUT_MS }, async () => {
+  // Each child's follow-on step takes the next ordinal when its value reaches
+  // the body, so the frontier spells out the order the three settled in.
+  class A extends Workflow<unknown, { from: string }> {
+    run(): { from: string } {
+      return { from: "A" };
+    }
+  }
+  class B extends Workflow<unknown, { from: string }> {
+    run(): { from: string } {
+      return { from: "B" };
+    }
+  }
+  class C extends Workflow<unknown, { from: string }> {
+    run(): { from: string } {
+      return { from: "C" };
+    }
+  }
+  class Checkout extends Workflow<unknown, unknown> {
+    async run(_trigger: WorkflowTrigger<unknown>, step: WorkflowStep) {
+      await Promise.all([
+        step.call(A, {}).then((a) => step.run("x", () => a.from)),
+        step.call(B, {}).then((b) => step.run("y", () => b.from)),
+        step.call(C, {}).then((c) => step.run("z", () => c.from)),
+      ]);
+      return "done";
+    }
+  }
+  const frontier = (result: DispatchResult) =>
+    result.outcomes.map((outcome) => [outcome.kind, outcome.ordinal, outcome.name, outcome.output]);
+  const children = [A, B, C];
+
+  // The control: every output inline, so every value is there in the round
+  // its row replays.
+  const inline = await replay(
+    Checkout,
+    [
+      completedRow(0, "A", { from: "A" }, "child"),
+      completedRow(1, "B", { from: "B" }, "child"),
+      completedRow(2, "C", { from: "C" }, "child"),
+    ],
+    { children },
+  );
+  assert.deepEqual(
+    frontier(inline),
+    [
+      ["StepCompleted", 3, "x", "A"],
+      ["StepCompleted", 4, "y", "B"],
+      ["StepCompleted", 5, "z", "C"],
+    ],
+    show(inline),
+  );
+
+  // `A` stays inline; `B` and `C` are read through their objects.
+  for (const order of [["C", "B"], ["B", "C"], "together"] as const) {
+    const { asked, reader } = heldChildOutputs({ B: { from: "B" }, C: { from: "C" } }, order);
+    const result = await replayReading(
+      reader,
+      Checkout,
+      [
+        completedRow(0, "A", { from: "A" }, "child"),
+        storedChildRow(1, "B", { from: "B" }),
+        storedChildRow(2, "C", { from: "C" }),
+      ],
+      children,
+    );
+    assert.deepEqual(frontier(result), frontier(inline), `${JSON.stringify(order)}: ${show(result)}`);
+    assert.deepEqual([...asked].sort(), ["B", "C"]);
+  }
+});
+
+test("referenced child outputs are read in batches of childOutputReads", { timeout: TEST_TIMEOUT_MS }, async () => {
+  // A parent that calls seven children at once, each with its own name, so a
+  // reader can see how many reads the bridge opens together. The envelope's
+  // bound is the same number the host's splice path reads with.
+  const names = ["A", "B", "C", "D", "E", "F", "G"];
+  const classes = names.map((name) => {
+    const cls = class extends Workflow<unknown, unknown> {
+      run(): unknown {
+        return { from: name };
+      }
+    };
+    Object.defineProperty(cls, "name", { value: name });
+    return cls as unknown as WorkflowClass;
+  });
+  class Checkout extends Workflow<unknown, unknown> {
+    async run(_trigger: WorkflowTrigger<unknown>, step: WorkflowStep) {
+      await Promise.all(classes.map((C, i) =>
+        step.call(C, {}).then((value) => step.run(`s${i}`, () => value)),
+      ));
+      return "done";
+    }
+  }
+  const asked: string[] = [];
+  let inFlight = 0;
+  let maxInFlight = 0;
+  const reader = {
+    workflows: {
+      Checkout: {
+        get(id: string) {
+          assert.equal(id, RUN_ID);
+          return {
+            async readChildOutput(name: string, occurrence: number): Promise<unknown> {
+              assert.equal(occurrence, 0);
+              asked.push(name);
+              inFlight++;
+              maxInFlight = Math.max(maxInFlight, inFlight);
+              await new Promise((resolve) => setImmediate(resolve));
+              inFlight--;
+              return { from: name };
+            },
+          };
+        },
+      },
+    },
+  };
+  const result = await replayReading(
+    reader,
+    Checkout,
+    names.map((name, ordinal) => storedChildRow(ordinal, name, { from: name })),
+    classes,
+    3,
+  );
+  assert.deepEqual([...asked].sort(), [...names].sort());
+  assert.ok(maxInFlight > 1, `the batch opened reads together, saw ${maxInFlight}`);
+  assert.ok(maxInFlight <= 3, `at most childOutputReads reads are open, saw ${maxInFlight}`);
+  assert.deepEqual(
+    result.outcomes.map((outcome) => outcome.name),
+    names.map((_, index) => `s${index}`),
+    show(result),
+  );
+});
+
+test("referenced child outputs without a read bound fail the run before any read", { timeout: TEST_TIMEOUT_MS }, async () => {
+  // The host always publishes the bound. An envelope without a usable one must
+  // not fall back to opening one read per referenced row at once.
+  class Child extends Workflow<unknown, unknown> {
+    run(): unknown {
+      return { from: "Child" };
+    }
+  }
+  class Checkout extends Workflow<unknown, unknown> {
+    async run(_trigger: WorkflowTrigger<unknown>, step: WorkflowStep) {
+      await step.call(Child as unknown as WorkflowClass, {});
+      return "done";
+    }
+  }
+  const asked: string[] = [];
+  const reader = {
+    workflows: {
+      Checkout: {
+        get() {
+          return {
+            async readChildOutput(name: string): Promise<unknown> {
+              asked.push(name);
+              return { from: name };
+            },
+          };
+        },
+      },
+    },
+  };
+  const result = await replayReading(
+    reader,
+    Checkout,
+    [storedChildRow(0, "Child", { from: "Child" })],
+    [Child as unknown as WorkflowClass],
+    0,
+  );
+  assert.equal(result.kind, "RunFailed", show(result));
+  assert.match(JSON.stringify(result.error), /read bound is unavailable/, show(result));
+  assert.deepEqual(asked, [], "no referenced output was read");
 });
 
 test("a failed child row surfaces its cancellation or timeout type", { timeout: TEST_TIMEOUT_MS }, async () => {

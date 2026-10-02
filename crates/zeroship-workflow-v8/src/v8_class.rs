@@ -12,7 +12,7 @@ use std::future::Future;
 use std::rc::Rc;
 
 use serde_json::{Map, Value};
-use zeroship_runtime::state::{OpError, OpResult, ResolveValue, SharedState};
+use zeroship_runtime::state::{NativeValue, OpError, OpResult, ResolveValue, SharedState};
 use zeroship_runtime_macros::v8_class;
 #[allow(unused_imports)]
 use zeroship_runtime_macros::{v8_constructor, v8_getter, v8_method, v8_name};
@@ -125,6 +125,65 @@ fn json_type_name(v: &Value) -> &'static str {
         Value::Array(_) => "array",
         Value::Object(_) => "object",
     }
+}
+
+/// A parsed child output, materialized into V8 without a second parse.
+///
+/// The reader validates and parses the object's bytes once; the runtime
+/// materializes this value when the pump re-enters its V8 scope, so the isolate
+/// never runs `JSON.parse` over the same bytes.
+struct ChildOutputValue(Value);
+
+impl NativeValue for ChildOutputValue {
+    fn into_v8<'s>(
+        self: Box<Self>,
+        scope: &mut v8::PinScope<'s, '_>,
+    ) -> Result<v8::Local<'s, v8::Value>, OpError> {
+        json_to_v8(scope, self.0)
+    }
+}
+
+fn json_to_v8<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    value: Value,
+) -> Result<v8::Local<'s, v8::Value>, OpError> {
+    Ok(match value {
+        Value::Null => v8::null(scope).into(),
+        Value::Bool(boolean) => v8::Boolean::new(scope, boolean).into(),
+        Value::Number(number) => {
+            if let Some(integer) = number.as_i64() {
+                v8::Number::new(scope, integer as f64).into()
+            } else if let Some(integer) = number.as_u64() {
+                v8::Number::new(scope, integer as f64).into()
+            } else if let Some(float) = number.as_f64() {
+                v8::Number::new(scope, float).into()
+            } else {
+                v8::null(scope).into()
+            }
+        }
+        Value::String(string) => v8::String::new(scope, &string)
+            .ok_or_else(|| OpError::type_error("workflow child output string allocation failed"))?
+            .into(),
+        Value::Array(items) => {
+            let array = v8::Array::new(scope, items.len() as i32);
+            for (index, item) in items.into_iter().enumerate() {
+                let value = json_to_v8(scope, item)?;
+                array.set_index(scope, index as u32, value);
+            }
+            array.into()
+        }
+        Value::Object(fields) => {
+            let object = v8::Object::new(scope);
+            for (key, value) in fields {
+                let name = v8::String::new(scope, &key).ok_or_else(|| {
+                    OpError::type_error("workflow child output key allocation failed")
+                })?;
+                let value = json_to_v8(scope, value)?;
+                object.set(scope, name.into(), value);
+            }
+            object.into()
+        }
+    })
 }
 
 /// The creator's start input, and the options the host starts it under.
@@ -494,6 +553,73 @@ impl WorkflowRun {
             };
             let value = match read {
                 Ok(bytes) => ResolveValue::Bytes(bytes),
+                Err(error) => ResolveValue::RejectError(crate::error::to_op_error(error)),
+            };
+            OpResult::JsValue {
+                resolver,
+                value,
+                request_id,
+            }
+        }));
+        Ok(promise.into())
+    }
+
+    /// `run.readChildOutput(name, occurrence)` -> Promise<unknown> over a
+    /// completed child's output, parsed once by the reader.
+    ///
+    /// The replay bridge reads every referenced child through this rather than
+    /// `readStepOutput`, so bytes the host already validated and parsed reach
+    /// the body as its value without a second parse.
+    #[v8_method]
+    #[v8_name = "readChildOutput"]
+    fn read_child_output<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        name: String,
+        occurrence: f64,
+    ) -> Result<v8::Local<'s, v8::Value>, OpError> {
+        if name.is_empty()
+            || !occurrence.is_finite()
+            || occurrence < 0.0
+            || occurrence.fract() != 0.0
+            || occurrence > f64::from(u32::MAX)
+        {
+            return Err(OpError::type_error(
+                "readChildOutput requires a step name and a nonnegative integer occurrence",
+            ));
+        }
+        let state = runtime_state(scope);
+        let (resolver, request_id, promise) = setup_promise(scope, &state);
+        let backend = self.backend.clone();
+        let run_id = self.run_id.clone();
+        let task_reader = scope
+            .get_slot::<TaskOutputReader>()
+            .filter(|reader| reader.reader.run_id() == run_id)
+            .cloned();
+        state.borrow_mut().spawned_ops.push(Box::pin(async move {
+            let read = if let Some(reader) = task_reader {
+                let result = reader.reader.read_child_output(&name, occurrence as u32).await;
+                if reader.reader.check().is_err() {
+                    // App code cannot catch a lost replay dependency and then
+                    // continue producing external effects or journal outcomes.
+                    reader.interrupt.cancel();
+                }
+                result
+            } else {
+                match backend
+                    .read_step_output(run_id, name, occurrence as u32)
+                    .await
+                {
+                    Ok(bytes) => serde_json::from_slice(&bytes).map_err(|_| {
+                        WorkflowServiceError::Internal(
+                            "workflow child output payload is not valid JSON".into(),
+                        )
+                    }),
+                    Err(error) => Err(error),
+                }
+            };
+            let value = match read {
+                Ok(value) => ResolveValue::Native(Box::new(ChildOutputValue(value))),
                 Err(error) => ResolveValue::RejectError(crate::error::to_op_error(error)),
             };
             OpResult::JsValue {

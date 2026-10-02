@@ -11,9 +11,12 @@ mod platform;
 
 use zeroship_control::{
     Registry,
-    plan_catalog::{PlanCatalog, free_plan_id, seed_plans},
+    plan_catalog::{PlanCatalog, free_plan_id, pro_plan_id, seed_plans},
 };
-use zeroship_core::{schema_name::SchemaName, workflow_policy::AppPolicy};
+use zeroship_core::{
+    schema_name::SchemaName,
+    workflow_policy::{AppPolicy, MAX_CHILD_OUTPUT_BYTES_CEILING},
+};
 use zeroship_data_orm::{
     ConnectOptions, binding::DbBinding, encryption::ProjectKeySource, orm::Database,
 };
@@ -75,4 +78,47 @@ async fn startup_preserves_archived_plans_and_complete_workflow_policy() {
         .unwrap()
         .get(0);
     assert_eq!(serde_json::from_value::<AppPolicy>(stored).unwrap(), policy);
+}
+
+/// A fresh catalog seeds the free tier with the free-tier child-output bound,
+/// so a free app's effective limit is 64 KiB before an operator provisions
+/// anything. Every paid tier is seeded at the platform ceiling instead.
+#[compio::test(crate = "crate::common::live")]
+async fn builtin_seed_gives_free_the_sixty_four_kibibyte_bound() {
+    let fixture = Box::pin(platform::Platform::new()).await;
+    let url = fixture
+        .runtime_url
+        .replacen("zeroship_workflow@", "zeroship_control@", 1);
+    let registry = Registry::new(&url).await.unwrap();
+    seed_plans(&registry).await.unwrap();
+    let free: serde_json::Value = fixture
+        .admin
+        .query_one(
+            "SELECT workflow_policy_json FROM zeroship.plans WHERE id=$1",
+            &[&free_plan_id()],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        serde_json::from_value::<AppPolicy>(free)
+            .unwrap()
+            .max_child_output_bytes,
+        64 * 1024
+    );
+    let pro: serde_json::Value = fixture
+        .admin
+        .query_one(
+            "SELECT workflow_policy_json FROM zeroship.plans WHERE id=$1",
+            &[&pro_plan_id()],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        serde_json::from_value::<AppPolicy>(pro)
+            .unwrap()
+            .max_child_output_bytes,
+        MAX_CHILD_OUTPUT_BYTES_CEILING
+    );
 }

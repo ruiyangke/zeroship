@@ -307,7 +307,7 @@ export class Platform {
       admission: true, dispatch: true, ingress: true,
       maxLiveRuns: 10000, maxChildDepth: 16, maxRunning: 16,
       maxInputBytes: 1048576, maxFrontier: 256, maxJournalBytes: 16777216,
-      maxChildOutputBytes: 67108864,
+      maxChildOutputBytes: 8388608,
       maxPayloadBytes: 67108864, maxPayloadObjects: 100000,
       maxPayloadStorageBytes: 1073741824, payloadStagingRetentionMs: 86400000,
       maxStepAttempts: 8, retryDelayMs: 1000, maxDeliveryAttempts: 8,

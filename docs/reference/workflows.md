@@ -450,7 +450,8 @@ const risk = await step.call(RiskReview, {
 });
 ```
 
-The child is an ordinary run. Its output is journaled into the parent step. If
+The child is an ordinary run. Its output is journaled into the parent step, and
+`step.call` resolves to the value the child returned however large it is. If
 the child is cancelled, the parent receives `ChildCancelledError`. If the child
 does not finish before `timeout`, the parent receives `ChildTimeoutError`. If
 the child's output would carry the parent past the plan's `maxChildOutputBytes`,
@@ -813,8 +814,9 @@ const bytes = await run.readOutput();
 
 The inline threshold is 1 MiB, and it applies to step outputs: a step output at
 or under it is journaled inline, and anything larger, or explicitly
-by-reference, becomes a workflow blob. A run's input and its final output take
-no threshold. Whatever starts a run and whatever it returns are staged as blobs,
+by-reference, becomes a workflow blob. It also decides how a parent's replay
+carries a child's output, below. A run's input and its final output take no
+threshold. Whatever starts a run and whatever it returns are staged as blobs,
 so each costs an object against the app's payload budget however small it is.
 That covers a run started through `start()`, a child started by `step.call` or
 `step.startMany`, a successor seeded by `step.continueAsNew`, and every firing
@@ -829,13 +831,28 @@ over that is refused. Being stored as a blob does not raise that cap, and a
 schedule answers to it at deploy time, where the deploy is what fails.
 
 A child's output is not read on demand either. `step.call` and `step.startMany`
-resolve to the value each child returned, so every replay of the parent reads
-each completed child's output in full before the body runs, the way it reads
-the run's input. The plan therefore bounds what one run carries of them:
-`maxChildOutputBytes` caps the sum of the outputs of every completed child in
-one run generation. The cap is applied as each child completes into its parent,
-in the order the parent's steps were issued. A child whose output would carry
-the sum past it is not attached: its join is recorded `failed` with
+resolve to the value each child returned, never to a `StepOutputRef`, so every
+replay of the parent reads each completed child's output in full before the
+body runs, the way it reads the run's input. The inline threshold decides only
+how that value reaches the replay. An output at or under it travels inside the
+journal the replay starts from. A larger one stays a workflow blob, and the
+replay reads it through the reader a `StepOutputRef` uses, together with every
+other such output, before the body runs. Either way the value is there in the
+round its journal row is replayed, so a `step.call` settles at the same point
+whichever side of the threshold its output falls on and whichever read finishes
+first. The order in which a parent's `step.call` promises settle, and with it
+the ordinal each later step takes, is the journal's on every replay.
+
+The plan bounds what one run carries of child outputs: `maxChildOutputBytes`
+caps the sum of the outputs of every completed child in one run generation. The
+platform ceiling is 8 MiB, which no plan can raise past; the free tier grants
+64 KiB. The cap is on the sum
+rather than on each output because every dispatch of the parent reads all of
+them, inside one execution held to the app's CPU and memory limits, so the sum
+is what each dispatch pays, and no single child output can exceed it. The cap
+is applied as each child completes into its parent, in the order the parent's
+steps were issued. A child whose output would carry the sum past it is not
+attached: its join is recorded `failed` with
 `LimitExceededError` and `retryable: false`, and `await step.call(...)` throws
 it, so a `catch` there can take another path and an uncaught one fails the run.
 Children already attached stay attached. Under `step.startMany` the rejected
