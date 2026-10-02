@@ -812,17 +812,21 @@ async fn wrong_password() {
 // Helper: create the complex test table
 // ---------------------------------------------------------------------------
 
-const COMPLEX_TABLE: &str = "pg_complex_test";
-
-async fn create_complex_table(client: &Client) {
+/// Create a table private to ONE test and return its name.
+///
+/// The name is per-test, not per-module: several tests below share this shape,
+/// and a single fixed table would have them drop and recreate each other's
+/// fixture when the suite runs concurrently.
+async fn create_complex_table(client: &Client) -> String {
+    let table = common::test_object_name("cpg_complex_table");
     client
-        .execute(&format!("DROP TABLE IF EXISTS {COMPLEX_TABLE}"), &[])
+        .execute(&format!("DROP TABLE IF EXISTS {table}"), &[])
         .await
         .unwrap();
     client
         .execute(
             &format!(
-                "CREATE TABLE {COMPLEX_TABLE} (
+                "CREATE TABLE {table} (
                     id SERIAL PRIMARY KEY,
                     name TEXT NOT NULL,
                     value BIGINT DEFAULT 0,
@@ -837,11 +841,12 @@ async fn create_complex_table(client: &Client) {
         )
         .await
         .unwrap();
+    table
 }
 
-async fn drop_complex_table(client: &Client) {
+async fn drop_complex_table(client: &Client, table: &str) {
     client
-        .execute(&format!("DROP TABLE IF EXISTS {COMPLEX_TABLE}"), &[])
+        .execute(&format!("DROP TABLE IF EXISTS {table}"), &[])
         .await
         .unwrap();
 }
@@ -855,13 +860,13 @@ async fn large_result_set() {
     let url = require_pg().await;
     let client = connect(&url).await.unwrap();
 
-    create_complex_table(&client).await;
+    let table = create_complex_table(&client).await;
 
     // INSERT 1000 rows
     for i in 0..1000i64 {
         client
             .execute(
-                &format!("INSERT INTO {COMPLEX_TABLE} (name, value) VALUES ($1, $2)"),
+                &format!("INSERT INTO {table} (name, value) VALUES ($1, $2)"),
                 &[&format!("row_{i}"), &i],
             )
             .await
@@ -871,7 +876,7 @@ async fn large_result_set() {
     // SELECT all
     let rows = client
         .query(
-            &format!("SELECT id, name, value FROM {COMPLEX_TABLE} ORDER BY id"),
+            &format!("SELECT id, name, value FROM {table} ORDER BY id"),
             &[],
         )
         .await
@@ -887,7 +892,7 @@ async fn large_result_set() {
         assert_eq!(value, idx as i64);
     }
 
-    drop_complex_table(&client).await;
+    drop_complex_table(&client, &table).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -920,12 +925,12 @@ async fn text_types() {
     let url = require_pg().await;
     let client = connect(&url).await.unwrap();
 
-    create_complex_table(&client).await;
+    let table = create_complex_table(&client).await;
 
     // Empty string
     client
         .execute(
-            &format!("INSERT INTO {COMPLEX_TABLE} (name) VALUES ($1)"),
+            &format!("INSERT INTO {table} (name) VALUES ($1)"),
             &[&""],
         )
         .await
@@ -935,7 +940,7 @@ async fn text_types() {
     let unicode_str = "Hello 🌍🎉 你好世界 こんにちは";
     client
         .execute(
-            &format!("INSERT INTO {COMPLEX_TABLE} (name) VALUES ($1)"),
+            &format!("INSERT INTO {table} (name) VALUES ($1)"),
             &[&unicode_str],
         )
         .await
@@ -945,7 +950,7 @@ async fn text_types() {
     let long_str = "A".repeat(10 * 1024);
     client
         .execute(
-            &format!("INSERT INTO {COMPLEX_TABLE} (name) VALUES ($1)"),
+            &format!("INSERT INTO {table} (name) VALUES ($1)"),
             &[&long_str.as_str()],
         )
         .await
@@ -955,7 +960,7 @@ async fn text_types() {
     let special_str = "it's a \"test\"\\with\nnewlines\tand\ttabs";
     client
         .execute(
-            &format!("INSERT INTO {COMPLEX_TABLE} (name) VALUES ($1)"),
+            &format!("INSERT INTO {table} (name) VALUES ($1)"),
             &[&special_str],
         )
         .await
@@ -964,7 +969,7 @@ async fn text_types() {
     // SELECT all back and verify
     let rows = client
         .query(
-            &format!("SELECT name FROM {COMPLEX_TABLE} ORDER BY id"),
+            &format!("SELECT name FROM {table} ORDER BY id"),
             &[],
         )
         .await
@@ -976,7 +981,7 @@ async fn text_types() {
     assert_eq!(rows[2].get::<_, &str>("name"), long_str.as_str());
     assert_eq!(rows[3].get::<_, &str>("name"), special_str);
 
-    drop_complex_table(&client).await;
+    drop_complex_table(&client, &table).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -988,7 +993,7 @@ async fn numeric_types() {
     let url = require_pg().await;
     let client = connect(&url).await.unwrap();
 
-    create_complex_table(&client).await;
+    let table = create_complex_table(&client).await;
 
     let small: i16 = -123;
     let medium: i32 = 42_000;
@@ -1004,7 +1009,7 @@ async fn numeric_types() {
     client
         .execute(
             &format!(
-                "INSERT INTO {COMPLEX_TABLE} (name, small_num, value, score, flag) \
+                "INSERT INTO {table} (name, small_num, value, score, flag) \
                  VALUES ($1, $2, $3, $4, $5)"
             ),
             &[&"numeric_test", &small, &large, &float_d, &flag],
@@ -1014,7 +1019,7 @@ async fn numeric_types() {
 
     let rows = client
         .query(
-            &format!("SELECT small_num, value, score, flag FROM {COMPLEX_TABLE} WHERE name = $1"),
+            &format!("SELECT small_num, value, score, flag FROM {table} WHERE name = $1"),
             &[&"numeric_test"],
         )
         .await
@@ -1038,7 +1043,7 @@ async fn numeric_types() {
     assert_eq!(rows[0].get::<_, i32>("i"), medium);
     assert_eq!(rows[0].get::<_, f32>("f"), float_s);
 
-    drop_complex_table(&client).await;
+    drop_complex_table(&client, &table).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -1050,7 +1055,7 @@ async fn binary_data() {
     let url = require_pg().await;
     let client = connect(&url).await.unwrap();
 
-    create_complex_table(&client).await;
+    let table = create_complex_table(&client).await;
 
     // Binary data with null bytes, 0xFF, and various byte patterns
     let binary: Vec<u8> = (0..=255).collect();
@@ -1060,7 +1065,7 @@ async fn binary_data() {
 
     client
         .execute(
-            &format!("INSERT INTO {COMPLEX_TABLE} (name, data) VALUES ($1, $2)"),
+            &format!("INSERT INTO {table} (name, data) VALUES ($1, $2)"),
             &[&"binary_test", &with_nulls.as_slice()],
         )
         .await
@@ -1068,7 +1073,7 @@ async fn binary_data() {
 
     let rows = client
         .query(
-            &format!("SELECT data FROM {COMPLEX_TABLE} WHERE name = $1"),
+            &format!("SELECT data FROM {table} WHERE name = $1"),
             &[&"binary_test"],
         )
         .await
@@ -1078,7 +1083,7 @@ async fn binary_data() {
     let data: &[u8] = rows[0].get("data");
     assert_eq!(data, with_nulls.as_slice());
 
-    drop_complex_table(&client).await;
+    drop_complex_table(&client, &table).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -1090,13 +1095,13 @@ async fn multiple_statements_sequential() {
     let url = require_pg().await;
     let client = connect(&url).await.unwrap();
 
-    create_complex_table(&client).await;
+    let table = create_complex_table(&client).await;
 
     // Run 20 different queries on the same connection
     for i in 0..20i64 {
         client
             .execute(
-                &format!("INSERT INTO {COMPLEX_TABLE} (name, value) VALUES ($1, $2)"),
+                &format!("INSERT INTO {table} (name, value) VALUES ($1, $2)"),
                 &[&format!("seq_{i}"), &i],
             )
             .await
@@ -1107,7 +1112,7 @@ async fn multiple_statements_sequential() {
     for i in 0..20i64 {
         let rows = client
             .query(
-                &format!("SELECT value FROM {COMPLEX_TABLE} WHERE name = $1"),
+                &format!("SELECT value FROM {table} WHERE name = $1"),
                 &[&format!("seq_{i}")],
             )
             .await
@@ -1119,7 +1124,7 @@ async fn multiple_statements_sequential() {
     // Verify connection still healthy
     assert!(!client.is_closed());
 
-    drop_complex_table(&client).await;
+    drop_complex_table(&client, &table).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -1131,13 +1136,13 @@ async fn transaction_rollback_explicit() {
     let url = require_pg().await;
     let mut client = connect(&url).await.unwrap();
 
-    create_complex_table(&client).await;
+    let table = create_complex_table(&client).await;
 
     // BEGIN, INSERT, explicit ROLLBACK
     {
         let tx = client.transaction().await.unwrap();
         tx.execute(
-            &format!("INSERT INTO {COMPLEX_TABLE} (name) VALUES ($1)"),
+            &format!("INSERT INTO {table} (name) VALUES ($1)"),
             &[&"should_not_exist"],
         )
         .await
@@ -1148,7 +1153,7 @@ async fn transaction_rollback_explicit() {
     // Verify data not present
     let rows = client
         .query(
-            &format!("SELECT name FROM {COMPLEX_TABLE} WHERE name = $1"),
+            &format!("SELECT name FROM {table} WHERE name = $1"),
             &[&"should_not_exist"],
         )
         .await
@@ -1158,7 +1163,7 @@ async fn transaction_rollback_explicit() {
     // Connection is usable
     assert!(!client.is_closed());
 
-    drop_complex_table(&client).await;
+    drop_complex_table(&client, &table).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -1570,7 +1575,7 @@ async fn error_recovery_in_transaction() {
     let url = require_pg().await;
     let client = connect(&url).await.unwrap();
 
-    create_complex_table(&client).await;
+    let table = create_complex_table(&client).await;
 
     // BEGIN
     client.execute("BEGIN", &[]).await.unwrap();
@@ -1578,7 +1583,7 @@ async fn error_recovery_in_transaction() {
     // INSERT (succeeds)
     client
         .execute(
-            &format!("INSERT INTO {COMPLEX_TABLE} (name, value) VALUES ($1, $2)"),
+            &format!("INSERT INTO {table} (name, value) VALUES ($1, $2)"),
             &[&"good_row", &1i64],
         )
         .await
@@ -1587,7 +1592,7 @@ async fn error_recovery_in_transaction() {
     // INSERT with duplicate primary key - triggers unique_violation
     let err = client
         .execute(
-            &format!("INSERT INTO {COMPLEX_TABLE} (id, name) VALUES (1, $1)"),
+            &format!("INSERT INTO {table} (id, name) VALUES (1, $1)"),
             &[&"dup_id"],
         )
         .await;
@@ -1607,14 +1612,14 @@ async fn error_recovery_in_transaction() {
     // Verify the good_row was rolled back too
     let rows = client
         .query(
-            &format!("SELECT name FROM {COMPLEX_TABLE} WHERE name = $1"),
+            &format!("SELECT name FROM {table} WHERE name = $1"),
             &[&"good_row"],
         )
         .await
         .unwrap();
     assert_eq!(rows.len(), 0);
 
-    drop_complex_table(&client).await;
+    drop_complex_table(&client, &table).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -1706,13 +1711,13 @@ async fn returning_clause() {
     let url = require_pg().await;
     let client = connect(&url).await.unwrap();
 
-    create_complex_table(&client).await;
+    let table = create_complex_table(&client).await;
 
     // INSERT with RETURNING
     let rows = client
         .query(
             &format!(
-                "INSERT INTO {COMPLEX_TABLE} (name, value) VALUES ($1, $2) RETURNING id, value"
+                "INSERT INTO {table} (name, value) VALUES ($1, $2) RETURNING id, value"
             ),
             &[&"ret_test", &42i64],
         )
@@ -1725,7 +1730,7 @@ async fn returning_clause() {
     assert!(id > 0, "expected positive id, got {id}");
     assert_eq!(value, 42);
 
-    drop_complex_table(&client).await;
+    drop_complex_table(&client, &table).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -1737,12 +1742,12 @@ async fn update_with_returning() {
     let url = require_pg().await;
     let client = connect(&url).await.unwrap();
 
-    create_complex_table(&client).await;
+    let table = create_complex_table(&client).await;
 
     // Insert a row with value=10
     client
         .execute(
-            &format!("INSERT INTO {COMPLEX_TABLE} (name, value) VALUES ($1, $2)"),
+            &format!("INSERT INTO {table} (name, value) VALUES ($1, $2)"),
             &[&"upd_test", &10i64],
         )
         .await
@@ -1752,7 +1757,7 @@ async fn update_with_returning() {
     let rows = client
         .query(
             &format!(
-                "UPDATE {COMPLEX_TABLE} SET value = value + 1 WHERE name = $1 RETURNING value"
+                "UPDATE {table} SET value = value + 1 WHERE name = $1 RETURNING value"
             ),
             &[&"upd_test"],
         )
@@ -1763,7 +1768,7 @@ async fn update_with_returning() {
     let value: i64 = rows[0].get("value");
     assert_eq!(value, 11);
 
-    drop_complex_table(&client).await;
+    drop_complex_table(&client, &table).await;
 }
 
 // ---------------------------------------------------------------------------

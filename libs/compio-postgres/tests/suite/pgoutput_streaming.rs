@@ -69,26 +69,50 @@ async fn client() -> Client {
 
 /// Collect messages until the transaction ends, however it ends: a
 /// non-streamed `Commit`, a streamed `StreamCommit`, or a `StreamAbort`.
-async fn collect(slot: &str, streaming: Streaming, publication: &str) -> Vec<PgOutputMessage> {
-    try_collect(slot, streaming, publication)
+///
+/// `write` is run AFTER the stream is started, so the walsender decodes the
+/// transaction live. Writing first and reading afterwards lets a committed
+/// transaction's rolled-back subtransaction be discarded in memory without
+/// ever being streamed, which leaves no `StreamAbort` to observe.
+async fn collect<F, Fut>(
+    slot: &str,
+    streaming: Streaming,
+    publication: &str,
+    write: F,
+) -> Vec<PgOutputMessage>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = u32>,
+{
+    try_collect(slot, streaming, publication, write)
         .await
         .unwrap_or_else(|error| panic!("a live frame failed to decode: {error}"))
 }
 
-async fn try_collect(
+async fn try_collect<F, Fut>(
     slot: &str,
     streaming: Streaming,
     publication: &str,
-) -> Result<Vec<PgOutputMessage>, String> {
-    try_collect_with_fast_keepalives(slot, streaming, publication, false).await
+    write: F,
+) -> Result<Vec<PgOutputMessage>, String>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = u32>,
+{
+    try_collect_with_fast_keepalives(slot, streaming, publication, false, write).await
 }
 
-async fn try_collect_with_fast_keepalives(
+async fn try_collect_with_fast_keepalives<F, Fut>(
     slot: &str,
     streaming: Streaming,
     publication: &str,
     fast_keepalives: bool,
-) -> Result<Vec<PgOutputMessage>, String> {
+    write: F,
+) -> Result<Vec<PgOutputMessage>, String>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = u32>,
+{
     let mut config = common::replication_config("cpg_streaming");
     // The walsender is the process that decodes, so the limit has to be set
     // on ITS session. Startup options are the only channel a replication
@@ -125,8 +149,19 @@ async fn try_collect_with_fast_keepalives(
         .await
         .map_err(|error| format!("START_REPLICATION failed: {}", common::error_chain(&error)))?;
 
+    // The write runs while the stream is live, so a rolled-back
+    // subtransaction is streamed and then aborted rather than discarded
+    // unstreamed at commit time.
+    let xid = write().await;
+
     let mut decoder = pgoutput::Decoder::new();
     let mut messages = Vec::new();
+    // Whether the frames currently being read belong to the fixture's own
+    // transaction. `PostgreSQL` 16 streams a large concurrent transaction's
+    // `StreamStart`/`StreamStop`/`StreamCommit` framing to this slot even when
+    // this slot's publication filters out every one of its rows, so a frame
+    // that is not ours is dropped instead of being allowed to end the read.
+    let mut ours = false;
     loop {
         match stream.next().await.map_err(|error| {
             format!("replication stream failed: {}", common::error_chain(&error))
@@ -135,13 +170,39 @@ async fn try_collect_with_fast_keepalives(
                 let message = decoder
                     .decode(&body)
                     .map_err(|error| format!("{error:?}"))?;
-                let done = match &message {
-                    PgOutputMessage::Commit { .. } | PgOutputMessage::StreamCommit { .. } => true,
-                    PgOutputMessage::StreamAbort { xid, subxid, .. } => xid == subxid,
-                    _ => false,
+                let (keep, terminal) = match &message {
+                    PgOutputMessage::Begin {
+                        xid: message_xid, ..
+                    }
+                    | PgOutputMessage::StreamStart {
+                        xid: message_xid, ..
+                    } => {
+                        ours = *message_xid == xid;
+                        (ours, false)
+                    }
+                    PgOutputMessage::Commit { .. } => (ours, ours),
+                    PgOutputMessage::StreamCommit {
+                        xid: message_xid, ..
+                    } => (ours, ours && *message_xid == xid),
+                    PgOutputMessage::StreamAbort {
+                        xid: message_xid,
+                        subxid,
+                        ..
+                    } => {
+                        // An abort arrives OUTSIDE an open chunk, after a
+                        // StreamStop, so a concurrent transaction's StreamStart
+                        // can sit between our chunk and our abort and clear
+                        // `ours`. The xid names the transaction directly, so
+                        // ownership is taken from it instead.
+                        let belongs = *message_xid == xid || *subxid == xid;
+                        (belongs, belongs && message_xid == subxid)
+                    }
+                    _ => (ours, false),
                 };
-                messages.push(message);
-                if done {
+                if keep {
+                    messages.push(message);
+                }
+                if terminal {
                     return Ok(messages);
                 }
             }
@@ -191,23 +252,47 @@ impl Fixture {
         fixture
     }
 
-    async fn write_big_transaction(&self, ending: &str) {
+    /// Open an explicit transaction and return the xid `PostgreSQL` assigned.
+    ///
+    /// THE XID IS WHAT TELLS A TEST'S TRANSACTION FROM A CONCURRENT ONE. Under
+    /// protocol 2 a transaction large enough to spill `logical_decoding_work_mem`
+    /// is streamed, and `PostgreSQL` 16 sends the `StreamStart`/`StreamCommit`
+    /// framing for it to every slot whose stream is reading that LSN - including
+    /// slots whose publication filters out every row it contains. A reader that
+    /// stopped at the first `StreamCommit` could therefore stop on another
+    /// test's empty stream and see a fraction of its own transaction. Keeping
+    /// only frames carrying this xid is what scopes the read.
+    async fn begin_and_xid(&self) -> u32 {
+        self.setup
+            .batch_execute("BEGIN")
+            .await
+            .expect("begin the fixture transaction");
+        let xid: i64 = self
+            .setup
+            .query_one_scalar("SELECT txid_current()", &[])
+            .await
+            .expect("read the transaction id");
+        xid as u32
+    }
+
+    async fn write_big_transaction(&self, ending: &str) -> u32 {
+        let xid = self.begin_and_xid().await;
         self.setup
             .batch_execute(&format!(
-                "BEGIN;
-                 INSERT INTO {t} SELECT g, repeat('x', 200) FROM generate_series(1, {ROWS}) g;
+                "INSERT INTO {t} SELECT g, repeat('x', 200) FROM generate_series(1, {ROWS}) g;
                  {ending};",
                 t = self.table,
             ))
             .await
             .expect("bulk transaction failed");
+        xid
     }
 
-    async fn write_big_subtransaction(&self) {
+    async fn write_big_subtransaction(&self) -> u32 {
+        let xid = self.begin_and_xid().await;
         self.setup
             .batch_execute(&format!(
-                "BEGIN;
-                 INSERT INTO {t}
+                "INSERT INTO {t}
                     SELECT g, repeat('x', 200)
                       FROM generate_series(1, {half}) g;
                  SAVEPOINT streamed_child;
@@ -222,13 +307,14 @@ impl Fixture {
             ))
             .await
             .expect("bulk subtransaction failed");
+        xid
     }
 
-    async fn write_rolled_back_big_subtransaction(&self) {
+    async fn write_rolled_back_big_subtransaction(&self) -> u32 {
+        let xid = self.begin_and_xid().await;
         self.setup
             .batch_execute(&format!(
-                "BEGIN;
-                 INSERT INTO {t} VALUES (1, 'top before');
+                "INSERT INTO {t} VALUES (1, 'top before');
                  SAVEPOINT streamed_child;
                  INSERT INTO {t}
                     SELECT g, repeat('x', 200)
@@ -241,6 +327,7 @@ impl Fixture {
             ))
             .await
             .expect("rolled-back bulk subtransaction failed");
+        xid
     }
 
     async fn drop_all(&self) {
@@ -279,7 +366,12 @@ struct AbortOutcome {
     committed: bool,
 }
 
-async fn observe_abort(slot: &str, streaming: Streaming, publication: &str) -> AbortOutcome {
+async fn observe_abort(
+    slot: &str,
+    streaming: Streaming,
+    publication: &str,
+    xid: u32,
+) -> AbortOutcome {
     // PostgreSQL 18 can remain healthily silent for this rollback, so bound the
     // observation rather than waiting for a transaction-terminal frame. A
     // one-second server timeout forces a demanded keepalive during the window:
@@ -287,9 +379,14 @@ async fn observe_abort(slot: &str, streaming: Streaming, publication: &str) -> A
     // it the walsender terminates and the inner future returns an error. The
     // old test folded that transport error into an empty result and therefore
     // mistook a dead stream for PostgreSQL 18's legitimate silence.
+    //
+    // The transaction is written BEFORE this call. Starting the read first
+    // would leave the one-second walsender timeout armed across the write, and
+    // a whole-transaction `ROLLBACK` is streamed and aborted reliably from a
+    // committed WAL record, so there is nothing to gain by decoding it live.
     let messages = match compio::time::timeout(
         ABORT_OBSERVATION,
-        try_collect_with_fast_keepalives(slot, streaming, publication, true),
+        try_collect_with_fast_keepalives(slot, streaming, publication, true, || async { xid }),
     )
     .await
     {
@@ -322,8 +419,10 @@ async fn observe_abort(slot: &str, streaming: Streaming, publication: &str) -> A
 async fn a_streamed_transaction_arrives_in_chunks_and_commits_as_a_stream() {
     compio::time::timeout(WATCHDOG, async {
         let fixture = Fixture::create("cpg stream on").await;
-        fixture.write_big_transaction("COMMIT").await;
-        let messages = collect(&fixture.slot, Streaming::On, &fixture.publication).await;
+        let messages = collect(&fixture.slot, Streaming::On, &fixture.publication, || {
+            fixture.write_big_transaction("COMMIT")
+        })
+        .await;
         fixture.drop_all().await;
 
         let starts = messages
@@ -380,8 +479,10 @@ async fn a_streamed_transaction_arrives_in_chunks_and_commits_as_a_stream() {
 async fn a_streamed_subtransaction_preserves_its_own_xid() {
     compio::time::timeout(WATCHDOG, async {
         let fixture = Fixture::create("cpg stream subxid").await;
-        fixture.write_big_subtransaction().await;
-        let decoded = try_collect(&fixture.slot, Streaming::On, &fixture.publication).await;
+        let decoded = try_collect(&fixture.slot, Streaming::On, &fixture.publication, || {
+            fixture.write_big_subtransaction()
+        })
+        .await;
         fixture.drop_all().await;
 
         let messages = decoded.unwrap_or_else(|error| {
@@ -433,8 +534,10 @@ async fn a_streamed_subtransaction_preserves_its_own_xid() {
 async fn a_child_stream_abort_does_not_end_its_parent_transaction() {
     compio::time::timeout(WATCHDOG, async {
         let fixture = Fixture::create("cpg stream child abort").await;
-        fixture.write_rolled_back_big_subtransaction().await;
-        let decoded = try_collect(&fixture.slot, Streaming::On, &fixture.publication).await;
+        let decoded = try_collect(&fixture.slot, Streaming::On, &fixture.publication, || {
+            fixture.write_rolled_back_big_subtransaction()
+        })
+        .await;
         fixture.drop_all().await;
 
         let messages = decoded
@@ -471,8 +574,10 @@ async fn a_child_stream_abort_does_not_end_its_parent_transaction() {
 async fn the_same_transaction_without_streaming_is_one_begin_and_commit() {
     compio::time::timeout(WATCHDOG, async {
         let fixture = Fixture::create("cpg stream off").await;
-        fixture.write_big_transaction("COMMIT").await;
-        let messages = collect(&fixture.slot, Streaming::Off, &fixture.publication).await;
+        let messages = collect(&fixture.slot, Streaming::Off, &fixture.publication, || {
+            fixture.write_big_transaction("COMMIT")
+        })
+        .await;
         fixture.drop_all().await;
 
         assert!(
@@ -499,8 +604,8 @@ async fn the_same_transaction_without_streaming_is_one_begin_and_commit() {
 async fn a_rolled_back_streamed_transaction_is_never_reported_as_committed() {
     compio::time::timeout(WATCHDOG, async {
         let fixture = Fixture::create("cpg stream abort").await;
-        fixture.write_big_transaction("ROLLBACK").await;
-        let outcome = observe_abort(&fixture.slot, Streaming::On, &fixture.publication).await;
+        let xid = fixture.write_big_transaction("ROLLBACK").await;
+        let outcome = observe_abort(&fixture.slot, Streaming::On, &fixture.publication, xid).await;
         fixture.drop_all().await;
 
         assert!(
@@ -526,8 +631,9 @@ async fn a_rolled_back_streamed_transaction_is_never_reported_as_committed() {
 async fn a_parallel_stream_abort_preserves_protocol_four_metadata() {
     compio::time::timeout(WATCHDOG, async {
         let fixture = Fixture::create("cpg parallel abort").await;
-        fixture.write_big_transaction("ROLLBACK").await;
-        let outcome = observe_abort(&fixture.slot, Streaming::Parallel, &fixture.publication).await;
+        let xid = fixture.write_big_transaction("ROLLBACK").await;
+        let outcome =
+            observe_abort(&fixture.slot, Streaming::Parallel, &fixture.publication, xid).await;
         fixture.drop_all().await;
 
         assert!(

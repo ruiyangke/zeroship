@@ -329,26 +329,57 @@ async fn prepared_transactions_expose_every_two_phase_frame() {
             let mut messages = Vec::new();
             let mut first_error = None;
             let mut stream_prepares_inside_a_chunk = 0usize;
+            // A prepared transaction is delivered to a `two_phase` slot
+            // WITHOUT regard to the slot's publication filter, so a concurrent
+            // test that runs `PREPARE TRANSACTION` puts its gid on this
+            // stream. Only the gids this test produced are its own; a prepare
+            // family frame naming anything else belongs to another session and
+            // is dropped, exactly as the sibling two-phase test ignores a
+            // prepare it did not ask for. The stream is otherwise read until
+            // every one of this test's gids has reached its commit or
+            // rollback, not until the first `C` on the wire, because that `C`
+            // can be another session's ordinary commit.
+            let expected_gids = [
+                commit_gid.as_str(),
+                rollback_gid.as_str(),
+                stream_commit_gid.as_str(),
+                stream_rollback_gid.as_str(),
+            ];
+            let mut finished: BTreeSet<String> = BTreeSet::new();
             loop {
                 match stream.next().await.expect("replication stream failed") {
                     Some(ReplicationMessage::XLogData { body, .. }) => {
-                        // The sentinel's ordinary Commit terminates the read
-                        // even while this test is red on a newly observed tag.
-                        // That lets the producer finish and the fixture clean
-                        // up before the stored decoder error fails the test.
-                        let done = body.first() == Some(&b'C');
                         // Sampled BEFORE decoding, because decode is what
                         // clears it. See the StreamPrepare placement assertion
                         // below for why this is worth recording.
                         let chunk_open_before = decoder.stream_xid().is_some();
                         match decoder.decode(&body) {
                             Ok(message) => {
-                                if chunk_open_before
-                                    && matches!(message, PgOutputMessage::StreamPrepare { .. })
-                                {
-                                    stream_prepares_inside_a_chunk += 1;
+                                let foreign = match &message {
+                                    PgOutputMessage::BeginPrepare { gid, .. }
+                                    | PgOutputMessage::Prepare { gid, .. }
+                                    | PgOutputMessage::StreamPrepare { gid, .. }
+                                    | PgOutputMessage::CommitPrepared { gid, .. }
+                                    | PgOutputMessage::RollbackPrepared { gid, .. } => {
+                                        !expected_gids.contains(&gid.as_str())
+                                    }
+                                    _ => false,
+                                };
+                                if !foreign {
+                                    if chunk_open_before
+                                        && matches!(message, PgOutputMessage::StreamPrepare { .. })
+                                    {
+                                        stream_prepares_inside_a_chunk += 1;
+                                    }
+                                    match &message {
+                                        PgOutputMessage::CommitPrepared { gid, .. }
+                                        | PgOutputMessage::RollbackPrepared { gid, .. } => {
+                                            finished.insert(gid.clone());
+                                        }
+                                        _ => {}
+                                    }
+                                    messages.push(message);
                                 }
-                                messages.push(message);
                             }
                             Err(error) => {
                                 eprintln!(
@@ -363,7 +394,7 @@ async fn prepared_transactions_expose_every_two_phase_frame() {
                                 }
                             }
                         }
-                        if done {
+                        if finished.len() == expected_gids.len() {
                             return (messages, first_error, stream_prepares_inside_a_chunk);
                         }
                     }

@@ -16,22 +16,36 @@ pub mod env;
 /// Longest identifier `PostgreSQL` stores (`NAMEDATALEN - 1`).
 const MAX_POSTGRES_IDENTIFIER_LEN: usize = 63;
 
-/// Build an unquoted `PostgreSQL` identifier private to this test process.
+/// Build an unquoted `PostgreSQL` identifier private to one TEST.
 ///
 /// The readable prefix is normalised to `[a-z0-9_]`, while the PID makes two
 /// concurrent test binaries choose different server-side namespaces. The hash
-/// covers the original logical name and the PID, so truncating a long readable
-/// prefix cannot merge two logical names. The result is ASCII, begins with a
-/// legal unquoted-identifier character, and never exceeds `PostgreSQL`'s
-/// 63-byte identifier limit.
+/// covers the original logical name, the PID and the calling thread's name.
+///
+/// THE THREAD NAME IS WHAT SCOPES ONE TEST FROM ANOTHER. Under libtest every
+/// test runs on a thread named after it, so a fixture that calls this once per
+/// test hands each test its own table, slot or publication instead of one
+/// shared by the whole module. Repeated calls from the same test still agree,
+/// because the name is stable for the thread. Without it, tests that run
+/// concurrently in one binary collide with `42P07` (relation already exists) or
+/// `23505` (duplicate key on `pg_type`), which is what a per-module fixture
+/// sharing one name produces.
+///
+/// The hash also keeps truncation from merging two logical names: a long
+/// readable prefix is cut, but the digest still separates the originals. The
+/// result is ASCII, begins with a legal unquoted-identifier character, and
+/// never exceeds `PostgreSQL`'s 63-byte identifier limit.
 pub fn test_object_name(logical: &str) -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
     let pid = std::process::id();
+    let thread = std::thread::current();
+    let thread_name = thread.name().unwrap_or("");
     let mut hasher = DefaultHasher::new();
     logical.hash(&mut hasher);
     pid.hash(&mut hasher);
+    thread_name.hash(&mut hasher);
     let digest = hasher.finish();
 
     let mut readable: String = logical
@@ -1033,6 +1047,36 @@ mod tests {
         assert_ne!(first, second);
         assert_ne!(punctuation, underscore);
         assert_eq!(first, test_object_name(&format!("{common_prefix}first")));
+    }
+
+    /// Two tests in one binary can ask for the same logical name at the same
+    /// time, each on its own libtest thread. A per-PROCESS name handed both the
+    /// same table, which is the `42P07`/`23505` collision seen when the suite
+    /// runs concurrently; the thread name is what separates them. The same
+    /// thread asking twice must still get one name, or cleanup would target
+    /// nothing.
+    #[test]
+    fn one_logical_name_in_two_tests_is_two_objects() {
+        let named = |thread_name: &'static str| {
+            std::thread::Builder::new()
+                .name(thread_name.to_owned())
+                .spawn(|| test_object_name("shared fixture"))
+                .expect("spawn a named thread")
+                .join()
+                .expect("the named thread did not panic")
+        };
+
+        let first = named("one_test");
+        let second = named("another_test");
+        assert_ne!(
+            first, second,
+            "two tests asking for one logical name were given the same object: {first}"
+        );
+        assert_eq!(
+            first,
+            named("one_test"),
+            "the same test asking twice must get its object back"
+        );
     }
 
     #[test]

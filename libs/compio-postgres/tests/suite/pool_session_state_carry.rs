@@ -261,11 +261,12 @@ async fn an_open_transaction_does_not_survive_a_release() {
 async fn a_listen_registration_survives_a_release() {
     let url = test_url();
     let pool = single_connection_pool(&url).await;
+    let channel = common::test_object_name("cpg_carry_channel");
 
     let first_pid = {
         let client = pool.acquire().await.expect("first checkout");
         client
-            .batch_execute("LISTEN cpg_carry_channel")
+            .batch_execute(&format!("LISTEN {channel}"))
             .await
             .expect("listen");
         client
@@ -289,8 +290,10 @@ async fn a_listen_registration_survives_a_release() {
     // Set-returning, so it belongs in FROM rather than in an expression.
     let still_listening: i64 = client
         .query_one(
-            "SELECT count(*)::int8 FROM pg_listening_channels() AS c
-              WHERE c = 'cpg_carry_channel'",
+            &format!(
+                "SELECT count(*)::int8 FROM pg_listening_channels() AS c
+                  WHERE c = '{channel}'"
+            ),
             &[],
         )
         .await
