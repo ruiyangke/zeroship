@@ -17,8 +17,22 @@
 // SSE wire `useChat` expects — no manual frame plumbing.
 
 import { action } from "@zeroship/rpc/server";
-import { openai } from "@ai-sdk/openai";
+import { createOpenAI } from "@ai-sdk/openai";
+import { env } from "zeroship";
 import { streamText, convertToModelMessages, type UIMessage } from "ai";
+
+// The provider is built from the app's own environment, not from
+// `process.env`: a creator points the app at any OpenAI-compatible endpoint
+// by setting the `OPENAI_BASE_URL` app variable and the `OPENAI_API_KEY` app
+// secret, and the runtime surfaces both on `env`. Locally the same two names
+// arrive with a `ZS_VAR_` prefix (`.env`), which is how the test fixture
+// supplies a stub without any real key.
+function provider() {
+  return createOpenAI({
+    baseURL: env.OPENAI_BASE_URL as string | undefined,
+    apiKey: env.OPENAI_API_KEY as string | undefined,
+  });
+}
 
 // `action()`, not `mutation()`: mutations run inside a transaction and the
 // runtime refuses an outbound `fetch` there, so the OpenAI call fails with
@@ -32,7 +46,7 @@ export const chat = action(
     // before passing to streamText (otherwise streamText sees a Promise
     // and downstream `messages.some(...)` blows up).
     const result = streamText({
-      model: openai("gpt-5-nano"),
+      model: provider().chat("gpt-5-nano"),
       system: "You are a friendly assistant.",
       messages: await convertToModelMessages(input.messages),
     });

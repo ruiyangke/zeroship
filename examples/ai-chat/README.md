@@ -7,7 +7,24 @@ calls OpenAI via `@ai-sdk/openai` and streams the response.
 
 ## Run it
 
-Set `OPENAI_API_KEY` in `.env` (gitignored). Then either:
+The app reads its provider from its own environment: `OPENAI_API_KEY` (the
+key) and, for an OpenAI-compatible endpoint, `OPENAI_BASE_URL` (the base
+URL). In a deployment those are an app secret and an app variable:
+
+```bash
+zeroship secret set OPENAI_API_KEY=sk-... --app=<app-id>
+zeroship var set OPENAI_BASE_URL=https://api.openai.com/v1 --app=<app-id>
+```
+
+Locally the same values come from `.env` (gitignored) with the `ZS_VAR_`
+prefix the dev server strips into `env`:
+
+```dotenv
+ZS_VAR_OPENAI_API_KEY=sk-...
+ZS_VAR_OPENAI_BASE_URL=https://api.openai.com/v1
+```
+
+Then either:
 
 **Dev (recommended for iteration):**
 
@@ -23,11 +40,21 @@ and spawns the zeroship runtime against `dev-bootstrap.js`.
 
 ```bash
 pnpm build
-OPENAI_API_KEY=$(grep OPENAI_API_KEY .env | cut -d= -f2) \
+ZS_VAR_OPENAI_API_KEY=$(grep ZS_VAR_OPENAI_API_KEY .env | cut -d= -f2) \
   zeroship serve dist/server/index.js --port 3000
 ```
 
 Open http://localhost:3000/ to chat.
+
+## Tests
+
+`pnpm test:e2e` runs hermetically. The Playwright web-server fixture starts a
+local OpenAI-compatible stub and points the app at it with
+`ZS_VAR_OPENAI_BASE_URL` / `ZS_VAR_OPENAI_API_KEY` — the same configuration
+surface a creator uses — so no real key and no network to OpenAI are needed.
+The stub streams several deltas in the chat-completions SSE wire and records
+every request; the suite asserts the app sent the expected model, messages and
+key, and that a provider error surfaces in the chat UI.
 
 ## How the wire fits together
 
@@ -41,7 +68,7 @@ zeroship kernel
   │ calls default.rpc("chat", { messages }, ctx)
   ▼
 chat() in src/server.ts
-  │ streamText({ model: openai("gpt-4o-mini"), messages })
+  │ streamText({ model: openai.chat("gpt-5-nano"), messages })
   │ result.toUIMessageStreamResponse()  ← v5 SSE wire
   ▼
 zeroship kernel inspect_response forwards SSE bytes verbatim
@@ -79,8 +106,8 @@ work without modification:
   against any class implementing the spec ReadableStream surface;
   no reach into private fields.
 
-- **`process.env` preservation in the worker build** —
-  the worker build would statically rewrite `process.env` to `{}`.
-  The vite-plugin defines `"process.env": "process.env"` for the worker
-  to keep the references intact, so the OpenAI provider reads
-  `OPENAI_API_KEY` at runtime from the env the runtime injects.
+- **`env` for provider configuration** — the app builds its provider from
+  `env.OPENAI_API_KEY` and `env.OPENAI_BASE_URL`. Those are app values the
+  runtime seeds before the worker evaluates creator code, so a deployment and
+  a local dev server supply the provider the same way; the app never depends
+  on a shell environment variable.

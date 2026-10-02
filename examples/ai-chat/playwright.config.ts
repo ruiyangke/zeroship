@@ -1,8 +1,9 @@
 import { defineConfig, devices } from "@playwright/test";
+import { APP_ORIGIN, GATE_ORIGIN } from "./tests/fixture/settings.ts";
 
 export default defineConfig({
   testDir: "./e2e",
-  // One worker: the suite drives a streaming reply against a paid provider, and
+  // One worker: the suite drives a streaming reply against a local stub and
   // the box also hosts the dev server this config starts.
   fullyParallel: false,
   forbidOnly: !!process.env.CI,
@@ -12,7 +13,7 @@ export default defineConfig({
   timeout: 60_000,
   expect: { timeout: 15_000 },
   use: {
-    baseURL: "http://127.0.0.1:5173",
+    baseURL: APP_ORIGIN,
     trace: "on-first-retry",
     screenshot: "only-on-failure",
     video: "retain-on-failure",
@@ -29,9 +30,15 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: "pnpm dev --host 127.0.0.1",
-    url: "http://127.0.0.1:5173",
-    reuseExistingServer: true,
+    // Starts the OpenAI-compatible stub and the app's dev server together,
+    // configuring the app through its own `ZS_VAR_` environment surface.
+    command: "node tests/fixture/browser-server.ts",
+    // The fixture's gate, not the Vite port: it opens only once the runtime
+    // behind Vite answers an RPC, so the suite never starts against a 503.
+    url: GATE_ORIGIN,
+    stdout: "pipe",
+    reuseExistingServer: false,
+    gracefulShutdown: { signal: "SIGTERM", timeout: 10_000 },
     timeout: 120_000,
   },
 });
