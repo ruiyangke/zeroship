@@ -191,7 +191,7 @@ pub async fn run(settings: WorkflowSettings, options: ServerOptions) -> Result<(
     }
     let url = settings.database_url.expose_str().to_owned();
     let (client, connection) = compio::time::timeout(
-        options.coordinator.acquire_timeout,
+        options.coordinator.startup_timeout(),
         compio_postgres::connect(&url, compio_postgres::NoTls),
     )
     .await?
@@ -298,10 +298,14 @@ pub async fn run(settings: WorkflowSettings, options: ServerOptions) -> Result<(
                     // scopes, the ones the driver's lanes also close, so
                     // acceptance and closure meet on the same rows.
                     let runs = Rc::new(
-                        crate::runs::RunService::connect(&url, service.recovery(recovery)?)
-                            .await
-                            .map_err(|_| crate::coordinator::Error::Unavailable)?
-                            .with_deployments(deployments),
+                        crate::runs::RunService::connect_within(
+                            &url,
+                            service.recovery(recovery)?,
+                            coordinator.startup_timeout(),
+                        )
+                        .await
+                        .map_err(|_| crate::coordinator::Error::Unavailable)?
+                        .with_deployments(deployments),
                     );
                     Ok::<_, crate::coordinator::Error>(Rc::new(WorkflowHttpState {
                         service,
@@ -420,9 +424,13 @@ async fn sweep_lane(
     let policies =
         Rc::new(connect_policies(facts, url, options.coordinator, observations).await?);
     let runs = Rc::new(
-        crate::runs::RunService::connect(url, startup.recovery(options.driver.recovery)?)
-            .await?
-            .with_deployments(deployments),
+        crate::runs::RunService::connect_within(
+            url,
+            startup.recovery(options.driver.recovery)?,
+            options.coordinator.startup_timeout(),
+        )
+        .await?
+        .with_deployments(deployments),
     );
     let lane = MaintenanceLane::new(
         startup.manager.queue().clone(),
@@ -484,7 +492,18 @@ fn deployments(
     )))
 }
 
-async fn connect_policies(
+/// Bind the policy ledger over the service's own metadata database.
+///
+/// One startup step, so it is bounded by [`Options::startup_timeout`] like the
+/// authentication connection, the coordinator's pool warm-up, its queue binding
+/// and placement eligibility: a database that accepts connections and never
+/// answers fails startup within that budget. The ledger's own transactions stay
+/// bounded by [`Options::command_timeout`].
+///
+/// # Errors
+/// Returns `Unavailable` for an unreachable or unanswering database, and the
+/// ledger's own classification for a store it refuses to publish.
+pub async fn connect_policies(
     facts: Rc<dyn AppFactsSource>,
     url: &str,
     options: Options,
@@ -494,7 +513,7 @@ async fn connect_policies(
     use zeroship_data_orm::{
         binding::DbBinding, encryption::ProjectKeySource, orm::Database, ConnectOptions,
     };
-    compio::time::timeout(options.command_timeout, async {
+    compio::time::timeout(options.startup_timeout(), async {
         let connections = NonZeroUsize::new(options.connections).ok_or(ManagerError::Invalid)?;
         // Its own tenant, so the publication transaction takes a lane of its
         // own. A platform route carries no database id, so every binding that

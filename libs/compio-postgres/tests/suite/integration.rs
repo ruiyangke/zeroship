@@ -17,7 +17,7 @@
 //! Nothing needs exporting for the provisioned server; `PG_TEST_URL` points
 //! the run at another one (see `common::test_url`).
 
-use compio_postgres::error::SqlState;
+use compio_postgres::error::{PoolBudget, SqlState};
 use compio_postgres::types::{IsNull, ToSql, Type, to_sql_checked};
 use compio_postgres::{
     Client, Config, Error, NoTls, Pool, PoolConfig, QueryOutcome, Row, SimpleQueryMessage,
@@ -1647,21 +1647,27 @@ async fn pool_exhaustion() {
     // long budget to observe the exhaustion error.
     //
     // `min_idle: 2`, NOT 0, and that is load-bearing. `acquire_timeout`
-    // bounds the WHOLE of `get()` - opening a connection as well as waiting for
-    // one - so with an empty pool the first two acquisitions would have to
-    // complete a TCP connect, a startup exchange and SCRAM-SHA-256 inside the
-    // same budget meant for the exhaustion wait. That makes a test about
-    // CAPACITY fail on a busy machine because of LATENCY.
+    // bounds the WHOLE of a checkout - opening a connection on demand as well
+    // as waiting for one - so with an empty pool the first two acquisitions
+    // would have to complete a TCP connect, a startup exchange and
+    // SCRAM-SHA-256 inside the budget meant for the exhaustion wait. That
+    // makes a test about CAPACITY fail on a busy machine because of LATENCY.
     //
-    // Warming both connections up front removes the unrelated variable. The two
-    // acquisitions below now come from `idle` and open no sockets, so the only
-    // thing the acquire budget times is the third `get()`, which is what the
-    // test is named after.
+    // Warm-up opens both connections before construction returns, under its
+    // own `warm_up_timeout` rather than the short checkout budget. The two
+    // acquisitions below then come from `idle` and open no sockets, so the
+    // only thing the acquire budget times is the third checkout, which is what
+    // the test is named after.
+    //
+    // The warm-up budget is set far beyond the watchdog on the third checkout,
+    // so a checkout bounded by the warm-up budget instead of its own trips the
+    // watchdog rather than passing.
     let mut config = compio_postgres::PoolConfig::new();
     config
         .max_size(2)
         .min_idle(2)
-        .acquire_timeout(std::time::Duration::from_millis(200));
+        .acquire_timeout(std::time::Duration::from_millis(200))
+        .warm_up_timeout(std::time::Duration::from_secs(60));
     let pool = Pool::connect_with_pool_config(&url, config).await.unwrap();
     assert_eq!(
         pool.idle_count(),
@@ -1673,21 +1679,22 @@ async fn pool_exhaustion() {
     let _c1 = pool.acquire().await.unwrap();
     let _c2 = pool.acquire().await.unwrap();
 
-    // Third acquisition should fail with connection timeout (pool exhausted).
-    let err = pool.acquire().await;
-    match err {
-        Err(e) => {
-            // The pool wraps its timeout error in Error::connect; check that
-            // the message mentions timeout/pool so we know it's not some other
-            // unrelated failure.
-            let msg = format!("{e}");
-            assert!(
-                msg.contains("connect") || msg.contains("timeout") || msg.contains("pool"),
-                "expected pool exhaustion error, got: {e}"
-            );
-        }
-        Ok(_) => panic!("expected pool exhaustion error, but got a connection"),
-    }
+    // Third acquisition must fail with the pool's timeout (pool exhausted).
+    let third = compio::time::timeout(std::time::Duration::from_secs(10), pool.acquire())
+        .await
+        .expect("the exhausted checkout outlived its acquire budget, so another budget bounded it");
+    let Err(error) = third else {
+        panic!("expected pool exhaustion error, but got a connection");
+    };
+    assert!(
+        error.is_pool_timeout(),
+        "expected the exhausted checkout to fail as a pool timeout, got: {error:?}"
+    );
+    assert_eq!(
+        error.pool_timeout_budget(),
+        Some(PoolBudget::Acquire),
+        "the exhausted checkout was classified as another budget: {error:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -5301,14 +5308,18 @@ async fn a_pool_with_room_still_warms_up_to_min_idle() {
     );
 }
 
-/// The two configurations the pool refuses must actually be refused, and must
-/// say so at construction rather than at the first checkout.
+/// The configurations the pool cannot honour must actually be refused, and
+/// must say so at construction rather than as a timeout later.
 ///
-/// Both were added with the warm-set fix and neither had coverage. The
-/// `max_size = 0` arm matters most: without it the pool constructs `Ok`,
-/// never opens a connection, and then parks every `get()` on a waiter nothing
-/// can wake, so the caller pays the full `acquire_timeout` - 30s by
-/// default - to learn what the constructor already knew.
+/// Without the `max_size = 0` refusal the pool constructs `Ok`, never opens a
+/// connection, and then parks every `get()` on a waiter nothing can wake, so
+/// the caller pays the full checkout budget to learn what the constructor
+/// already knew.
+///
+/// A zero `warm_up_timeout` expires before warm-up's first handshake can
+/// finish, so without its refusal construction reports a pool timeout that the
+/// configuration made certain. The refusal is a configuration error rather
+/// than a pool timeout.
 ///
 /// `min_idle > max_size` is reachable without setting `min_idle`, because
 /// `PoolConfig::default()` supplies 2 when a caller lowers only `max_size`.
@@ -5322,6 +5333,25 @@ async fn a_pool_refuses_a_configuration_it_cannot_honour() {
     assert!(
         zero.is_err(),
         "a pool with max_size 0 was constructed; every checkout on it would time out"
+    );
+
+    let mut no_warm_up_config = PoolConfig::new();
+    no_warm_up_config
+        .max_size(1)
+        .min_idle(1)
+        .warm_up_timeout(std::time::Duration::ZERO);
+    let Err(no_warm_up) = Pool::connect_with_pool_config(&url, no_warm_up_config).await else {
+        panic!("a pool with a zero warm_up_timeout was constructed");
+    };
+    assert!(
+        !no_warm_up.is_pool_timeout(),
+        "a zero warm_up_timeout was attempted and expired instead of refused: {no_warm_up:?}"
+    );
+    assert_eq!(
+        no_warm_up.pool_timeout_budget(),
+        None,
+        "a zero warm_up_timeout was reported as a pool budget expiry instead of a refusal: \
+         {no_warm_up:?}"
     );
 
     let mut inverted_config = PoolConfig::new();

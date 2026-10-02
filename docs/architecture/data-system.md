@@ -66,8 +66,9 @@ Rust transaction callback expire when that callback finishes.
 
 PostgreSQL operations and transactions use `Pool::acquire()` to obtain an owned
 `PoolConnection` from the same bounded pool. Pool handles clone shared state;
-each lease keeps that state alive across callbacks. Warm-up and checkout have
-a pool acquisition budget, including async hooks. A transaction keeps its
+each lease keeps that state alive across callbacks. Each checkout has an
+acquisition budget and pool construction has its own warm-up budget, both
+including async hooks. A transaction keeps its
 lease through settlement; withdrawal
 consumes that lease with `discard()` so an uncertain session cannot be reused.
 Pool shutdown interrupts pending acquisition without invalidating leases still

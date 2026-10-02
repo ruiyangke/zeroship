@@ -1436,7 +1436,7 @@ mod tests {
             pool_config
                 .max_size(1)
                 .min_idle(0)
-                .acquire_timeout(Duration::from_millis(100));
+                .warm_up_timeout(Duration::from_millis(100));
             let Err(error) = compio_postgres::Pool::connect_with_config(config, pool_config).await
             else {
                 panic!("a peer that never replies completed a pool warm-up");

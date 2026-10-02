@@ -6,7 +6,7 @@ publishable: it depends on nothing in this workspace.
 
 It is a SUPERSET of tokio-postgres's client surface. On top of that crate's API
 it adds a connection pool, logical replication with a pgoutput decoder, a
-rustls transport, four timeout clocks, an opt-in prepared-statement cache, a
+rustls transport, client-side timeout clocks, an opt-in prepared-statement cache, a
 password-file and `pg_service.conf` reader, TLS key logging, a configurable
 maximum message size, wire protocol 3.2 with negotiated fallback to 3.0, and
 `is_dirty` / `process_id` / `transaction_status` / `query_events` /
@@ -60,10 +60,15 @@ pool -> acquire -> lease -> drop -> cleanup if needed -> reuse
                      +---- discard -> close socket -> release capacity
 ```
 
-`PoolConfig::acquire_timeout` bounds asynchronous warm-up, including retries and
-hooks, and each checkout, including waiting and validation. Use
-`Error::is_pool_timeout()` and `Error::is_pool_closed()` to classify acquisition
-failures; command deadlines and transport failures retain their own meanings.
+`PoolConfig::acquire_timeout` bounds each checkout: waiting for a connection,
+opening one on demand, validation, and hooks. `PoolConfig::warm_up_timeout`
+bounds constructing the pool: its warm-up connections, their retries, and their
+`after_connect` hooks. They are separate budgets because the work differs - a
+checkout makes at most one handshake, warm-up several with retries - so a short
+checkout limit does not cut startup short. Use `Error::is_pool_timeout()` and
+`Error::is_pool_closed()` to classify pool failures, and
+`Error::pool_timeout_budget()` to see which budget expired; command deadlines
+and transport failures retain their own meanings.
 
 `discard()` consumes the lease, closes its physical connection, and
 releases capacity without running a reuse hook. Use it when cleanup cannot be

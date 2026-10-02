@@ -1,7 +1,7 @@
 //! Live coverage for pool connection lifecycle hooks.
 
 use compio_postgres::config::TargetSessionAttrs;
-use compio_postgres::error::SqlState;
+use compio_postgres::error::{PoolBudget, SqlState};
 use compio_postgres::{Config, Pool, PoolConfig};
 use std::cell::{Cell, RefCell};
 use std::io::{ErrorKind, Read, Write};
@@ -16,56 +16,147 @@ fn test_url() -> String {
     common::test_url()
 }
 
+/// Warm-up's budget covers its `after_connect` hooks, and expiry closes every
+/// candidate warm-up opened - the earlier, finished one as well as the one
+/// whose hook was still pending.
+///
+/// The peer is scripted, so reaching the second hook costs two trivial
+/// handshakes rather than two SCRAM exchanges against a live server. The
+/// blocked hook announces itself over its own channel, so the wait for that
+/// readiness is bounded separately and the budget under test only has to cover
+/// the hook that never returns.
 #[compio::test]
 async fn warm_up_bounds_after_connect_and_closes_every_candidate() {
+    const WARM_UP_BUDGET: Duration = Duration::from_millis(500);
+    const READY_WATCHDOG: Duration = Duration::from_secs(5);
+    const OUTER_WATCHDOG: Duration = Duration::from_secs(10);
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind the scripted peer");
+    let address = listener.local_addr().expect("scripted peer address");
+    listener
+        .set_nonblocking(true)
+        .expect("make the scripted accept bounded");
+    let (closed_tx, closed_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut sessions = Vec::new();
+        for pid in [71_u32, 72] {
+            let Some(mut stream) = accept_within(&listener, Duration::from_secs(5)) else {
+                break;
+            };
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("bound the scripted peer's reads");
+            read_startup(&mut stream);
+            write_startup_ok(&mut stream, pid);
+            sessions.push(stream);
+        }
+        let closed: Vec<bool> = sessions.into_iter().map(closed_by_client).collect();
+        let _ = closed_tx.send(closed);
+    });
+
+    let (ready_tx, ready_rx) = futures_channel::oneshot::channel();
+    let ready = Rc::new(RefCell::new(Some(ready_tx)));
     let entered = Rc::new(Cell::new(0));
     let hook_entered = Rc::clone(&entered);
-    let pids = Rc::new(RefCell::new(Vec::new()));
-    let hook_pids = Rc::clone(&pids);
+    let hook_ready = Rc::clone(&ready);
     let mut config = config(2, 2);
-    config.acquire_timeout(Duration::from_millis(300));
-    config.after_connect(move |client| {
+    config.warm_up_timeout(WARM_UP_BUDGET);
+    config.after_connect(move |_client| {
         let entered = Rc::clone(&hook_entered);
-        hook_pids.borrow_mut().push(client.process_id());
+        let ready = Rc::clone(&hook_ready);
         Box::pin(async move {
             entered.set(entered.get() + 1);
             if entered.get() == 2 {
+                if let Some(ready) = ready.borrow_mut().take() {
+                    let _ = ready.send(());
+                }
                 std::future::pending::<()>().await;
             }
             Ok(())
         })
     });
-    let result = compio::time::timeout(
-        Duration::from_secs(3),
-        Pool::connect_with_pool_config(&test_url(), config),
-    )
-    .await
-    .expect("pool warm-up ignored acquire_timeout while its hook was pending");
-    assert_eq!(entered.get(), 2, "warm-up never reached the blocked hook");
-    let error = result.expect_err("pool published a candidate before initialization completed");
-    assert!(
-        error.is_pool_timeout(),
-        "wrong initialization error: {error:?}"
+    let connection_config: Config = format!("postgres://postgres@{address}/fake?sslmode=disable")
+        .parse()
+        .expect("parse the scripted peer's DSN");
+    let (result, readiness) = futures_util::join!(
+        compio::time::timeout(
+            OUTER_WATCHDOG,
+            Pool::connect_with_config(connection_config, config),
+        ),
+        compio::time::timeout(READY_WATCHDOG, ready_rx),
     );
-    let pids = pids.borrow().clone();
-    let observer = connect_pool(&test_url(), PoolConfig::new()).await;
-    compio::time::timeout(Duration::from_secs(3), async {
+    readiness
+        .expect("warm-up never reached the blocked hook before its readiness watchdog")
+        .expect("the blocked hook dropped its readiness channel");
+    assert_eq!(entered.get(), 2, "warm-up did not reach the blocked hook");
+    let error = result
+        .expect("pool warm-up ignored warm_up_timeout while its hook was pending")
+        .expect_err("pool published a candidate before initialization completed");
+    assert_eq!(
+        error.pool_timeout_budget(),
+        Some(PoolBudget::WarmUp),
+        "the blocked hook was classified as another budget: {error:?}"
+    );
+
+    // Polled rather than blocked on: closing a candidate's socket can need this
+    // runtime to run its connection task.
+    let closed = compio::time::timeout(Duration::from_secs(6), async {
         loop {
-            let rows = observer
-                .query(
-                    "SELECT pid FROM pg_stat_activity WHERE pid = ANY($1)",
-                    &[&pids],
-                )
-                .await
-                .unwrap();
-            if rows.is_empty() {
-                break;
+            if let Ok(closed) = closed_rx.try_recv() {
+                return closed;
             }
             compio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
-    .expect("timed-out warm-up retained a database session");
+    .expect("the scripted peer never reported on its sessions");
+    assert_eq!(
+        closed,
+        [true, true],
+        "timed-out warm-up left a candidate's session open"
+    );
+}
+
+/// Accept one connection on a non-blocking listener, or give up after `limit`.
+fn accept_within(listener: &TcpListener, limit: Duration) -> Option<std::net::TcpStream> {
+    let deadline = std::time::Instant::now() + limit;
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                stream
+                    .set_nonblocking(false)
+                    .expect("make the accepted stream blocking");
+                return Some(stream);
+            }
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                if std::time::Instant::now() >= deadline {
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Err(error) => panic!("scripted accept failed: {error}"),
+        }
+    }
+}
+
+/// Whether the client closed this session: end of stream, or a reset, before
+/// the stream's read timeout.
+fn closed_by_client(mut stream: std::net::TcpStream) -> bool {
+    let mut scratch = [0_u8; 256];
+    loop {
+        match stream.read(&mut scratch) {
+            Ok(0) => return true,
+            Ok(_) => {}
+            Err(error) => {
+                return matches!(
+                    error.kind(),
+                    ErrorKind::ConnectionAborted
+                        | ErrorKind::ConnectionReset
+                        | ErrorKind::BrokenPipe
+                );
+            }
+        }
+    }
 }
 
 fn config(max_size: usize, min_idle: usize) -> PoolConfig {

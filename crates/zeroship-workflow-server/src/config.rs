@@ -84,7 +84,15 @@ pub struct WorkflowSettings {
     /// Metadata database connections per HTTP thread.
     #[config(name = "workflow.database_connections", default = 8)]
     pub database_connections: Operational<usize>,
-    /// Maximum wait to acquire a metadata connection.
+    /// Budget for each metadata database wait: a checkout from the
+    /// coordinator's pool, and each step of opening the database at startup.
+    ///
+    /// One setting bounds both, and there is no separate startup setting. At
+    /// startup it bounds, one step at a time, the authentication connection,
+    /// the coordinator's pool warm-up, its queue binding, placement
+    /// eligibility, the journal open and the policy-ledger open, so a database
+    /// that accepts connections and never answers fails startup within this
+    /// budget.
     #[config(name = "workflow.database_acquire_timeout_ms", default = 5000)]
     pub database_acquire_timeout_ms: Operational<u64>,
     /// Deadline for a complete metadata transaction.

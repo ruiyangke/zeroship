@@ -370,6 +370,19 @@ them:
 - `auth_provider` is one value for two services: auth serves the provider and
   control verifies its tokens. `native` means the platform's own issuer.
 
+### A row that bounds more than its name says
+
+`workflow.database_acquire_timeout_ms` is the workflow service's one metadata
+database budget. It bounds each checkout from the coordinator's pool, which its
+name says, and each step of opening the database at startup, which it does not:
+the authentication connection, the coordinator's pool warm-up, its queue binding,
+placement eligibility, the journal open and the policy-ledger open, one step at a
+time. There is no separate startup setting, so a database that accepts
+connections and never answers fails startup within this value.
+`Options::startup_timeout` in
+`crates/zeroship-workflow-server/src/coordinator.rs` is where the service reads
+it for startup.
+
 ---
 
 ## Hand-maintained: the deployment surface

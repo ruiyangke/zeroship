@@ -9,6 +9,7 @@ use std::{
     collections::HashMap,
     rc::Rc,
     sync::Arc,
+    time::Duration,
 };
 
 use futures::{future::LocalBoxFuture, lock::Mutex};
@@ -69,6 +70,36 @@ impl RunService {
             recovery,
             ingress: RefCell::new(HashMap::new()),
         })
+    }
+
+    /// Open the journal under a startup budget.
+    ///
+    /// [`RunService::connect`] lets the journal's ORM pools fall back to the
+    /// driver's construction defaults and its verification queries to the
+    /// pool's own command deadline. A host opening the journal at startup owes
+    /// the operator one budget for that step: a database that accepts
+    /// connections and then stops answering fails here within `startup_timeout`
+    /// rather than at a default of the pool's.
+    ///
+    /// # Errors
+    /// As [`RunService::connect`], plus `Unavailable` when the budget expires.
+    #[expect(
+        clippy::future_not_send,
+        reason = "the journal store and the recovery scope it owns belong to their compio runtime"
+    )]
+    pub async fn connect_within(
+        url: &str,
+        recovery: Recovery,
+        startup_timeout: Duration,
+    ) -> Result<Self, WorkflowServiceError> {
+        Box::pin(compio::time::timeout(
+            startup_timeout,
+            Self::connect(url, recovery),
+        ))
+        .await
+        .map_err(|_| {
+            WorkflowServiceError::Unavailable("workflow journal startup timed out".into())
+        })?
     }
 
     /// Bind the deployment retention authority this journal decides holds

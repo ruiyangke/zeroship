@@ -78,6 +78,9 @@ impl From<compio_postgres::Error> for Error {
 #[derive(Debug, Clone, Copy)]
 pub struct Options {
     pub connections: usize,
+    /// The metadata database's wait budget, `workflow.database_acquire_timeout_ms`.
+    /// It bounds each checkout from the coordinator's pool and, as
+    /// [`Options::startup_timeout`], each step of opening the database.
     pub acquire_timeout: Duration,
     pub command_timeout: Duration,
     pub worker_ttl: Duration,
@@ -99,6 +102,20 @@ impl Default for Options {
     }
 }
 impl Options {
+    /// The budget for each step of opening the metadata database: the service's
+    /// authentication connection, constructing the coordinator's pool, binding
+    /// its queue, binding placement eligibility ([`connect_eligibility`]),
+    /// opening the journal and opening the policy ledger.
+    ///
+    /// It is [`Options::acquire_timeout`]. One operator setting bounds startup
+    /// and checkouts alike, so a database that accepts connections and never
+    /// answers fails startup within the budget the operator chose, not within
+    /// a default of the pool's.
+    #[must_use]
+    pub const fn startup_timeout(&self) -> Duration {
+        self.acquire_timeout
+    }
+
     /// # Errors
     /// Rejects empty limits or durations that cannot be represented in storage.
     pub fn validate(&self) -> Result<(), Error> {
@@ -129,8 +146,12 @@ impl Coordinator {
     /// Placement reads zone and enrollment facts through `eligibility`; the
     /// production host passes [`connect_eligibility`] over the same database.
     ///
+    /// Constructing the pool and binding the queue are each bounded by
+    /// [`Options::startup_timeout`].
+    ///
     /// # Errors
-    /// Rejects invalid options, connection failures and incompatible metadata schemas.
+    /// Rejects invalid options, connection failures and incompatible metadata
+    /// schemas. A startup step that outlasts its budget is `Unavailable`.
     pub async fn connect(
         url: &str,
         options: Options,
@@ -143,6 +164,7 @@ impl Coordinator {
             .max_size(options.connections)
             .min_idle(1)
             .acquire_timeout(options.acquire_timeout)
+            .warm_up_timeout(options.startup_timeout())
             .command_timeout(options.command_timeout);
         let pool = Pool::connect_with_pool_config(url, config).await?;
         let binding = DbBinding::platform(
@@ -151,7 +173,7 @@ impl Coordinator {
             SchemaName::new("workflow_manager").map_err(|_| Error::Invalid)?,
         );
         let queue = compio::time::timeout(
-            options.acquire_timeout,
+            options.startup_timeout(),
             Queue::connect(
                 binding,
                 url,
@@ -290,13 +312,14 @@ impl Coordinator {
 }
 
 /// Bind Control's zone and enrollment rows for placement and verify the
-/// manager role's column grants on them.
+/// manager role's column grants on them, within [`Options::startup_timeout`].
 ///
 /// # Errors
-/// Returns `Unavailable` for an unreachable database or missing grants.
+/// Returns `Unavailable` for an unreachable or unanswering database or missing
+/// grants.
 pub async fn connect_eligibility(url: &str, options: Options) -> Result<ControlEligibility, Error> {
     options.validate()?;
-    compio::time::timeout(options.acquire_timeout, async {
+    compio::time::timeout(options.startup_timeout(), async {
         let database = Database::connect(
             DbBinding::platform(
                 "platform",

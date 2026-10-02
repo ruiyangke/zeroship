@@ -325,6 +325,20 @@ pub enum ErrorPosition {
     },
 }
 
+/// Which of the pool's budgets expired.
+///
+/// [`Error::is_pool_timeout`] reports that one expired; this names it.
+/// Construction and checkout run under different budgets because the work
+/// differs, and a caller that retries one should not retry the other.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum PoolBudget {
+    /// [`crate::PoolConfig::acquire_timeout`] expired during a checkout.
+    Acquire,
+    /// [`crate::PoolConfig::warm_up_timeout`] expired while constructing the
+    /// pool.
+    WarmUp,
+}
+
 #[derive(Debug, PartialEq)]
 enum Kind {
     Io,
@@ -399,7 +413,7 @@ enum Kind {
     RowCount,
     Connect,
     PoolClosed,
-    PoolTimeout,
+    PoolTimeout(PoolBudget),
     /// A post-startup target-session probe produced a valid rejection, an SQL
     /// error, or an unusable result. This rejects the current configured host,
     /// skipping its other transports and addresses, but permits the next host.
@@ -498,7 +512,8 @@ impl fmt::Display for Error {
             Kind::RowCount => fmt.write_str("query returned an unexpected number of rows"),
             Kind::Connect => fmt.write_str("error connecting to server"),
             Kind::PoolClosed => fmt.write_str("pool is closed"),
-            Kind::PoolTimeout => fmt.write_str("pool acquisition timed out"),
+            Kind::PoolTimeout(PoolBudget::Acquire) => fmt.write_str("pool acquisition timed out"),
+            Kind::PoolTimeout(PoolBudget::WarmUp) => fmt.write_str("pool warm-up timed out"),
             Kind::TargetSessionAttrs => fmt.write_str("error checking target session attributes"),
             Kind::TargetSessionAttrsFatal => {
                 fmt.write_str("error communicating during target session attribute check")
@@ -543,14 +558,29 @@ impl Error {
         self.0.kind == Kind::PoolClosed
     }
 
-    /// Whether the pool's acquisition budget expired during startup or checkout.
+    /// Whether one of the pool's budgets expired: `PoolConfig::warm_up_timeout`
+    /// while constructing the pool, or `PoolConfig::acquire_timeout` during a
+    /// checkout. [`Error::pool_timeout_budget`] reports which.
     ///
-    /// This includes connection setup, validation, and lifecycle hooks. It does
+    /// It includes connection setup, validation, and lifecycle hooks. It does
     /// not imply that the pool was full or that the database was unreachable.
     /// Command and socket deadlines have their own error predicates.
     #[must_use]
     pub fn is_pool_timeout(&self) -> bool {
-        self.0.kind == Kind::PoolTimeout
+        matches!(self.0.kind, Kind::PoolTimeout(_))
+    }
+
+    /// Which of the pool's budgets expired, if this is a pool timeout.
+    ///
+    /// [`Error::is_pool_timeout`] reports whether one expired; this names it
+    /// without reading the rendered message. `None` means this is not a pool
+    /// timeout, including a configuration the pool refused.
+    #[must_use]
+    pub fn pool_timeout_budget(&self) -> Option<PoolBudget> {
+        match self.0.kind {
+            Kind::PoolTimeout(budget) => Some(budget),
+            _ => None,
+        }
     }
 
     /// Whether the connection was refused because an earlier operation on it
@@ -785,9 +815,9 @@ impl Error {
         Error::new(Kind::PoolClosed, None)
     }
 
-    pub(crate) fn pool_timeout(detail: String) -> Error {
+    pub(crate) fn pool_timeout(budget: PoolBudget, detail: String) -> Error {
         Error::new(
-            Kind::PoolTimeout,
+            Kind::PoolTimeout(budget),
             Some(Box::new(io::Error::new(io::ErrorKind::TimedOut, detail))),
         )
     }
@@ -860,15 +890,17 @@ mod tests {
     #[test]
     fn pool_errors_are_typed_independently_of_their_messages() {
         let closed = Error::pool_closed();
-        let timeout = Error::pool_timeout("diagnostic context".into());
+        let timeout = Error::pool_timeout(PoolBudget::Acquire, "diagnostic context".into());
         assert!(closed.is_pool_closed());
         assert!(!closed.is_closed());
         assert!(!closed.is_pool_timeout());
+        assert_eq!(closed.pool_timeout_budget(), None);
         assert_eq!(closed.to_string(), "pool is closed");
         assert!(timeout.is_pool_timeout());
         assert!(!timeout.is_pool_closed());
         assert!(!timeout.is_command_timeout());
         assert!(!timeout.is_read_timeout());
+        assert_eq!(timeout.pool_timeout_budget(), Some(PoolBudget::Acquire));
         assert_eq!(timeout.to_string(), "pool acquisition timed out");
         let source = timeout
             .source()
@@ -877,6 +909,12 @@ mod tests {
             .unwrap();
         assert_eq!(source.kind(), io::ErrorKind::TimedOut);
         assert_eq!(source.to_string(), "diagnostic context");
+
+        let warm_up = Error::pool_timeout(PoolBudget::WarmUp, "diagnostic context".into());
+        assert!(warm_up.is_pool_timeout());
+        assert_eq!(warm_up.pool_timeout_budget(), Some(PoolBudget::WarmUp));
+        assert_eq!(warm_up.to_string(), "pool warm-up timed out");
+
         for error in [
             Error::connect(io::Error::other("pool is closed")),
             Error::connect(io::Error::other("pool acquisition timed out")),
@@ -886,6 +924,7 @@ mod tests {
         ] {
             assert!(!error.is_pool_closed(), "misclassified {error:?}");
             assert!(!error.is_pool_timeout(), "misclassified {error:?}");
+            assert_eq!(error.pool_timeout_budget(), None, "misclassified {error:?}");
         }
     }
 

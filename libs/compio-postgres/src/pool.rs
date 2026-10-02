@@ -78,6 +78,7 @@ use std::time::{Duration, Instant};
 
 #[cfg(doc)]
 use crate::config::SslMode;
+use crate::error::PoolBudget;
 use crate::tls::NoTls;
 use crate::{CancelToken, Client, Config, Connection, Error, Socket, TransactionStatus};
 
@@ -132,6 +133,7 @@ pub struct PoolConfig {
     max_lifetime: Duration,
     idle_timeout: Duration,
     acquire_timeout: Duration,
+    warm_up_timeout: Duration,
     command_timeout: Option<Duration>,
     validation_bypass: Duration,
     after_connect: Option<Rc<AfterConnectHook>>,
@@ -147,6 +149,7 @@ impl Default for PoolConfig {
             max_lifetime: Duration::from_secs(1800),
             idle_timeout: Duration::from_secs(600),
             acquire_timeout: Duration::from_secs(30),
+            warm_up_timeout: Duration::from_secs(30),
             command_timeout: None,
             validation_bypass: Duration::from_millis(500),
             after_connect: None,
@@ -239,20 +242,59 @@ impl PoolConfig {
         self.idle_timeout
     }
 
-    /// Set the total budget for pool warm-up and for each checkout.
+    /// Set the budget for one checkout (default: 30 s).
     ///
-    /// Warm-up shares a deadline across its connections, retries, and hooks.
-    /// Each checkout shares a deadline across FIFO waiting, connection setup,
-    /// validation, and hooks. Use [`Error::is_pool_timeout`] to recognize expiry.
+    /// Each [`Pool::acquire`] shares this deadline across FIFO waiting, opening
+    /// a connection on demand when the pool has capacity but nothing idle,
+    /// validation, and hooks. Constructing the pool does not use it: warm-up
+    /// has its own budget, [`PoolConfig::warm_up_timeout`], so a short checkout
+    /// limit does not force a short limit on startup's handshakes. Use
+    /// [`Error::is_pool_timeout`] to recognize expiry.
     pub fn acquire_timeout(&mut self, acquire_timeout: Duration) -> &mut Self {
         self.acquire_timeout = acquire_timeout;
         self
     }
 
-    /// Get the pool initialization and acquisition budget.
+    /// Get the budget for one checkout.
     #[must_use]
     pub fn get_acquire_timeout(&self) -> Duration {
         self.acquire_timeout
+    }
+
+    /// Set the budget for constructing the pool (default: 30 s).
+    ///
+    /// [`Pool::connect`], [`Pool::connect_with_pool_config`] and
+    /// [`Pool::connect_with_config`] open the minimum idle count of connections
+    /// (at least one, which proves the connection settings) one after another
+    /// before they return. Each connection runs [`PoolConfig::after_connect`]
+    /// after its handshake, and a connection that fails to open is retried with
+    /// backoff. This deadline covers all of it. When it expires, every
+    /// connection already opened is closed and construction fails with an
+    /// [`Error::is_pool_timeout`] error whose [`Error::pool_timeout_budget`] is
+    /// [`PoolBudget::WarmUp`].
+    ///
+    /// It is separate from [`PoolConfig::acquire_timeout`] because the work is
+    /// different: warm-up is several sequential handshakes with retries, a
+    /// checkout at most one, so a checkout limit short enough to be useful is
+    /// too short for warm-up's retries to be reached. The default equals the
+    /// default checkout budget, so a pool that sets neither gives construction
+    /// and a checkout the same limit. Raise it for a large minimum idle count
+    /// over a slow link, or lower the minimum idle count and let
+    /// [`Pool::start_housekeeper`] fill the rest. Each attempt's own
+    /// connection setup is bounded separately by [`Config::connect_timeout`].
+    ///
+    /// It must be greater than zero. Warm-up always opens a connection, so a
+    /// zero budget can never be met, and the constructors refuse it before
+    /// connecting.
+    pub fn warm_up_timeout(&mut self, warm_up_timeout: Duration) -> &mut Self {
+        self.warm_up_timeout = warm_up_timeout;
+        self
+    }
+
+    /// Get the budget for constructing the pool.
+    #[must_use]
+    pub fn get_warm_up_timeout(&self) -> Duration {
+        self.warm_up_timeout
     }
 
     /// Set the client command deadline applied by [`PoolConnection::command`].
@@ -265,7 +307,7 @@ impl PoolConfig {
     /// before returning a distinguishable [`Error::is_command_timeout`] error.
     /// It is disabled by default.
     ///
-    /// It is deliberately separate from the other four clocks:
+    /// It is deliberately separate from the other clocks:
     ///
     /// - Clock (2), `PostgreSQL`'s server-side `statement_timeout`, is a GUC,
     ///   already reachable with `options=-c statement_timeout=...`.
@@ -275,8 +317,11 @@ impl PoolConfig {
     ///   it does not detect a healthy peer that simply sends nothing.
     /// - Clock (4), [`Config::connect_timeout`], applies per address to
     ///   connection setup, including the handshake.
-    /// - Clock (5), [`PoolConfig::acquire_timeout`], limits waiting to
-    ///   acquire a pooled connection.
+    /// - Clock (5), [`PoolConfig::acquire_timeout`], bounds each checkout:
+    ///   waiting for a connection, opening one on demand, validation, and
+    ///   hooks.
+    /// - Clock (6), [`PoolConfig::warm_up_timeout`], bounds constructing the
+    ///   pool: its warm-up connections, their retries, and their hooks.
     ///
     /// This is pool policy, not a libpq connection parameter, and therefore is
     /// not accepted in a `PostgreSQL` connection string. See
@@ -388,6 +433,15 @@ impl PoolConfig {
             return Err(Error::config("pool max_size must be at least 1".into()));
         }
 
+        // Warm-up always does I/O, so a zero budget expires before any of it
+        // can finish. Refuse it here rather than reporting a pool timeout the
+        // configuration made certain.
+        if self.warm_up_timeout.is_zero() {
+            return Err(Error::config(
+                "pool warm_up_timeout must be greater than zero".into(),
+            ));
+        }
+
         // These are contradictory instructions, not a preference the pool can
         // approximate. Report them rather than silently choosing one value.
         if self.min_idle > self.max_size {
@@ -412,6 +466,7 @@ impl std::fmt::Debug for PoolConfig {
             .field("max_lifetime", &self.max_lifetime)
             .field("idle_timeout", &self.idle_timeout)
             .field("acquire_timeout", &self.acquire_timeout)
+            .field("warm_up_timeout", &self.warm_up_timeout)
             .field("command_timeout", &self.command_timeout)
             .field("validation_bypass", &self.validation_bypass)
             .field("after_connect", &self.after_connect.is_some())
@@ -848,7 +903,7 @@ impl Pool {
     }
 
     /// Create a new pool. Eagerly opens `min_idle` connections to verify
-    /// the URL and warm the pool.
+    /// the URL and warm the pool, within [`PoolConfig::warm_up_timeout`].
     ///
     /// `min_idle` is lowered to `max_size` when the default would exceed it.
     /// This is the only constructor that can produce that combination, because
@@ -873,16 +928,19 @@ impl Pool {
     ///
     /// Opens the configured minimum idle count upfront, or one connection when
     /// that count is zero, so the first burst of traffic does not pay full
-    /// connect latency. Each warm-up connection gets up to three attempts,
-    /// with 100ms and 400ms delays between failures, to survive Docker
-    /// ordering, DNS blips, and brief PG restarts.
+    /// connect latency. Each warm-up connection retries with backoff, to
+    /// survive Docker ordering, DNS blips, and brief PG restarts. The whole
+    /// warm-up is bounded by [`PoolConfig::warm_up_timeout`], not by the
+    /// checkout budget.
     ///
     /// # Errors
     ///
-    /// Refuses a `max_size` of 0, and a `min_idle` greater than `max_size`.
-    /// Both are configurations the pool cannot honour rather than preferences
-    /// it can approximate, and both are cheaper to hear about here than as a
-    /// checkout that blocks for `acquire_timeout`.
+    /// Refuses a `max_size` of 0, a zero [`PoolConfig::warm_up_timeout`], and
+    /// a `min_idle` greater than `max_size`. Each is a configuration the pool
+    /// cannot honour rather than a preference it can approximate, and each is
+    /// cheaper to hear about here than as a timeout it made certain. Warm-up
+    /// that outlasts [`PoolConfig::warm_up_timeout`] fails with
+    /// [`Error::is_pool_timeout`].
     pub async fn connect_with_pool_config(
         url: &str,
         pool_config: PoolConfig,
@@ -924,8 +982,11 @@ impl Pool {
     /// Returns an error for invalid pool or transport configuration, failed
     /// connection warm-up, a rejected `after_connect` callback, or a warm-up
     /// connection that becomes unusable before the pool can be published.
-    /// [`PoolConfig::acquire_timeout`] bounds asynchronous initialization;
-    /// expiry is identified by [`Error::is_pool_timeout`].
+    /// [`PoolConfig::warm_up_timeout`] bounds the whole warm-up, and expiry is
+    /// identified by [`Error::is_pool_timeout`] with
+    /// [`Error::pool_timeout_budget`] reporting [`PoolBudget::WarmUp`].
+    /// [`PoolConfig::acquire_timeout`] plays no part here; it bounds checkouts
+    /// only.
     pub async fn connect_with_config(
         connection_config: Config,
         pool_config: PoolConfig,
@@ -934,15 +995,18 @@ impl Pool {
         let transport = Transport::resolve(connection_config)?;
 
         let entries = compio::time::timeout(
-            pool_config.acquire_timeout,
+            pool_config.warm_up_timeout,
             Self::warm_up(&transport, &pool_config),
         )
         .await
         .map_err(|_| {
-            Error::pool_timeout(format!(
-                "pool initialization exceeded {:?}",
-                pool_config.acquire_timeout,
-            ))
+            Error::pool_timeout(
+                PoolBudget::WarmUp,
+                format!(
+                    "pool warm-up exceeded its warm_up_timeout of {:?}",
+                    pool_config.warm_up_timeout,
+                ),
+            )
         })??;
 
         let total = entries.len();
@@ -1226,13 +1290,17 @@ impl Pool {
                 // again, so this is the more specific and stable answer.
                 self.ensure_open()?;
                 self.inner.metrics.inc_timeouts();
-                Err(Error::pool_timeout(format!(
-                    "acquisition exceeded {:?} (pool: {} idle, {} total, {} maximum)",
-                    self.inner.config.acquire_timeout,
-                    self.inner.idle.borrow().len(),
-                    self.inner.total.get(),
-                    self.inner.config.max_size,
-                )))
+                Err(Error::pool_timeout(
+                    PoolBudget::Acquire,
+                    format!(
+                        "pool acquisition exceeded its acquire_timeout of {:?} (pool: {} idle, {} \
+                         total, {} maximum)",
+                        self.inner.config.acquire_timeout,
+                        self.inner.idle.borrow().len(),
+                        self.inner.total.get(),
+                        self.inner.config.max_size,
+                    ),
+                ))
             }
         }
     }
@@ -2558,7 +2626,7 @@ impl Drop for CloseWaiter<'_> {
 /// How long timeout recovery may spend sending `CancelRequest` and proving that
 /// the original session reached `ReadyForQuery`.
 ///
-/// This is a bounded cleanup grace after clock (1), not a sixth user-facing
+/// This is a bounded cleanup grace after clock (1), not another user-facing
 /// deadline. Without it, a hung cancellation connection or a lost packet could
 /// turn an expired command deadline into an indefinitely pending future. If it
 /// expires, the pool synchronously shuts down and later evicts the session.
@@ -2908,11 +2976,11 @@ mod tests {
 
     /// Every `PoolConfig` getter must return its OWN field.
     ///
-    /// Four of the five are `Duration`. Any permutation among those four type
-    /// checks and hands back a plausible value, so a getter wired to the wrong
-    /// field is silent: callers see a real timeout, just not theirs. The five
-    /// values below are distinct for exactly that reason - equal values would
-    /// let every permutation pass.
+    /// Most of them are `Duration`. Any permutation among those type checks and
+    /// hands back a plausible value, so a getter wired to the wrong field is
+    /// silent: callers see a real timeout, just not theirs. The values below are
+    /// distinct for exactly that reason - equal values would let every
+    /// permutation pass.
     #[test]
     fn every_pool_config_getter_returns_its_own_field() {
         let mut config = PoolConfig::new();
@@ -2921,7 +2989,8 @@ mod tests {
             .max_lifetime(Duration::from_secs(101))
             .idle_timeout(Duration::from_secs(202))
             .acquire_timeout(Duration::from_secs(303))
-            .validation_bypass(Duration::from_secs(404));
+            .validation_bypass(Duration::from_secs(404))
+            .warm_up_timeout(Duration::from_secs(505));
 
         assert_eq!(config.get_max_size(), 11, "get_max_size");
         assert_eq!(
@@ -2943,6 +3012,11 @@ mod tests {
             config.get_validation_bypass(),
             Duration::from_secs(404),
             "get_validation_bypass"
+        );
+        assert_eq!(
+            config.get_warm_up_timeout(),
+            Duration::from_secs(505),
+            "get_warm_up_timeout"
         );
     }
 

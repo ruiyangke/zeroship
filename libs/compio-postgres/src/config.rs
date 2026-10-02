@@ -1611,7 +1611,9 @@ impl Config {
     /// with `options=-c statement_timeout=...`),
     /// [`Config::connect_timeout`] (4: resolution, TCP/TLS setup, startup and
     /// authentication), and [`crate::PoolConfig::acquire_timeout`]
-    /// (5: waiting for a pooled connection).
+    /// (5: a pooled checkout - waiting for a connection or opening one on
+    /// demand). Constructing a pool has its own budget,
+    /// [`crate::PoolConfig::warm_up_timeout`], which bounds no query.
     ///
     /// None of them is `tcp_user_timeout`, which bounds how long transmitted
     /// TCP data may remain unacknowledged rather than silence from a peer that

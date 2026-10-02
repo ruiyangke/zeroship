@@ -123,7 +123,8 @@ impl RefreshSessionPool {
         pool_config
             .max_size(self.inner.pool_size)
             .min_idle(1)
-            .acquire_timeout(Duration::from_secs(REFRESH_POOL_ACQUIRE_TIMEOUT_SECS));
+            .acquire_timeout(Duration::from_secs(REFRESH_POOL_ACQUIRE_TIMEOUT_SECS))
+            .warm_up_timeout(Duration::from_secs(REFRESH_POOL_ACQUIRE_TIMEOUT_SECS));
         let pool = Rc::new(Pool::connect_with_pool_config(&self.inner.db_url, pool_config).await?);
         pool.start_housekeeper();
         let pool = REFRESH_POOLS.with(|pools| {

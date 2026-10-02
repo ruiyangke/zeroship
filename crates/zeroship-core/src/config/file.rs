@@ -377,7 +377,8 @@ pub struct WorkflowSection {
     pub max_request_bytes: Option<usize>,
     /// Metadata database connections per HTTP thread.
     pub database_connections: Option<usize>,
-    /// Maximum wait to acquire a metadata connection.
+    /// Budget for each metadata database wait: a checkout, and each step of
+    /// opening the database at startup.
     pub database_acquire_timeout_ms: Option<u64>,
     /// Deadline for a complete metadata transaction.
     pub database_command_timeout_ms: Option<u64>,

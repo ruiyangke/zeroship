@@ -6,7 +6,8 @@
 use compio_postgres::{Client, NoTls};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    num::NonZeroU32,
+    num::{NonZeroU32, NonZeroUsize},
+    rc::Rc,
     time::Duration,
 };
 use testcontainers::{
@@ -22,10 +23,20 @@ use zeroship_core::{
     workflow_jobs::{JobOperation, JobOutcome, ManagementCommand, Settlement},
     workflow_policy::AppPolicy,
 };
+use zeroship_workflow::WorkflowServiceError;
 use zeroship_workflow_manager::{
-    coordinator::Placed, maintenance::MaintenanceAuthority, Error,
+    app_facts::{AppFactsFuture, AppFactsSource},
+    coordinator::Placed,
+    maintenance::MaintenanceAuthority,
+    policy::control::PolicyObservations,
+    recovery::Options as RecoveryOptions,
+    Error,
 };
-use zeroship_workflow_server::coordinator::{Coordinator, Error as HostError, Options, SCHEMA_SQL};
+use zeroship_workflow_server::{
+    coordinator::{connect_eligibility, Coordinator, Error as HostError, Options, SCHEMA_SQL},
+    runs::RunService,
+    server::connect_policies,
+};
 
 type StoredIds = BTreeMap<(String, String, String), String>;
 
@@ -1030,4 +1041,312 @@ async fn assignment_verification_checks_expiry_after_waiting_for_scope_lock() {
     });
     assert_eq!(result, Err(Error::Denied));
     service.verify().await.unwrap();
+}
+
+/// The startup budget these tests give the coordinator. The pool's own default
+/// warm-up budget is far longer than [`STARTUP_WATCHDOG`], so a step bounded by
+/// that default instead of by this budget trips the watchdog.
+const STARTUP_BUDGET: Duration = Duration::from_millis(500);
+const STARTUP_WATCHDOG: Duration = Duration::from_secs(5);
+
+/// A `PostgreSQL` stand-in that completes the handshake of its first `answered`
+/// connections and then accepts every later one without ever answering it.
+struct StallingDatabase {
+    url: String,
+    stop: std::sync::mpsc::Sender<()>,
+    thread: std::thread::JoinHandle<Accepted>,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Accepted {
+    answered: usize,
+    silent: usize,
+}
+impl StallingDatabase {
+    fn start(answered: usize) -> Self {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind the stand-in");
+        listener
+            .set_nonblocking(true)
+            .expect("make the stand-in's accept pollable");
+        let url = format!(
+            "postgres://coordinator_test@{}/postgres?sslmode=disable",
+            listener.local_addr().expect("stand-in address")
+        );
+        let (stop, stopped) = std::sync::mpsc::channel::<()>();
+        let thread = std::thread::spawn(move || {
+            let mut held = Vec::new();
+            let mut accepted = Accepted {
+                answered: 0,
+                silent: 0,
+            };
+            loop {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream
+                            .set_nonblocking(false)
+                            .expect("make the accepted stream blocking");
+                        if accepted.answered < answered {
+                            answer_startup(&mut stream);
+                            accepted.answered += 1;
+                        } else {
+                            accepted.silent += 1;
+                        }
+                        held.push(stream);
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if !matches!(
+                            stopped.try_recv(),
+                            Err(std::sync::mpsc::TryRecvError::Empty)
+                        ) {
+                            // Held until now so that every accepted session
+                            // stays open and silent, never closed: a closed
+                            // socket is a refusal, not a database that stalls.
+                            drop(held);
+                            return accepted;
+                        }
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    Err(error) => panic!("stand-in accept failed: {error}"),
+                }
+            }
+        });
+        Self { url, stop, thread }
+    }
+
+    fn stop(self) -> Accepted {
+        let _ = self.stop.send(());
+        self.thread.join().expect("the stand-in panicked")
+    }
+}
+
+/// Read one startup packet and answer it with `AuthenticationOk`,
+/// `BackendKeyData` and `ReadyForQuery`: a session that is open and idle.
+fn answer_startup(stream: &mut std::net::TcpStream) {
+    use std::io::{Read, Write};
+    stream
+        .set_read_timeout(Some(STARTUP_WATCHDOG))
+        .expect("bound the stand-in's read");
+    let mut length = [0_u8; 4];
+    stream
+        .read_exact(&mut length)
+        .expect("read the startup length");
+    let mut startup = vec![0_u8; u32::from_be_bytes(length) as usize - length.len()];
+    stream
+        .read_exact(&mut startup)
+        .expect("read the startup packet");
+    stream
+        .write_all(&[
+            b'R', 0, 0, 0, 8, 0, 0, 0, 0, b'K', 0, 0, 0, 12, 0, 0, 0, 7, 0, 0, 0, 46, b'Z', 0, 0,
+            0, 5, b'I',
+        ])
+        .expect("answer the startup packet");
+}
+
+fn budgeted() -> Options {
+    Options {
+        acquire_timeout: STARTUP_BUDGET,
+        ..Options::default()
+    }
+}
+
+/// Run one startup step under the watchdog and return how long it took to
+/// fail, with the error it produced. A step that is not bounded by the startup
+/// budget trips the watchdog.
+async fn fails_within_budget<T, E>(
+    step: &str,
+    future: impl std::future::Future<Output = Result<T, E>>,
+) -> (Duration, E) {
+    let started = std::time::Instant::now();
+    let result = compio::time::timeout(STARTUP_WATCHDOG, future)
+        .await
+        .unwrap_or_else(|_| panic!("{step} outlived the startup budget of {STARTUP_BUDGET:?}"));
+    let elapsed = started.elapsed();
+    let Err(error) = result else {
+        panic!("{step} succeeded against a database that never answers");
+    };
+    (elapsed, error)
+}
+
+/// A database that accepts connections and never answers fails coordinator
+/// startup within the one startup budget: constructing the pool, and binding
+/// placement eligibility, each stop at `Options::startup_timeout` rather than
+/// at a default of the pool's.
+#[compio::test]
+async fn a_silent_database_fails_startup_within_the_startup_budget() {
+    assert!(
+        compio_postgres::PoolConfig::default().get_warm_up_timeout() > STARTUP_WATCHDOG,
+        "the pool's default warm-up budget fits inside the watchdog, so this test \
+         cannot tell it from the startup budget"
+    );
+    assert_eq!(budgeted().startup_timeout(), STARTUP_BUDGET);
+    let database = StallingDatabase::start(0);
+
+    let (elapsed, error) = fails_within_budget(
+        "coordinator startup",
+        Box::pin(Coordinator::connect(
+            &database.url,
+            budgeted(),
+            holds::client(),
+            zone::trusted(),
+        )),
+    )
+    .await;
+    assert_eq!(
+        error,
+        HostError::Unavailable,
+        "coordinator startup did not report the database unavailable"
+    );
+    assert!(
+        elapsed >= STARTUP_BUDGET,
+        "coordinator startup failed after {elapsed:?}, before its budget, so something \
+         other than the budget stopped it"
+    );
+
+    let (elapsed, error) = fails_within_budget(
+        "binding placement eligibility",
+        connect_eligibility(&database.url, budgeted()),
+    )
+    .await;
+    assert_eq!(
+        error,
+        HostError::Unavailable,
+        "binding placement eligibility did not report the database unavailable"
+    );
+    assert!(
+        elapsed >= STARTUP_BUDGET,
+        "binding placement eligibility failed after {elapsed:?}, before its budget"
+    );
+
+    let accepted = database.stop();
+    assert_eq!(accepted.answered, 0);
+    assert!(
+        accepted.silent >= 2,
+        "the stand-in accepted fewer connections than the steps that ran: {accepted:?}"
+    );
+}
+
+/// The step after the pool is bounded by the same budget: a database that
+/// answers the pool's warm-up connection and then stalls every later one fails
+/// startup at the queue binding within `Options::startup_timeout`.
+#[compio::test]
+async fn a_database_that_stalls_after_the_pool_fails_startup_within_the_startup_budget() {
+    let database = StallingDatabase::start(1);
+
+    let (elapsed, error) = fails_within_budget(
+        "coordinator startup",
+        Box::pin(Coordinator::connect(
+            &database.url,
+            budgeted(),
+            holds::client(),
+            zone::trusted(),
+        )),
+    )
+    .await;
+    assert_eq!(
+        error,
+        HostError::Unavailable,
+        "coordinator startup did not report the database unavailable"
+    );
+    assert!(
+        elapsed >= STARTUP_BUDGET,
+        "coordinator startup failed after {elapsed:?}, before its budget"
+    );
+
+    let accepted = database.stop();
+    assert_eq!(
+        accepted.answered, 1,
+        "the pool's warm-up connection was not the answered one: {accepted:?}"
+    );
+    assert!(
+        accepted.silent >= 1,
+        "startup failed without the queue opening a connection, so the failure is \
+         not the queue step's: {accepted:?}"
+    );
+}
+
+/// A facts source that is never consulted: `connect_policies` opens the ledger
+/// before it reads any observation, and a silent database fails there.
+#[derive(Debug)]
+struct SilentFacts;
+impl AppFactsSource for SilentFacts {
+    fn observe<'a>(&'a self, _apps: &'a [AppId]) -> AppFactsFuture<'a> {
+        Box::pin(async { Err(Error::Unavailable) })
+    }
+}
+
+/// Opening the journal is a startup step, so a database that accepts
+/// connections and never answers fails it within `Options::startup_timeout`,
+/// not at the construction default of the ORM pools it opens.
+#[compio::test]
+async fn a_silent_database_fails_the_journal_step_within_the_startup_budget() {
+    assert!(
+        compio_postgres::PoolConfig::default().get_warm_up_timeout() > STARTUP_WATCHDOG,
+        "the pool's default warm-up budget fits inside the watchdog, so this test \
+         cannot tell it from the startup budget"
+    );
+    let fixture = Fixture::new().await;
+    let service = fixture.options(Options::default()).await;
+    let recovery = service
+        .recovery(RecoveryOptions::default())
+        .expect("a live coordinator yields a recovery scope");
+    let database = StallingDatabase::start(0);
+
+    let (elapsed, error) = fails_within_budget(
+        "journal startup",
+        Box::pin(RunService::connect_within(
+            &database.url,
+            recovery,
+            STARTUP_BUDGET,
+        )),
+    )
+    .await;
+    assert!(
+        matches!(error, WorkflowServiceError::Unavailable(_)),
+        "journal startup did not report the database unavailable: {error:?}"
+    );
+    assert!(
+        elapsed >= STARTUP_BUDGET,
+        "journal startup failed after {elapsed:?}, before its budget"
+    );
+
+    let accepted = database.stop();
+    assert_eq!(accepted.answered, 0);
+    assert!(
+        accepted.silent >= 1,
+        "the journal step never reached the silent database: {accepted:?}"
+    );
+}
+
+/// Opening the policy ledger is a startup step too, so a database that accepts
+/// connections and never answers fails it within `Options::startup_timeout`,
+/// not within the ledger's transaction deadline.
+#[compio::test]
+async fn a_silent_database_fails_the_policy_step_within_the_startup_budget() {
+    let database = StallingDatabase::start(0);
+
+    let (elapsed, error) = fails_within_budget(
+        "policy ledger startup",
+        Box::pin(connect_policies(
+            Rc::new(SilentFacts),
+            &database.url,
+            budgeted(),
+            PolicyObservations::new(NonZeroUsize::new(16).expect("policy cache capacity")),
+        )),
+    )
+    .await;
+    assert_eq!(
+        error,
+        Error::Unavailable,
+        "policy ledger startup did not report the database unavailable"
+    );
+    assert!(
+        elapsed >= STARTUP_BUDGET,
+        "policy ledger startup failed after {elapsed:?}, before its budget"
+    );
+
+    let accepted = database.stop();
+    assert_eq!(accepted.answered, 0);
+    assert!(
+        accepted.silent >= 1,
+        "the policy step never reached the silent database: {accepted:?}"
+    );
 }

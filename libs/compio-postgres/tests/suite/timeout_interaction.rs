@@ -1,4 +1,4 @@
-//! Interaction coverage for the driver's four client-owned timeout clocks.
+//! Interaction coverage for the driver's client-owned timeout clocks.
 //!
 //! The scripted peer is used where transport silence and recovery ordering
 //! must be controlled. It speaks only enough plaintext PostgreSQL to complete
@@ -11,6 +11,7 @@
 // default query-depth limit is exhausted before the interaction tests build.
 
 use compio_postgres::config::SslMode;
+use compio_postgres::error::PoolBudget;
 use compio_postgres::{Client, Config, Error, Pool, PoolConfig};
 use futures_channel::oneshot;
 use std::io::{ErrorKind, Read, Write};
@@ -352,6 +353,20 @@ fn pool_config(command_timeout: Option<Duration>, acquire_timeout: Duration) -> 
     config
 }
 
+/// The pool for the live-server test, which measures command-timeout recovery
+/// and nothing about acquisition or construction: it keeps the default acquire
+/// and warm-up budgets instead of tightening either, so a slow handshake on a
+/// loaded machine cannot fail it for a reason it does not test.
+fn live_pool_config(command_timeout: Duration) -> PoolConfig {
+    let mut config = PoolConfig::new();
+    config
+        .max_size(1)
+        .min_idle(0)
+        .validation_bypass(Duration::from_secs(5))
+        .command_timeout(command_timeout);
+    config
+}
+
 async fn wait_for_client_close(client: &Client) {
     compio::time::timeout(OPERATION_WATCHDOG, async {
         while !client.is_closed() {
@@ -511,11 +526,14 @@ async fn command_timeout_recovers_without_a_read_timeout() {
             "command-only fixture accidentally enabled the read clock"
         );
 
-        let pool_config = pool_config(Some(COMMAND_FIRST_TIMEOUT), Duration::from_secs(1));
+        let pool_config = live_pool_config(COMMAND_FIRST_TIMEOUT);
         let pool = Pool::connect_with_config(connection_config, pool_config)
             .await
             .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
-        let mut client = pool.acquire().await.expect("check out live PostgreSQL session");
+        let mut client = pool
+            .acquire()
+            .await
+            .expect("check out live PostgreSQL session");
         let announced_pid = client.process_id();
 
         let error = compio::time::timeout(
@@ -974,4 +992,101 @@ async fn dropping_command_during_timeout_recovery_retires_session_before_reuse()
     )
     .await
     .expect("command-recovery abandonment test exceeded its outer watchdog");
+}
+
+/// Scripted peer: constructing a pool is bounded by its own budget, not the
+/// checkout's. The peer holds its handshake past the checkout budget and well
+/// inside the default warm-up budget, and construction must succeed.
+///
+/// A checkout makes at most one handshake; warm-up makes several, one after
+/// another with retries. A checkout limit short enough to be useful is too
+/// short for that, so construction bounded by the checkout budget fails a
+/// startup that its retries would carry.
+#[compio::test]
+async fn a_warm_up_slower_than_the_checkout_budget_still_constructs_the_pool() {
+    const CHECKOUT_BUDGET: Duration = Duration::from_millis(100);
+    const SLOW_HANDSHAKE: Duration = Duration::from_millis(400);
+
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server = StubServer::spawn(|listener| {
+            let mut stream = accept_bounded(&listener);
+            thread::sleep(SLOW_HANDSHAKE);
+            complete_startup(&mut stream, 303);
+            expect_disconnect(&mut stream);
+        });
+
+        let pool_config = pool_config(None, CHECKOUT_BUDGET);
+        assert!(
+            pool_config.get_warm_up_timeout() > SLOW_HANDSHAKE,
+            "the default warm-up budget is no longer than the scripted handshake, so \
+             this test cannot tell the budgets apart"
+        );
+        let started = Instant::now();
+        let pool = Pool::connect_with_config(stub_config(server.addr, None), pool_config)
+            .await
+            .expect("a handshake slower than the checkout budget failed pool construction");
+        assert!(
+            started.elapsed() > CHECKOUT_BUDGET,
+            "construction finished inside the checkout budget, so the handshake was not \
+             slow and this proves nothing"
+        );
+        assert_eq!(pool.idle_count(), 1, "warm-up did not seed the pool");
+
+        // The warmed connection is idle, so the short checkout budget has only
+        // a hand-over to cover.
+        let client = pool
+            .acquire()
+            .await
+            .expect("check out the warmed connection");
+        drop(client);
+        compio::time::timeout(OPERATION_WATCHDOG, pool.close())
+            .await
+            .expect("slow-warm-up pool close exceeded its watchdog");
+        server.finish();
+    })
+    .await
+    .expect("slow-warm-up construction exceeded its outer watchdog");
+}
+
+/// Scripted peer that never answers: construction stops at its own budget, and
+/// the error's typed budget says which one. The checkout budget stays at its
+/// default, far longer, so an expiry here can only be the warm-up budget's.
+#[compio::test]
+async fn warm_up_past_its_own_budget_is_a_warm_up_timeout() {
+    const WARM_UP_BUDGET: Duration = Duration::from_millis(200);
+
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server = StubServer::spawn(|listener| {
+            let mut stream = accept_bounded(&listener);
+            // Answer nothing; the client's startup packet is read and ignored
+            // until the client hangs up.
+            expect_disconnect(&mut stream);
+        });
+
+        let mut pool_config = PoolConfig::new();
+        pool_config
+            .max_size(1)
+            .min_idle(0)
+            .warm_up_timeout(WARM_UP_BUDGET);
+        assert!(
+            pool_config.get_acquire_timeout() > ASYNC_WATCHDOG,
+            "the default checkout budget would expire inside this test, so an expiry \
+             could be either budget's"
+        );
+        let error = Pool::connect_with_config(stub_config(server.addr, None), pool_config)
+            .await
+            .expect_err("a peer that never answers completed pool warm-up");
+        assert!(
+            error.is_pool_timeout(),
+            "warm-up expiry was not a pool timeout: {error:?}"
+        );
+        assert_eq!(
+            error.pool_timeout_budget(),
+            Some(PoolBudget::WarmUp),
+            "the warm-up expiry was classified as another budget: {error:?}"
+        );
+        server.finish();
+    })
+    .await
+    .expect("warm-up budget test exceeded its outer watchdog");
 }
