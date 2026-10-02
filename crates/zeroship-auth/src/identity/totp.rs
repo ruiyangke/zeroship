@@ -213,10 +213,13 @@ pub fn code_at(secret: &[u8], unix_secs: u64) -> String {
 /// alongside their Argon2id PHC hashes (to be stored). Returns
 /// `(plaintext_codes, hashes)` in matching order.
 ///
+/// Each hash runs on the blocking pool through [`password::hash`], one after
+/// another, so a confirm holds one Argon2 working set at a time.
+///
 /// # Errors
 ///
 /// Returns [`AuthError::Internal`] if Argon2 hashing fails.
-pub fn generate_backup_codes() -> Result<(Vec<String>, Vec<String>)> {
+pub async fn generate_backup_codes() -> Result<(Vec<String>, Vec<String>)> {
     let mut plain = Vec::with_capacity(BACKUP_CODE_COUNT);
     let mut hashes = Vec::with_capacity(BACKUP_CODE_COUNT);
     for _ in 0..BACKUP_CODE_COUNT {
@@ -224,7 +227,7 @@ pub fn generate_backup_codes() -> Result<(Vec<String>, Vec<String>)> {
         // Hash over the NORMALISED form so verify (which normalises the
         // submitted code) compares like-for-like regardless of the dash the
         // display form carries.
-        let hash = password::hash(&normalize_backup_code(&code))?;
+        let hash = password::hash(&normalize_backup_code(&code)).await?;
         plain.push(code);
         hashes.push(hash);
     }
@@ -264,8 +267,8 @@ pub fn normalize_backup_code(code: &str) -> String {
 /// # Errors
 ///
 /// Returns [`AuthError::Internal`] only if the stored PHC string is malformed.
-pub fn verify_backup_code(submitted: &str, phc: &str) -> Result<bool> {
-    password::verify(&normalize_backup_code(submitted), phc)
+pub async fn verify_backup_code(submitted: &str, phc: &str) -> Result<bool> {
+    password::verify(&normalize_backup_code(submitted), phc).await
 }
 
 #[cfg(test)]
@@ -416,21 +419,21 @@ mod tests {
         );
     }
 
-    #[test]
-    fn backup_codes_minted_with_matching_hashes_and_verify_once() {
-        let (plain, hashes) = generate_backup_codes().expect("mint");
+    #[compio::test]
+    async fn backup_codes_minted_with_matching_hashes_and_verify_once() {
+        let (plain, hashes) = generate_backup_codes().await.expect("mint");
         assert_eq!(plain.len(), BACKUP_CODE_COUNT);
         assert_eq!(hashes.len(), BACKUP_CODE_COUNT);
         // Every plaintext verifies against its own hash...
         for (code, hash) in plain.iter().zip(&hashes) {
             assert!(
-                verify_backup_code(code, hash).expect("verify"),
+                verify_backup_code(code, hash).await.expect("verify"),
                 "code {code} should verify"
             );
             // ...but NOT against a different code's hash.
             let other = &hashes[(plain.iter().position(|c| c == code).unwrap() + 1) % hashes.len()];
             assert!(
-                !verify_backup_code(code, other).expect("verify other"),
+                !verify_backup_code(code, other).await.expect("verify other"),
                 "code must not verify against another code's hash"
             );
         }
@@ -447,15 +450,15 @@ mod tests {
         }
     }
 
-    #[test]
-    fn backup_code_normalization_is_dash_and_space_insensitive() {
-        let (plain, hashes) = generate_backup_codes().expect("mint");
+    #[compio::test]
+    async fn backup_code_normalization_is_dash_and_space_insensitive() {
+        let (plain, hashes) = generate_backup_codes().await.expect("mint");
         let code = &plain[0];
         let bare = normalize_backup_code(code); // dashes stripped
                                                 // The same code with/without dashes and with spaces verifies identically.
-        assert!(verify_backup_code(code, &hashes[0]).unwrap());
-        assert!(verify_backup_code(&bare, &hashes[0]).unwrap());
+        assert!(verify_backup_code(code, &hashes[0]).await.unwrap());
+        assert!(verify_backup_code(&bare, &hashes[0]).await.unwrap());
         let spaced = format!("  {}  ", code.replace('-', " "));
-        assert!(verify_backup_code(&spaced, &hashes[0]).unwrap());
+        assert!(verify_backup_code(&spaced, &hashes[0]).await.unwrap());
     }
 }

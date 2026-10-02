@@ -366,13 +366,9 @@ async fn session_id_rotates_post_login_success() {
         let email = "rotate@zeroship.test".to_owned();
         let xff_ip = CLIENT_IP.to_owned();
         let password = "rotation-test-password-1234567890";
-        let phc = compio::runtime::spawn_blocking({
-            let pw = password.to_string();
-            move || zeroship_auth::identity::password::hash(&pw)
-        })
-        .await
-        .expect("hash spawn")
-        .expect("hash ok");
+        let phc = zeroship_auth::identity::password::hash(password)
+            .await
+            .expect("hash ok");
         fx.pg
             .execute(
                 "INSERT INTO zeroship.users (id, email, name, password_hash) VALUES ($1, $2::citext, $3, $4)",

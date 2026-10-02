@@ -10,10 +10,11 @@
 //!
 //! 1. Rate-limit — 3 buckets (email+ip, email, ip), deepest scope first.
 //! 2. User lookup by normalised email.
-//! 3. Dummy-hash enumeration defense — when the user is absent / locked /
-//!    disabled / has no `password_hash`, verify against the dummy hash so the
-//!    wall time matches a real verify (defeats email enumeration by timing).
-//! 4. Argon2 verify on `spawn_blocking` (~100 ms; never parks the event loop).
+//! 3. Padding enumeration defense — when the user is absent / locked /
+//!    disabled / has no `password_hash`, `password::verify_or_pad` verifies
+//!    against padding so the wall time matches a real verify (defeats email
+//!    enumeration by timing), and answers `false` whatever was submitted.
+//! 4. Argon2 verify on the blocking pool, the only form `password` offers.
 //! 5. Locked / disabled (ineligible) arm → fail. A soft `locked_until` lock is
 //!    attacker-inducible, so it returns the OPAQUE `invalid_credentials` (5.1),
 //!    indistinguishable from arm 6; a hard `disabled_at` keeps `Ineligible`.
@@ -92,7 +93,7 @@ impl CredentialError {
 ///
 /// SECURITY (invariant II): every rejection arm returns BEFORE the caller can
 /// reach any code/session mint, and no arm reaches the success return without a
-/// successful constant-time Argon2 verify. The dummy-hash verify runs on the
+/// successful constant-time Argon2 verify. The padding verify runs on the
 /// absent/locked/disabled/no-hash paths so the wall time is uniform.
 ///
 /// # Errors
@@ -154,33 +155,31 @@ pub async fn verify_password_credentials(
     };
 
     // 3. Constant-time enumeration defense: if user is None, locked, disabled,
-    // or has no password hash (OAuth-only), verify against the dummy hash so
-    // the wall time matches a real verify.
+    // or has no password hash (OAuth-only), there is no hash to check, and
+    // `verify_or_pad` spends the same Argon2 work on padding so the wall time
+    // matches a real verify.
     let now = chrono::Utc::now();
-    let phc = user
-        .as_ref()
-        .and_then(|u| {
-            let locked = u.locked_until.is_some_and(|t| t > now);
-            let disabled = u.disabled_at.is_some();
-            if locked || disabled || u.password_hash.is_none() {
-                None
-            } else {
-                u.password_hash.clone()
-            }
-        })
-        .unwrap_or_else(|| password::dummy_hash().to_string());
+    let phc = user.as_ref().and_then(|u| {
+        let locked = u.locked_until.is_some_and(|t| t > now);
+        let disabled = u.disabled_at.is_some();
+        if locked || disabled {
+            None
+        } else {
+            u.password_hash.as_deref()
+        }
+    });
 
-    // 4. Argon2 verify — CPU-bound, run on spawn_blocking so the event loop is
-    // not parked.
-    let password_clone = password.to_string();
-    let valid = compio::runtime::spawn_blocking(move || {
-        password::verify(&password_clone, &phc).unwrap_or(false)
-    })
-    .await
-    .unwrap_or(false);
+    // 4. Argon2 verify, on the blocking pool.
+    let valid = match password::verify_or_pad(password, phc).await {
+        Ok(valid) => valid,
+        Err(e) => {
+            tracing::error!(error = %e, "password verify failed");
+            false
+        }
+    };
 
     // 5. Locked / disabled (ineligible) arm — fail BEFORE any success path. The
-    // dummy-hash verify above already spent the wall time for these users.
+    // padding verify above already spent the wall time for these users.
     let ineligible_user = user
         .as_ref()
         .filter(|u| u.locked_until.is_some_and(|t| t > now) || u.disabled_at.is_some());
@@ -241,8 +240,8 @@ pub async fn verify_password_credentials(
         // row. Issue the matching throwaway round-trip here so this arm does
         // EQUAL latency-visible DB work — otherwise the post-Argon2 delta leaks
         // whether the email belongs to a real, password-bearing account. This
-        // is the DB analog of the dummy-hash above. Best-effort: a fault must
-        // not change the credential decision.
+        // is the DB analog of the padding verify above. Best-effort: a fault
+        // must not change the credential decision.
         if let Err(e) = users::record_login_failure_dummy(orm).await {
             tracing::error!(error = %e, "record_login_failure_dummy failed");
         }

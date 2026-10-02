@@ -366,3 +366,18 @@ debug = "line-tables-only"
 # and a test target's dependencies are built with `dev` regardless. Checked, not
 # assumed: building under `debug = 0` produced a test binary whose OWN frames
 # lost `file:line`, which they could only do by inheriting the dev setting.
+
+# Argon2id is the deliberately expensive primitive the auth flows run inside a
+# request, at the product's own parameters
+# (`crates/zeroship-auth/src/identity/password.rs`, `argon2`): signup and login
+# hash or verify once, a TOTP enrollment mints a whole set of backup codes, and
+# a rejected second factor verifies against every unused one. Unoptimized, each
+# evaluation costs many times what the product pays, so an auth case's
+# wall-clock budget goes to the KDF rather than to the flow it measures, and a
+# loaded machine turns that into a case timeout. The two crates that compute it
+# are built optimized; nothing else changes.
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3

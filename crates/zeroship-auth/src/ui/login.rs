@@ -113,10 +113,10 @@ pub struct LoginForm {
 ///
 /// 1. CSRF (form vs `__Host-zsidp_csrf` cookie).
 /// 2. Rate-limit (3 buckets in order: email+ip, email, ip).
-/// 3. User lookup by email; dummy-hash fallback when user absent / locked /
+/// 3. User lookup by email; a padding verify when user absent / locked /
 ///    has no `password_hash` (account-enumeration defense).
-/// 4. Argon2 verify wrapped in `compio::runtime::spawn_blocking` (~100 ms,
-///    must not block the ntex event loop).
+/// 4. Argon2 verify on the blocking pool, so the ntex event loop is not
+///    parked.
 /// 5. On success: insert `zeroship.idp_sessions`, set `__Host-zsidp_session`
 ///    cookie, and redirect back to the native authorize request.
 /// 6. On failure: re-render the form with a status code matching the
@@ -472,12 +472,16 @@ pub async fn post_2fa(
         }
     }
 
-    // 5b. Otherwise try an unused backup code (constant-time per-code via Argon2).
+    // 5b. Otherwise try an unused backup code (constant-time per-code via
+    // Argon2, each verify on the blocking pool).
     if !second_factor_ok {
         match totp_store::unused_backup_codes(db.as_ref(), &user.id).await {
             Ok(codes) => {
                 for c in &codes {
-                    if totp::verify_backup_code(&form.code, &c.code_hash).unwrap_or(false) {
+                    if totp::verify_backup_code(&form.code, &c.code_hash)
+                        .await
+                        .unwrap_or(false)
+                    {
                         // Single-use: mark it; only count the factor if WE won
                         // the mark-used race.
                         match totp_store::mark_backup_code_used(db.as_ref(), c.id).await {

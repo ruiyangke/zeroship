@@ -944,7 +944,7 @@ async fn totp_login_preserves_native_return_to() {
         )
         .await
         .expect("enroll totp");
-        let (_, hashes) = totp::generate_backup_codes().expect("backup codes");
+        let (_, hashes) = totp::generate_backup_codes().await.expect("backup codes");
         totp_store::confirm(&fx.db, &fx.user_id, &hashes)
             .await
             .expect("confirm totp");
@@ -1021,7 +1021,7 @@ async fn seed_user_client(
     client_id: &str,
     email: &str,
 ) {
-    let phc = password::hash(PASSWORD).expect("password hash");
+    let phc = password::hash(PASSWORD).await.expect("password hash");
     db.execute(
         "INSERT INTO zeroship.users (id, email, email_verified_at, name, password_hash) \
          VALUES ($1, $2::citext, NOW(), 'P4 User', $3)",

@@ -157,17 +157,11 @@ pub async fn post(
         }
     }
 
-    // 6. Hash the password — argon2 is CPU-bound, run on spawn_blocking so
-    // the ntex event loop is not parked (same constraint as /login).
-    let password_clone = form.password.clone();
-    let phc = match compio::runtime::spawn_blocking(move || password::hash(&password_clone)).await {
-        Ok(Ok(p)) => p,
-        Ok(Err(e)) => {
+    // 6. Hash the password, on the blocking pool (same constraint as /login).
+    let phc = match password::hash(&form.password).await {
+        Ok(p) => p,
+        Err(e) => {
             tracing::error!(error = %e, "signup password hash failed");
-            return render_error_page(PublicErrorMessage::ContactSupport);
-        }
-        Err(_) => {
-            tracing::error!("signup hash spawn_blocking panicked");
             return render_error_page(PublicErrorMessage::ContactSupport);
         }
     };

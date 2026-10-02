@@ -30,7 +30,7 @@ pub(super) async fn account(server: &AuthServer, email: &str) -> users::UserRow 
         &server.orm,
         email,
         "Logout fixture",
-        Some(&password::hash(PASSWORD).unwrap()),
+        Some(&password::hash(PASSWORD).await.unwrap()),
     )
     .await
     .unwrap()

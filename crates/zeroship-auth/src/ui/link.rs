@@ -13,7 +13,7 @@
 //!      [`LinkPage`] with a fresh CSRF cookie, prefilled with `existing_email`
 //!      and `provider`.
 //!   2. POST `/link` — verify CSRF, re-decode the token, run the
-//!      Argon2id verify in `spawn_blocking`. On match: insert the
+//!      Argon2id verify on the blocking pool. On match: insert the
 //!      `zeroship.federated_identities` row, create an
 //!      `zeroship.idp_sessions` row, and resume the native authorize
 //!      request. On mismatch: re-render the form with an error banner and a
@@ -132,9 +132,9 @@ pub struct LinkForm {
 ///   1. CSRF check (cookie vs form, constant-time).
 ///   2. Decode the pending token — rejected if MAC fails or expired.
 ///   3. Look up the user by `pending.user_id`. If absent we still run
-///      Argon2 against the dummy hash so the wall-clock matches a real
-///      verify (account-enumeration defense, mirroring `/login`).
-///   4. Argon2id verify in `spawn_blocking` (~100ms).
+///      Argon2 against padding so the wall-clock matches a real verify
+///      (account-enumeration defense, mirroring `/login`).
+///   4. Argon2id verify on the blocking pool.
 ///   5. On success: insert `zeroship.federated_identities`, create an
 ///      `zeroship.idp_sessions` row, audit `oauth_link_success`, and redirect
 ///      back to the native authorize request with the session cookie.
@@ -211,8 +211,8 @@ pub async fn post(
 
     // 3. Look up the user. The pending token's HMAC guarantees the
     // `user_id` came from us — but the row might have been deleted between
-    // token issuance and confirmation. Run dummy-hash on the missing arm so
-    // the wall-clock matches.
+    // token issuance and confirmation. The missing arm verifies against
+    // padding so the wall-clock matches.
     let user = match users::find_by_email(&orm, &pending.email).await {
         Ok(u) => u,
         Err(e) => {
@@ -222,28 +222,27 @@ pub async fn post(
     };
 
     let now = chrono::Utc::now();
-    let phc = user
-        .as_ref()
-        .and_then(|u| {
-            let locked = u.locked_until.is_some_and(|t| t > now);
-            let disabled = u.disabled_at.is_some();
-            if locked || disabled || u.password_hash.is_none() || u.id != pending.user_id {
-                None
-            } else {
-                u.password_hash.clone()
-            }
-        })
-        .unwrap_or_else(|| password::dummy_hash().to_string());
+    let phc = user.as_ref().and_then(|u| {
+        let locked = u.locked_until.is_some_and(|t| t > now);
+        let disabled = u.disabled_at.is_some();
+        let pending_account = u.id == pending.user_id;
+        if locked || disabled || !pending_account {
+            None
+        } else {
+            u.password_hash.as_deref()
+        }
+    });
 
-    // 4. Argon2 verify — CPU-bound, must not park the event loop.
-    let password_clone = form.password.clone();
-    let valid = compio::runtime::spawn_blocking(move || {
-        password::verify(&password_clone, &phc).unwrap_or(false)
-    })
-    .await
-    .unwrap_or(false);
+    // 4. Argon2 verify, on the blocking pool.
+    let valid = match password::verify_or_pad(&form.password, phc).await {
+        Ok(valid) => valid,
+        Err(e) => {
+            tracing::error!(error = %e, "link password verify failed");
+            false
+        }
+    };
 
-    // Re-evaluate the "real user" predicate (mirror the dummy-hash arm).
+    // Re-evaluate the "real user" predicate (mirror the padding arm).
     let ineligible_user = user.as_ref().filter(|u| {
         u.id == pending.user_id
             && (u.locked_until.is_some_and(|t| t > now) || u.disabled_at.is_some())

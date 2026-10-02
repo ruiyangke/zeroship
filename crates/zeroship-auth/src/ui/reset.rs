@@ -3,7 +3,7 @@
 //! GET renders the new-password form with the reset token in a hidden
 //! field. POST validates CSRF + password length, rate-limits per IP,
 //! declines a token that has no live row, Argon2-hashes the new password on
-//! a `spawn_blocking` worker (the event loop stays free), atomically redeems
+//! the blocking pool (the event loop stays free), atomically redeems
 //! the reset token (single-use) together with the password update, emits a
 //! `password_changed` audit event, revokes every existing session, consumes
 //! outstanding email tokens, clears cross-device magic completions, and
@@ -192,11 +192,9 @@ async fn submit(
     resp.finish()
 }
 
-/// Argon2 is CPU-bound; keep it off the request's event loop.
-async fn hash_password(password: String) -> Result<String> {
-    compio::runtime::spawn_blocking(move || password::hash(&password))
-        .await
-        .map_err(|_| AuthError::Internal("password_reset hash worker panicked".to_owned()))?
+/// The production hashing operation [`submit`] is handed.
+async fn hash_password(new_password: String) -> Result<String> {
+    password::hash(&new_password).await
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -62,6 +62,36 @@ async fn wrong_totp_preserves_the_challenge_for_a_valid_retry() {
     .await;
 }
 
+/// A rejected code is checked against every unused backup code, one Argon2
+/// verify each, and the server keeps answering other requests meanwhile.
+#[ntex::test]
+async fn a_rejected_code_leaves_the_server_answering_while_backup_codes_are_checked() {
+    Database::run(async |database| {
+        let server = AuthServer::start(database).await;
+        let user = account(&server, "creator@example.test").await;
+        let device = Authenticator::confirmed(&server, &user.id).await;
+        let mut challenge = Challenge::password(&server, &user, PASSWORD).await;
+        let (code, deadline) = device.rejected_code();
+        let response = Box::pin(assert_answering_during(
+            &server,
+            database,
+            "zeroship.totp_backup_codes",
+            challenge.submit(&server, &code),
+        ))
+        .await;
+        assert!(
+            unix_now() <= deadline,
+            "negative control outlived its selected code window"
+        );
+        assert_refused(response, "invalid code").await;
+        assert_eq!(
+            unused_backups(&server, &user.id).await,
+            device.backups.len()
+        );
+    })
+    .await;
+}
+
 #[ntex::test]
 async fn backup_code_is_consumed_by_the_route_and_a_replay_can_retry_with_an_unused_code() {
     Database::run(async |database| {
@@ -193,7 +223,7 @@ async fn changed_password_invalidates_the_challenge_without_spending_its_backup_
             .update::<_, users::UserRow>(
                 model::id.eq(user.id.as_str()).unwrap(),
                 model::password_hash
-                    .set(Some(password::hash(new_password).unwrap()))
+                    .set(Some(password::hash(new_password).await.unwrap()))
                     .unwrap()
                     .and(model::credential_version.increment(1_i64).unwrap())
                     .unwrap(),

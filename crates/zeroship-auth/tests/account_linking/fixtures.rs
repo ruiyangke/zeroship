@@ -24,7 +24,7 @@ pub(super) struct Confirmation {
 
 impl Confirmation {
     pub async fn new(server: &AuthServer, email: &str, subject: &str) -> Self {
-        let hash = password::hash(PASSWORD).unwrap();
+        let hash = password::hash(PASSWORD).await.unwrap();
         let user = Box::pin(users::create(&server.orm, email, "Account linking", Some(&hash)))
             .await
             .unwrap();

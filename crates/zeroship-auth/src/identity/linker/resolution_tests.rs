@@ -67,7 +67,7 @@ async fn a_password_requires_confirmation_and_preserves_the_native_continuation(
     Database::run(async |database| {
         let pg = database.connect_as_auth().await;
         let orm = database.orm().await;
-        let hash = password::hash("existing-password").unwrap();
+        let hash = password::hash("existing-password").await.unwrap();
         let user = users::create(&orm, "recipient@example.test", "Local name", Some(&hash))
             .await
             .unwrap();

@@ -227,6 +227,34 @@ async fn initial_and_pending_enrollment_need_no_reauth_or_removal_notice() {
     .await;
 }
 
+/// Confirming mints a full set of backup codes, one Argon2 hash each, and the
+/// server keeps answering other requests meanwhile.
+#[ntex::test]
+async fn confirming_leaves_the_server_answering_while_backup_codes_are_minted() {
+    Database::run(async |database| {
+        let session = AccountSession::new(database).await;
+        let device = session
+            .provisioning(session.submit("enroll", &[]).await)
+            .await;
+        let code = device.code();
+        let response = Box::pin(assert_answering_during(
+            &session.server,
+            database,
+            "zeroship.totp_credentials",
+            session.submit("confirm", &[("code", &code)]),
+        ))
+        .await;
+        assert_eq!(response.status().as_u16(), 200);
+        let body: Value = response.json().await.unwrap();
+        assert_eq!(body["confirmed"], true);
+        assert_eq!(
+            unused_backups(&session.server, &session.user.id).await,
+            totp::BACKUP_CODE_COUNT
+        );
+    })
+    .await;
+}
+
 enum RejectedProof {
     Missing,
     Password,

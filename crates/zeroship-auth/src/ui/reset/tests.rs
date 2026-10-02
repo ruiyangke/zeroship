@@ -148,7 +148,11 @@ async fn accepted_request_reaches_the_observed_hasher() {
         assert_eq!(response.status(), StatusCode::FOUND);
         assert_eq!(response.headers().get(LOCATION).unwrap(), "/login");
         assert_eq!(calls.get(), 1, "the observer must see accepted hashing");
-        assert!(password::verify(NEW_PASSWORD, &stored_password(&pg, &user.id).await).unwrap());
+        assert!(
+            password::verify(NEW_PASSWORD, &stored_password(&pg, &user.id).await)
+                .await
+                .unwrap()
+        );
         assert!(!password_reset::is_live(&pg, &token.raw).await.unwrap());
     })
     .await;
@@ -170,8 +174,8 @@ async fn production_route_updates_the_credential_and_consumes_the_token() {
         assert_eq!(response.status(), StatusCode::FOUND);
         assert_eq!(response.headers().get(LOCATION).unwrap(), "/login");
         let stored = stored_password(&pg, &user.id).await;
-        assert!(password::verify(NEW_PASSWORD, &stored).unwrap());
-        assert!(!password::verify(OLD_PASSWORD, &stored).unwrap());
+        assert!(password::verify(NEW_PASSWORD, &stored).await.unwrap());
+        assert!(!password::verify(OLD_PASSWORD, &stored).await.unwrap());
         assert!(!password_reset::is_live(&pg, &token.raw).await.unwrap());
     })
     .await;
@@ -212,7 +216,11 @@ async fn exhausted_ip_is_rejected_before_hashing_a_live_token() {
             test::call_service(&app, request(&csrf, &token.raw, "192.0.2.2").to_request()).await;
         assert_eq!(response.status(), StatusCode::FOUND);
         assert_eq!(calls.get(), 1, "a different IP has an independent budget");
-        assert!(password::verify(NEW_PASSWORD, &stored_password(&pg, &user.id).await).unwrap());
+        assert!(
+            password::verify(NEW_PASSWORD, &stored_password(&pg, &user.id).await)
+                .await
+                .unwrap()
+        );
     })
     .await;
 }

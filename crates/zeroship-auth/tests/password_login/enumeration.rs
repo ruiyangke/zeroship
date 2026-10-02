@@ -4,7 +4,7 @@
 
 use super::fixtures::*;
 use crate::common::{self, auth_server::AuthServer, database::Database};
-use zeroship_auth::{identity::password, store::users};
+use zeroship_auth::store::users;
 
 #[derive(Debug, PartialEq, Eq)]
 struct Refusal {
@@ -42,7 +42,7 @@ async fn refusal(response: cyper::Response) -> Refusal {
 }
 
 #[ntex::test]
-async fn password_refusals_are_equivalent_even_when_the_dummy_hash_matches() {
+async fn password_refusals_are_equivalent_even_when_the_padding_matches() {
     Database::run(async |database| {
         let server = AuthServer::start(database).await;
         let real = user(&server, "real@example.test").await;
@@ -60,11 +60,11 @@ async fn password_refusals_are_equivalent_even_when_the_dummy_hash_matches() {
                 .unwrap()
                 .is_none()
         );
+        // The password the padding credential is a hash of. That it matches,
+        // and that `password::verify_or_pad` still refuses it, is pinned beside
+        // the padding itself: `crates/zeroship-auth/src/identity/password.rs`,
+        // `padding_never_verifies_even_the_password_it_was_hashed_from`.
         let padding = "absent-user-padding";
-        assert!(
-            password::verify(padding, password::dummy_hash()).unwrap(),
-            "this scenario must submit a password that actually matches the dummy credential"
-        );
         for (email, submitted) in [
             (missing, WRONG_PASSWORD),
             (missing, padding),

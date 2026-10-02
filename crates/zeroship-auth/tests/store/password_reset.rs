@@ -106,8 +106,8 @@ async fn completion_obeys_transaction_rollback_and_commit() {
     Database::run(async |database| {
         let orm = database.orm().await;
         let mut client = database.connect_as_auth().await;
-        let old_hash = password::hash("old reset password phrase").unwrap();
-        let new_hash = password::hash("new reset password phrase").unwrap();
+        let old_hash = password::hash("old reset password phrase").await.unwrap();
+        let new_hash = password::hash("new reset password phrase").await.unwrap();
         let user = users::create(&orm, "reset@example.test", "Reset", Some(&old_hash))
             .await
             .unwrap();
@@ -181,8 +181,8 @@ async fn completion_binds_the_user_at_issue_time_after_email_reassignment() {
     Database::run(async |database| {
         let orm = database.orm().await;
         let client = database.connect_as_auth().await;
-        let old_hash = password::hash("old reset password phrase").unwrap();
-        let new_hash = password::hash("new reset password phrase").unwrap();
+        let old_hash = password::hash("old reset password phrase").await.unwrap();
+        let new_hash = password::hash("new reset password phrase").await.unwrap();
         let original = users::create(
             &orm,
             "original@example.test",

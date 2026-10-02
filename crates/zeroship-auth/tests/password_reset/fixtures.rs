@@ -23,7 +23,7 @@ pub(super) async fn user(
     orm: &zeroship_data_orm::Database,
     email: &str,
 ) -> users::UserRow {
-    let hash = password::hash(OLD_PASSWORD).unwrap();
+    let hash = password::hash(OLD_PASSWORD).await.unwrap();
     users::create(orm, email, "Reset", Some(&hash))
         .await
         .unwrap()

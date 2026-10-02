@@ -86,7 +86,7 @@ async fn confirm_activates_and_issues_backup_codes() {
         let ct = totp::encrypt_secret(&key(), &user.id, &secret).unwrap();
         totp_store::enroll(&db, &user.id, &ct, false).await.unwrap();
 
-        let (plain, hashes) = totp::generate_backup_codes().unwrap();
+        let (plain, hashes) = totp::generate_backup_codes().await.unwrap();
         let confirmed = totp_store::confirm(&db, &user.id, &hashes)
             .await
             .expect("confirm");
@@ -138,7 +138,7 @@ async fn confirm_without_enrollment_is_a_noop() {
         .await
         .unwrap();
 
-        let (_, hashes) = totp::generate_backup_codes().unwrap();
+        let (_, hashes) = totp::generate_backup_codes().await.unwrap();
         let confirmed = totp_store::confirm(&db, &user.id, &hashes)
             .await
             .expect("confirm");
@@ -201,7 +201,7 @@ async fn backup_code_works_once_then_is_rejected() {
         let secret = totp::generate_secret();
         let ct = totp::encrypt_secret(&key(), &user.id, &secret).unwrap();
         totp_store::enroll(&db, &user.id, &ct, false).await.unwrap();
-        let (plain, hashes) = totp::generate_backup_codes().unwrap();
+        let (plain, hashes) = totp::generate_backup_codes().await.unwrap();
         totp_store::confirm(&db, &user.id, &hashes).await.unwrap();
 
         // Redeem the first code: find the matching unused row, verify, mark used.
@@ -211,7 +211,10 @@ async fn backup_code_works_once_then_is_rejected() {
             .unwrap();
         let mut matched_id = None;
         for row in &unused {
-            if totp::verify_backup_code(target, &row.code_hash).unwrap() {
+            if totp::verify_backup_code(target, &row.code_hash)
+                .await
+                .unwrap()
+            {
                 matched_id = Some(row.id);
                 break;
             }
@@ -262,7 +265,7 @@ async fn disable_removes_credential_and_codes() {
         let secret = totp::generate_secret();
         let ct = totp::encrypt_secret(&key(), &user.id, &secret).unwrap();
         totp_store::enroll(&db, &user.id, &ct, false).await.unwrap();
-        let (_, hashes) = totp::generate_backup_codes().unwrap();
+        let (_, hashes) = totp::generate_backup_codes().await.unwrap();
         totp_store::confirm(&db, &user.id, &hashes).await.unwrap();
         assert!(totp_store::is_enabled(&db, &user.id).await.unwrap());
 
@@ -312,7 +315,7 @@ async fn re_enroll_resets_to_pending() {
         )
         .await
         .unwrap();
-        let (_, hashes) = totp::generate_backup_codes().unwrap();
+        let (_, hashes) = totp::generate_backup_codes().await.unwrap();
         totp_store::confirm(&db, &user.id, &hashes).await.unwrap();
         assert!(totp_store::is_enabled(&db, &user.id).await.unwrap());
 
@@ -393,7 +396,7 @@ async fn credential_cascades_on_user_delete() {
         )
         .await
         .unwrap();
-        let (_, hashes) = totp::generate_backup_codes().unwrap();
+        let (_, hashes) = totp::generate_backup_codes().await.unwrap();
         totp_store::confirm(&db, &user.id, &hashes).await.unwrap();
 
         // Hard-delete the user → CASCADE tears down credential + codes (ISS-11/ISS-12).

@@ -151,11 +151,11 @@ target under an HMAC).
 
 Credential checking itself is centralised. `verify_password_credentials` in
 `crates/zeroship-auth/src/identity/credentials.rs` is the one place a password is checked: rate
-limits over three buckets, user lookup, a dummy-hash timing defence so an unknown email costs the
-same as a known one, Argon2 verification off the reactor, an opaque refusal for a soft lock,
-eligibility, and its own audit emission. Second-factor completion routes back through
-`ui::login::post_2fa`, which re-checks the credential version against the live row before
-completing the flow the challenge names.
+limits over three buckets, user lookup, a padding verify (`password::verify_or_pad`) so an unknown
+email costs the same as a known one and can never pass, Argon2 verification off the reactor, an
+opaque refusal for a soft lock, eligibility, and its own audit emission. Second-factor completion
+routes back through `ui::login::post_2fa`, which re-checks the credential version against the live
+row before completing the flow the challenge names.
 
 Two flows are worth reading for their fail-closed shape. `complete` in
 `crates/zeroship-auth/src/identity/password_reset.rs` is one statement that selects the target by

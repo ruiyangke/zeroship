@@ -58,14 +58,41 @@ impl Database {
             compio::time::timeout(Duration::from_secs(15), futures::future::join_all(drivers))
                 .await;
         let removed = database.postgres.rm();
-        for driver in closed.expect("fixture connections must close before their runtime") {
-            driver
-                .expect("fixture driver task")
-                .expect("fixture PostgreSQL connection");
+        let mut teardown = Vec::new();
+        match closed {
+            Err(elapsed) => teardown.push(format!(
+                "fixture connections must close before their runtime: {elapsed:?}"
+            )),
+            Ok(drivers) => {
+                for driver in drivers {
+                    match driver {
+                        Err(_) => teardown.push("fixture driver task panicked".to_owned()),
+                        Ok(Err(error)) => {
+                            teardown.push(format!("fixture PostgreSQL connection: {error:?}"));
+                        }
+                        Ok(Ok(())) => {}
+                    }
+                }
+            }
         }
-        removed.expect("remove the fixture's PostgreSQL container");
-        if let Err(panic) = outcome {
-            std::panic::resume_unwind(panic);
+        if let Err(error) = removed {
+            teardown.push(format!(
+                "remove the fixture's PostgreSQL container: {error:?}"
+            ));
+        }
+        // A case that failed reports its own failure. What its teardown then
+        // found is printed beside it rather than raised instead of it: a case
+        // that unwinds while the server is still working on its request can
+        // leave that server's connection open, and the symptom must not
+        // replace the failure that caused it.
+        match outcome {
+            Err(panic) => {
+                for failure in &teardown {
+                    eprintln!("auth fixture teardown after the case failed: {failure}");
+                }
+                std::panic::resume_unwind(panic);
+            }
+            Ok(()) => assert!(teardown.is_empty(), "{}", teardown.join("; ")),
         }
     }
 
@@ -404,6 +431,46 @@ async fn a_failed_case_releases_its_server_and_cannot_change_the_next_database()
         !container_ids().contains(&*successful_id.borrow()),
         "successful case leaked its PostgreSQL server"
     );
+}
+
+/// A case that fails reports its own failure even when its teardown also
+/// fails, and a case that passes still fails on a teardown it left broken.
+///
+/// Each case moves a client out of itself, so its connection outlives the
+/// case and the teardown's close check fails for both.
+#[ntex::test]
+async fn a_failed_case_reports_its_own_failure_over_the_teardown_it_broke() {
+    let leaked = RefCell::new(Vec::new());
+    let failed = AssertUnwindSafe(Database::run(async |database| {
+        let client = database.connect().await;
+        leaked.borrow_mut().push(client);
+        panic!("intentional fixture failure");
+    }))
+    .catch_unwind()
+    .await
+    .expect_err("case must propagate its assertion failure");
+    assert_eq!(
+        failed.downcast_ref::<&str>(),
+        Some(&"intentional fixture failure"),
+        "the teardown replaced the case's own failure: {:?}",
+        failed.downcast_ref::<String>()
+    );
+
+    let passed = AssertUnwindSafe(Database::run(async |database| {
+        let client = database.connect().await;
+        leaked.borrow_mut().push(client);
+    }))
+    .catch_unwind()
+    .await
+    .expect_err("a passing case must still fail on the connection it left open");
+    let message = passed
+        .downcast_ref::<String>()
+        .expect("the teardown reports what it found");
+    assert!(
+        message.contains("fixture connections must close before their runtime"),
+        "{message}"
+    );
+    assert_eq!(leaked.borrow().len(), 2, "both cases leaked their client");
 }
 
 fn container_ids() -> Vec<String> {

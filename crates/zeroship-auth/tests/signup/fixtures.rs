@@ -172,7 +172,11 @@ pub(super) async fn created(server: &AuthServer, email: &str) -> users::UserRow 
         .expect("signup creates the account");
     assert_eq!(user.email, email);
     assert_eq!(user.name, NAME);
-    assert!(password::verify(PASSWORD, user.password_hash.as_deref().unwrap()).unwrap());
+    assert!(
+        password::verify(PASSWORD, user.password_hash.as_deref().unwrap())
+            .await
+            .unwrap()
+    );
     user
 }
 

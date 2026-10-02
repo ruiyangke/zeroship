@@ -23,7 +23,9 @@ impl App {
             &client,
         )
         .await;
-        let hash = zeroship_auth::identity::password::hash(PASSWORD).unwrap();
+        let hash = zeroship_auth::identity::password::hash(PASSWORD)
+            .await
+            .unwrap();
         database
             .admin
             .execute(

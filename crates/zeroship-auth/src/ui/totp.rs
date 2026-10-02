@@ -349,7 +349,7 @@ pub async fn confirm(
     }
 
     // Code valid → mint backup codes and confirm atomically.
-    let (plain, hashes) = match totp::generate_backup_codes() {
+    let (plain, hashes) = match totp::generate_backup_codes().await {
         Ok(v) => v,
         Err(e) => {
             tracing::error!(error = %e, "backup code mint failed");
@@ -576,7 +576,7 @@ async fn notify_second_factor_removed(
 }
 
 /// Verify a re-auth proof: a valid current TOTP code (decrypt the stored secret
-/// and check) OR the correct account password (Argon2, on `spawn_blocking`).
+/// and check) OR the correct account password (Argon2, on the blocking pool).
 /// Returns `true` if EITHER supplied proof validates. Shared by `enroll` and
 /// `disable` - both can leave the account without a working second factor, so
 /// both accept exactly these two proofs.
@@ -601,15 +601,12 @@ async fn verify_reauth(
     // Password proof (only meaningful for accounts that have a password).
     if let (Some(pw), Some(phc)) = (
         submitted_password.filter(|p| !p.is_empty()),
-        user.password_hash.clone(),
+        user.password_hash.as_deref(),
     ) {
-        let pw = pw.to_string();
-        let ok =
-            compio::runtime::spawn_blocking(move || password::verify(&pw, &phc).unwrap_or(false))
-                .await
-                .unwrap_or(false);
-        if ok {
-            return true;
+        match password::verify(pw, phc).await {
+            Ok(true) => return true,
+            Ok(false) => {}
+            Err(e) => tracing::error!(error = %e, "reauth password verify failed"),
         }
     }
     false

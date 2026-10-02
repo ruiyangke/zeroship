@@ -2,10 +2,18 @@
 
 #![allow(clippy::future_not_send)]
 
-use crate::common::{self, CookieJar, auth_server::AuthServer};
+use crate::common::{
+    self, CookieJar,
+    auth_server::AuthServer,
+    database::{Database, eventually},
+};
+use futures::future::{self, Either};
 use std::{
+    cell::Cell,
     collections::HashSet,
-    time::{SystemTime, UNIX_EPOCH},
+    future::Future,
+    pin::pin,
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 use zeroship_auth::{
     identity::{password, totp},
@@ -17,7 +25,7 @@ use zeroship_core::UserId;
 pub(super) const PASSWORD: &str = "second factor fixture password phrase";
 
 pub(super) async fn account(server: &AuthServer, email: &str) -> users::UserRow {
-    let hash = password::hash(PASSWORD).unwrap();
+    let hash = password::hash(PASSWORD).await.unwrap();
     Box::pin(users::create(&server.orm, email, "Second factor", Some(&hash)))
         .await
         .unwrap()
@@ -46,7 +54,7 @@ impl Authenticator {
     }
 
     pub async fn confirm(&mut self, server: &AuthServer, user: &UserId) {
-        let (plain, hashes) = totp::generate_backup_codes().unwrap();
+        let (plain, hashes) = totp::generate_backup_codes().await.unwrap();
         assert!(
             totp_store::confirm(&server.pg, user, &hashes)
                 .await
@@ -255,4 +263,98 @@ pub(super) async fn unused_backups(server: &AuthServer, user: &UserId) -> usize 
         .await
         .unwrap()
         .len()
+}
+
+/// Send `request` and prove the server keeps answering other requests while
+/// that request's Argon2 work runs.
+///
+/// The fixture server has ONE worker thread, so Argon2 run on it would hold
+/// every other connection until it finished. The handler is parked on an
+/// exclusive lock on `gate`, the table its last statement before the Argon2
+/// work reads. Once that statement has completed, a `/healthz` is sent.
+///
+/// A worker parked on the hash reads that `/healthz` only when the hash is done
+/// and the handler next awaits the database, so the answer takes nearly all of
+/// the remainder of `request`. A worker that is free answers it in a sliver of
+/// that time. The assertion is that the `/healthz` round trip is under half of
+/// the remainder of `request`, both measured from the same instant, which
+/// separates the two with room on either side and needs no absolute duration.
+pub(super) async fn assert_answering_during(
+    server: &AuthServer,
+    database: &Database,
+    gate: &str,
+    request: impl Future<Output = cyper::Response>,
+) -> cyper::Response {
+    let server_session: i32 = server
+        .pg
+        .query_one("SELECT pg_backend_pid()", &[])
+        .await
+        .unwrap()
+        .get(0);
+    let holder = database.connect().await;
+    holder
+        .batch_execute(&format!(
+            "BEGIN; LOCK TABLE {gate} IN ACCESS EXCLUSIVE MODE"
+        ))
+        .await
+        .unwrap();
+    let observer = database.connect().await;
+    let stage = Cell::new("waiting for the handler to reach the gate");
+    let started = Cell::new(None::<Instant>);
+    let probe = async {
+        assert!(
+            database.wait_until_blocked(&[server_session]).await,
+            "the handler never read {gate}"
+        );
+        stage.set("releasing the gate");
+        holder.batch_execute("COMMIT").await.unwrap();
+        stage.set("waiting for the gated statement to complete");
+        assert!(
+            eventually(async || {
+                observer
+                    .query_one(
+                        "SELECT state = 'idle' FROM pg_stat_activity WHERE pid = $1",
+                        &[&server_session],
+                    )
+                    .await
+                    .unwrap()
+                    .get(0)
+            })
+            .await,
+            "the gated statement on {gate} never completed"
+        );
+        stage.set("waiting for /healthz");
+        let sent = Instant::now();
+        started.set(Some(sent));
+        let healthz = server
+            .http
+            .get(format!("{}/healthz", server.auth_base))
+            .unwrap()
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(healthz.status().as_u16(), 200);
+        sent.elapsed()
+    };
+    let (response, healthz, remainder) = match future::select(pin!(request), pin!(probe)).await {
+        Either::Right((healthz, request)) => {
+            let response = request.await;
+            let remainder = started
+                .get()
+                .expect("the probe started its clock")
+                .elapsed();
+            (response, healthz, remainder)
+        }
+        Either::Left((response, _)) => panic!(
+            "the server answered the gated request ({}) while the probe was {}",
+            response.status(),
+            stage.get()
+        ),
+    };
+    assert!(
+        healthz * 2 < remainder,
+        "a /healthz sent as the Argon2 work began took {healthz:?} to answer, against \
+         {remainder:?} for the rest of the request: the worker was not serving while it hashed"
+    );
+    response
 }
