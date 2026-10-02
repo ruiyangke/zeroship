@@ -3,6 +3,8 @@ name = "zeroship-stream"
 version = "0.1.0"
 edition = "2021"
 description = "Kafka-family durable stream transport seam for zeroship billing events."
+# Integration suites are explicit targets; a new tests/integration/<name>.rs is compiled by nothing until tests/integration/main.rs declares it.
+autotests = false
 
 [dependencies]
 async-trait = { workspace = true }
@@ -20,6 +22,10 @@ futures = { workspace = true }
 testcontainers = { version = "0.28", default-features = false, features = ["blocking", "watchdog"] }
 # The shared reaper-owned broker container this binary runs against.
 zeroship-testkit = { path = "../../tests/testkit" }
+
+[[test]]
+name = "integration"
+path = "tests/integration/main.rs"
 
 [lints]
 workspace = true

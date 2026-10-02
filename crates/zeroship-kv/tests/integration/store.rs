@@ -1,8 +1,5 @@
 use zeroship_kv::{KvConfig, KvError, KvStore, Namespace};
 
-#[cfg(feature = "redis")]
-mod support;
-
 #[test]
 fn namespaces_cannot_change_the_key_grammar_or_impersonate_platform_scopes() {
     assert_ne!(
@@ -236,7 +233,7 @@ fn failed_embedded_open_does_not_fall_back_to_another_store() {
 #[cfg(feature = "redis")]
 #[compio::test]
 async fn runtime_redis_configuration_runs_the_same_scoped_contract() {
-    let fixtures = support::fixtures();
+    let fixtures = crate::support::fixtures();
     for redis in [fixtures.redis_config(), fixtures.cluster_config()] {
         let config = KvConfig::Redis { redis };
         let store = KvStore::open(&config).unwrap();

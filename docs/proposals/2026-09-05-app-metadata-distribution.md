@@ -956,7 +956,7 @@ MEASURED support that the split is clean today: no PRODUCER writes a non-empty
 in `crates/zeroship-bundle/src/manifest.rs`, the emitter in
 `packages/vite-plugin/src/zship.ts`, and the worker's own construction in
 `crates/zeroship-worker/src/handler.rs`. One test in
-`crates/zeroship-core/tests/types_test.rs` constructs a populated one to exercise
+`crates/zeroship-core/tests/integration/types_test.rs` constructs a populated one to exercise
 variant validation, which is why this says "producer" rather than "nothing in the
 tree". Ingest *refuses* a non-empty one on a fresh deploy alongside a non-zero
 `asset_version` (the fresh-deploy invariants inside `ingest`). The `env.assets.*`
@@ -2540,7 +2540,7 @@ note that names a transient state is a note that expires**; it now names the
 commits instead.
 
 **28. "Nothing in the tree ever writes a non-empty `runtime_assets`" is true of
-producers and false as written.** `crates/zeroship-core/tests/types_test.rs`
+producers and false as written.** `crates/zeroship-core/tests/integration/types_test.rs`
 constructs one with an entry, to exercise variant validation. The design point (no
 production writer, so the manifest is immutable-after-deploy today) stands; the
 universal quantifier did not. Now arm A15.

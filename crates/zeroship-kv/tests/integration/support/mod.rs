@@ -3,7 +3,7 @@
 use zeroship_kv as redis_types;
 
 #[allow(dead_code)]
-#[path = "../../../../libs/compio-redis/tests/common/containers.rs"]
+#[path = "../../../../../libs/compio-redis/tests/common/containers.rs"]
 pub mod containers;
 
 pub use containers::fixtures;

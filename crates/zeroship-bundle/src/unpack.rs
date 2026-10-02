@@ -523,7 +523,7 @@ mod tests {
     /// **What this does NOT catch**: that step 8 then rejects the deploy. That
     /// is a HANDOFF, not a hole - `ingest` asserts every hash in this set was
     /// seen in the archive, and `blob_missing_from_tar_is_rejected` in
-    /// `tests/runtime_descriptor_ingest_test.rs` covers that arm for the
+    /// `tests/integration/runtime_descriptor_ingest_test.rs` covers that arm for the
     /// descriptor hash, which flows through the same check.
     #[test]
     fn variant_blob_hashes_are_required_to_be_present() {

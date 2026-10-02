@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 description = "Non-shipped configuration naming contract checker"
 publish = false
+# Test suites are explicit targets; a new tests/integration/<name>.rs is compiled by nothing until it is declared here or in tests/integration/main.rs.
+autotests = false
 
 [[bin]]
 name = "zeroship-config-contract"
@@ -28,7 +30,7 @@ zeroship-control = { workspace = true }
 # put a relay in any deployed binary's closure. The alternative was to classify
 # the relay as something other than `platform`, which would leave a shipped
 # service's configuration surface unaudited: exactly the vacuity
-# `tests/real_registry.rs` exists to prevent.
+# `tests/integration/real_registry.rs` exists to prevent.
 zeroship-data-cdc-server = { workspace = true }
 zeroship-gateway = { workspace = true }
 zeroship-migrate-server = { workspace = true }
@@ -50,6 +52,26 @@ toml = { workspace = true }
 
 [dev-dependencies]
 trybuild = "1.0"
+
+[[test]]
+name = "integration"
+path = "tests/integration/main.rs"
+
+# These three register into a link-time registry. Sharing one binary would make
+# each suite's enumeration depend on the other suites' registrations, so each
+# keeps its own target.
+
+[[test]]
+name = "declared_env"
+path = "tests/integration/declared_env.rs"
+
+[[test]]
+name = "linked_registry"
+path = "tests/integration/linked_registry.rs"
+
+[[test]]
+name = "typed_accessor"
+path = "tests/integration/typed_accessor.rs"
 
 [lints]
 workspace = true

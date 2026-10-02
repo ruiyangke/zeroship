@@ -3,7 +3,7 @@
 //! Everything here is measured against declarations that live in the LIBRARY
 //! crate (`zeroship_config_contract::fixtures`) while the assertions run in this
 //! separate integration-test crate. This file names no read site of its own; the
-//! one hand-written accessor call lives in tests/typed_accessor.rs, a different
+//! one hand-written accessor call lives in tests/integration/typed_accessor.rs, a different
 //! test binary with a different registry.
 //!
 //! THE MACRO REGISTERS BY TWO INDEPENDENT PATHS, and a test that does not

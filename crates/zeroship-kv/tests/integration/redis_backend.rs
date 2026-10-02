@@ -4,13 +4,11 @@
 
 #![cfg(feature = "redis")]
 
-mod support;
-
 use zeroship_kv::backend::{Backend, Redis, TtlState};
 
 #[compio::test]
 async fn single_node_roundtrip() {
-    let fixtures = support::fixtures();
+    let fixtures = crate::support::fixtures();
     let url = fixtures.redis_config();
     let b = Redis::new(url);
     let app = "kv-test-single";
@@ -52,7 +50,7 @@ async fn list_all(b: &Redis, app: &str, prefix: &str) -> Vec<String> {
 
 #[compio::test]
 async fn cluster_roundtrip_via_backend() {
-    let fixtures = support::fixtures();
+    let fixtures = crate::support::fixtures();
     let b = Redis::new(fixtures.cluster_config());
     let app = "kv-test-cluster";
 
@@ -89,7 +87,7 @@ async fn cluster_roundtrip_via_backend() {
 
 #[compio::test]
 async fn ttl_expires_in_cluster_mode() {
-    let fixtures = support::fixtures();
+    let fixtures = crate::support::fixtures();
     let url = fixtures.cluster_config();
     let b = Redis::new(url);
     let app = "kv-test-cluster-ttl";
@@ -107,7 +105,7 @@ where
     F: Fn(Redis, &'static str) -> Fut,
     Fut: std::future::Future<Output = ()>,
 {
-    let fixtures = support::fixtures();
+    let fixtures = crate::support::fixtures();
     f(Redis::new(fixtures.redis_config()), "single").await;
     f(Redis::new(fixtures.cluster_config()), "cluster").await;
 }
@@ -370,7 +368,7 @@ async fn incr_on_non_numeric_is_typed_error() {
 
 #[compio::test]
 async fn reordered_seeds_preserve_data_access() {
-    let fixtures = support::fixtures();
+    let fixtures = crate::support::fixtures();
     let forward = fixtures.cluster_config();
     let mut reverse = forward.clone();
     let zeroship_kv::Topology::Cluster { seeds } = &mut reverse.topology else { panic!("expected cluster") };

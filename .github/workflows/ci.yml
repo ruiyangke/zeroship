@@ -68,7 +68,7 @@ jobs:
       - name: Project config Rust behavior
         run: |
           cargo test --locked -p zeroship-cli --bin zeroship project_config::tests
-          cargo test --locked -p zeroship-cli --test deploy_test
+          cargo test --locked -p zeroship-cli --test e2e deploy_test::
       - name: Project config build behavior
         run: >-
           pnpm --dir packages/vite-plugin exec node --import tsx --test
@@ -181,7 +181,7 @@ jobs:
         run: cargo xtask test data-architecture
       - name: KV storage remains independent of the V8 binding
         if: ${{ !cancelled() }}
-        run: cargo test -p zeroship-kv --test architecture
+        run: cargo test -p zeroship-kv --test integration architecture::
       - name: Repository dependency and feature contracts
         if: ${{ !cancelled() }}
         run: cargo xtask test repository

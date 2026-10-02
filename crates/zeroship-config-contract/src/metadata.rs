@@ -155,7 +155,7 @@ pub fn check_workspace(manifest_path: &Path) -> Result<MetadataSummary, Vec<Meta
 /// The peer of [`check_workspace`] for callers that need the NAMES rather than
 /// the counts. [`MetadataSummary`] answers "how many are `platform`", which
 /// cannot answer "is `zeroship-gate` one of them"; the registry anti-vacuity
-/// guard in `tests/real_registry.rs` asks the second question.
+/// guard in `tests/integration/real_registry.rs` asks the second question.
 ///
 /// # Errors
 ///

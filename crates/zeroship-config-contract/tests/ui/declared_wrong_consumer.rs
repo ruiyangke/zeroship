@@ -6,7 +6,7 @@
 //! recorded against the wrong component.
 //!
 //! The positive control is `a_read_site_carries_its_class_and_its_consumer` in
-//! tests/declared_env.rs: same macro, same key shape, matching consumer, and it
+//! tests/integration/declared_env.rs: same macro, same key shape, matching consumer, and it
 //! compiles and records.
 
 use zeroship_config_contract::fixtures::{FixtureControlConfigConsumer, FixtureWorkerConfigConsumer};

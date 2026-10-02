@@ -79,7 +79,14 @@ pub fn run() -> Result<()> {
         "local workflow identity, retained code and background worker contracts",
     )?;
     checked(
-        cargo().args(["test", "-p", "zeroship-cli", "--test", "workflow_local"]),
+        cargo().args([
+            "test",
+            "-p",
+            "zeroship-cli",
+            "--test",
+            "e2e",
+            "workflow_local::",
+        ]),
         "CLI workflow binding and process recovery",
     )?;
     checked(

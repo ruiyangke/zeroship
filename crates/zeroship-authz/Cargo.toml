@@ -3,6 +3,8 @@ name = "zeroship-authz"
 version = "0.1.0"
 edition = "2021"
 description = "Authorization wrapper policy types for the zeroship platform"
+# Integration suites are explicit targets; a new tests/integration/<name>.rs is compiled by nothing until tests/integration/main.rs declares it.
+autotests = false
 
 [dependencies]
 cedar-policy = { version = "4.11.0", default-features = false, features = ["ipaddr"] }
@@ -19,6 +21,10 @@ compio = { workspace = true }
 futures = { workspace = true }
 # The shared reaper-owned platform database this binary runs its cases against.
 zeroship-testkit = { path = "../../tests/testkit" }
+
+[[test]]
+name = "integration"
+path = "tests/integration/main.rs"
 
 [build-dependencies]
 cedar-policy = { version = "4.11.0", default-features = false, features = ["ipaddr"] }

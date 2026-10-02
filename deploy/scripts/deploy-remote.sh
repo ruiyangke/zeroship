@@ -456,7 +456,7 @@ PLATFORM_SECRETS_SRC="crates/zeroship-core/src/config/secrets.rs"
 # RESERVED_APP_NAMES, read out of the const that IS the contract.
 #
 # A shell script scraping Rust source is allowed here for exactly the reason
-# crates/zeroship-core/tests/generated_secret_scrape.rs gives for the
+# crates/zeroship-core/tests/integration/generated_secret_scrape.rs gives for the
 # generated-secret table: this path has no Rust toolchain requirement today,
 # and adding `cargo run` to a deploy to read four strings is a worse trade than
 # a pinned pattern.
@@ -487,7 +487,7 @@ reserved_app_names() {
 # This was an inline `sed` at its point of use; it is a named function for the
 # same reason the one above is, so `scrape_floor` can put a floor under it and
 # so the path has exactly one spelling. Pinned by
-# crates/zeroship-core/tests/generated_secret_scrape.rs, which asserts the
+# crates/zeroship-core/tests/integration/generated_secret_scrape.rs, which asserts the
 # pattern, the path, and that the path resolves.
 #
 # $1 is the source file, defaulting to the real one; tests pass fixtures.
@@ -962,7 +962,7 @@ main() {
   # A field-anchored pattern over a const table is a narrower coupling than
   # "any quoted uppercase word in a 900-line file", but it is STILL text
   # matching source, so it is not left to chance:
-  # `crates/zeroship-core/tests/generated_secret_scrape.rs` runs this exact
+  # `crates/zeroship-core/tests/integration/generated_secret_scrape.rs` runs this exact
   # extraction and asserts it yields PLATFORM_SECRETS exactly. That test also
   # went stale-blind in the reorg -- it asserted the script contained the
   # pattern INCLUDING the old `crates/core/...` path, so it was pinning the

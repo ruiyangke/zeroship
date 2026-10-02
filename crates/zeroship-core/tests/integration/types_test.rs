@@ -1,5 +1,5 @@
 use zeroship_bundle::{
-    AssetEntry, AssetVariant, HttpMethod, Manifest, ManifestMetadata, Match,
+    AssetEntry, AssetVariant, HttpMethod, Manifest, Match,
     ProcedureKind, RedirectAction, RequiredPrincipal, ResourceEntry, StaticAction, WorkerCode,
 };
 use zeroship_core::net_policy::Verdict;
@@ -1164,10 +1164,3 @@ fn manifest_does_not_serialize_rules_field() {
     );
 }
 
-// Suppress unused-import warning when the corresponding test references
-// drop out; keep them imported for any future test additions that
-// exercise the type definitions directly.
-#[allow(dead_code)]
-fn _force_imports_used() {
-    let _ = ManifestMetadata::default();
-}

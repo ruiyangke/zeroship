@@ -3,6 +3,8 @@ name = "zeroship-core"
 version = "0.1.0"
 edition = "2021"
 description = "Core types, VFS, and auth for the zeroship platform"
+# Integration suites are explicit targets; a new tests/integration/<name>.rs is compiled by nothing until tests/integration/main.rs declares it.
+autotests = false
 
 [dependencies]
 clap = { workspace = true }
@@ -75,6 +77,10 @@ ntex = { workspace = true }
 # `logout_token` verifier's unit tests. PKCS#8 encoding is needed
 # because `jsonwebtoken::EncodingKey::from_ed_der` takes the DER form.
 ed25519-dalek = { workspace = true, features = ["pkcs8"] }
+
+[[test]]
+name = "integration"
+path = "tests/integration/main.rs"
 
 [lints]
 workspace = true

@@ -1005,7 +1005,7 @@ services:
 
   # redpanda - Kafka-wire durable stream for the billing-provider platform.
   # Host-side integration tests use the test-only name:
-  #   REDPANDA_BROKERS=127.0.0.1:19092 cargo test -p zeroship-stream --test redpanda_roundtrip
+  #   REDPANDA_BROKERS=127.0.0.1:19092 cargo test -p zeroship-stream --test integration redpanda_roundtrip::
   # The SERVICES do not: the worker and gateway producers take
   # `--metering-brokers` / `ZEROSHIP_METERING_BROKERS` (canonical
   # `metering.brokers`, also settable as `[metering] brokers` in the overlay for

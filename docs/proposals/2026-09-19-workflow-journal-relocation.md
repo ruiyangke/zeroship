@@ -873,7 +873,7 @@ protocol. This extends a working client rather than inventing one.
    could occupy. `StartOptions::creator_subset` REFUSES with `InvalidStart::SuppliedInputRef` rather
    than dropping one silently. Three assertions bind it, each mutation-proven -
    `a_creator_start_cannot_name_a_payload_descriptor`
-   (`crates/zeroship-core/tests/workflow_jobs_test.rs`) refuses both spellings at the body root and
+   (`crates/zeroship-core/tests/integration/workflow_jobs_test.rs`) refuses both spellings at the body root and
    inside `options`; `a_remote_start_refuses_a_creator_supplied_payload_descriptor`
    (`crates/zeroship-workflow-runner/src/remote/tests.rs`) additionally asserts the peer saw no
    request at all; and `start_stages_the_creator_value_and_refuses_a_named_payload_object`
@@ -1612,7 +1612,7 @@ protocol. This extends a working client rather than inventing one.
 6. **DONE. The creator-schema path is deleted, and the exposure with it.** No endpoint installs
    or repairs a journal, no principal holds a grant to one, no client posts one, the control plane
    holds no journal manager, and the worker holds no journal to refuse. The exhaustive table in
-   `crates/zeroship-core/tests/service_authorization_test.rs` holds the grant half:
+   `crates/zeroship-core/tests/integration/service_authorization_test.rs` holds the grant half:
    `endpoint_catalog_records_exact_measured_operations` requires every operation
    `service_allowlist` grants to be pinned by destination, method and path template, and
    `measured_allowlist_is_encoded_and_enforced_row_by_row` asserts each principal's row exactly.

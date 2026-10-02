@@ -38,7 +38,7 @@
 // here would notice a band permitting `organization:admin` at `resource is App`.
 // That fence is the SCOPE of each band (`resource is Organization`, never a
 // condition in the body) and it is bound by
-// `crates/zeroship-authz/tests/platform_policies_test.rs`, which drives real
+// `crates/zeroship-authz/tests/integration/platform_policies_test.rs`, which drives real
 // principals at real ranks against real resource types.
 //
 // ---------------------------------------------------------------------------

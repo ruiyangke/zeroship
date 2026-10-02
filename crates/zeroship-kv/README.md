@@ -73,12 +73,12 @@ Testcontainers starts isolated databases, configures cluster slots, and removes
 containers when their tests finish. Docker must be available; startup failures
 fail the run. No backend URLs, Compose setup, or bootstrap scripts are needed.
 Shared cluster fixtures live in `libs/compio-redis/tests/common/containers.rs`
-and are reused by the KV and V8 binding tests. `tests/topologies.rs` exercises deployment discovery,
+and are reused by the KV and V8 binding tests. `tests/integration/topologies.rs` exercises deployment discovery,
 Sentinel failover, and authenticated TLS. Testcontainers is a development-only dependency; its
 Docker orchestration runs independently of the compio database operations.
 
-`tests/architecture.rs` checks the dependency boundary with every storage
-feature enabled. `tests/state_dir_lock_marker.rs` checks the Vite diagnostic
+`tests/integration/architecture.rs` checks the dependency boundary with every storage
+feature enabled. `tests/integration/state_dir_lock_marker.rs` checks the Vite diagnostic
 token against the compiled Rust constant. Both run through ordinary Cargo tests.
 
 The driver, store, and binding suites also run with nextest:

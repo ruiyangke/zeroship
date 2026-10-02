@@ -31,9 +31,6 @@
 //! receiver. kv-v8's test crate can't import runtime's test-only
 //! `common` module, so the minimal pieces are replicated inline.
 
-#[path = "../../zeroship-kv/tests/support/mod.rs"]
-mod support;
-
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -854,7 +851,7 @@ fn e2e_scenarios() {
 // Run the same JavaScript contract against Docker-owned network backends.
 #[test]
 fn e2e_redis() {
-    let fixtures = support::fixtures();
+    let fixtures = crate::support::fixtures();
     let store = KvStore::open(&KvConfig::Redis {
         redis: fixtures.redis_config(),
     })
@@ -865,7 +862,7 @@ fn e2e_redis() {
 
 #[test]
 fn e2e_dragonfly_cluster() {
-    let fixtures = support::fixtures();
+    let fixtures = crate::support::fixtures();
     let store = KvStore::open(&KvConfig::Redis {
         redis: fixtures.cluster_config(),
     })
@@ -878,8 +875,8 @@ fn e2e_dragonfly_cluster() {
 /// hanging the isolate. The fetch harness bounds completion with a timeout.
 #[test]
 fn e2e_backend_unavailable() {
-    let server = support::containers::start_redis();
-    let redis = support::containers::standalone(&server);
+    let server = crate::support::containers::start_redis();
+    let redis = crate::support::containers::standalone(&server);
     server
         .stop()
         .expect("stop Redis before calling the binding");
@@ -1059,8 +1056,8 @@ export default {
     },
 };
 "#;
-    let server = support::containers::start_redis();
-    let redis = support::containers::standalone(&server);
+    let server = crate::support::containers::start_redis();
+    let redis = crate::support::containers::standalone(&server);
     server.stop().unwrap();
     let backend = KvStore::open(&KvConfig::Redis { redis }).unwrap();
     let id = zeroship_core::AppId::mint();

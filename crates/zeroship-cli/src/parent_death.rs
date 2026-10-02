@@ -188,7 +188,7 @@ mod tests {
 
     // These cover the value contract only. They say NOTHING about whether an
     // orphan dies - that is kernel behaviour, and it is exercised for real,
-    // against this binary, in crates/zeroship-cli/tests/parent_death_test.rs.
+    // against this binary, in crates/zeroship-cli/tests/e2e/parent_death_test.rs.
     #[test]
     fn a_plain_pid_is_accepted() {
         assert_eq!(parse_parent_pid("4242"), Some(4242));

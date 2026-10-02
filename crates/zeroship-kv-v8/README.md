@@ -16,7 +16,7 @@ startup. Cargo features determine which implementations the host can configure.
 - `error.rs`: storage errors mapped to TypeErrors or coded promise rejections.
 - `dispatch.rs`: scheduling scoped Rust operations, result conversion, and
   successful-op metering.
-- `tests/e2e_runtime.rs`: the real V8-to-storage path, including metering.
+- `tests/integration/e2e_runtime.rs`: the real V8-to-storage path, including metering.
 
 The public Rust surface is `KvBinding`. Storage types are imported directly from
 `zeroship-kv`; this crate does not re-export them. Its tests enable both backend

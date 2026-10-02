@@ -1,8 +1,5 @@
 use zeroship_kv::backend::{Backend, TtlState};
 
-#[cfg(feature = "redis")]
-mod support;
-
 async fn delete_contract(backend: &dyn Backend) {
     let app = "delete-contract";
     let other = "delete-contract-neighbor";
@@ -42,7 +39,7 @@ async fn redb_delete_treats_expired_keys_as_absent() {
 #[cfg(feature = "redis")]
 #[compio::test]
 async fn redis_delete_treats_expired_keys_as_absent() {
-    let fixtures = support::fixtures();
+    let fixtures = crate::support::fixtures();
     for config in [fixtures.redis_config(), fixtures.cluster_config()] {
         delete_contract(&zeroship_kv::backend::Redis::new(config)).await;
     }

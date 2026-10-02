@@ -8,7 +8,7 @@
 //! have to fall back to not emitting one at all.
 //!
 //! The positive control is the same call with a `const` key in
-//! tests/declared_env.rs.
+//! tests/integration/declared_env.rs.
 
 use zeroship_config_contract::fixtures::FixtureControlConfigConsumer;
 use zeroship_core::config::DeclaredEnvKey;

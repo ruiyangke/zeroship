@@ -3204,7 +3204,7 @@ archive. Reconciliation publishes an intent committed outside the host, and an
 acknowledgement lost before the manager replays the committed turn without
 executing it again. An idle app retires through a delivered Close; its next
 start is fenced, establishes a newer epoch and completes, and a restarted host
-reopens the retired scope. `crates/zeroship-cli/tests/workflow_local.rs` repeats restart
+reopens the retired scope. `crates/zeroship-cli/tests/e2e/workflow_local.rs` repeats restart
 after process death through the real `zeroship serve` binary, and
 `zeroship-workflow-manager` tests the combined platform bootstrap and its
 refusal of partial or changed files.

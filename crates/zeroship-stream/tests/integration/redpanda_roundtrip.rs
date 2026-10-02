@@ -75,7 +75,7 @@ fn brokers() -> String {
 
 /// The child test the broker's lifetime measurements run, by its full path in this
 /// binary.
-const CHILD_TEST: &str = "the_redpanda_broker_reports_its_container";
+const CHILD_TEST: &str = "redpanda_roundtrip::the_redpanda_broker_reports_its_container";
 
 #[test]
 fn the_redpanda_broker_reports_its_container() {

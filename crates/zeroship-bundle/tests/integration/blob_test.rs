@@ -58,7 +58,7 @@ async fn probe_fails_once_the_blob_root_is_gone() {
 // What these do NOT catch: the S3 backend's probe. `S3BlobStore::probe` HEADs
 // a never-written key and treats 404 as reachable; that arm needs a live
 // endpoint and belongs with the other S3-server-gated tests in
-// crates/zeroship-bundle/tests/s3_blob_store.rs.
+// crates/zeroship-bundle/tests/integration/s3_blob_store.rs.
 
 #[test]
 fn sha256_hex_known_vector() {

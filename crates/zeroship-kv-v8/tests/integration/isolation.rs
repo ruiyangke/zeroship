@@ -5,9 +5,6 @@
     reason = "V8 isolates and KV futures run on their owning compio thread."
 )]
 
-#[path = "../../zeroship-kv/tests/support/mod.rs"]
-mod support;
-
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -283,7 +280,7 @@ async fn apps_cannot_operate_on_each_other_in_redb() {
 
 #[compio::test]
 async fn apps_cannot_operate_on_each_other_in_redis_and_dragonfly() {
-    let fixtures = support::fixtures();
+    let fixtures = crate::support::fixtures();
     for redis in [fixtures.redis_config(), fixtures.cluster_config()] {
         let store = KvStore::open(&KvConfig::Redis { redis }).unwrap();
         exercise_isolation(store).await;
