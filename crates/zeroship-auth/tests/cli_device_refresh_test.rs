@@ -38,15 +38,19 @@ const CLI_SCOPE: &str = "offline_access apps:deploy apps:read";
 ///
 /// The membership and project scopes are the verb table
 /// `zeroship organization` ships, and `env:*` plus `secrets:write` are the
-/// verb tables `zeroship var` and `zeroship secret` ship. A scope missing from
-/// the REGISTRATION is refused with `invalid_scope` at the
+/// verb tables `zeroship var` and `zeroship secret` ship. `database:migrate` is
+/// the one verb `zeroship migrate` spends: the migration service authorizes
+/// applying schema at the DATABASE, by a seat on the project that owns it
+/// (`crates/zeroship-migrate-server/src/auth.rs`, `authorize`). A scope missing
+/// from the REGISTRATION is refused with `invalid_scope` at the
 /// device-authorization endpoint, so a short list here is a login that fails
 /// outright rather than a verb that fails later.
-const EXPECTED_REGISTERED_SCOPES: [&str; 20] = [
+const EXPECTED_REGISTERED_SCOPES: [&str; 21] = [
     "apps:archive",
     "apps:deploy",
     "apps:read",
     "apps:write",
+    "database:migrate",
     "env:read",
     "env:write",
     "organization:admin",
@@ -66,11 +70,12 @@ const EXPECTED_REGISTERED_SCOPES: [&str; 20] = [
 ];
 /// The scopes the CLI's token may carry AUTHORITY for. `offline_access` is
 /// deliberately absent: it manages the grant, it does not widen it.
-const EXPECTED_ISSUABLE_SCOPES: [&str; 19] = [
+const EXPECTED_ISSUABLE_SCOPES: [&str; 20] = [
     "apps:archive",
     "apps:deploy",
     "apps:read",
     "apps:write",
+    "database:migrate",
     "env:read",
     "env:write",
     "organization:admin",
@@ -185,7 +190,12 @@ impl Fixture {
     /// starts at redemption.
     #[allow(clippy::future_not_send)]
     async fn login(&self) -> (TokenResponse, String) {
-        let authorization = self.device_authorization(CLI_SCOPE).await;
+        self.login_with(CLI_SCOPE).await
+    }
+
+    #[allow(clippy::future_not_send)]
+    async fn login_with(&self, scope: &str) -> (TokenResponse, String) {
+        let authorization = self.device_authorization(scope).await;
         let device_code = authorization["device_code"]
             .as_str()
             .expect("device authorization returns device_code")
@@ -387,7 +397,11 @@ async fn the_cli_registration_permits_refresh_and_registers_offline_access() {
         assert_eq!(
             row.get::<_, Vec<String>>("scopes"),
             expected,
-            "the CLI cannot ask for offline_access unless the registration lists it"
+            "`zeroship login` requests every one of these on a single /device confirmation. \
+             The registration is first-party (skip_consent = TRUE): no stored consent grant \
+             narrows it, and a new principal's grants are seeded from the same list, so a \
+             scope ADDED here widens every CLI credential minted after it. Change this list \
+             only on purpose; a scope it lacks is a login refused with invalid_scope"
         );
         assert!(
             row.get::<_, bool>("refresh_allowed"),
@@ -401,6 +415,67 @@ async fn the_cli_registration_permits_refresh_and_registers_offline_access() {
             issuable, EXPECTED_ISSUABLE_SCOPES,
             "offline_access manages the grant; it must not widen the resource-authority ceiling"
         );
+    })
+    .await;
+}
+
+/// `zeroship login` asks for the whole registration in one request
+/// (`crates/zeroship-cli/src/auth.rs`, `requested_scope`), so the registration
+/// is worth only what the OP grants of it at once. The test above pins what the
+/// reconciled row SAYS; this one spends it: every scope the row lists is
+/// requested together, approved and redeemed, and the token carries all of
+/// them. One scope past the row is refused at the door, so the registration is
+/// the exact bound and not merely a floor.
+///
+/// What this does NOT show: that the CLI's request is the registration. That is
+/// `crates/zeroship-cli/src/auth.rs`,
+/// `the_requested_scope_covers_the_whole_client_ceiling_plus_offline_access`,
+/// and `crates/zeroship-core/src/device_grant.rs`,
+/// `the_registration_is_the_issuable_ceiling_plus_offline_access`.
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn the_cli_can_log_in_with_its_whole_registration_and_nothing_wider() {
+    Database::run(async |database| {
+        let fx = Fixture::boot(database).await;
+        let registered: Vec<String> = fx
+            .db
+            .query_one(
+                "SELECT scopes FROM zeroship.oauth_clients WHERE client_id = $1",
+                &[&PLATFORM_CLI_CLIENT_ID],
+            )
+            .await
+            .expect("load reconciled CLI registration")
+            .get("scopes");
+        assert!(
+            registered.len() > 1 && registered.iter().any(|scope| scope == "offline_access"),
+            "the measurement needs a registration with resource scopes and offline_access: \
+             {registered:?}"
+        );
+
+        let (token, _device_code) = fx.login_with(&registered.join(" ")).await;
+        let mut granted = registered.clone();
+        granted.sort();
+        let granted = granted.join(" ");
+        assert_eq!(
+            token.scope, granted,
+            "the OP granted less than the registration the CLI asked for in full"
+        );
+        assert!(
+            token.refresh_token.is_some(),
+            "offline_access was requested and must return a refresh family"
+        );
+        assert_platform_principal_token(&fx, &token.access_token, &granted);
+
+        // `database:write` is the neighbour of the one database verb the CLI
+        // holds, and the registration does not list it.
+        let wider = format!("{} database:write", registered.join(" "));
+        let (status, body) = fx.device_authorization_raw(&wider).await;
+        assert_eq!(
+            status, 400,
+            "a scope past the registration must be refused: {body}"
+        );
+        let err: Value = serde_json::from_str(&body).expect("decode error body");
+        assert_eq!(err["error"], "invalid_scope", "{body}");
     })
     .await;
 }
