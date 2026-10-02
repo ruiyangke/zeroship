@@ -5,7 +5,7 @@
 //! FAITHFUL by construction: every assertion runs against a live, migrated Postgres
 //! (a configured test database, `zeroship_core::config::test_database_url_opt`;
 //! the run refuses otherwise) and exercises the REAL paths --
-//!   * the REAL reconciler `billing_reconcile::tick_with` → `bill_organization` (so the tax
+//!   * the REAL reconciler `billing_reconcile::sweep` -> `bill_organization` (so the tax
 //!     call runs INSIDE the real finalize-in-one-UPDATE and the REAL balance CHECK
 //!     `total = subtotal − credit + tax` validates the row);
 //!   * the REAL `TaxProvider` seam on the REAL `AppState.tax_provider` (the fake is
@@ -46,8 +46,6 @@ use uuid::Uuid;
 
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_control::cron::billing_reconcile;
-use zeroship_control::stripe_client::{Period, StripeApi};
-use zeroship_control::stripe_store::StripeError;
 use zeroship_control::tax::{TaxAmount, TaxContext, TaxProvider, TaxProviderKind};
 use zeroship_control::{
     AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
@@ -57,10 +55,6 @@ use zeroship_core::AppId;
 fn db_url() -> String {
     common::require_control_db()
 }
-
-/// The reconciler single-flights fleet-wide via `pg_try_advisory_lock`; serialize the
-/// reconcile-driving tests with a process-wide lock (mirrors the credit/reconcile tests).
-static RECONCILE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 
@@ -111,144 +105,6 @@ impl TaxProvider for FakeTaxProvider {
         Ok(TaxAmount {
             tax_cents: self.tax_cents,
         })
-    }
-}
-
-// ===========================================================================
-// A recording StripeApi fake (no HTTP). `bill_organization` is generic over StripeApi; the
-// tax math under test never touches Stripe, so a fake suffices.
-// ===========================================================================
-
-#[derive(Default)]
-struct RecordingStripe {
-    item_seq: Mutex<u64>,
-    inv_seq: Mutex<u64>,
-}
-
-impl RecordingStripe {
-    fn unique(prefix: &str) -> String {
-        format!("{prefix}_{}", Uuid::new_v4().simple())
-    }
-}
-
-impl StripeApi for RecordingStripe {
-    async fn create_customer(&self, _e: &str, _c: &str) -> Result<String, StripeError> {
-        Ok("cus_fake".into())
-    }
-    async fn create_checkout_setup_session(
-        &self,
-        _c: &str,
-        _ok: &str,
-        _cancel: &str,
-    ) -> Result<String, StripeError> {
-        Ok("https://fake/session".into())
-    }
-    async fn create_invoice_item(
-        &self,
-        _customer: &str,
-        _amount: u64,
-        _currency: &str,
-        _desc: &str,
-        _period: Period,
-        _idem: &str,
-        _lookup: &str,
-        _metadata: &[(String, String)],
-    ) -> Result<String, StripeError> {
-        *self.item_seq.lock().unwrap() += 1;
-        Ok(Self::unique("ii"))
-    }
-    async fn delete_invoice_item(&self, _item_id: &str) -> Result<(), StripeError> {
-        Ok(())
-    }
-    async fn find_invoice_item_by_key(
-        &self,
-        _c: &str,
-        _k: &str,
-    ) -> Result<Option<String>, StripeError> {
-        Ok(None)
-    }
-    async fn create_invoice(&self, _c: &str, _cr: &str, _k: &str) -> Result<String, StripeError> {
-        *self.inv_seq.lock().unwrap() += 1;
-        Ok(Self::unique("in"))
-    }
-    async fn finalize_invoice(&self, id: &str) -> Result<String, StripeError> {
-        Ok(id.to_string())
-    }
-    async fn create_meter_event(
-        &self,
-        _n: &str,
-        _c: &str,
-        _v: u64,
-        _i: &str,
-        _t: i64,
-    ) -> Result<(), StripeError> {
-        Ok(())
-    }
-    async fn meter_event_summary(
-        &self,
-        _m: &str,
-        _c: &str,
-        _s: i64,
-        _e: i64,
-    ) -> Result<u64, StripeError> {
-        Ok(0)
-    }
-    async fn create_connect_account(
-        &self,
-        _e: &str,
-        _c: &str,
-        _co: &str,
-    ) -> Result<String, StripeError> {
-        Ok("acct_fake".into())
-    }
-    async fn create_account_link(
-        &self,
-        _a: &str,
-        _r: &str,
-        _rt: &str,
-    ) -> Result<String, StripeError> {
-        Ok("https://fake/onboard".into())
-    }
-    async fn retrieve_account(
-        &self,
-        id: &str,
-    ) -> Result<zeroship_control::stripe_client::ConnectAccount, StripeError> {
-        Ok(zeroship_control::stripe_client::ConnectAccount {
-            id: id.into(),
-            charges_enabled: true,
-            payouts_enabled: true,
-            details_submitted: true,
-            organization_id: None,
-        })
-    }
-    async fn create_connect_payment_intent(
-        &self,
-        _a: &str,
-        _amt: u64,
-        _cur: &str,
-        _fee: u64,
-        _d: &str,
-        _k: &str,
-    ) -> Result<zeroship_control::stripe_client::ConnectPaymentIntent, StripeError> {
-        Ok(zeroship_control::stripe_client::ConnectPaymentIntent {
-            id: "pi_fake".into(),
-            client_secret: None,
-        })
-    }
-    async fn invoice_settlement_ids(
-        &self,
-        _provider_invoice_id: &str,
-    ) -> Result<(Option<String>, Option<String>), StripeError> {
-        Ok((None, None))
-    }
-    async fn create_refund(
-        &self,
-        _provider_invoice_id: &str,
-        _amount_cents: u64,
-        _currency: &str,
-        _idempotency_key: &str,
-    ) -> Result<String, StripeError> {
-        Ok(Self::unique("re"))
     }
 }
 
@@ -511,12 +367,6 @@ async fn insert_grant(
 // (a) NATIVE provider ⇒ tax_cents = 0, total = subtotal − credit (behaviour-neutral).
 // ===========================================================================
 
-// RECONCILE_LOCK guards `Mutex<()>` - a pure test-serialization token, not
-// shared mutable data accessed across the await. compio::test runs each
-// test on its own single-threaded runtime, so the held guard cannot
-// deadlock another task's poll the way it could under a work-stealing
-// executor.
-#[allow(clippy::await_holding_lock)]
 #[compio::test(crate = "crate::common::live")]
 async fn native_tax_is_zero_and_total_is_subtotal_minus_credit() {
     let url = db_url();
@@ -529,9 +379,6 @@ async fn native_tax_is_zero_and_total_is_subtotal_minus_credit() {
         .expect("native tax provider builds"),
     )
     .await;
-    let _recon = RECONCILE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -550,11 +397,9 @@ async fn native_tax_is_zero_and_total_is_subtotal_minus_credit() {
     insert_grant(&fx.state, organization, 300, "usd", chrono::Utc::now()).await;
     ingest_at(&fx.state, &app, 1000, period, 1).await;
 
-    let billed = billing_reconcile::tick_with(&fx.state, &RecordingStripe::default(), now)
+    billing_reconcile::sweep(&fx.state, period)
         .await
         .expect("tick");
-    assert_eq!(billed, 1);
-
     let inv = read_invoice(&fx.state, organization, period)
         .await
         .expect("invoice");
@@ -580,17 +425,12 @@ async fn native_tax_is_zero_and_total_is_subtotal_minus_credit() {
 //     leave tax_cents = 0 and total = subtotal − credit).
 // ===========================================================================
 
-// See the allow on `native_tax_is_zero_and_total_is_subtotal_minus_credit` above.
-#[allow(clippy::await_holding_lock)]
 #[compio::test(crate = "crate::common::live")]
 async fn fake_provider_tax_is_frozen_and_total_includes_tax() {
     let url = db_url();
     // Inject the FAKE provider the SAME way Native is injected (the Arc slot) — (c).
     let fake = Arc::new(FakeTaxProvider::new(123));
     let fx = build_fixture(&url, "fake", fake.clone() as Arc<dyn TaxProvider>).await;
-    let _recon = RECONCILE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -610,11 +450,9 @@ async fn fake_provider_tax_is_frozen_and_total_includes_tax() {
     insert_grant(&fx.state, organization, 300, "usd", chrono::Utc::now()).await;
     ingest_at(&fx.state, &app, 1000, period, 1).await;
 
-    let billed = billing_reconcile::tick_with(&fx.state, &RecordingStripe::default(), now)
+    billing_reconcile::sweep(&fx.state, period)
         .await
         .expect("tick");
-    assert_eq!(billed, 1);
-
     let inv = read_invoice(&fx.state, organization, period)
         .await
         .expect("invoice");
@@ -652,16 +490,11 @@ async fn fake_provider_tax_is_frozen_and_total_includes_tax() {
 //     step masking the tax wiring.
 // ===========================================================================
 
-// See the allow on `native_tax_is_zero_and_total_is_subtotal_minus_credit` above.
-#[allow(clippy::await_holding_lock)]
 #[compio::test(crate = "crate::common::live")]
 async fn fake_provider_tax_without_credit_holds_balance_check() {
     let url = db_url();
     let fake = Arc::new(FakeTaxProvider::new(250));
     let fx = build_fixture(&url, "fake-nocredit", fake.clone() as Arc<dyn TaxProvider>).await;
-    let _recon = RECONCILE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -679,11 +512,9 @@ async fn fake_provider_tax_without_credit_holds_balance_check() {
     // $5 usage, NO credit → subtotal 500, credit 0, tax 250 → total 750.
     ingest_at(&fx.state, &app, 500, period, 1).await;
 
-    let billed = billing_reconcile::tick_with(&fx.state, &RecordingStripe::default(), now)
+    billing_reconcile::sweep(&fx.state, period)
         .await
         .expect("tick");
-    assert_eq!(billed, 1);
-
     let inv = read_invoice(&fx.state, organization, period)
         .await
         .expect("invoice");
@@ -732,8 +563,6 @@ impl TaxProvider for ErrTaxProvider {
     }
 }
 
-// See the allow on `native_tax_is_zero_and_total_is_subtotal_minus_credit` above.
-#[allow(clippy::await_holding_lock)]
 #[compio::test(crate = "crate::common::live")]
 async fn tax_provider_error_fails_closed_invoice_not_finalized() {
     let url = db_url();
@@ -743,9 +572,6 @@ async fn tax_provider_error_fails_closed_invoice_not_finalized() {
         Arc::new(ErrTaxProvider) as Arc<dyn TaxProvider>,
     )
     .await;
-    let _recon = RECONCILE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     // A DISTINCT far-back period so this test's permanent 'draft' leftover (the finalize
     // is intentionally never allowed to commit) can never be swept by a sibling reconcile.
     let now = now_for_closed_period().await - 200 * 86_400;
@@ -764,7 +590,7 @@ async fn tax_provider_error_fails_closed_invoice_not_finalized() {
     ingest_at(&fx.state, &app, 500, period, 1).await; // $5
 
     // The sweep swallows the per-organization tax error → this organization is NOT billed.
-    let _ = billing_reconcile::tick_with(&fx.state, &RecordingStripe::default(), now)
+    let _ = billing_reconcile::sweep(&fx.state, period)
         .await
         .expect("tick swallows the per-organization tax error and returns Ok");
 
@@ -805,8 +631,6 @@ async fn tax_provider_error_fails_closed_invoice_not_finalized() {
 // open call.
 // ===========================================================================
 
-// See the allow on `native_tax_is_zero_and_total_is_subtotal_minus_credit` above.
-#[allow(clippy::await_holding_lock)]
 #[compio::test(crate = "crate::common::live")]
 async fn missing_customer_with_usage_is_skipped_no_invoice() {
     let url = db_url();
@@ -819,9 +643,6 @@ async fn missing_customer_with_usage_is_skipped_no_invoice() {
         .expect("native tax provider builds"),
     )
     .await;
-    let _recon = RECONCILE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -833,7 +654,7 @@ async fn missing_customer_with_usage_is_skipped_no_invoice() {
     // DELIBERATELY do NOT set a Stripe customer for this organization.
     ingest_at(&fx.state, &app, 500, period, 1).await; // $5 of billable usage
 
-    let _ = billing_reconcile::tick_with(&fx.state, &RecordingStripe::default(), now)
+    let _ = billing_reconcile::sweep(&fx.state, period)
         .await
         .expect("tick");
 
@@ -862,8 +683,6 @@ async fn missing_customer_with_usage_is_skipped_no_invoice() {
 //     credit-funded value is never refundable as cash.)
 // ===========================================================================
 
-// See the allow on `native_tax_is_zero_and_total_is_subtotal_minus_credit` above.
-#[allow(clippy::await_holding_lock)]
 #[compio::test(crate = "crate::common::live")]
 async fn credit_fully_covers_subtotal_zero_invoice_no_charge_row() {
     let url = db_url();
@@ -876,9 +695,6 @@ async fn credit_fully_covers_subtotal_zero_invoice_no_charge_row() {
         .expect("native tax provider builds"),
     )
     .await;
-    let _recon = RECONCILE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -898,11 +714,9 @@ async fn credit_fully_covers_subtotal_zero_invoice_no_charge_row() {
     insert_grant(&fx.state, organization, 2000, "usd", chrono::Utc::now()).await;
     ingest_at(&fx.state, &app, 500, period, 1).await;
 
-    let billed = billing_reconcile::tick_with(&fx.state, &RecordingStripe::default(), now)
+    billing_reconcile::sweep(&fx.state, period)
         .await
         .expect("tick");
-    assert_eq!(billed, 1);
-
     let inv = read_invoice(&fx.state, organization, period)
         .await
         .expect("invoice");
@@ -965,16 +779,11 @@ async fn credit_fully_covers_subtotal_zero_invoice_no_charge_row() {
 //     two segments are produced by the real proration engine — no shim.
 // ===========================================================================
 
-// See the allow on `native_tax_is_zero_and_total_is_subtotal_minus_credit` above.
-#[allow(clippy::await_holding_lock)]
 #[compio::test(crate = "crate::common::live")]
 async fn tax_computed_once_over_summed_multi_segment_subtotal() {
     let url = db_url();
     let fake = Arc::new(FakeTaxProvider::new(200));
     let fx = build_fixture(&url, "tax-multiseg", fake.clone() as Arc<dyn TaxProvider>).await;
-    let _recon = RECONCILE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -1025,11 +834,9 @@ async fn tax_computed_once_over_summed_multi_segment_subtotal() {
     // More usage after the change → cumulative 800 (segment 1 delta = 500c).
     ingest_at(&fx.state, &app, 500, period, 2).await;
 
-    let billed = billing_reconcile::tick_with(&fx.state, &RecordingStripe::default(), now)
+    billing_reconcile::sweep(&fx.state, period)
         .await
         .expect("tick");
-    assert_eq!(billed, 1);
-
     let inv = read_invoice(&fx.state, organization, period)
         .await
         .expect("invoice");

@@ -50,7 +50,7 @@ use ntex::web::{self, test};
 use serde_json::{json, Value};
 use uuid::Uuid;
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
-use zeroship_control::notify::{BillingNotificationKind, RecordingNotifier};
+use zeroship_control::notify::RecordingNotifier;
 use zeroship_control::refund::{issue_refund, NativeRefundProvider, RefundDestination, RefundOutcome};
 use zeroship_control::{
     stripe_handlers, AppState, EnvStore, Quota, RateLimiter, Registry,
@@ -69,11 +69,10 @@ fn tmpdir(label: &str) -> PathBuf {
     path
 }
 
-/// Fixture wiring the webhook handler with a `RecordingNotifier` so test (d) can observe
-/// the `disputed` send the cron drives. Returns the state + the notifier handle.
+/// Fixture wiring the webhook handler with a `RecordingNotifier` for the notify
+/// cron to send through.
 struct Fixture {
     state: Arc<AppState>,
-    notifier: Arc<RecordingNotifier>,
     blob_root: PathBuf,
     deploy_tmp_dir: PathBuf,
 }
@@ -131,7 +130,7 @@ impl Fixture {
                 &zeroship_control::tax::TaxProviderConfig::native(),
             )
             .expect("native tax provider builds"),
-            notifier: notifier.clone(),
+            notifier,
             mailer: std::sync::Arc::new(zeroship_mailer::RecordingMailer::new()),
             pairwise_salt: [0u8; 32],
             projected_charge_cache: std::sync::Arc::new(
@@ -139,7 +138,7 @@ impl Fixture {
             ),
         });
 
-        Self { state, notifier, blob_root, deploy_tmp_dir }
+        Self { state, blob_root, deploy_tmp_dir }
     }
 }
 
@@ -603,6 +602,11 @@ async fn dispute_closed_won_restores_cash_lost_leaves_debit() {
 // (d) the dispute produces exactly ONE `disputed` notification (per-organization ledger).
 // ───────────────────────────────────────────────────────────────────────────
 
+// The notify cron is fleet-wide: a sibling's sweep can claim and deliver this
+// organization's disputed row through THE SIBLING's recorder. The durable
+// artifact is the per-organization `billing_notifications` row, so the
+// assertions below read that ledger and wait for it to settle to `sent` instead
+// of reading a per-fixture recorder.
 #[compio::test(crate = "crate::common::live")]
 async fn dispute_produces_exactly_one_disputed_notification() {
     let url = db_url();
@@ -631,11 +635,32 @@ async fn dispute_produces_exactly_one_disputed_notification() {
         .expect("dsp id")[0]
         .get("id");
 
-    // Drive the REAL notify cron tick (it sweeps the shared DB; we scope by organization).
-    let key_prefix = format!("{organization}:disputed:");
-    let _ = zeroship_control::cron::billing_notify::tick(&fx.state)
-        .await
-        .expect("notify tick 1");
+    // Drive the REAL notify cron until THIS organization's disputed row settles to
+    // `sent`. A sibling sweep may have claimed it first (and delivered it through the
+    // sibling's recorder) - that is exactly the multi-replica claim-before-send path,
+    // and the per-organization ledger row is the durable artifact either way. The
+    // sweep is driven directly (its claim INSERT is the multi-node arbiter) so a
+    // sibling holding the advisory lock does not starve this case's own drive.
+    let mut settled = false;
+    for _ in 0..200 {
+        let _ = zeroship_control::cron::billing_notify::sweep(&fx.state)
+            .await
+            .expect("notify sweep");
+        let sent: i64 = conn
+            .query(
+                "SELECT COUNT(*)::bigint AS n FROM zeroship.billing_notifications \
+                 WHERE organization_id = $1 AND kind = 'disputed' AND status = 'sent'",
+                &[&organization],
+            )
+            .await
+            .expect("count disputed sent")[0]
+            .get("n");
+        if sent >= 1 {
+            settled = true;
+            break;
+        }
+    }
+    assert!(settled, "the disputed notification settled to sent");
 
     // Exactly one `disputed` ledger row for THIS organization, marked sent, keyed on the dsp_…
     let ledger = conn
@@ -650,26 +675,20 @@ async fn dispute_produces_exactly_one_disputed_notification() {
     assert_eq!(ledger[0].get::<_, String>("transition_id"), dsp_id, "keyed on the dsp_… id");
     assert_eq!(ledger[0].get::<_, String>("s"), "sent");
 
-    // Exactly one delivery for THIS organization's disputed key (scoped, parallel-safe).
-    assert_eq!(
-        fx.notifier.delivered_for_key_prefix(&key_prefix),
-        1,
-        "exactly one disputed email delivered for this organization"
-    );
-
-    // A second cron tick must NOT re-send (claim ledger already `sent`).
-    let _ = zeroship_control::cron::billing_notify::tick(&fx.state)
+    // A second sweep must NOT add a row (claim ledger already `sent`).
+    let _ = zeroship_control::cron::billing_notify::sweep(&fx.state)
         .await
-        .expect("notify tick 2");
-    assert_eq!(
-        fx.notifier.delivered_for_key_prefix(&key_prefix),
-        1,
-        "the disputed notification is send-once across cron ticks"
-    );
-    assert!(
-        fx.notifier.delivered_for_kind(BillingNotificationKind::Disputed) >= 1,
-        "the disputed kind was exercised"
-    );
+        .expect("second notify sweep");
+    let rows: i64 = conn
+        .query(
+            "SELECT COUNT(*)::bigint AS n FROM zeroship.billing_notifications \
+             WHERE organization_id = $1 AND kind = 'disputed'",
+            &[&organization],
+        )
+        .await
+        .expect("count disputed rows")[0]
+        .get("n");
+    assert_eq!(rows, 1, "the disputed notification is send-once across cron ticks");
 }
 
 // ───────────────────────────────────────────────────────────────────────────

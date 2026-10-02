@@ -49,10 +49,9 @@ fn db_url() -> String {
 /// production multi-instance safety). Under the DEFAULT multi-threaded cargo runner two
 /// sweep-driving tests would race the SAME lock: the loser gets `ran: false` and does no
 /// detection, so its finding assertions would fail. Serialize the sweep-driving tests with
-/// a process-wide lock to mirror the production single-flight — exactly as
-/// `billing_reconcile_test`'s `RECONCILE_LOCK` does (a poisoned lock from a prior panic is
-/// recovered). The single-flight test (f), which deliberately holds the advisory lock on a
-/// side session, is serialized too so it never starves a concurrent sweep test.
+/// a process-wide lock to mirror the production single-flight (a poisoned lock from a prior
+/// panic is recovered). The single-flight test (f), which deliberately holds the advisory
+/// lock on a side session, is serialized too so it never starves a concurrent sweep test.
 static RECONCILE_LOCK: Mutex<()> = Mutex::new(());
 
 fn serialize_sweeps() -> std::sync::MutexGuard<'static, ()> {

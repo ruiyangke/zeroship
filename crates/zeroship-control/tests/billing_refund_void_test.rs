@@ -53,10 +53,6 @@ fn db_url() -> String {
     common::require_control_db()
 }
 
-/// The reconciler single-flights fleet-wide via `pg_try_advisory_lock`; serialize the
-/// reconcile-driving tests with a process-wide lock (mirrors the credit/reconcile tests).
-static RECONCILE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 
 fn tmpdir(label: &str) -> PathBuf {
@@ -505,9 +501,12 @@ async fn insert_grant(
     id
 }
 
-/// Drive the reconciler for the closed period (single tick).
-async fn run_reconcile(state: &AppState, stripe: &RecordingStripe, now: i64) -> usize {
-    billing_reconcile::tick_with(state, stripe, now)
+/// Drive the reconciler for the closed period. The sweep body is driven directly
+/// (its per-`(organization, period)` invoice claim is the multi-node arbiter), so a
+/// sibling case holding the fleet-wide advisory lock cannot starve this case's own
+/// closed-period sweep.
+async fn run_reconcile(state: &AppState, now: i64) -> usize {
+    billing_reconcile::sweep(state, billing_reconcile::previous_period_start_unix(now))
         .await
         .expect("tick")
 }
@@ -542,19 +541,10 @@ async fn set_customer(state: &AppState, organization: &str) {
 //     Σ(invoice_payments) = $60, NOT total_cents.
 // ===========================================================================
 
-// RECONCILE_LOCK guards `Mutex<()>` - a pure test-serialization token, not
-// shared mutable data accessed across the await. compio::test runs each
-// test on its own single-threaded runtime, so the held guard cannot
-// deadlock another task's poll the way it could under a work-stealing
-// executor.
-#[allow(clippy::await_holding_lock)]
 #[compio::test(crate = "crate::common::live")]
 async fn over_refund_three_way_bound_blocks_credit_laundering() {
     let url = db_url();
     let fx = build_fixture(&url, "launder").await;
-    let _recon = RECONCILE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -575,8 +565,7 @@ async fn over_refund_three_way_bound_blocks_credit_laundering() {
     .await;
     ingest_at(&fx.state, &app, 10_000, period, 1).await;
 
-    let stripe = RecordingStripe::default();
-    assert_eq!(run_reconcile(&fx.state, &stripe, now).await, 1);
+    run_reconcile(&fx.state, now).await;
     let inv = active_invoice_id(&fx.state, organization, period)
         .await
         .expect("invoice");
@@ -752,15 +741,10 @@ async fn cash_refund_targets_recorded_payment_intent_not_invoice() {
 //     destination='credit' appends a refund_to_credit grant, NO Stripe charge reversal.
 // ===========================================================================
 
-// See the allow on `over_refund_three_way_bound_blocks_credit_laundering` above.
-#[allow(clippy::await_holding_lock)]
 #[compio::test(crate = "crate::common::live")]
 async fn cash_refund_issues_re_credit_refund_appends_grant() {
     let url = db_url();
     let fx = build_fixture(&url, "cashcredit").await;
-    let _recon = RECONCILE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -773,7 +757,7 @@ async fn cash_refund_issues_re_credit_refund_appends_grant() {
     ingest_at(&fx.state, &app, 10_000, period, 1).await; // $100, no credit
 
     let stripe = RecordingStripe::default();
-    assert_eq!(run_reconcile(&fx.state, &stripe, now).await, 1);
+    run_reconcile(&fx.state, now).await;
     let inv = active_invoice_id(&fx.state, organization, period)
         .await
         .expect("invoice");
@@ -919,15 +903,10 @@ async fn cash_refund_issues_re_credit_refund_appends_grant() {
 //     refund and ONE Stripe Refund; the ref is written after success.
 // ===========================================================================
 
-// See the allow on `over_refund_three_way_bound_blocks_credit_laundering` above.
-#[allow(clippy::await_holding_lock)]
 #[compio::test(crate = "crate::common::live")]
 async fn refund_replay_is_idempotent_exactly_one() {
     let url = db_url();
     let fx = build_fixture(&url, "replay").await;
-    let _recon = RECONCILE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -940,7 +919,7 @@ async fn refund_replay_is_idempotent_exactly_one() {
     ingest_at(&fx.state, &app, 10_000, period, 1).await;
 
     let stripe = RecordingStripe::default();
-    assert_eq!(run_reconcile(&fx.state, &stripe, now).await, 1);
+    run_reconcile(&fx.state, now).await;
     let inv = active_invoice_id(&fx.state, organization, period)
         .await
         .expect("invoice");
@@ -1141,15 +1120,10 @@ async fn tax_split_refund_returns_proportional_tax() {
 //     Net balance == had the invoice been correct the first time.
 // ===========================================================================
 
-// See the allow on `over_refund_three_way_bound_blocks_credit_laundering` above.
-#[allow(clippy::await_holding_lock)]
 #[compio::test(crate = "crate::common::live")]
 async fn void_reversal_conserves_credit_balance() {
     let url = db_url();
     let fx = build_fixture(&url, "voidrev").await;
-    let _recon = RECONCILE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -1171,7 +1145,7 @@ async fn void_reversal_conserves_credit_balance() {
     ingest_at(&fx.state, &app, 600, period, 1).await;
 
     let stripe = RecordingStripe::default();
-    assert_eq!(run_reconcile(&fx.state, &stripe, now).await, 1);
+    run_reconcile(&fx.state, now).await;
     let inv_a = active_invoice_id(&fx.state, organization, period)
         .await
         .expect("invoice A");
@@ -1238,15 +1212,10 @@ async fn void_reversal_conserves_credit_balance() {
 //     refunds exactly Σpayments − Σcash-refunds-issued − total(new), NOT double.
 // ===========================================================================
 
-// See the allow on `over_refund_three_way_bound_blocks_credit_laundering` above.
-#[allow(clippy::await_holding_lock)]
 #[compio::test(crate = "crate::common::live")]
 async fn true_up_subtracts_already_issued_cash_refunds() {
     let url = db_url();
     let fx = build_fixture(&url, "trueup").await;
-    let _recon = RECONCILE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -1260,7 +1229,7 @@ async fn true_up_subtracts_already_issued_cash_refunds() {
     // First bill: $60 of usage → subtotal 6000, total 6000 (no credit). $60 cash collected.
     ingest_at(&fx.state, &app, 6000, period, 1).await;
     let stripe = RecordingStripe::default();
-    assert_eq!(run_reconcile(&fx.state, &stripe, now).await, 1);
+    run_reconcile(&fx.state, now).await;
     let inv_b = active_invoice_id(&fx.state, organization, period)
         .await
         .expect("invoice B");
@@ -1373,15 +1342,10 @@ async fn true_up_subtracts_already_issued_cash_refunds() {
 //     read would have claimed.
 // ===========================================================================
 
-// See the allow on `over_refund_three_way_bound_blocks_credit_laundering` above.
-#[allow(clippy::await_holding_lock)]
 #[compio::test(crate = "crate::common::live")]
 async fn true_up_recomputes_over_collection_under_the_lock() {
     let url = db_url();
     let fx = build_fixture(&url, "trueup-lock").await;
-    let _recon = RECONCILE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
 
     let organization = make_organization(&fx.state, "trueup-lock").await;
     let organization = organization.as_str();
@@ -1528,15 +1492,10 @@ async fn true_up_recomputes_over_collection_under_the_lock() {
 //     the claim for reissue.
 // ===========================================================================
 
-// See the allow on `over_refund_three_way_bound_blocks_credit_laundering` above.
-#[allow(clippy::await_holding_lock)]
 #[compio::test(crate = "crate::common::live")]
 async fn one_active_invoice_per_period_void_releases_claim() {
     let url = db_url();
     let fx = build_fixture(&url, "claim").await;
-    let _recon = RECONCILE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -1549,7 +1508,7 @@ async fn one_active_invoice_per_period_void_releases_claim() {
     ingest_at(&fx.state, &app, 5000, period, 1).await;
 
     let stripe = RecordingStripe::default();
-    assert_eq!(run_reconcile(&fx.state, &stripe, now).await, 1);
+    run_reconcile(&fx.state, now).await;
     let inv1 = active_invoice_id(&fx.state, organization, period)
         .await
         .expect("invoice 1");
@@ -1609,15 +1568,10 @@ async fn one_active_invoice_per_period_void_releases_claim() {
 //     DIFFERENT organization's key is free. Mirrors the PR-2 consume-lock test.
 // ===========================================================================
 
-// See the allow on `over_refund_three_way_bound_blocks_credit_laundering` above.
-#[allow(clippy::await_holding_lock)]
 #[compio::test(crate = "crate::common::live")]
 async fn issue_refund_takes_per_organization_advisory_lock() {
     let url = db_url();
     let fx = build_fixture(&url, "rlock").await;
-    let _recon = RECONCILE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -1631,8 +1585,7 @@ async fn issue_refund_takes_per_organization_advisory_lock() {
     let app = make_owned_app(&fx.state, &plan, organization).await;
     ingest_at(&fx.state, &app, 5000, period, 1).await;
 
-    let stripe = RecordingStripe::default();
-    assert_eq!(run_reconcile(&fx.state, &stripe, now).await, 1);
+    run_reconcile(&fx.state, now).await;
     let inv = active_invoice_id(&fx.state, organization, period)
         .await
         .expect("invoice");
@@ -1709,15 +1662,10 @@ async fn issue_refund_takes_per_organization_advisory_lock() {
 //     allowed, a second $40 (Σ=$80 > $50) is rejected.
 // ===========================================================================
 
-// See the allow on `over_refund_three_way_bound_blocks_credit_laundering` above.
-#[allow(clippy::await_holding_lock)]
 #[compio::test(crate = "crate::common::live")]
 async fn two_refunds_summing_over_cash_second_is_rejected() {
     let url = db_url();
     let fx = build_fixture(&url, "sumcap").await;
-    let _recon = RECONCILE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -1729,8 +1677,7 @@ async fn two_refunds_summing_over_cash_second_is_rejected() {
     let app = make_owned_app(&fx.state, &plan, organization).await;
     ingest_at(&fx.state, &app, 5000, period, 1).await;
 
-    let stripe = RecordingStripe::default();
-    assert_eq!(run_reconcile(&fx.state, &stripe, now).await, 1);
+    run_reconcile(&fx.state, now).await;
     let inv = active_invoice_id(&fx.state, organization, period)
         .await
         .expect("invoice");
@@ -1794,15 +1741,10 @@ async fn two_refunds_summing_over_cash_second_is_rejected() {
 //     same note RAISEs.
 // ===========================================================================
 
-// See the allow on `over_refund_three_way_bound_blocks_credit_laundering` above.
-#[allow(clippy::await_holding_lock)]
 #[compio::test(crate = "crate::common::live")]
 async fn refund_to_credit_double_drive_appends_exactly_one_grant() {
     let url = db_url();
     let fx = build_fixture(&url, "rtcdup").await;
-    let _recon = RECONCILE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -1814,8 +1756,7 @@ async fn refund_to_credit_double_drive_appends_exactly_one_grant() {
     let app = make_owned_app(&fx.state, &plan, organization).await;
     ingest_at(&fx.state, &app, 5000, period, 1).await;
 
-    let stripe = RecordingStripe::default();
-    assert_eq!(run_reconcile(&fx.state, &stripe, now).await, 1);
+    run_reconcile(&fx.state, now).await;
     let inv = active_invoice_id(&fx.state, organization, period)
         .await
         .expect("invoice");
@@ -1900,15 +1841,10 @@ async fn refund_to_credit_double_drive_appends_exactly_one_grant() {
 //     and the balance conserved.
 // ===========================================================================
 
-// See the allow on `over_refund_three_way_bound_blocks_credit_laundering` above.
-#[allow(clippy::await_holding_lock)]
 #[compio::test(crate = "crate::common::live")]
 async fn void_reissue_is_redrivable_after_phase1_crash() {
     let url = db_url();
     let fx = build_fixture(&url, "redrive").await;
-    let _recon = RECONCILE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -1930,7 +1866,7 @@ async fn void_reissue_is_redrivable_after_phase1_crash() {
     ingest_at(&fx.state, &app, 600, period, 1).await;
 
     let stripe = RecordingStripe::default();
-    assert_eq!(run_reconcile(&fx.state, &stripe, now).await, 1);
+    run_reconcile(&fx.state, now).await;
     let inv_a = active_invoice_id(&fx.state, organization, period)
         .await
         .expect("invoice A");
@@ -2380,15 +2316,10 @@ async fn refunds_immutable_trigger_freezes_money_and_status_lifecycle() {
 //     And the void+reissue bridge reports `true_up_refund_id == None && true_up_cents == 0`.
 // ===========================================================================
 
-// See the allow on `over_refund_three_way_bound_blocks_credit_laundering` above.
-#[allow(clippy::await_holding_lock)]
 #[compio::test(crate = "crate::common::live")]
 async fn true_up_noop_when_over_collection_not_positive() {
     let url = db_url();
     let fx = build_fixture(&url, "gap23-noop").await;
-    let _recon = RECONCILE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
 
     let organization = make_organization(&fx.state, "gap23").await;
     let organization = organization.as_str();
@@ -2469,7 +2400,7 @@ async fn true_up_noop_when_over_collection_not_positive() {
     let period = prev_period(now);
     ingest_at(&fx.state, &app, 3000, period, 1).await; // $30
     let stripe = RecordingStripe::default();
-    assert_eq!(run_reconcile(&fx.state, &stripe, now).await, 1);
+    run_reconcile(&fx.state, now).await;
     let inv_b = active_invoice_id(&fx.state, organization, period)
         .await
         .expect("invoice B");
@@ -2517,15 +2448,10 @@ async fn true_up_noop_when_over_collection_not_positive() {
 //       second true-up.
 // ===========================================================================
 
-// See the allow on `over_refund_three_way_bound_blocks_credit_laundering` above.
-#[allow(clippy::await_holding_lock)]
 #[compio::test(crate = "crate::common::live")]
 async fn true_up_redrive_converges_noop_after_issue() {
     let url = db_url();
     let fx = build_fixture(&url, "gap4-redrive").await;
-    let _recon = RECONCILE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
 
     let organization = make_organization(&fx.state, "gap4").await;
     let organization = organization.as_str();
@@ -2609,15 +2535,10 @@ async fn true_up_redrive_converges_noop_after_issue() {
     );
 }
 
-// See the allow on `over_refund_three_way_bound_blocks_credit_laundering` above.
-#[allow(clippy::await_holding_lock)]
 #[compio::test(crate = "crate::common::live")]
 async fn true_up_claim_key_conflict_on_moved_anchor() {
     let url = db_url();
     let fx = build_fixture(&url, "gap4-conflict").await;
-    let _recon = RECONCILE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
 
     let organization = make_organization(&fx.state, "gap4c").await;
     let organization = organization.as_str();

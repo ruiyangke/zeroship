@@ -7,17 +7,17 @@
 //! registry JOINs `app_spend_state`); enforcement rides the PULLed
 //! `RouteEntry.spend_state`, NOT a pushed event.
 //!
-//! For each transition this cron ALSO writes an audit row and constructs a
-//! `ControlEvent::SpendState`. There is no live `ControlEvent` delivery
-//! path today; the event is built for the audit log / future SSE fan-out only.
-//! It is logged (and dropped) here so the wire variant has a producer and the
+//! For each transition this cron constructs a `ControlEvent::SpendState`; the
+//! durable `SpendStateChange` audit row is written by the engine that persists the
+//! transition (see [`SpendEngine::evaluate_all`]). There is no live `ControlEvent`
+//! delivery path today; the event is built for the audit log / future SSE fan-out
+//! only. It is logged (and dropped) here so the wire variant has a producer and the
 //! transition is observable.
 
 use zeroship_core::types::ControlEvent;
 
-use crate::audit::{self, Action, AuditEntry};
 use crate::registry::RegistryError;
-use crate::spend::{spend_state_str, SpendEngine, SpendTransition};
+use crate::spend::{SpendEngine, SpendTransition};
 use crate::AppState;
 
 /// Run one reconcile sweep. Exposed so an integration test can drive a single
@@ -62,38 +62,21 @@ pub async fn tick(state: &AppState) -> Result<usize, RegistryError> {
 
     let transitions = result?;
     for t in &transitions {
-        emit_transition(state, t).await;
+        emit_transition(t);
     }
     Ok(transitions.len())
 }
 
-/// Audit + construct the (currently un-delivered) `ControlEvent::SpendState`
+/// Construct and log the (currently un-delivered) `ControlEvent::SpendState`
 /// for one transition.
-#[allow(clippy::future_not_send)]
-async fn emit_transition(state: &AppState, t: &SpendTransition) {
-    // #8 — enrich the audit detail with the money context, matching the
-    // `{from,to,spend_cents,limit_cents}` shape documented on
-    // `audit::Action::SpendStateChange`.
-    let detail = serde_json::json!({
-        "from": spend_state_str(t.old),
-        "to": spend_state_str(t.new),
-        "spend_cents": t.spend_cents,
-        "limit_cents": t.limit_cents,
-    });
-    audit::log_with_detail(
-        &state.registry,
-        AuditEntry {
-            app_id: Some(&t.app_id),
-            organization_id: None,
-            actor_user_id: None,
-            action: Action::SpendStateChange,
-            resource: Some("spend_state"),
-            source_ip: None,
-        },
-        &detail,
-    )
-    .await;
-
+///
+/// The durable `SpendStateChange` audit row is written by the engine that
+/// persists the transition (see `SpendEngine::evaluate_all`), so the cron and a
+/// direct engine caller do not each audit one transition: the winner of the
+/// compare-and-swap writes it at most once. The insert is best-effort on a
+/// separate connection after the transition commits, so a crash between the two
+/// loses the row rather than duplicating it.
+fn emit_transition(t: &SpendTransition) {
     // D1: built for the audit log / future SSE only — there is no live
     // delivery path. Construct it so the wire variant has a real producer and
     // the transition is observable in logs.

@@ -3,7 +3,7 @@
 //!
 //! FAITHFUL by construction (the same posture as `billing_reconcile_test`): the
 //! tests drive the REAL `cyper`-based [`StripeClient`] against a localhost
-//! mock-Stripe HTTP server, and the REAL `billing_reconcile::tick_with` /
+//! mock-Stripe HTTP server, and the REAL `billing_reconcile::sweep` /
 //! `proration::record_plan_change` — NO shims. The plan-change write path is the
 //! exact server-side code `api.rs::set_plan` runs (`record_plan_change` in a
 //! per-organization-advisory-locked txn). Real Postgres via a configured test
@@ -23,7 +23,6 @@ use uuid::Uuid;
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_control::cron::billing_reconcile;
 use zeroship_control::proration::{self, PlanChangeOutcome, MAX_PLAN_CHANGES_PER_PERIOD};
-use zeroship_control::stripe_client::StripeClient;
 use zeroship_control::{
     AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
 };
@@ -32,11 +31,6 @@ use zeroship_core::AppId;
 fn db_url() -> String {
     common::require_control_db()
 }
-
-/// Serialize the reconcile-driving tests (same rationale as billing_reconcile_test:
-/// `tick_with` single-flights fleet-wide via a `pg_try_advisory_lock`, so two
-/// reconcile tests racing would have one LOSE the lock and skip).
-static RECONCILE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 
@@ -564,13 +558,6 @@ fn period_d(period_start: i64) -> chrono::NaiveDate {
     chrono::NaiveDate::from_ymd_opt(dt.year(), dt.month(), 1).unwrap()
 }
 
-fn dummy_passthrough(fx: &Fixture) -> StripeClient {
-    StripeClient::new(SecretString::new(
-        fx.state.stripe_secret_key.expose_secret().to_string(),
-    ))
-    .with_base_url(fx.state.stripe_base_url.clone())
-}
-
 /// Drive the REAL server-side plan-change path EXACTLY as `api.rs::set_plan` does:
 /// resolve the catalog base fees server-side, then call the SHARED
 /// `proration::record_plan_change_tx` (which takes the per-organization advisory lock,
@@ -693,19 +680,10 @@ async fn read_event(
 ///
 /// RED→GREEN: against the pre-PR-4 segment-blind item key + 2-col line PK, the two
 /// segments collapse to ONE Stripe item / ONE line (segment 1 under-billed).
-// RECONCILE_LOCK guards `Mutex<()>` - a pure test-serialization token, not
-// shared mutable data accessed across the await. compio::test runs each
-// test on its own single-threaded runtime, so the held guard cannot
-// deadlock another task's poll the way it could under a work-stealing
-// executor.
-#[allow(clippy::await_holding_lock)]
 #[compio::test(crate = "crate::common::live")]
 async fn two_segment_change_with_different_fx_posts_two_items_two_lines() {
     let url = db_url();
     let fx = build_fixture(&url, "twoseg").await;
-    let _recon = RECONCILE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
     let days_in_period = proration::days_in_period(period);
@@ -747,11 +725,9 @@ async fn two_segment_change_with_different_fx_posts_two_items_two_lines() {
     // More usage accrues under Pro: cumulative reaches 30000 by period end.
     ingest_at(&fx.state, &app, 26_000, period, 2).await;
 
-    let billed = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now)
+    billing_reconcile::sweep(&fx.state, period)
         .await
         .expect("tick");
-    assert_eq!(billed, 1, "one organization billed");
-
     // EXACTLY 2 distinct Stripe invoice-items (one per segment) + EXACTLY 2 lines.
     assert_eq!(
         fx.mock.count_created("POST", "/v1/invoiceitems"),
@@ -853,15 +829,10 @@ async fn two_segment_change_with_different_fx_posts_two_items_two_lines() {
 /// Each item must carry its own CU suffix in the description and its own
 /// `compute_units`/`usage` metadata; the description-only shape fails every
 /// assertion below.
-// See the allow on `two_segment_change_with_different_fx_posts_two_items_two_lines` above.
-#[allow(clippy::await_holding_lock)]
 #[compio::test(crate = "crate::common::live")]
 async fn each_proration_segment_item_shows_its_own_cu_and_usage() {
     let url = db_url();
     let fx = build_fixture(&url, "segcu").await;
-    let _recon = RECONCILE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -892,11 +863,9 @@ async fn each_proration_segment_item_shows_its_own_cu_and_usage() {
     record_plan_change_like_set_plan(&fx.state, &app, organization, &pro, day11).await;
     ingest_at(&fx.state, &app, 26_000, period, 2).await;
 
-    let billed = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now)
+    billing_reconcile::sweep(&fx.state, period)
         .await
         .expect("tick");
-    assert_eq!(billed, 1, "one organization billed");
-
     // Find the two item POSTs by their segment-aware Idempotency-Key.
     let reqs = fx.mock.requests();
     let item_for_seg = |seg: &str| -> RecordedRequest {
@@ -1034,15 +1003,10 @@ async fn segment_partition_invariants_hold() {
 /// (c) N=0 (no plan change) ⇒ EXACTLY ONE line per app at segment_no=0, full base
 /// fee + full quota + current plan — byte-for-byte the pre-PR-4 behaviour (one
 /// item, one line, one provider-ref).
-// See the allow on `two_segment_change_with_different_fx_posts_two_items_two_lines` above.
-#[allow(clippy::await_holding_lock)]
 #[compio::test(crate = "crate::common::live")]
 async fn no_change_yields_exactly_one_segment_zero_line() {
     let url = db_url();
     let fx = build_fixture(&url, "nochange").await;
-    let _recon = RECONCILE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -1059,11 +1023,9 @@ async fn no_change_yields_exactly_one_segment_zero_line() {
         .unwrap();
     ingest_at(&fx.state, &app, 750, period, 1).await; // 750c, no plan change
 
-    let billed = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now)
+    billing_reconcile::sweep(&fx.state, period)
         .await
         .expect("tick");
-    assert_eq!(billed, 1);
-
     assert_eq!(
         fx.mock.count_created("POST", "/v1/invoiceitems"),
         1,
@@ -1094,15 +1056,10 @@ async fn no_change_yields_exactly_one_segment_zero_line() {
 /// (f) Reconcile re-run does NOT double-post segments. After a full bill, a second
 /// tick is a no-op (period finalized) and the mock saw each segment item created
 /// EXACTLY once.
-// See the allow on `two_segment_change_with_different_fx_posts_two_items_two_lines` above.
-#[allow(clippy::await_holding_lock)]
 #[compio::test(crate = "crate::common::live")]
 async fn reconcile_rerun_does_not_double_post_segments() {
     let url = db_url();
     let fx = build_fixture(&url, "rerun").await;
-    let _recon = RECONCILE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -1128,17 +1085,15 @@ async fn reconcile_rerun_does_not_double_post_segments() {
     record_plan_change_like_set_plan(&fx.state, &app, organization, &pro, mid).await;
     ingest_at(&fx.state, &app, 2_000, period, 2).await; // cumulative 3000
 
-    let billed1 = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now)
+    billing_reconcile::sweep(&fx.state, period)
         .await
         .expect("tick 1");
-    assert_eq!(billed1, 1);
     let items_after_first = fx.mock.count_created("POST", "/v1/invoiceitems");
     assert_eq!(items_after_first, 2, "two segment items on the first bill");
 
-    let billed2 = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now)
+    billing_reconcile::sweep(&fx.state, period)
         .await
         .expect("tick 2");
-    assert_eq!(billed2, 0, "second run is a no-op (period finalized)");
     assert_eq!(
         fx.mock.count_created("POST", "/v1/invoiceitems"),
         2,
@@ -1151,15 +1106,10 @@ async fn reconcile_rerun_does_not_double_post_segments() {
 /// (g) set_plan snapshots usage_at_change SERVER-SIDE (from usage_aggregates), with
 /// server-derived frozen base fees, and a change whose effective period is already
 /// FINALIZED attributes to the NEXT period.
-// See the allow on `two_segment_change_with_different_fx_posts_two_items_two_lines` above.
-#[allow(clippy::await_holding_lock)]
 #[compio::test(crate = "crate::common::live")]
 async fn set_plan_snapshots_server_side_and_finalized_period_attributes_next() {
     let url = db_url();
     let fx = build_fixture(&url, "snap").await;
-    let _recon = RECONCILE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = chrono::Utc::now().timestamp();
 
     seed_weight(&fx.state).await;
@@ -1251,15 +1201,10 @@ async fn set_plan_snapshots_server_side_and_finalized_period_attributes_next() {
 /// (e) Past the per-period cap, set_plan still flips apps.plan_id but records NO
 /// new snapshot, and the reconcile prices the tail under the ACTUALLY-RUNNING plan
 /// (MAJOR-4) — never under a cheaper recorded plan.
-// See the allow on `two_segment_change_with_different_fx_posts_two_items_two_lines` above.
-#[allow(clippy::await_holding_lock)]
 #[compio::test(crate = "crate::common::live")]
 async fn past_cap_flips_plan_and_tail_prices_under_running_plan() {
     let url = db_url();
     let fx = build_fixture(&url, "cap").await;
-    let _recon = RECONCILE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -1354,11 +1299,9 @@ async fn past_cap_flips_plan_and_tail_prices_under_running_plan() {
     // Usage AFTER the cap (the tail). Bill it: the LAST segment must price under
     // the EXPENSIVE running plan (5c/CU), not the cheap recorded one (1c/CU).
     ingest_at(&fx.state, &app, 1_000, period, 1).await;
-    let billed = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now)
+    billing_reconcile::sweep(&fx.state, period)
         .await
         .expect("tick");
-    assert_eq!(billed, 1);
-
     let lines = read_segment_lines(&fx.state, organization, &app).await;
     let last = lines.last().expect("at least one segment");
     assert_eq!(
@@ -1371,15 +1314,10 @@ async fn past_cap_flips_plan_and_tail_prices_under_running_plan() {
 
 /// (d) An END-missing metric floors its segment delta at max(0,…) so a vanished
 /// metric never credits the bill (faithful, end-to-end through the reconcile).
-// See the allow on `two_segment_change_with_different_fx_posts_two_items_two_lines` above.
-#[allow(clippy::await_holding_lock)]
 #[compio::test(crate = "crate::common::live")]
 async fn end_missing_metric_does_not_credit_the_bill() {
     let url = db_url();
     let fx = build_fixture(&url, "floor").await;
-    let _recon = RECONCILE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -1415,11 +1353,9 @@ async fn end_missing_metric_does_not_credit_the_bill() {
     record_plan_change_like_set_plan(&fx.state, &app, organization, &pro, mid).await;
     // No further ingest: period-end requests == 5000 (== the snapshot).
 
-    let billed = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now)
+    billing_reconcile::sweep(&fx.state, period)
         .await
         .expect("tick");
-    assert_eq!(billed, 1, "billed (segment 0 has the 5000 usage)");
-
     let lines = read_segment_lines(&fx.state, organization, &app).await;
     // Segment 0 charged 5000c; segment 1's delta is 0 ⇒ $0 ⇒ NO line (skipped),
     // and crucially NO negative usage that would CREDIT the bill.
@@ -1445,15 +1381,10 @@ async fn end_missing_metric_does_not_credit_the_bill() {
 /// reconcile, and assert the frozen invoice line reflects the catalog value AT
 /// RECONCILE — documenting the intended (operator-gated, open-period-floats-until-
 /// finalize) behaviour.
-// See the allow on `two_segment_change_with_different_fx_posts_two_items_two_lines` above.
-#[allow(clippy::await_holding_lock)]
 #[compio::test(crate = "crate::common::live")]
 async fn segment_pricing_reflects_catalog_at_reconcile_time() {
     let url = db_url();
     let fx = build_fixture(&url, "catalogtime").await;
-    let _recon = RECONCILE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -1496,11 +1427,9 @@ async fn segment_pricing_reflects_catalog_at_reconcile_time() {
         .expect("raise Pro base fee");
 
     let days_in_period = proration::days_in_period(period);
-    let billed = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now)
+    billing_reconcile::sweep(&fx.state, period)
         .await
         .expect("tick");
-    assert_eq!(billed, 1);
-
     let lines = read_segment_lines(&fx.state, organization, &app).await;
     let pro_line = lines
         .iter()
@@ -1536,15 +1465,10 @@ async fn segment_pricing_reflects_catalog_at_reconcile_time() {
 /// provider-ref + a matching Stripe item, then drive a reconcile that builds only
 /// the real (fewer) segments. Assert: the orphan Stripe item is deleted, exactly
 /// the current segment set persists, and the DB subtotal == the Stripe item total.
-// See the allow on `two_segment_change_with_different_fx_posts_two_items_two_lines` above.
-#[allow(clippy::await_holding_lock)]
 #[compio::test(crate = "crate::common::live")]
 async fn shrinking_redrive_removes_orphaned_segment_and_stripe_item() {
     let url = db_url();
     let fx = build_fixture(&url, "orphan").await;
-    let _recon = RECONCILE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -1609,11 +1533,9 @@ async fn shrinking_redrive_removes_orphaned_segment_and_stripe_item() {
 
     // Drive the reconcile: it re-drives the existing draft, builds ONLY segment 0,
     // and must delete the orphan segment 1 (DB line + ref + Stripe item).
-    let billed = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now)
+    billing_reconcile::sweep(&fx.state, period)
         .await
         .expect("tick");
-    assert_eq!(billed, 1, "the re-driven draft finalizes");
-
     // The orphan Stripe item was DELETEd.
     assert!(
         fx.mock.was_item_deleted(&orphan_item_id),
@@ -1656,15 +1578,10 @@ async fn shrinking_redrive_removes_orphaned_segment_and_stripe_item() {
 /// object) must ABORT/SKIP that app's billing rather than silently becoming `{}`
 /// (which would zero the segment START and massively over-count). Assert: the
 /// organization is NOT billed, no Stripe item is posted, and no finalized invoice.
-// See the allow on `two_segment_change_with_different_fx_posts_two_items_two_lines` above.
-#[allow(clippy::await_holding_lock)]
 #[compio::test(crate = "crate::common::live")]
 async fn corrupt_usage_snapshot_skips_app_instead_of_overbilling() {
     let url = db_url();
     let fx = build_fixture(&url, "corrupt").await;
-    let _recon = RECONCILE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -1709,13 +1626,9 @@ async fn corrupt_usage_snapshot_skips_app_instead_of_overbilling() {
 
     // The reconcile must NOT bill this organization (the parse error aborts/skips the
     // app) — it does NOT silently price off an empty snapshot.
-    let billed = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now)
+    billing_reconcile::sweep(&fx.state, period)
         .await
         .expect("tick returns (per-organization error is logged + skipped)");
-    assert_eq!(
-        billed, 0,
-        "the organization with a corrupt snapshot is NOT billed (no over-bill)"
-    );
     assert_eq!(
         fx.mock.count_created("POST", "/v1/invoiceitems"),
         0,

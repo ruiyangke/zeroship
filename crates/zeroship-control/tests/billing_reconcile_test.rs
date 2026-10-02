@@ -40,17 +40,6 @@ fn db_url() -> String {
     common::require_control_db()
 }
 
-/// `billing_reconcile::tick_with`/`sweep` single-flights fleet-wide via
-/// `pg_try_advisory_lock` (production multi-instance safety) — a NON-blocking
-/// `try` lock, so two sweeps racing would have one LOSE the lock and return
-/// `Ok(0)` (skip). Under the default multi-threaded test runner two
-/// reconcile-driving tests would race and the loser's `billed == 1` assertion
-/// would fail. `missing_default_fx` additionally mutates the fleet-wide
-/// `pricing_config` singleton. Serialize the reconcile-driving tests with a
-/// process-wide lock to mirror the production single-flight (a poisoned lock from
-/// a prior panic is recovered).
-static RECONCILE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 
 /// The Stripe API version the client MUST pin. Sourced from the production
@@ -917,6 +906,24 @@ async fn ingest_at(state: &AppState, app: &AppId, requests: u64, period_start: i
     .await;
 }
 
+/// Seed an available credit grant (1 ledger unit = 1 cent) for `organization`.
+async fn insert_credit_grant(state: &AppState, organization: &str, amount_cents: i64) {
+    state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.credit_ledger \
+               (id, organization_id, kind, amount_cents, currency, created_at) \
+             VALUES ($1, $2, 'grant', $3, 'usd', NOW())",
+            &[
+                &zeroship_core::typed_id::new_credit_id(),
+                &organization,
+                &amount_cents,
+            ],
+        )
+        .await
+        .expect("insert credit grant");
+}
+
 /// Ingest a set of CUSTOM metrics (name → raw) for `app` at `period_start`, after
 /// seeding a `1 CU / op` weight for each so they price through the real CU
 /// pipeline. Used by the description-cap / metadata-cap regression tests to drive
@@ -1122,19 +1129,10 @@ async fn read_line_snapshot(
 /// The reconciler builds Stripe invoice items per owned app from REAL
 /// aggregates, then creates + finalizes an invoice — all through the real cyper
 /// client hitting the mock server. Records on `billing_runs`.
-// RECONCILE_LOCK guards `Mutex<()>` - a pure test-serialization token, not
-// shared mutable data accessed across the await. compio::test runs each
-// test on its own single-threaded runtime, so the held guard cannot
-// deadlock another task's poll the way it could under a work-stealing
-// executor.
-#[allow(clippy::await_holding_lock)]
 #[compio::test(crate = "crate::common::live")]
 async fn reconcile_creates_invoice_items_per_app_from_real_aggregates() {
     let url = db_url();
     let fx = build_fixture(&url, "items").await;
-    let _recon = RECONCILE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -1156,10 +1154,9 @@ async fn reconcile_creates_invoice_items_per_app_from_real_aggregates() {
     ingest_at(&fx.state, &app1, 500, period, 1).await; // 500c
     ingest_at(&fx.state, &app2, 250, period, 2).await; // 250c
 
-    let billed = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now)
+    billing_reconcile::sweep(&fx.state, period)
         .await
         .expect("tick");
-    assert_eq!(billed, 1, "one organization billed");
 
     // Two invoice-item creates (one per app) + one invoice create + one finalize.
     assert_eq!(
@@ -1195,15 +1192,10 @@ async fn reconcile_creates_invoice_items_per_app_from_real_aggregates() {
 ///
 /// `make_plan` = 1 CU/request, FX 1c/CU, no included CU. 750 requests ⇒ 750 CU,
 /// 750 billable, amount 750c.
-// See the allow on `reconcile_creates_invoice_items_per_app_from_real_aggregates` above.
-#[allow(clippy::await_holding_lock)]
 #[compio::test(crate = "crate::common::live")]
 async fn single_segment_item_carries_cu_and_full_metadata_amount_unchanged() {
     let url = db_url();
     let fx = build_fixture(&url, "cu1seg").await;
-    let _recon = RECONCILE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -1222,10 +1214,9 @@ async fn single_segment_item_carries_cu_and_full_metadata_amount_unchanged() {
 
     ingest_at(&fx.state, &app, 750, period, 1).await;
 
-    let billed = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now)
+    billing_reconcile::sweep(&fx.state, period)
         .await
         .expect("tick");
-    assert_eq!(billed, 1, "one organization billed");
 
     let reqs = fx.mock.requests();
     let item = reqs
@@ -1316,15 +1307,10 @@ async fn single_segment_item_carries_cu_and_full_metadata_amount_unchanged() {
 ///
 /// 80 custom metrics with long names (each 1 CU/op) → the packed usage blob far
 /// exceeds one 500-char metadata value, forcing the split + the truncation flag.
-// See the allow on `reconcile_creates_invoice_items_per_app_from_real_aggregates` above.
-#[allow(clippy::await_holding_lock)]
 #[compio::test(crate = "crate::common::live")]
 async fn many_metric_item_respects_description_and_metadata_length_caps() {
     let url = db_url();
     let fx = build_fixture(&url, "cucap").await;
-    let _recon = RECONCILE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -1352,10 +1338,9 @@ async fn many_metric_item_respects_description_and_metadata_length_caps() {
         .collect();
     ingest_custom_metrics(&fx.state, &app, &metrics, period, 1).await;
 
-    let billed = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now)
+    billing_reconcile::sweep(&fx.state, period)
         .await
         .expect("tick");
-    assert_eq!(billed, 1, "one organization billed");
 
     let reqs = fx.mock.requests();
     let item = reqs
@@ -1490,15 +1475,10 @@ async fn every_stripe_call_pins_the_api_version() {
 /// THE no-double-bill guarantee. Run the tick TWICE for the same (organization,
 /// period). The second run is a pure no-op via the `billing_runs` PK conflict —
 /// the mock server sees the invoice-item creates EXACTLY ONCE.
-// See the allow on `reconcile_creates_invoice_items_per_app_from_real_aggregates` above.
-#[allow(clippy::await_holding_lock)]
 #[compio::test(crate = "crate::common::live")]
 async fn reconcile_is_idempotent_per_period() {
     let url = db_url();
     let fx = build_fixture(&url, "idem").await;
-    let _recon = RECONCILE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -1516,19 +1496,17 @@ async fn reconcile_is_idempotent_per_period() {
         .unwrap();
     ingest_at(&fx.state, &app, 300, period, 1).await; // 300c
 
-    let billed1 = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now)
+    billing_reconcile::sweep(&fx.state, period)
         .await
         .expect("tick 1");
-    assert_eq!(billed1, 1, "first run bills the organization");
 
     let items_after_first = fx.mock.count_path("POST", "/v1/invoiceitems");
     assert_eq!(items_after_first, 1, "one invoice item on the first run");
 
     // Second run for the SAME period — must be a no-op (already billed).
-    let billed2 = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now)
+    billing_reconcile::sweep(&fx.state, period)
         .await
         .expect("tick 2");
-    assert_eq!(billed2, 0, "second run is a no-op (per-period idempotency)");
 
     // The mock server saw the invoice-item create EXACTLY ONCE total.
     assert_eq!(
@@ -1880,15 +1858,10 @@ async fn setup_session_creates_customer_once() {
 /// Two apps owned by the SAME user_id roll into ONE organization invoice spanning
 /// both apps (proves the owner-join grouping). Apps with no owner row are
 /// skipped (an unowned app gets no invoice).
-// See the allow on `reconcile_creates_invoice_items_per_app_from_real_aggregates` above.
-#[allow(clippy::await_holding_lock)]
 #[compio::test(crate = "crate::common::live")]
 async fn reconcile_groups_apps_by_owner_via_the_organization() {
     let url = db_url();
     let fx = build_fixture(&url, "owner").await;
-    let _recon = RECONCILE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -1920,13 +1893,9 @@ async fn reconcile_groups_apps_by_owner_via_the_organization() {
     ingest_at(&fx.state, &owned_b, 200, period, 2).await; // 200c
     ingest_at(&fx.state, &unowned, 999, period, 3).await; // would be 999c — must NOT bill
 
-    let billed = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now)
+    billing_reconcile::sweep(&fx.state, period)
         .await
         .expect("tick");
-    assert_eq!(
-        billed, 1,
-        "one organization billed (the unowned app is skipped)"
-    );
 
     // One invoice item per OWNED app (2), not 3.
     assert_eq!(
@@ -1948,15 +1917,10 @@ async fn reconcile_groups_apps_by_owner_via_the_organization() {
 /// `stripe_invoice_id IS NULL` (the run was claimed but the process died before
 /// Stripe responded). The next tick RE-DRIVES it — the Stripe call fires with
 /// the SAME deterministic idempotency key and the row is completed.
-// See the allow on `reconcile_creates_invoice_items_per_app_from_real_aggregates` above.
-#[allow(clippy::await_holding_lock)]
 #[compio::test(crate = "crate::common::live")]
 async fn crashed_run_with_null_invoice_id_is_redriven() {
     let url = db_url();
     let fx = build_fixture(&url, "crash").await;
-    let _recon = RECONCILE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -1990,10 +1954,9 @@ async fn crashed_run_with_null_invoice_id_is_redriven() {
         .await
         .expect("pre-insert draft invoice (crash-window claim)");
 
-    let billed = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now)
+    billing_reconcile::sweep(&fx.state, period)
         .await
         .expect("tick");
-    assert_eq!(billed, 1, "the NULL-invoice run is re-driven and completed");
 
     // The Stripe finalize used the deterministic invoice idempotency key.
     let invoice_create = fx
@@ -2031,15 +1994,15 @@ async fn crashed_run_with_null_invoice_id_is_redriven() {
 /// default row REMOVED ⇒ the platform cannot price ⇒ the sweep must ABORT
 /// (error out) and produce NO invoice and NO `billing_runs` row — never a silent
 /// base-only $0 invoice, which would leak revenue.
-// See the allow on `reconcile_creates_invoice_items_per_app_from_real_aggregates` above.
-#[allow(clippy::await_holding_lock)]
+///
+/// This case mutates the fleet-wide `pricing_config` singleton every case in this
+/// shared-database binary reads, so it runs alone in a child copy of the binary
+/// (see the spawner below) rather than racing a sibling's pricing.
 #[compio::test(crate = "crate::common::live")]
+#[ignore = "mutates the fleet-wide pricing_config singleton; its spawner runs it alone in a child"]
 async fn missing_default_fx_aborts_sweep_and_bills_no_one() {
     let url = db_url();
     let fx = build_fixture(&url, "nofx").await;
-    let _recon = RECONCILE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -2114,7 +2077,7 @@ async fn missing_default_fx_aborts_sweep_and_bills_no_one() {
     // The sweep must FAIL CLOSED — abort with an error, not bill $0. Capture the
     // observations FIRST, then restore the singleton, then assert (so a failing
     // assert can never leak the deletion).
-    let res = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now).await;
+    let res = billing_reconcile::sweep(&fx.state, period).await;
     let items = fx.mock.count_path("POST", "/v1/invoiceitems");
     let invoices = fx.mock.count_path("POST", "/v1/invoices");
     let runs = fx
@@ -2153,28 +2116,110 @@ async fn missing_default_fx_aborts_sweep_and_bills_no_one() {
     );
 }
 
-/// Build the real `StripeClient` pointed at the fixture's mock — used by the
-/// reconcile tests so the sweep drives the REAL cyper client (NOT a stub).
-fn dummy_passthrough(fx: &Fixture) -> StripeClient {
-    StripeClient::new(SecretString::new(
-        fx.state.stripe_secret_key.expose_secret().to_string(),
-    ))
-    .with_base_url(fx.state.stripe_base_url.clone())
+/// Run the fleet-wide-singleton case alone in a child (see [`crate::isolated_case`]).
+#[test]
+fn missing_default_fx_aborts_sweep_and_bills_no_one_in_an_isolated_process() {
+    crate::isolated_case::run_alone(
+        "billing_reconcile_test::missing_default_fx_aborts_sweep_and_bills_no_one",
+    );
+}
+
+/// Two lock-free sweeps racing over the SAME organization and period must not
+/// double-process. One active invoice, one created charge per line as seen by the
+/// provider (it replays the deterministic Idempotency-Key), and credit drawn once.
+///
+/// The per-line provider-ref ledger is read before the POST and written after it,
+/// so it cannot arbitrate this race; the guarantees that hold are Stripe's
+/// deterministic item/invoice key and `credit::consume_at_finalize`'s
+/// per-organization advisory lock.
+#[compio::test(crate = "crate::common::live")]
+async fn concurrent_sweeps_over_one_organization_are_exactly_once() {
+    let url = db_url();
+    let fx = build_fixture(&url, "concurrent-sweep").await;
+    let now = now_for_closed_period().await;
+    let period = prev_period(now);
+
+    let organization = make_organization(&fx.state, "concurrent-sweep").await;
+    let organization = organization.as_str();
+    // `make_plan` sets the plan's own FX, so this case never touches the shared
+    // `pricing_config` singleton.
+    let plan = make_plan(&fx.state).await;
+    let app = make_owned_app(&fx.state, &plan, organization).await;
+    fx.state
+        .stripe_store
+        .set_customer(
+            organization,
+            &format!("cus_race_{}", Uuid::new_v4().simple()),
+        )
+        .await
+        .unwrap();
+    // 600 requests x 1 cent = 600c subtotal; the 100c grant is drawn once.
+    ingest_at(&fx.state, &app, 600, period, 1).await;
+    insert_credit_grant(&fx.state, organization, 100).await;
+
+    let (a, b) = futures::future::join(
+        billing_reconcile::sweep(&fx.state, period),
+        billing_reconcile::sweep(&fx.state, period),
+    )
+    .await;
+    a.expect("sweep a");
+    b.expect("sweep b");
+
+    // Exactly ONE active (non-void) invoice, finalized, for this organization+period.
+    let active: i64 = fx
+        .state
+        .control_pg
+        .query(
+            "SELECT COUNT(*)::bigint AS n FROM zeroship.invoices \
+              WHERE organization_id = $1 AND period = $2::date AND status <> 'void'",
+            &[&organization, &period_d(period)],
+        )
+        .await
+        .expect("count active invoices")[0]
+        .get("n");
+    assert_eq!(active, 1, "one active invoice for the organization+period");
+    let invoice = read_invoice(&fx.state, organization, period).await;
+    assert_eq!(
+        invoice.as_ref().map(|(status, _)| status.as_str()),
+        Some("finalized"),
+        "the single active invoice finalized"
+    );
+    assert!(
+        finalized_invoice_id(&fx.state, organization, period)
+            .await
+            .is_some(),
+        "the finalized invoice carries its provider id"
+    );
+
+    // One charge per line as seen by the provider: the racing duplicate POST carried
+    // the same deterministic Idempotency-Key, so the mock replayed it and created
+    // no second object.
+    assert_eq!(
+        fx.mock.count_created("POST", "/v1/invoiceitems"),
+        1,
+        "the provider deduped the racing invoice-item POST to one created charge"
+    );
+
+    // Credit consumed once: a double-consume would leave the balance below zero.
+    let balance = zeroship_control::credit::balance(&*fx.state.control_pg, organization, "usd")
+        .await
+        .expect("read credit balance");
+    assert_eq!(balance, 0, "the 100c grant was drawn exactly once");
+    let (_, total) = invoice.expect("invoice exists");
+    assert_eq!(
+        total, 500,
+        "subtotal 600 - credit 100 once, no double credit"
+    );
 }
 
 /// A partial post then crash, followed by a re-drive AFTER Stripe's
 /// Idempotency-Key window has expired (dedupe OFF). The per-app LEDGER — not
 /// Stripe's 24h key — must guarantee app A's invoice item is created EXACTLY
 /// ONCE; the re-drive posts ONLY app B.
-// See the allow on `reconcile_creates_invoice_items_per_app_from_real_aggregates` above.
-#[allow(clippy::await_holding_lock)]
 #[compio::test(crate = "crate::common::live")]
 async fn partial_post_then_crash_does_not_double_bill_app_a() {
     let url = db_url();
     let fx = build_fixture(&url, "partial").await;
-    let _recon = RECONCILE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -2196,15 +2241,11 @@ async fn partial_post_then_crash_does_not_double_bill_app_a() {
 
     // First drive: crashes after the first invoice item posts.
     fx.mock.fail_after_invoice_items(1);
-    let res = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now).await;
+    billing_reconcile::sweep(&fx.state, period)
+        .await
+        .expect("sweep swallows the per-organization error");
     fx.mock.clear_fault();
-    // The sweep swallows per-organization errors → Ok(0) (nobody fully billed), but
-    // exactly ONE item must have posted + been ledgered.
-    assert_eq!(
-        res.expect("tick swallows the per-organization error"),
-        0,
-        "no organization fully billed on the crashed drive"
-    );
+    // Exactly ONE item must have posted + been ledgered before the crash.
 
     let created_after_crash = fx.mock.count_created("POST", "/v1/invoiceitems");
     assert_eq!(
@@ -2226,13 +2267,9 @@ async fn partial_post_then_crash_does_not_double_bill_app_a() {
 
     // Re-drive with a healthy client — the ledger must skip the already-posted
     // app and post ONLY the remaining one.
-    let billed = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now)
+    billing_reconcile::sweep(&fx.state, period)
         .await
         .expect("re-drive tick");
-    assert_eq!(
-        billed, 1,
-        "the organization is now fully billed on the re-drive"
-    );
 
     // THE guarantee: total CREATED items == 2 (A once + B once), NOT 3 — even
     // though Stripe's key window expired. The ledger, not Stripe, enforced this.
@@ -2261,15 +2298,10 @@ async fn partial_post_then_crash_does_not_double_bill_app_a() {
 /// Idempotency-Key window has expired (dedupe OFF) must NOT post a second item —
 /// the claim-then-call intent row + the deterministic metadata LOOKUP adopt the
 /// already-posted item. The app's invoice item is created EXACTLY ONCE.
-// See the allow on `reconcile_creates_invoice_items_per_app_from_real_aggregates` above.
-#[allow(clippy::await_holding_lock)]
 #[compio::test(crate = "crate::common::live")]
 async fn post_then_crash_before_ledger_does_not_double_bill_after_24h() {
     let url = db_url();
     let fx = build_fixture(&url, "c1crash").await;
-    let _recon = RECONCILE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -2290,13 +2322,10 @@ async fn post_then_crash_before_ledger_does_not_double_bill_after_24h() {
     // First drive: the item posts to Stripe, then we crash before the ledger
     // confirms it.
     fx.mock.post_then_crash_invoice_item();
-    let res = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now).await;
+    billing_reconcile::sweep(&fx.state, period)
+        .await
+        .expect("sweep swallows the per-organization error");
     fx.mock.clear_fault();
-    assert_eq!(
-        res.expect("sweep swallows the per-organization error"),
-        0,
-        "no organization fully billed on the crashed drive"
-    );
 
     // The item DID post to Stripe exactly once on the crashed drive.
     assert_eq!(
@@ -2322,13 +2351,9 @@ async fn post_then_crash_before_ledger_does_not_double_bill_after_24h() {
 
     // Re-drive with a healthy client. The NULL intent row + the metadata lookup
     // must ADOPT the already-posted item rather than POST a duplicate.
-    let billed = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now)
+    billing_reconcile::sweep(&fx.state, period)
         .await
         .expect("re-drive tick");
-    assert_eq!(
-        billed, 1,
-        "the organization is fully billed on the re-drive"
-    );
 
     // THE guarantee: the app's invoice item was CREATED exactly once across both
     // drives — even though Stripe's key window expired. The ledger + metadata
@@ -2366,15 +2391,10 @@ async fn post_then_crash_before_ledger_does_not_double_bill_after_24h() {
 /// A normal (≤24h) re-drive of the same crash window is STILL idempotent: with
 /// dedupe ON, the re-driven POST replays Stripe's original object (no new item),
 /// so the deterministic Idempotency-Key path also yields exactly one created item.
-// See the allow on `reconcile_creates_invoice_items_per_app_from_real_aggregates` above.
-#[allow(clippy::await_holding_lock)]
 #[compio::test(crate = "crate::common::live")]
 async fn post_then_crash_redrive_within_24h_is_idempotent() {
     let url = db_url();
     let fx = build_fixture(&url, "c1within").await;
-    let _recon = RECONCILE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -2393,7 +2413,7 @@ async fn post_then_crash_redrive_within_24h_is_idempotent() {
     ingest_at(&fx.state, &app, 320, period, 1).await; // 320c
 
     fx.mock.post_then_crash_invoice_item();
-    let _ = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now).await;
+    let _ = billing_reconcile::sweep(&fx.state, period).await;
     fx.mock.clear_fault();
     assert_eq!(
         fx.mock.count_created("POST", "/v1/invoiceitems"),
@@ -2402,10 +2422,9 @@ async fn post_then_crash_redrive_within_24h_is_idempotent() {
     );
 
     // Re-drive WITHIN 24h: dedupe stays ON. Stripe replays the original item.
-    let billed = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now)
+    billing_reconcile::sweep(&fx.state, period)
         .await
         .expect("re-drive within 24h");
-    assert_eq!(billed, 1, "organization billed on the re-drive");
     assert_eq!(
         fx.mock.count_created("POST", "/v1/invoiceitems"),
         1,
@@ -2431,15 +2450,10 @@ async fn post_then_crash_redrive_within_24h_is_idempotent() {
 ///
 /// Persisting the draft id before finalize + re-finalizing
 /// THAT draft on re-drive makes the finalized invoice carry the real amount.
-// See the allow on `reconcile_creates_invoice_items_per_app_from_real_aggregates` above.
-#[allow(clippy::await_holding_lock)]
 #[compio::test(crate = "crate::common::live")]
 async fn archived_app_open_invoice_finalizes_original_draft_after_24h() {
     let url = db_url();
     let fx = build_fixture(&url, "c2crash").await;
-    let _recon = RECONCILE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -2459,13 +2473,10 @@ async fn archived_app_open_invoice_finalizes_original_draft_after_24h() {
 
     // First drive: items post, draft is created + persisted, then finalize crashes.
     fx.mock.crash_on_finalize();
-    let res = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now).await;
+    billing_reconcile::sweep(&fx.state, period)
+        .await
+        .expect("sweep swallows the per-organization error");
     fx.mock.clear_fault();
-    assert_eq!(
-        res.expect("sweep swallows the per-organization error"),
-        0,
-        "not fully billed (finalize crashed)"
-    );
 
     // The item posted, the draft was created exactly once and PERSISTED.
     assert_eq!(
@@ -2511,13 +2522,9 @@ async fn archived_app_open_invoice_finalizes_original_draft_after_24h() {
     // Re-drive with a healthy client after archive: billing retains the app's
     // usage, ownership, line, and draft identity, so it must FINALIZE the
     // EXISTING draft rather than create a new empty one.
-    let billed = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now)
+    billing_reconcile::sweep(&fx.state, period)
         .await
         .expect("re-drive tick");
-    assert_eq!(
-        billed, 1,
-        "the organization is fully billed on the re-drive"
-    );
 
     // THE guarantee: still exactly ONE draft created across both drives (no new
     // empty draft), and the finalize targeted the ORIGINAL draft id.
@@ -2663,15 +2670,10 @@ fn force_reconcile_route(cfg: &mut web::ServiceConfig) {
 ///
 /// The gate is load-bearing: without `check_auth`, the
 /// no-bearer request would 200 + bill — a privilege bypass.
-// See the allow on `reconcile_creates_invoice_items_per_app_from_real_aggregates` above.
-#[allow(clippy::await_holding_lock)]
 #[compio::test(crate = "crate::common::live")]
 async fn force_reconcile_endpoint_is_operator_gated_and_drives_a_chosen_period() {
     let url = db_url();
     let fx = build_fixture(&url, "force").await;
-    let _recon = RECONCILE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -2760,15 +2762,10 @@ async fn force_reconcile_endpoint_is_operator_gated_and_drives_a_chosen_period()
 // iterating usage keys.
 // ===========================================================================
 
-// See the allow on `reconcile_creates_invoice_items_per_app_from_real_aggregates` above.
-#[allow(clippy::await_holding_lock)]
 #[compio::test(crate = "crate::common::live")]
 async fn finalized_line_replays_persisted_amount_bit_for_bit_via_bill_organization() {
     let url = db_url();
     let fx = build_fixture(&url, "c1replay").await;
-    let _recon = RECONCILE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -2812,10 +2809,9 @@ async fn finalized_line_replays_persisted_amount_bit_for_bit_via_bill_organizati
     ingest_at(&fx.state, &app, 640, period, 1).await; // 640 requests → 640 CU → 640c
 
     // Drive the REAL bill_organization path (via the sweep) against live PG + mock.
-    let billed = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now)
+    billing_reconcile::sweep(&fx.state, period)
         .await
         .expect("tick");
-    assert_eq!(billed, 1, "the organization is billed");
     assert_eq!(
         read_invoice(&fx.state, organization, period).await,
         Some(("finalized".to_string(), 640)),
@@ -2863,15 +2859,10 @@ async fn finalized_line_replays_persisted_amount_bit_for_bit_via_bill_organizati
 // error-loop forever leaving the DB stranded at 'draft'.
 // ===========================================================================
 
-// See the allow on `reconcile_creates_invoice_items_per_app_from_real_aggregates` above.
-#[allow(clippy::await_holding_lock)]
 #[compio::test(crate = "crate::common::live")]
 async fn refinalize_already_finalized_converges_locally() {
     let url = db_url();
     let fx = build_fixture(&url, "m2converge").await;
-    let _recon = RECONCILE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -2893,18 +2884,11 @@ async fn refinalize_already_finalized_converges_locally() {
     // is ALREADY finalized on Stripe (the crash-after-finalize window). The drive
     // must CONVERGE the local finalize, not error-loop.
     fx.mock.finalize_already_finalized();
-    // `billed` is a FLEET-wide count (the sweep bills every un-finalized organization
-    // with usage in `period`), so other tests' leftovers can inflate it; assert
-    // on THIS organization's converged outcome below rather than the exact count. The
-    // guarantee under test is that the drive did NOT error-loop (it returned Ok and
-    // this organization converged).
-    let billed = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now)
+    // The drive must NOT error-loop; assert on THIS organization's converged
+    // durable outcome below rather than any fleet-wide count.
+    billing_reconcile::sweep(&fx.state, period)
         .await
         .expect("tick converges on already-finalized (no error loop)");
-    assert!(
-        billed >= 1,
-        "the re-finalize converges (at least this organization billed)"
-    );
 
     // The DB is now finalized at the real amount — NOT stranded at 'draft'.
     assert_eq!(
@@ -2941,15 +2925,10 @@ async fn refinalize_already_finalized_converges_locally() {
 // retry) and is NEVER finalized-without-ref.
 // ===========================================================================
 
-// See the allow on `reconcile_creates_invoice_items_per_app_from_real_aggregates` above.
-#[allow(clippy::await_holding_lock)]
 #[compio::test(crate = "crate::common::live")]
 async fn finalize_and_invoice_ref_commit_atomically() {
     let url = db_url();
     let fx = build_fixture(&url, "m1atomic").await;
-    let _recon = RECONCILE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     // Use a DISTINCT closed period (~5 months back) so this test's PERMANENT
     // draft-invoice leftover (the finalize is intentionally never allowed to
     // commit) can never be swept by a sibling reconcile test billing the
@@ -3014,7 +2993,7 @@ async fn finalize_and_invoice_ref_commit_atomically() {
     // The colliding finalize is a per-organization error the sweep swallows + continues
     // past (so the tick still returns Ok). We assert on THIS organization's state below
     // rather than the fleet-wide count (other tests' creators may also be swept).
-    let _ = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now)
+    let _ = billing_reconcile::sweep(&fx.state, period)
         .await
         .expect("sweep swallows the per-organization error and returns Ok");
 

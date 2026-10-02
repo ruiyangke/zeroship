@@ -17,22 +17,11 @@ use uuid::Uuid;
 use zeroship_control::metering::{current_period_start_unix, Metering, UsageAggregate};
 use zeroship_control::spend::SpendEngine;
 use zeroship_control::Registry;
-use zeroship_core::{types::SpendState, AppId};
+use zeroship_core::AppId;
 
 fn db_url() -> String {
     common::require_control_db()
 }
-
-/// `SpendEngine::evaluate_all` is a FLEET-WIDE sweep (`SELECT id FROM apps` →
-/// price + transition every app). In production it is single-flighted by the
-/// reconcile cron's `pg_try_advisory_lock`, so two sweeps never run at once. The
-/// default multi-threaded test runner would otherwise run two `evaluate_all`
-/// tests concurrently — each seeing the OTHER's freshly-seeded Block-bound app
-/// and racing to transition it (double history rows / a stolen transition).
-/// Serialize the sweep-driving tests with a process-wide lock to mirror the
-/// production single-flight (a poisoned lock from a prior panic is recovered —
-/// we still want the next test to run).
-static SWEEP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 async fn pg(db_url: &str) -> compio_postgres::Client {
     let (client, conn) = connect(db_url, NoTls).await.expect("pg connect");
@@ -51,6 +40,9 @@ async fn make_app_on_priced_plan(
     client: &compio_postgres::Client,
     spend_limit_default_cents: i64,
 ) -> (String, AppId) {
+    // The metric catalog must exist before the weight FK. Seed it here so a case
+    // is self-sufficient regardless of which sibling cases ran first.
+    common::seed_metric_catalog(client, "requests").await;
     // Ensure the `requests` weight is exactly 1 CU / op for this assertion,
     // independent of any future global seed re-tuning.
     client
@@ -81,26 +73,42 @@ async fn make_app_on_priced_plan(
     (plan_id, app)
 }
 
-async fn seed_requests(metering: &Metering, app: &AppId, requests: u64) {
-    let write = metering
-        .replace_period_snapshot(
-            current_period_start_unix(),
-            &[UsageAggregate {
-                app_id: app.clone(),
-                metric: "requests".to_string(),
-                total: i64::try_from(requests).expect("test requests fit i64"),
-            }],
+/// Seed THIS app's current-period `requests` total with a per-app upsert. A
+/// fleet-wide `replace_period_snapshot` rewrite deletes every other case's
+/// current-period rows, so a case touches only its own row.
+async fn seed_requests(client: &compio_postgres::Client, app: &AppId, requests: u64) {
+    common::seed_metric_catalog(client, "requests").await;
+    let period = current_period_start_unix();
+    let requests = i64::try_from(requests).expect("test requests fit i64");
+    let prior: Option<i64> = client
+        .query(
+            "SELECT total FROM zeroship.usage_aggregates \
+              WHERE app_id = $1 AND period = $2::date AND metric = 'requests'",
+            &[&app.as_str(), &common::period_date(period)],
         )
         .await
-        .expect("seed usage snapshot");
+        .expect("read prior usage")
+        .first()
+        .map(|r| r.get("total"));
     // Checked rather than silenced: a seed that reports a decrease means a
-    // previous test left a HIGHER total for this app in the same period, so the
+    // previous run left a HIGHER total for this app in the same period, so the
     // fixture is lying about its starting state.
-    assert!(
-        write.decreased.is_empty(),
-        "seeding must not lower an existing total; fixture state is dirty: {:?}",
-        write.decreased
-    );
+    if let Some(prior) = prior {
+        assert!(
+            prior <= requests,
+            "seeding must not lower an existing total; fixture state is dirty: {prior} -> {requests}"
+        );
+    }
+    client
+        .execute(
+            "INSERT INTO zeroship.usage_aggregates AS u (app_id, period, metric, total, updated_at) \
+             VALUES ($1, $2::date, 'requests', $3, NOW()) \
+             ON CONFLICT (app_id, period, metric) DO UPDATE SET \
+               total = EXCLUDED.total, updated_at = NOW()",
+            &[&app.as_str(), &common::period_date(period), &requests],
+        )
+        .await
+        .expect("seed usage");
 }
 
 /// Read the persisted `(state, history_count)` for an app.
@@ -136,23 +144,17 @@ async fn read_state(client: &compio_postgres::Client, app: &AppId) -> (Option<St
 /// signal that the projection is unsound. This asserts the signal exists; it does NOT
 /// assert any enforcement behaviour, because refusing a decrease is an operator policy
 /// call (a legitimate dedup fix or bad-event purge also lowers a total).
-// SWEEP_LOCK guards `Mutex<()>` - a pure test-serialization token (see the
-// doc comment above), not shared mutable data accessed across the await.
-// compio::test runs each test on its own single-threaded runtime, so the
-// held guard cannot deadlock another task's poll the way it could under a
-// work-stealing executor.
-#[allow(clippy::await_holding_lock)]
 #[compio::test(crate = "crate::common::live")]
 async fn period_rewrite_reports_a_total_that_shrank() {
     let url = db_url();
     let client = pg(&url).await;
-    let _sweep = SWEEP_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let registry = Registry::new(&url).await.expect("registry");
     let metering = Metering::new(registry);
     let (_plan, app) = make_app_on_priced_plan(&client, 100).await;
-    let period = current_period_start_unix();
+    // `replace_period_snapshot` REWRITES every row for its period, so this case
+    // reserves a private calendar month: the rewrite can then only touch this
+    // case's own row.
+    let period = common::next_isolated_period().await;
 
     let agg = |total: i64| {
         vec![UsageAggregate {
@@ -210,15 +212,10 @@ async fn period_rewrite_reports_a_total_that_shrank() {
     );
 }
 
-// See the allow on `period_rewrite_reports_a_total_that_shrank` above.
-#[allow(clippy::await_holding_lock)]
 #[compio::test(crate = "crate::common::live")]
 async fn evaluate_all_persists_and_returns_transitions() {
     let url = db_url();
     let client = pg(&url).await;
-    let _sweep = SWEEP_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let registry = Registry::new(&url).await.expect("registry");
     let metering = Metering::new(registry.clone());
     let engine = SpendEngine::new(registry);
@@ -226,19 +223,16 @@ async fn evaluate_all_persists_and_returns_transitions() {
     // Plan limit = 100 cents; 1 cent per request. Ingest 100 requests into the
     // CURRENT period ⇒ spend = 100 cents = 100% ⇒ Block.
     let (_plan, app) = make_app_on_priced_plan(&client, 100).await;
-    seed_requests(&metering, &app, 100).await;
+    seed_requests(&client, &app, 100).await;
     // Sanity: usage landed in the current period.
     let period = current_period_start_unix();
     assert_eq!(metering.total(&app, period, "requests").await.unwrap(), 100);
 
-    // First evaluation: Allow → Block (a transition). Only OUR app should be
-    // asserted (the fleet may contain other test apps; filter to ours).
-    let transitions = engine.evaluate_all().await.expect("evaluate_all");
-    let ours: Vec<_> = transitions.iter().filter(|t| t.app_id == app).collect();
-    assert_eq!(ours.len(), 1, "our app transitioned exactly once");
-    assert_eq!(ours[0].old, SpendState::Allow);
-    assert_eq!(ours[0].new, SpendState::Block);
-
+    // First evaluation: Allow -> Block. The durable per-app state row is asserted
+    // (the fleet contains other test apps; the state row is keyed by our app). The
+    // transition write is a compare-and-swap, so a concurrent sibling sweep that
+    // derived the same transition cannot append a second history row.
+    engine.evaluate_all().await.expect("evaluate_all");
     let (state, hist) = read_state(&client, &app).await;
     assert_eq!(state.as_deref(), Some("block"), "persisted state is block");
     assert_eq!(
@@ -246,13 +240,9 @@ async fn evaluate_all_persists_and_returns_transitions() {
         "exactly one history row appended on the transition"
     );
 
-    // Idempotent: a second evaluation with unchanged usage/limit yields NO new
-    // transition for our app and appends NO new history row.
-    let transitions2 = engine.evaluate_all().await.expect("evaluate_all #2");
-    assert!(
-        !transitions2.iter().any(|t| t.app_id == app),
-        "no transition on a stable second tick",
-    );
+    // Idempotent: a second evaluation with unchanged usage/limit appends NO new
+    // history row.
+    engine.evaluate_all().await.expect("evaluate_all #2");
     let (_state2, hist2) = read_state(&client, &app).await;
     assert_eq!(hist2, 1, "no extra history row on a stable tick");
 }
@@ -264,26 +254,18 @@ async fn evaluate_all_persists_and_returns_transitions() {
 /// `limit_cents` (they are written from the same values inside ONE
 /// transaction). A crash-induced half-write (state with no history, or vice
 /// versa) would fail this consistency check.
-// See the allow on `period_rewrite_reports_a_total_that_shrank` above.
-#[allow(clippy::await_holding_lock)]
 #[compio::test(crate = "crate::common::live")]
 async fn transition_writes_state_and_history_atomically_and_consistent() {
     let url = db_url();
     let client = pg(&url).await;
-    let _sweep = SWEEP_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let registry = Registry::new(&url).await.expect("registry");
-    let metering = Metering::new(registry.clone());
     let engine = SpendEngine::new(registry);
 
     // Limit 100 cents, 1 cent/request, 100 requests ⇒ 100% ⇒ Block.
     let (_plan, app) = make_app_on_priced_plan(&client, 100).await;
-    seed_requests(&metering, &app, 100).await;
+    seed_requests(&client, &app, 100).await;
 
-    let transitions = engine.evaluate_all().await.expect("evaluate_all");
-    let ours: Vec<_> = transitions.iter().filter(|t| t.app_id == app).collect();
-    assert_eq!(ours.len(), 1, "our app transitioned once");
+    engine.evaluate_all().await.expect("evaluate_all");
 
     // The state row exists.
     let state_rows = client
@@ -330,8 +312,6 @@ async fn transition_writes_state_and_history_atomically_and_consistent() {
     );
 }
 
-// See the allow on `period_rewrite_reports_a_total_that_shrank` above.
-#[allow(clippy::await_holding_lock)]
 #[compio::test(crate = "crate::common::live")]
 async fn overflowing_spend_is_skipped_not_clamped_and_blocked() {
     // MAJOR-1: an app whose priced `spend_cents` overflows i64 must be SKIPPED
@@ -340,13 +320,11 @@ async fn overflowing_spend_is_skipped_not_clamped_and_blocked() {
     // enforcement and reconcile agree.
     let url = db_url();
     let client = pg(&url).await;
-    let _sweep = SWEEP_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let registry = Registry::new(&url).await.expect("registry");
-    let metering = Metering::new(registry.clone());
     let engine = SpendEngine::new(registry);
 
+    // The metric catalog must exist before the weight FK.
+    common::seed_metric_catalog(&client, "requests").await;
     // Force the `requests` weight to exactly 1 CU/op for a deterministic CU total.
     client
         .execute(
@@ -380,14 +358,10 @@ async fn overflowing_spend_is_skipped_not_clamped_and_blocked() {
     let app = common::seed_app(&client, &name, &plan_id).await;
 
     // Usage = i64::MAX requests in the current period.
-    seed_requests(&metering, &app, i64::MAX as u64).await;
+    seed_requests(&client, &app, i64::MAX as u64).await;
 
     // The sweep must NOT transition (skip) our app, and write NO state row for it.
-    let transitions = engine.evaluate_all().await.expect("evaluate_all");
-    assert!(
-        !transitions.iter().any(|t| t.app_id == app),
-        "an overflowing-spend app is SKIPPED (no transition), not clamped-and-Blocked",
-    );
+    engine.evaluate_all().await.expect("evaluate_all");
     let (state, hist) = read_state(&client, &app).await;
     assert_eq!(
         state, None,
@@ -396,8 +370,6 @@ async fn overflowing_spend_is_skipped_not_clamped_and_blocked() {
     assert_eq!(hist, 0, "no spend_state_history row for the skipped app");
 }
 
-// See the allow on `period_rewrite_reports_a_total_that_shrank` above.
-#[allow(clippy::await_holding_lock)]
 #[compio::test(crate = "crate::common::live")]
 async fn raising_limit_recovers_block_immediately() {
     // Faithful PG exercise of the raised-limit recovery: an app pinned at Block
@@ -405,15 +377,11 @@ async fn raising_limit_recovers_block_immediately() {
     // above the deadband (deadband would otherwise hold Block at a fixed cap).
     let url = db_url();
     let client = pg(&url).await;
-    let _sweep = SWEEP_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let registry = Registry::new(&url).await.expect("registry");
-    let metering = Metering::new(registry.clone());
     let engine = SpendEngine::new(registry);
 
     let (_plan, app) = make_app_on_priced_plan(&client, 100).await;
-    seed_requests(&metering, &app, 100).await;
+    seed_requests(&client, &app, 100).await;
 
     // Tick 1: Block.
     engine.evaluate_all().await.unwrap();
@@ -424,12 +392,7 @@ async fn raising_limit_recovers_block_immediately() {
 
     // Tick 2: immediate recovery to Allow (deadband bypassed by the limit
     // change), and a second history row recording Block → Allow.
-    let t = engine.evaluate_all().await.unwrap();
-    let ours: Vec<_> = t.iter().filter(|x| x.app_id == app).collect();
-    assert_eq!(ours.len(), 1);
-    assert_eq!(ours[0].old, SpendState::Block);
-    assert_eq!(ours[0].new, SpendState::Allow);
-
+    engine.evaluate_all().await.unwrap();
     let (state, hist) = read_state(&client, &app).await;
     assert_eq!(state.as_deref(), Some("allow"));
     assert_eq!(hist, 2, "Block\u{2192}Allow appends a second history row");
@@ -443,23 +406,17 @@ async fn raising_limit_recovers_block_immediately() {
 // in the redesigned schema).
 // ---------------------------------------------------------------------------
 
-// See the allow on `period_rewrite_reports_a_total_that_shrank` above.
-#[allow(clippy::await_holding_lock)]
 #[compio::test(crate = "crate::common::live")]
 async fn set_limit_writes_only_app_spend_limit_and_fleet_eval_reflects_it() {
     let url = db_url();
     let client = pg(&url).await;
-    let _sweep = SWEEP_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let registry = Registry::new(&url).await.expect("registry");
-    let metering = Metering::new(registry.clone());
     let engine = SpendEngine::new(registry);
 
     // Plan default = 100c. Ingest 100 requests = 100c ⇒ at the plan default this
     // is 100% ⇒ Block.
     let (_plan, app) = make_app_on_priced_plan(&client, 100).await;
-    seed_requests(&metering, &app, 100).await;
+    seed_requests(&client, &app, 100).await;
 
     // Set a generous override BEFORE the first eval. It must land in the dedicated
     // CONFIG table `app_spend_limit` — NOT in `app_spend_state` (which has no
@@ -503,22 +460,16 @@ async fn set_limit_writes_only_app_spend_limit_and_fleet_eval_reflects_it() {
     );
 }
 
-// See the allow on `period_rewrite_reports_a_total_that_shrank` above.
-#[allow(clippy::await_holding_lock)]
 #[compio::test(crate = "crate::common::live")]
 async fn transition_history_row_binds_non_null_period() {
     let url = db_url();
     let client = pg(&url).await;
-    let _sweep = SWEEP_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let registry = Registry::new(&url).await.expect("registry");
-    let metering = Metering::new(registry.clone());
     let engine = SpendEngine::new(registry);
 
     // 100c cap, 100 requests ⇒ Block (a transition that writes history).
     let (_plan, app) = make_app_on_priced_plan(&client, 100).await;
-    seed_requests(&metering, &app, 100).await;
+    seed_requests(&client, &app, 100).await;
     engine.evaluate_all().await.unwrap();
 
     // `spend_state_history.period` is NOT NULL in the redesigned schema — the
@@ -541,4 +492,216 @@ async fn transition_history_row_binds_non_null_period() {
         1,
         "the history period is a first-of-month billing_period DATE"
     );
+}
+
+/// A fleet sweep must not abort when an app is deleted between the app-list
+/// scan and that app's state read. In production the deletion funnel runs
+/// concurrently with the spend cron, so an app can be gone by the time the
+/// sweep reaches it; the sweep owes every other app a verdict regardless.
+///
+/// THE INTERLEAVING IS FORCED, not raced: the subject holds `zeroship.plans`
+/// exclusively so the sweep blocks in `PlanCatalog::list` - which runs AFTER it
+/// has already read the app ids on its own connection - then deletes the app and
+/// releases. `pg_stat_activity` proves the sweep is the backend waiting on that
+/// lock before the delete happens.
+#[compio::test(crate = "crate::common::live")]
+async fn evaluate_all_skips_an_app_deleted_mid_sweep() {
+    use std::time::Duration;
+
+    let url = db_url();
+    let client = pg(&url).await;
+    let registry = Registry::new(&url).await.expect("registry");
+    let engine = SpendEngine::new(registry);
+    common::seed_pricing_catalog(&client).await;
+
+    let (_plan, app) = make_app_on_priced_plan(&client, 100).await;
+    seed_requests(&client, &app, 100).await;
+
+    // A side session that holds `plans` exclusively for the duration of the
+    // interleaving. The sweep reads its app list first, then blocks in
+    // `catalog.list` until this session commits.
+    let (holder, holder_conn) = connect(&url, NoTls).await.expect("holder connect");
+    crate::common::live::spawn(async move {
+        let _ = holder_conn.run().await;
+    });
+    let holder_pid: i32 = holder
+        .query("SELECT pg_backend_pid() AS pid", &[])
+        .await
+        .expect("holder pid")[0]
+        .get("pid");
+    holder
+        .batch_execute("BEGIN; LOCK TABLE zeroship.plans IN ACCESS EXCLUSIVE MODE")
+        .await
+        .expect("hold plans exclusively");
+
+    let sweep = compio::runtime::spawn(async move { engine.evaluate_all().await });
+
+    let mut blocked = false;
+    for _ in 0..200 {
+        let waiting: bool = client
+            .query(
+                "SELECT EXISTS ( \
+                   SELECT 1 FROM pg_stat_activity a \
+                     JOIN pg_locks l ON l.pid = a.pid \
+                    WHERE NOT l.granted AND a.wait_event_type = 'Lock' \
+                      AND a.query LIKE '%FROM zeroship.plans ORDER BY id%' \
+                      AND $1 = ANY(pg_blocking_pids(a.pid))) AS waiting",
+                &[&holder_pid],
+            )
+            .await
+            .expect("poll pg_locks")[0]
+            .get("waiting");
+        if waiting {
+            blocked = true;
+            break;
+        }
+        compio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        blocked,
+        "the sweep must reach its per-app read only after it has scanned the app list; \
+         it never appeared waiting on the plans lock"
+    );
+
+    // The app-list scan is behind us, so deleting the row now is exactly the
+    // production race: the sweep will reach its state read and find no row.
+    let deleted = holder
+        .execute(
+            "DELETE FROM zeroship.apps WHERE id = $1",
+            &[&app.as_str()],
+        )
+        .await
+        .expect("delete the app mid-sweep");
+    assert_eq!(deleted, 1, "the subject app is gone");
+    holder.batch_execute("COMMIT").await.expect("release plans");
+
+    let outcome = sweep
+        .await
+        .expect("the sweep task did not panic")
+        .expect("a vanished app is skipped, not a sweep-fatal error");
+    assert!(
+        !outcome.iter().any(|t| t.app_id == app),
+        "the deleted app cannot have transitioned",
+    );
+}
+
+/// Two concurrent `evaluate_all` drives that both read the same prior state must
+/// append EXACTLY ONE transition row. `persist_transition` arbitrates with a
+/// compare-and-swap on the stored state; without it, both drives append history
+/// for one `allow`->`block` transition.
+///
+/// THE RACE IS FORCED, not raced: a side session pre-creates the app's state row
+/// at `allow` and holds a row lock on it, so both drives read `allow` (a plain
+/// SELECT does not block) and then block at the write. Releasing lets them race;
+/// the durable history count must be one.
+///
+/// Runs alone in a child process: the sweep is fleet-wide, so a sibling case's
+/// sweep could transition this app first and write the one history (and,
+/// best-effort, audit) row itself, hiding whether THIS case's drives arbitrated.
+/// The spawner below runs it in a child whose own database no sibling observes.
+#[compio::test(crate = "crate::common::live")]
+#[ignore = "shares the fleet-wide app/state space with siblings; its spawner runs it alone in a child"]
+async fn concurrent_evaluate_all_appends_one_history_row() {
+    use std::time::Duration;
+
+    let url = db_url();
+    let client = pg(&url).await;
+    let registry = Registry::new(&url).await.expect("registry");
+    let engine = SpendEngine::new(registry);
+    common::seed_pricing_catalog(&client).await;
+
+    let (_plan, app) = make_app_on_priced_plan(&client, 100).await;
+    seed_requests(&client, &app, 100).await;
+
+    // Pre-create the row at `allow` so both drives' prior-state reads see it.
+    let period = current_period_start_unix();
+    client
+        .execute(
+            "INSERT INTO zeroship.app_spend_state \
+               (app_id, state, spend_cents, eval_limit_cents, period, evaluated_at) \
+             VALUES ($1, 'allow', 0, 0, $2::date, NOW())",
+            &[&app.as_str(), &common::period_date(period)],
+        )
+        .await
+        .expect("pre-create allow state");
+
+    // A side session holds a row lock on that state row. Both drives read `allow`
+    // and block at the compare-and-swap write.
+    let (holder, holder_conn) = connect(&url, NoTls).await.expect("holder connect");
+    crate::common::live::spawn(async move {
+        let _ = holder_conn.run().await;
+    });
+    holder.batch_execute("BEGIN").await.expect("begin holder tx");
+    holder
+        .query(
+            "SELECT 1 FROM zeroship.app_spend_state WHERE app_id = $1 FOR UPDATE",
+            &[&app.as_str()],
+        )
+        .await
+        .expect("lock the state row");
+
+    let first = engine.clone();
+    let second = engine.clone();
+    let a = compio::runtime::spawn(async move { first.evaluate_all().await });
+    let b = compio::runtime::spawn(async move { second.evaluate_all().await });
+
+    let mut raced = false;
+    for _ in 0..400 {
+        let waiting: i64 = client
+            .query(
+                "SELECT COUNT(*)::bigint AS n FROM pg_stat_activity a \
+                  WHERE a.wait_event_type = 'Lock' \
+                    AND a.query LIKE '%INSERT INTO zeroship.app_spend_state%' \
+                    AND cardinality(pg_blocking_pids(a.pid)) > 0",
+                &[],
+            )
+            .await
+            .expect("count blocked drives")[0]
+            .get("n");
+        if waiting >= 2 {
+            raced = true;
+            break;
+        }
+        compio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        raced,
+        "both drives must block at the state write after reading `allow`"
+    );
+
+    holder.batch_execute("COMMIT").await.expect("release the row");
+
+    let _ = a.await.expect("drive a did not panic").expect("drive a ok");
+    let _ = b.await.expect("drive b did not panic").expect("drive b ok");
+
+    let (state, hist) = read_state(&client, &app).await;
+    assert_eq!(state.as_deref(), Some("block"), "the app ended blocked");
+    assert_eq!(
+        hist, 1,
+        "two concurrent drives of one allow->block transition append exactly one history row",
+    );
+
+    // The winning drive also wrote the transition's durable audit row. This pins
+    // that the engine, not only the cron, audits a persisted transition, and that
+    // the compare-and-swap admits one audit row under concurrent drives.
+    let audit: i64 = client
+        .query(
+            "SELECT COUNT(*)::bigint AS n FROM zeroship.app_audit \
+              WHERE app_id = $1 AND action = 'spend_state_change'",
+            &[&app.as_str()],
+        )
+        .await
+        .expect("count spend audits")[0]
+        .get("n");
+    assert_eq!(
+        audit, 1,
+        "exactly one SpendStateChange audit row for our app across the concurrent drives",
+    );
+}
+
+/// Run the forced concurrent-transition case alone in a child (see
+/// [`crate::isolated_case`]) so no sibling fleet-wide sweep touches its app.
+#[test]
+fn concurrent_evaluate_all_appends_one_history_row_in_an_isolated_process() {
+    crate::isolated_case::run_alone("spend::concurrent_evaluate_all_appends_one_history_row");
 }

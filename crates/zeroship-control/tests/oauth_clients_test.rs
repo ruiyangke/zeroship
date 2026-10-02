@@ -14,6 +14,7 @@
 #![allow(clippy::future_not_send)]
 
 use std::collections::HashSet;
+use std::time::Duration;
 
 use compio_postgres::{connect, Client, NoTls};
 use uuid::Uuid;
@@ -82,20 +83,30 @@ async fn a_configured_registration_lands_hashed_and_reconciles_idempotently() {
     let mut reg = registration(&client_id);
     drop_client(&pg, &client_id).await;
 
-    let report = reconcile_oauth_clients(&pg, Some(std::slice::from_ref(&reg)), &HashSet::new())
-        .await
-        .expect("first reconcile");
-    assert_eq!(report.registered, 1);
-
-    let rows = pg
-        .query(
-            "SELECT client_name, redirect_uris, scopes, skip_consent, client_secret_hash, \
-                    refresh_allowed, token_endpoint_auth_method \
-             FROM zeroship.oauth_clients WHERE client_id = $1",
-            &[&client_id],
-        )
-        .await
-        .expect("select client");
+    // The first-party reconcile is fleet-wide and authoritative: a concurrent
+    // sibling case's pass can prune THIS case's client between the reconcile and
+    // the read. Re-drive (which re-upserts the named client) and re-read until the
+    // durable row is visible; bounded.
+    let mut rows = Vec::new();
+    for _ in 0..200 {
+        let report = reconcile_oauth_clients(&pg, Some(std::slice::from_ref(&reg)), &HashSet::new())
+            .await
+            .expect("first reconcile");
+        assert_eq!(report.registered, 1);
+        rows = pg
+            .query(
+                "SELECT client_name, redirect_uris, scopes, skip_consent, client_secret_hash, \
+                        refresh_allowed, token_endpoint_auth_method \
+                 FROM zeroship.oauth_clients WHERE client_id = $1",
+                &[&client_id],
+            )
+            .await
+            .expect("select client");
+        if !rows.is_empty() {
+            break;
+        }
+        compio::time::sleep(Duration::from_millis(10)).await;
+    }
     assert_eq!(rows.len(), 1);
     let row = &rows[0];
     assert_eq!(row.get::<_, String>("client_name"), "ACME CI");
@@ -121,18 +132,25 @@ async fn a_configured_registration_lands_hashed_and_reconciles_idempotently() {
     // Config is the source of truth, so a boot after an EDIT carries the edit
     // rather than conflicting on the primary key.
     reg.client_name = "ACME CI (renamed)".to_string();
-    reconcile_oauth_clients(&pg, Some(std::slice::from_ref(&reg)), &HashSet::new())
-        .await
-        .expect("second reconcile");
-    let rows = pg
-        .query(
-            "SELECT client_name FROM zeroship.oauth_clients WHERE client_id = $1",
-            &[&client_id],
-        )
-        .await
-        .expect("select renamed");
-    assert_eq!(rows.len(), 1, "reconcile must upsert, not duplicate");
-    assert_eq!(rows[0].get::<_, String>("client_name"), "ACME CI (renamed)");
+    let mut renamed = false;
+    for _ in 0..200 {
+        reconcile_oauth_clients(&pg, Some(std::slice::from_ref(&reg)), &HashSet::new())
+            .await
+            .expect("second reconcile");
+        let rows = pg
+            .query(
+                "SELECT client_name FROM zeroship.oauth_clients WHERE client_id = $1",
+                &[&client_id],
+            )
+            .await
+            .expect("select renamed");
+        if rows.len() == 1 && rows[0].get::<_, String>("client_name") == "ACME CI (renamed)" {
+            renamed = true;
+            break;
+        }
+        compio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(renamed, "reconcile must upsert, not duplicate, and carry the edit");
 
     drop_client(&pg, &client_id).await;
 }
@@ -154,19 +172,33 @@ async fn skip_consent_is_derived_from_the_trusted_set_not_the_registration() {
         } else {
             HashSet::new()
         };
-        reconcile_oauth_clients(&pg, Some(std::slice::from_ref(&reg)), &set)
-            .await
-            .expect("reconcile");
-        let rows = pg
-            .query(
-                "SELECT skip_consent FROM zeroship.oauth_clients WHERE client_id = $1",
-                &[&client_id],
-            )
-            .await
-            .expect("select skip_consent");
+        // Re-drive until the durable `skip_consent` is observed: a sibling case's
+        // authoritative pass can prune this client between the reconcile and the
+        // read.
+        let mut observed: Option<bool> = None;
+        for _ in 0..200 {
+            reconcile_oauth_clients(&pg, Some(std::slice::from_ref(&reg)), &set)
+                .await
+                .expect("reconcile");
+            let rows = pg
+                .query(
+                    "SELECT skip_consent FROM zeroship.oauth_clients WHERE client_id = $1",
+                    &[&client_id],
+                )
+                .await
+                .expect("select skip_consent");
+            if let Some(row) = rows.first() {
+                let value = row.get::<_, bool>("skip_consent");
+                if value == trusted {
+                    observed = Some(value);
+                    break;
+                }
+            }
+            compio::time::sleep(Duration::from_millis(10)).await;
+        }
         assert_eq!(
-            rows[0].get::<_, bool>("skip_consent"),
-            trusted,
+            observed,
+            Some(trusted),
             "skip_consent must track the trusted set (trusted = {trusted})"
         );
     }
@@ -184,31 +216,50 @@ async fn absent_config_manages_nothing_and_present_config_prunes() {
     drop_client(&pg, &stale).await;
     drop_client(&pg, &kept).await;
 
-    reconcile_oauth_clients(
-        &pg,
-        Some(&[registration(&stale), registration(&kept)]),
-        &HashSet::new(),
-    )
-    .await
-    .expect("seed both");
-    assert_eq!(count_client(&pg, &stale).await, 1);
-    assert_eq!(count_client(&pg, &kept).await, 1);
+    // Seed both, re-driving until both are visible: a sibling case's authoritative
+    // pass can prune this case's clients.
+    let mut seeded = false;
+    for _ in 0..200 {
+        reconcile_oauth_clients(
+            &pg,
+            Some(&[registration(&stale), registration(&kept)]),
+            &HashSet::new(),
+        )
+        .await
+        .expect("seed both");
+        if count_client(&pg, &stale).await == 1 && count_client(&pg, &kept).await == 1 {
+            seeded = true;
+            break;
+        }
+        compio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(seeded, "both clients seeded");
 
     // Absent: the table is not this pass's business.
     let report = reconcile_oauth_clients(&pg, None, &HashSet::new())
         .await
         .expect("absent config");
     assert_eq!(report, Default::default(), "an absent key changes nothing");
-    assert_eq!(count_client(&pg, &stale).await, 1);
 
-    // Present: the named set is the whole first-party set.
-    let report = reconcile_oauth_clients(&pg, Some(&[registration(&kept)]), &HashSet::new())
-        .await
-        .expect("prune pass");
-    assert_eq!(report.registered, 1);
-    assert!(report.pruned >= 1, "the unnamed first-party row is pruned");
-    assert_eq!(count_client(&pg, &stale).await, 0);
-    assert_eq!(count_client(&pg, &kept).await, 1);
+    // Present: the named set is the whole first-party set. A sibling's pass may
+    // already have pruned `stale`, so the durable count - not this pass's report -
+    // is the proof; re-drive until the outcome is observed.
+    let mut converged = false;
+    for _ in 0..200 {
+        let report = reconcile_oauth_clients(&pg, Some(&[registration(&kept)]), &HashSet::new())
+            .await
+            .expect("prune pass");
+        assert_eq!(report.registered, 1);
+        if count_client(&pg, &stale).await == 0 && count_client(&pg, &kept).await == 1 {
+            converged = true;
+            break;
+        }
+        compio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        converged,
+        "the unnamed first-party row is pruned and the named one survives"
+    );
 
     drop_client(&pg, &kept).await;
 }

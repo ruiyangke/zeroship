@@ -824,12 +824,7 @@ pub async fn force_reconcile(
         .and_then(|v| v.parse::<i64>().ok())
         .unwrap_or_else(|| chrono::Utc::now().timestamp());
 
-    let stripe = crate::stripe_client::StripeClient::new(crate::SecretString::new(
-        state.stripe_secret_key.expose_secret().to_string(),
-    ))
-    .with_base_url(state.stripe_base_url.clone());
-
-    match crate::cron::billing_reconcile::tick_with(&state, &stripe, now_unix).await {
+    match crate::cron::billing_reconcile::tick_with(&state, now_unix).await {
         Ok(billed) => {
             let period_start = crate::cron::billing_reconcile::previous_period_start_unix(now_unix);
             web::HttpResponse::Ok().json(&serde_json::json!({

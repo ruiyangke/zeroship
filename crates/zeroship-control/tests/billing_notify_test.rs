@@ -43,7 +43,7 @@ use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_control::account_status::AccountStatusStore;
 use zeroship_control::account_status::DEFAULT_MAX_DUNNING_DAYS;
 use zeroship_control::cron::billing_notify::NOTIFY_REDRIVE_HORIZON;
-use zeroship_control::cron::{billing_notify, dunning, spend_reconcile};
+use zeroship_control::cron::{billing_notify, dunning};
 use zeroship_control::notify::{BillingNotificationKind, RecordingNotifier};
 use zeroship_control::{
     AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
@@ -52,30 +52,6 @@ use zeroship_core::AppId;
 
 fn db_url() -> String {
     common::require_control_db()
-}
-
-/// Process-global gate serializing the act of SWEEPING across this binary's tests.
-///
-/// The notify cron is FLEET-WIDE by design: one tick scans ALL creators and sends every
-/// pending row through the `AppState.notifier` of whichever fixture drove that tick. Under
-/// the default parallel runner that means a sibling test's tick can deliver MY organization's
-/// email into the SIBLING's `RecordingNotifier` and flip the shared-DB row to `sent` —
-/// invisible to my recorder. The DB ledger is immune (assert there where we can), but the
-/// re-drive test must observe TWO send attempts for the SAME key on ITS OWN recorder to
-/// prove the provider-side idempotency dedup, which only holds if no sibling steals the
-/// row mid-sequence. This gate makes the SWEEP single-threaded across the binary's tests
-/// WITHOUT weakening the cron: every gated tick still acquires the real advisory lock,
-/// claims-before-send, and sends for real — only concurrent sibling SWEEPS are excluded,
-/// exactly as a real fleet has at most one sweeper per tick (the cron's own invariant).
-static TICK_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// Hold the sweep gate for a critical region that drives ticks. `lock().unwrap_or_else`
-/// recovers a poisoned gate (a sibling test panicking mid-sweep must not cascade-fail the
-/// rest) so an unrelated failure does not mask the result under test.
-fn lock_tick_gate() -> std::sync::MutexGuard<'static, ()> {
-    TICK_GATE
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
@@ -89,6 +65,9 @@ fn tmpdir(label: &str) -> PathBuf {
 
 struct Fixture {
     state: Arc<AppState>,
+    /// This fixture's recording notifier. Held so a case can observe the
+    /// provider-side idempotency key and the per-key delivery dedup even though
+    /// the cron sweeps a shared database.
     notifier: RecordingNotifier,
     pg: Arc<compio_postgres::Client>,
     blob_root: PathBuf,
@@ -137,8 +116,7 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
 
     let control_pg = Arc::new(control_pg_client);
 
-    // The RECORDING notifier under test — kept as a handle so assertions read what was
-    // (or was not) delivered, and so a test can flip it to failing / suppressed.
+    // The recording notifier the cron sends through.
     let notifier = RecordingNotifier::new();
 
     let state = Arc::new(AppState {
@@ -330,30 +308,19 @@ async fn sent_count_kind(
         .get::<_, i64>("c")
 }
 
-/// Drive `billing_notify::tick` until every `(organization, expected_sent)` in `want` has at
+/// Drive the notify scan until every `(organization, expected_sent)` in `want` has at
 /// least `expected_sent` `sent` ledger rows AND zero `pending` rows — i.e. THIS test's
 /// own transitions are fully delivered.
 ///
-/// WHY a loop and not a single `tick`: the cron's single-flight advisory lock is
-/// FLEET-WIDE (one global key). Under the DEFAULT parallel test runner a sibling test's
-/// concurrent `tick` (or its held side-lock) can own the lock when this test ticks, so a
-/// given `tick` legitimately wins nothing and returns 0 — exactly the multi-node
-/// "loser skips this tick" path the production cron retries on its next ~5min cycle. We
-/// reproduce that retry here so the assertion is scoped to THIS organization's settled state,
-/// never to a global per-tick send count. The cron, the claim-before-send, and the lock
-/// are exercised UNCHANGED — only the test waits out lock contention instead of assuming
-/// one tick wins. The bound keeps a genuine bug (rows that never settle) from hanging.
-// `lock_tick_gate()` guards `Mutex<()>` - a pure test-serialization token, not shared
-// mutable data accessed across the await. compio::test runs each test on its own
-// single-threaded runtime, so the held guard cannot deadlock another task's poll the
-// way it could under a work-stealing executor.
-#[allow(clippy::await_holding_lock)]
+/// The scan body is driven directly: it is fleet-wide, and a sibling case's scan can
+/// legitimately deliver THIS case's rows through the sibling's recorder. The claim
+/// INSERT is the multi-node arbiter, so the per-organization ledger row is the durable
+/// artifact and this loop waits for THAT organization to settle rather than asserting
+/// any global per-sweep send count. The bound keeps a genuine bug (rows that never
+/// settle) from hanging.
 async fn tick_until_sent(state: &AppState, pg: &compio_postgres::Client, want: &[(&str, i64)]) {
     for _ in 0..200 {
-        {
-            let _gate = lock_tick_gate();
-            billing_notify::tick(state).await.expect("tick");
-        }
+        let _ = billing_notify::sweep(state).await.expect("sweep");
         let mut all_settled = true;
         for &(organization, expected_sent) in want {
             let sent = ledger_count(pg, organization, "sent").await;
@@ -383,11 +350,22 @@ async fn age_pending(pg: &compio_postgres::Client, organization: &str) {
     .expect("age pending");
 }
 
+/// Roll this organization's notification rows back to a `pending` claim aged past
+/// the re-drive horizon - the crash-after-send model, re-armed on demand.
+async fn crash_and_age(pg: &compio_postgres::Client, organization: &str) {
+    pg.execute(
+        "UPDATE zeroship.billing_notifications SET status = 'pending', sent_at = NULL \
+          WHERE organization_id = $1",
+        &[&organization],
+    )
+    .await
+    .expect("reset to pending");
+    age_pending(pg, organization).await;
+}
+
 // ===========================================================================
 // (c) each event kind produces exactly one notification
 // ===========================================================================
-// See the allow on `tick_until_sent` above.
-#[allow(clippy::await_holding_lock)]
 #[compio::test(crate = "crate::common::live")]
 async fn each_kind_produces_exactly_one_notification() {
     let url = db_url();
@@ -497,10 +475,7 @@ async fn each_kind_produces_exactly_one_notification() {
         }
         v
     };
-    {
-        let _gate = lock_tick_gate();
-        billing_notify::tick(st).await.expect("second tick");
-    }
+    billing_notify::tick(st).await.expect("second tick");
     for (c, k, before) in pre {
         assert_eq!(
             sent_count_kind(&fx.pg, c, k).await,
@@ -544,6 +519,8 @@ async fn concurrent_ticks_send_each_event_once() {
         .map(|_| true)
         .expect("hold notify lock");
     assert!(held);
+    // This tick acquires the DB advisory lock and, finding it held by the side
+    // session below, claims nothing (the multi-node loser path).
     let blocked = billing_notify::tick(st)
         .await
         .expect("tick while lock held");
@@ -602,80 +579,56 @@ async fn concurrent_ticks_send_each_event_once() {
 // (b) crash after send, before the `sent` flip → re-drive past the horizon, the
 //     Idempotency-Key makes the re-send effect idempotent (the key IS passed).
 // ===========================================================================
-// See the allow on `tick_until_sent` above.
-#[allow(clippy::await_holding_lock)]
 #[compio::test(crate = "crate::common::live")]
 async fn crash_before_flip_redrives_idempotent() {
     let url = db_url();
     let fx = build_fixture(&url, "redrive").await;
     let st = &*fx.state;
 
-    // This test is the ONE that must observe its OWN recorder across the whole
-    // seed → first-send → crash → re-drive sequence (the provider-dedup proof = TWO
-    // attempts / ONE delivery on MY key). A sibling tick that swept MY pending row would
-    // record the send in the sibling's recorder and flip my row in the shared DB, stealing
-    // the observation. So we hold the fleet-wide sweep gate for the entire critical region
-    // — INCLUDING the seeding, so no sibling can sweep my freshly-seeded row before MY tick
-    // sends it. Every tick below is still a REAL gated sweep (advisory lock +
-    // claim-before-send + send); only concurrent sibling sweeps are excluded, matching the
-    // cron's own "one sweeper per tick" invariant, made deterministic for the binary.
-    let _gate = lock_tick_gate();
-
     let organization = make_organization(&fx.pg).await;
     let organization = organization.as_str();
     fail_payment(st, organization, 1_000).await;
 
-    // Simulate a CRASH after send but before the flip: drive the FIRST send to the
-    // notifier (delivered once) but force the ledger row to stay `pending` by failing
-    // the flip. We model the crash by sending via the notifier directly through the
-    // sweep, then resetting the row to pending + aging it.
-    // The cron sweeps a shared test DB; scope all assertions to THIS organization's key.
+    // The provider-side Idempotency-Key is the claim PK tuple. The cron is
+    // fleet-wide, so a sibling sweep can deliver THIS organization's transition
+    // through ITS recorder and flip the shared ledger row; when that happens the row
+    // is already `sent`, so re-arm a stale `pending` and try again (bounded) until
+    // THIS fixture's recorder records the attempt. That re-arming is the
+    // crash-after-send model itself, not a lock.
     let key = format!(
         "{}:{}:{}",
         organization,
         BillingNotificationKind::PastDue.as_str(),
-        // the transition_id is the obh_ id of the only history row for this organization
         obh_id(&fx.pg, organization).await,
     );
 
-    // FIRST send: drive (gated) ticks until MY transition is delivered+settled. With the
-    // gate held, no sibling sweeps, so THIS fixture's notifier makes the send.
-    let mut settled = false;
-    for _ in 0..200 {
-        billing_notify::tick(st).await.expect("first tick");
-        if ledger_count(&fx.pg, organization, "sent").await >= 1
-            && ledger_count(&fx.pg, organization, "pending").await == 0
-        {
-            settled = true;
+    // FIRST send: until OUR recorder sees the key delivered once.
+    let mut first_attempted = false;
+    for _ in 0..400 {
+        let _ = billing_notify::sweep(st).await.expect("first sweep");
+        if fx.notifier.attempts_for_key(&key) >= 1 {
+            first_attempted = true;
             break;
         }
+        crash_and_age(&fx.pg, organization).await;
     }
-    assert!(settled, "first sweep settled MY transition to sent");
+    assert!(
+        first_attempted,
+        "the Idempotency-Key tuple (organization:kind:transition_id) is passed to the notifier"
+    );
     assert_eq!(
         fx.notifier.delivered_for_key(&key),
         1,
-        "the Idempotency-Key tuple (organization:kind:transition_id) is passed and delivered once"
+        "the provider-side key delivers the first attempt exactly once"
     );
 
-    // CRASH model: the `sent` flip never committed → roll the row back to pending and
-    // age it past NOTIFY_REDRIVE_HORIZON.
-    fx.pg
-        .execute(
-            "UPDATE zeroship.billing_notifications SET status = 'pending', sent_at = NULL \
-              WHERE organization_id = $1",
-            &[&organization],
-        )
-        .await
-        .expect("reset to pending");
-    age_pending(&fx.pg, organization).await;
-
-    // The next sweep RE-DRIVES the SAME row (re-claims past the horizon, re-sends). The
-    // recording notifier dedups on the SAME Idempotency-Key, so the recipient sees ONE
-    // email even though TWO send attempts were made (at-least-once delivery / exactly-once
-    // claim / idempotent effect). (Gate still held — no sibling can steal the re-drive.)
+    // CRASH model + re-drive: force a stale `pending` claim before each sweep until
+    // OUR recorder observes a SECOND attempt for the SAME key. The provider key
+    // dedups the re-send, so one delivery remains.
     let mut redrove = false;
-    for _ in 0..200 {
-        billing_notify::tick(st).await.expect("re-drive tick");
+    for _ in 0..400 {
+        crash_and_age(&fx.pg, organization).await;
+        let _ = billing_notify::sweep(st).await.expect("re-drive sweep");
         if fx.notifier.attempts_for_key(&key) >= 2 {
             redrove = true;
             break;
@@ -690,8 +643,11 @@ async fn crash_before_flip_redrives_idempotent() {
         1,
         "the provider Idempotency-Key dedups the re-send: ONE delivery across re-drives"
     );
-    // The row is now `sent` (the re-drive flipped it).
-    assert_eq!(ledger_count(&fx.pg, organization, "sent").await, 1);
+    assert_eq!(
+        ledger_count(&fx.pg, organization, "sent").await,
+        1,
+        "exactly one sent ledger row across re-drives",
+    );
 }
 
 /// The obh_ surrogate id of the single history row for a organization.
@@ -763,17 +719,6 @@ async fn history_surrogate_ids_carry_disjoint_prefixes() {
 // is 0.
 // ===========================================================================
 
-/// A process-wide gate serializing SPEND ticks across this binary's tests (the
-/// spend-reconcile cron single-flights on its OWN fleet-wide advisory lock; a sibling
-/// holding it would make my `tick` skip and win nothing). Mirrors `TICK_GATE`.
-static SPEND_TICK_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-fn lock_spend_gate() -> std::sync::MutexGuard<'static, ()> {
-    SPEND_TICK_GATE
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
 /// Seed a plan charging 1 cent/request with `limit_cents` default spend cap and
 /// an app on that plan IN `organization`.
 ///
@@ -786,6 +731,7 @@ async fn make_spend_app_owned_by(
     organization: &str,
     limit_cents: i64,
 ) -> (AppId, String) {
+    common::seed_metric_catalog(pg, "requests").await;
     pg.execute(
         "INSERT INTO zeroship.metric_weights (metric, units_per_op, per_units) \
          VALUES ('requests', 1, 1) \
@@ -886,16 +832,16 @@ async fn spend_hist_count(pg: &compio_postgres::Client, app: &AppId, to_state: &
         .get::<_, i64>("c")
 }
 
-/// Drive ONE gated spend-reconcile tick (serialized against sibling spend ticks).
-// See the allow on `tick_until_sent` above.
-#[allow(clippy::await_holding_lock)]
+/// Drive the spend sweep body once. The body is idempotent under concurrent
+/// drives (the transition is a compare-and-swap), so a case can drive it directly
+/// without the cron's single-flight advisory lock - which a sibling case may hold.
 async fn spend_tick(state: &AppState) {
-    let _g = lock_spend_gate();
-    spend_reconcile::tick(state).await.expect("spend tick");
+    zeroship_control::spend::SpendEngine::new(state.registry.clone())
+        .evaluate_all()
+        .await
+        .expect("spend tick");
 }
 
-// See the allow on `tick_until_sent` above.
-#[allow(clippy::await_holding_lock)]
 #[compio::test(crate = "crate::common::live")]
 async fn spend_band_walk_produces_one_notification_per_transition() {
     let url = db_url();
@@ -1007,10 +953,7 @@ async fn spend_band_walk_produces_one_notification_per_transition() {
             sent_count_kind(&fx.pg, organization, SpendBlock).await,
         ),
     ];
-    {
-        let _gate = lock_tick_gate();
-        billing_notify::tick(st).await.expect("second notify tick");
-    }
+    let _ = billing_notify::sweep(st).await.expect("second notify sweep");
     for (k, before) in pre {
         assert_eq!(
             sent_count_kind(&fx.pg, organization, k).await,
@@ -1045,8 +988,6 @@ async fn spend_band_walk_produces_one_notification_per_transition() {
 // This test walks the band DOWN (Block→Degrade→Warn→Allow) via real limit-raise
 // reconcile ticks and asserts ZERO spend notifications.
 // ===========================================================================
-// See the allow on `tick_until_sent` above.
-#[allow(clippy::await_holding_lock)]
 #[compio::test(crate = "crate::common::live")]
 async fn spend_band_recovery_walk_sends_no_notifications() {
     let url = db_url();
@@ -1129,13 +1070,12 @@ async fn spend_band_recovery_walk_sends_no_notifications() {
         "warn→allow row"
     );
 
-    // --- Run the notify cron to convergence. NONE of the recovery edges may email.
-    {
-        let _gate = lock_tick_gate();
-        billing_notify::tick(st).await.expect("notify tick");
-        // A second sweep to be sure nothing was left pending to re-drive into a send.
-        billing_notify::tick(st).await.expect("second notify tick");
-    }
+    // --- Run the notify scan to convergence. NONE of the recovery edges may email.
+    //     Drive the scan body directly so a sibling holding the advisory lock cannot
+    //     starve the scan this case is asserting on.
+    let _ = billing_notify::sweep(st).await.expect("notify sweep");
+    // A second sweep to be sure nothing was left pending to re-drive into a send.
+    let _ = billing_notify::sweep(st).await.expect("second notify sweep");
 
     let warn = sent_count_kind(&fx.pg, organization, SpendWarn).await;
     let degrade = sent_count_kind(&fx.pg, organization, SpendDegrade).await;
@@ -1184,14 +1124,11 @@ async fn age_history(pg: &compio_postgres::Client, organization: &str, days: i64
     .expect("age history");
 }
 
-// See the allow on `tick_until_sent` above.
-#[allow(clippy::await_holding_lock)]
 #[compio::test(crate = "crate::common::live")]
 async fn aged_transition_past_scan_window_is_not_notified() {
     let url = db_url();
     let fx = build_fixture(&url, "watermark").await;
     let st = &*fx.state;
-    let _gate = lock_tick_gate(); // own the sweep so a sibling can't claim my aged row
 
     // A organization with ONE past_due transition (a obh_ history row).
     let organization = make_organization(&fx.pg).await;

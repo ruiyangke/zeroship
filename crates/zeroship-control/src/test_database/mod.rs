@@ -37,7 +37,21 @@ impl Postgres {
             ))
             .with_env_var("POSTGRES_PASSWORD", "fixture")
             .with_env_var("POSTGRES_DB", "control_tests")
-            .with_cmd(["postgres", "-c", "wal_level=logical", "-c", "fsync=off"])
+            // The suite opens a connection per query (the registry has no pool) and
+            // each case may hold side connections; the default `max_connections` is
+            // exhausted by the parallel runner. Size the server for it. Do not bound
+            // idle sessions: the live-case harness already fails a case that leaks a
+            // connection, and a server-side kill would hide the leak rather than
+            // surface it.
+            .with_cmd([
+                "postgres",
+                "-c",
+                "wal_level=logical",
+                "-c",
+                "fsync=off",
+                "-c",
+                "max_connections=500",
+            ])
             .with_startup_timeout(Duration::from_secs(120));
         let owned = start_owned(&DockerCli::system(), &Ownership::mint(), request)
             .unwrap_or_else(|error| panic!("control tests require Docker and PostgreSQL: {error}"));

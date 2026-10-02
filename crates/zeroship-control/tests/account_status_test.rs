@@ -217,21 +217,25 @@ async fn dunning_exhaustion_suspends() {
         .await
         .expect("dunning sweep");
 
-    // The stale organization (and ONLY it among ours) is suspended.
-    assert!(
-        transitions.iter().any(|t| t.organization_id == stale
-            && t.from == AccountState::PastDue
-            && t.to == AccountState::Suspended
-            && t.reason == "dunning_exhausted"),
-        "the exhausted-window organization is suspended"
-    );
+    // The sweep claims EVERY exhausted organization in the shared database in one
+    // statement, so a sibling case's sweep can claim this case's organization
+    // first and this call returns no transition for it. The property under test is
+    // the durable outcome for our own organizations, not which sweep returned the
+    // transition.
     assert!(
         !transitions.iter().any(|t| t.organization_id == fresh),
         "the in-window organization is NOT suspended"
     );
-
-    assert_eq!(db_state(&f.pg, stale).await.as_deref(), Some("suspended"));
-    assert_eq!(db_state(&f.pg, fresh).await.as_deref(), Some("past_due"));
+    assert_eq!(
+        db_state(&f.pg, stale).await.as_deref(),
+        Some("suspended"),
+        "the exhausted-window organization is suspended"
+    );
+    assert_eq!(
+        db_state(&f.pg, fresh).await.as_deref(),
+        Some("past_due"),
+        "the in-window organization is NOT suspended"
+    );
 
     // suspended_at stamped.
     let suspended_at: Option<chrono::DateTime<chrono::Utc>> = f

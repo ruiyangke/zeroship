@@ -204,10 +204,16 @@ impl SpendEngine {
     /// eval-limit in `app_spend_state` — so this is a DOUBLE LEFT JOIN
     /// (`apps ⋈ app_spend_limit ⋈ app_spend_state`). Defaults Allow / NULL / 0
     /// when there is no row yet in the respective table.
+    ///
+    /// `None` means the app row is gone. The sweep read the id list on its own
+    /// connection and then does per-app reads on that same connection outside a
+    /// transaction, so an app deleted by the deletion funnel between the two - a
+    /// normal lifecycle event, not a corrupt state - is simply absent.
+    /// A vanished app is skipped rather than aborting the whole fleet sweep.
     async fn app_state_row(
         conn: &compio_postgres::Client,
         app_id: &AppId,
-    ) -> Result<(String, SpendState, Option<i64>, i64), RegistryError> {
+    ) -> Result<Option<(String, SpendState, Option<i64>, i64)>, RegistryError> {
         let rows = conn
             .query(
                 "SELECT a.plan_id, s.state, l.spend_limit_cents, s.eval_limit_cents \
@@ -218,9 +224,9 @@ impl SpendEngine {
                 &[&app_id.as_str()],
             )
             .await?;
-        let row = rows
-            .first()
-            .ok_or_else(|| RegistryError::NotFound(format!("app {}", app_id.as_str())))?;
+        let Some(row) = rows.first() else {
+            return Ok(None);
+        };
         let plan_id: String = row.get("plan_id");
         let prev = row
             .get::<_, Option<String>>("state")
@@ -228,7 +234,7 @@ impl SpendEngine {
             .map_or(SpendState::Allow, parse_spend_state);
         let override_limit: Option<i64> = row.get("spend_limit_cents");
         let eval_limit: i64 = row.get::<_, Option<i64>>("eval_limit_cents").unwrap_or(0);
-        Ok((plan_id, prev, override_limit, eval_limit))
+        Ok(Some((plan_id, prev, override_limit, eval_limit)))
     }
 
     /// Evaluate every app: price current-period usage, derive the new state vs
@@ -306,8 +312,15 @@ impl SpendEngine {
 
         for row in &app_rows {
             let app_id = crate::app_id::from_row(row, "id", "spend app")?;
-            let (plan_id, prev, override_limit, prev_eval_limit) =
-                Self::app_state_row(&conn, &app_id).await?;
+            let Some((plan_id, prev, override_limit, prev_eval_limit)) =
+                Self::app_state_row(&conn, &app_id).await?
+            else {
+                tracing::debug!(
+                    app_id = %app_id.as_str(),
+                    "spend: app row vanished between the fleet scan and its state read - skipping"
+                );
+                continue;
+            };
 
             // Plan → price model + default spend limit. A missing plan row
             // (should not happen — plan_id is an FK) is skipped, not crashed.
@@ -388,7 +401,7 @@ impl SpendEngine {
             let new = derive_state(spend_cents, limit_cents, &self.thresholds, prev, limit_changed);
 
             if new != prev {
-                Self::persist_transition(
+                let persisted = Self::persist_transition(
                     &mut conn,
                     &app_id,
                     prev,
@@ -398,13 +411,44 @@ impl SpendEngine {
                     period_start,
                 )
                 .await?;
-                transitions.push(SpendTransition {
-                    app_id,
-                    old: prev,
-                    new,
-                    spend_cents: spend_i64,
-                    limit_cents: limit_i64,
-                });
+                // Only report the transition THIS drive actually persisted. A
+                // concurrent drive that won the compare-and-swap has already
+                // recorded it, and reporting it twice would over-count.
+                if persisted {
+                    // The audit row belongs to the transition, not to the caller
+                    // that happened to drive the sweep: the engine writes it here
+                    // so a transition persisted by ANY drive is audited at most
+                    // once (the same compare-and-swap that admits one history row
+                    // admits one audit write). The audit is a best-effort insert on
+                    // a separate connection AFTER the transition commits, so a
+                    // process death between the two loses the row; this bounds
+                    // duplicate audits, not lost ones.
+                    crate::audit::log_with_detail(
+                        &self.registry,
+                        crate::audit::AuditEntry {
+                            app_id: Some(&app_id),
+                            organization_id: None,
+                            actor_user_id: None,
+                            action: crate::audit::Action::SpendStateChange,
+                            resource: Some("spend_state"),
+                            source_ip: None,
+                        },
+                        &serde_json::json!({
+                            "from": spend_state_str(prev),
+                            "to": spend_state_str(new),
+                            "spend_cents": spend_i64,
+                            "limit_cents": limit_i64,
+                        }),
+                    )
+                    .await;
+                    transitions.push(SpendTransition {
+                        app_id,
+                        old: prev,
+                        new,
+                        spend_cents: spend_i64,
+                        limit_cents: limit_i64,
+                    });
+                }
             } else {
                 // No transition, but keep the stored spend/eval-limit fresh so
                 // the next tick's `limit_changed` comparison is accurate and
@@ -440,26 +484,43 @@ impl SpendEngine {
         spend_cents: i64,
         eval_limit_cents: i64,
         period_start_unix: i64,
-    ) -> Result<(), RegistryError> {
+    ) -> Result<bool, RegistryError> {
         let period = period_date(period_start_unix);
         let tx = conn.transaction().await?;
-        tx.execute(
-            "INSERT INTO zeroship.app_spend_state \
-               (app_id, state, spend_cents, eval_limit_cents, period, evaluated_at) \
-             VALUES ($1, $2::text, $3, $4, $5::date, NOW()) \
-             ON CONFLICT (app_id) DO UPDATE SET \
-               state = EXCLUDED.state, spend_cents = EXCLUDED.spend_cents, \
-               eval_limit_cents = EXCLUDED.eval_limit_cents, \
-               period = EXCLUDED.period, evaluated_at = NOW()",
-            &[
-                &app_id.as_str(),
-                &spend_state_str(to),
-                &spend_cents,
-                &eval_limit_cents,
-                &period,
-            ],
-        )
-        .await?;
+        // COMPARE-AND-SWAP on the prior state. `evaluate_all` reads `prev` and then
+        // persists on a DIFFERENT statement, so two sweeps that both read the same
+        // `prev` would otherwise both append a history row for one transition -
+        // exactly-once history under concurrent drives (the production cron
+        // single-flights, but `evaluate_all` is also called directly). The UPDATE
+        // branch only fires while the stored state still equals the `prev` this
+        // drive derived from; a drive whose read is stale writes no row. On the
+        // no-row INSERT branch there is no prior state, so the insert always wins.
+        let changed = tx
+            .execute(
+                "INSERT INTO zeroship.app_spend_state \
+                   (app_id, state, spend_cents, eval_limit_cents, period, evaluated_at) \
+                 VALUES ($1, $2::text, $3, $4, $5::date, NOW()) \
+                 ON CONFLICT (app_id) DO UPDATE SET \
+                   state = EXCLUDED.state, spend_cents = EXCLUDED.spend_cents, \
+                   eval_limit_cents = EXCLUDED.eval_limit_cents, \
+                   period = EXCLUDED.period, evaluated_at = NOW() \
+                 WHERE zeroship.app_spend_state.state = $6::text",
+                &[
+                    &app_id.as_str(),
+                    &spend_state_str(to),
+                    &spend_cents,
+                    &eval_limit_cents,
+                    &period,
+                    &spend_state_str(from),
+                ],
+            )
+            .await?;
+        if changed == 0 {
+            // Another drive already moved this app from `from`. Committing the
+            // empty transaction leaves the winner's history as the single row.
+            tx.commit().await?;
+            return Ok(false);
+        }
         // `spend_state_history.period` is NOT NULL — bind it. The
         // `from_state`/`to_state` params are bound `::text` (the spend_state domain
         // rejects a bare &str).
@@ -484,7 +545,7 @@ impl SpendEngine {
         )
         .await?;
         tx.commit().await?;
-        Ok(())
+        Ok(true)
     }
 
     /// UPSERT spend/eval-limit freshness WITHOUT a state change (no history).

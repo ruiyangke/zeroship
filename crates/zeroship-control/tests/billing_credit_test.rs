@@ -31,7 +31,7 @@
 use crate::common;
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use uuid::Uuid;
 
@@ -39,8 +39,6 @@ use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_control::credit::{self, GrantOutcome};
 use zeroship_control::cron::billing_reconcile;
 use zeroship_control::registry::RegistryError;
-use zeroship_control::stripe_client::{Period, StripeApi};
-use zeroship_control::stripe_store::StripeError;
 use zeroship_control::{
     AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
 };
@@ -50,10 +48,6 @@ fn db_url() -> String {
     common::require_control_db()
 }
 
-/// The reconciler single-flights fleet-wide via `pg_try_advisory_lock`; serialize
-/// the reconcile-driving tests with a process-wide lock (mirrors the reconcile test).
-static RECONCILE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 
 fn tmpdir(label: &str) -> PathBuf {
@@ -61,148 +55,6 @@ fn tmpdir(label: &str) -> PathBuf {
     p.push(format!("zs-credit-{label}-{}", Uuid::new_v4().simple()));
     std::fs::create_dir_all(&p).expect("mk tmpdir");
     p
-}
-
-// ===========================================================================
-// A recording StripeApi fake (no HTTP). `bill_organization` is generic over StripeApi;
-// the credit math under test never touches Stripe, so a fake suffices and keeps
-// the test focused on the REAL reconciler + REAL PG + REAL credit helpers.
-// ===========================================================================
-
-#[derive(Default)]
-struct RecordingStripe {
-    item_seq: Mutex<u64>,
-    inv_seq: Mutex<u64>,
-}
-
-impl RecordingStripe {
-    /// A process-unique id so distinct creators never collide on the
-    /// `billing_provider_refs` UNIQUE(provider, ref_kind, external_id).
-    fn unique(prefix: &str) -> String {
-        format!("{prefix}_{}", Uuid::new_v4().simple())
-    }
-}
-
-impl StripeApi for RecordingStripe {
-    async fn create_customer(&self, _e: &str, _c: &str) -> Result<String, StripeError> {
-        Ok("cus_fake".into())
-    }
-    async fn create_checkout_setup_session(
-        &self,
-        _c: &str,
-        _ok: &str,
-        _cancel: &str,
-    ) -> Result<String, StripeError> {
-        Ok("https://fake/session".into())
-    }
-    async fn create_invoice_item(
-        &self,
-        _customer: &str,
-        _amount: u64,
-        _currency: &str,
-        _desc: &str,
-        _period: Period,
-        _idem: &str,
-        _lookup: &str,
-        _metadata: &[(String, String)],
-    ) -> Result<String, StripeError> {
-        *self.item_seq.lock().unwrap() += 1;
-        Ok(Self::unique("ii"))
-    }
-    async fn delete_invoice_item(&self, _item_id: &str) -> Result<(), StripeError> {
-        Ok(())
-    }
-    async fn find_invoice_item_by_key(
-        &self,
-        _c: &str,
-        _k: &str,
-    ) -> Result<Option<String>, StripeError> {
-        Ok(None)
-    }
-    async fn create_invoice(&self, _c: &str, _cr: &str, _k: &str) -> Result<String, StripeError> {
-        *self.inv_seq.lock().unwrap() += 1;
-        Ok(Self::unique("in"))
-    }
-    async fn finalize_invoice(&self, id: &str) -> Result<String, StripeError> {
-        // finalize does not change the invoice id — echo the draft id back.
-        Ok(id.to_string())
-    }
-    async fn create_meter_event(
-        &self,
-        _n: &str,
-        _c: &str,
-        _v: u64,
-        _i: &str,
-        _t: i64,
-    ) -> Result<(), StripeError> {
-        Ok(())
-    }
-    async fn meter_event_summary(
-        &self,
-        _m: &str,
-        _c: &str,
-        _s: i64,
-        _e: i64,
-    ) -> Result<u64, StripeError> {
-        Ok(0)
-    }
-    async fn create_connect_account(
-        &self,
-        _e: &str,
-        _c: &str,
-        _co: &str,
-    ) -> Result<String, StripeError> {
-        Ok("acct_fake".into())
-    }
-    async fn create_account_link(
-        &self,
-        _a: &str,
-        _r: &str,
-        _rt: &str,
-    ) -> Result<String, StripeError> {
-        Ok("https://fake/onboard".into())
-    }
-    async fn retrieve_account(
-        &self,
-        id: &str,
-    ) -> Result<zeroship_control::stripe_client::ConnectAccount, StripeError> {
-        Ok(zeroship_control::stripe_client::ConnectAccount {
-            id: id.into(),
-            charges_enabled: true,
-            payouts_enabled: true,
-            details_submitted: true,
-            organization_id: None,
-        })
-    }
-    async fn create_connect_payment_intent(
-        &self,
-        _a: &str,
-        _amt: u64,
-        _cur: &str,
-        _fee: u64,
-        _d: &str,
-        _k: &str,
-    ) -> Result<zeroship_control::stripe_client::ConnectPaymentIntent, StripeError> {
-        Ok(zeroship_control::stripe_client::ConnectPaymentIntent {
-            id: "pi_fake".into(),
-            client_secret: None,
-        })
-    }
-    async fn invoice_settlement_ids(
-        &self,
-        _provider_invoice_id: &str,
-    ) -> Result<(Option<String>, Option<String>), StripeError> {
-        Ok((None, None))
-    }
-    async fn create_refund(
-        &self,
-        _provider_invoice_id: &str,
-        _amount_cents: u64,
-        _currency: &str,
-        _idempotency_key: &str,
-    ) -> Result<String, StripeError> {
-        Ok(Self::unique("re"))
-    }
 }
 
 // ===========================================================================
@@ -583,19 +435,10 @@ async fn credit_ledger_is_append_only_and_kind_sign_checked() {
 //     per-grant consumed entries; total = subtotal − credit + tax (tax=0).
 // ===========================================================================
 
-// RECONCILE_LOCK guards `Mutex<()>` - a pure test-serialization token, not
-// shared mutable data accessed across the await. compio::test runs each
-// test on its own single-threaded runtime, so the held guard cannot
-// deadlock another task's poll the way it could under a work-stealing
-// executor.
-#[allow(clippy::await_holding_lock)]
 #[compio::test(crate = "crate::common::live")]
 async fn finalize_consumes_oldest_first_and_balances() {
     let url = db_url();
     let fx = build_fixture(&url, "consume").await;
-    let _recon = RECONCILE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -620,10 +463,9 @@ async fn finalize_consumes_oldest_first_and_balances() {
     // ($3) then g_new ($2). total = 500 − 500 + 0 = 0.
     ingest_at(&fx.state, &app, 500, period, 1).await;
 
-    let billed = billing_reconcile::tick_with(&fx.state, &RecordingStripe::default(), now)
+    billing_reconcile::sweep(&fx.state, period)
         .await
         .expect("tick");
-    assert_eq!(billed, 1);
 
     let inv = read_invoice_money(&fx.state, organization, period)
         .await
@@ -675,15 +517,10 @@ async fn finalize_consumes_oldest_first_and_balances() {
 // (c) a reconcile RE-RUN of the same period does NOT double-consume.
 // ===========================================================================
 
-// See the allow on `finalize_consumes_oldest_first_and_balances` above.
-#[allow(clippy::await_holding_lock)]
 #[compio::test(crate = "crate::common::live")]
 async fn reconcile_rerun_does_not_double_consume() {
     let url = db_url();
     let fx = build_fixture(&url, "rerun").await;
-    let _recon = RECONCILE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -709,10 +546,9 @@ async fn reconcile_rerun_does_not_double_consume() {
     .await;
     ingest_at(&fx.state, &app, 400, period, 1).await; // $4 usage
 
-    let billed1 = billing_reconcile::tick_with(&fx.state, &RecordingStripe::default(), now)
+    billing_reconcile::sweep(&fx.state, period)
         .await
         .expect("tick 1");
-    assert_eq!(billed1, 1);
     let bal1 = credit::balance(&*fx.state.control_pg, organization, "usd")
         .await
         .unwrap();
@@ -720,10 +556,9 @@ async fn reconcile_rerun_does_not_double_consume() {
 
     // RE-RUN the same period. The finalized short-circuit returns Ok(false); the
     // balance MUST be conserved (no second draw).
-    let billed2 = billing_reconcile::tick_with(&fx.state, &RecordingStripe::default(), now)
+    billing_reconcile::sweep(&fx.state, period)
         .await
         .expect("tick 2");
-    assert_eq!(billed2, 0, "re-run is a no-op (already finalized)");
     let bal2 = credit::balance(&*fx.state.control_pg, organization, "usd")
         .await
         .unwrap();
@@ -826,15 +661,10 @@ async fn consume_helper_is_idempotent_on_draft_redrive() {
 // (d) an expires_at-expired grant is NOT consumed.
 // ===========================================================================
 
-// See the allow on `finalize_consumes_oldest_first_and_balances` above.
-#[allow(clippy::await_holding_lock)]
 #[compio::test(crate = "crate::common::live")]
 async fn expired_grant_is_not_consumed() {
     let url = db_url();
     let fx = build_fixture(&url, "expired").await;
-    let _recon = RECONCILE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -872,10 +702,9 @@ async fn expired_grant_is_not_consumed() {
 
     ingest_at(&fx.state, &app, 500, period, 1).await; // $5 usage
 
-    let billed = billing_reconcile::tick_with(&fx.state, &RecordingStripe::default(), now)
+    billing_reconcile::sweep(&fx.state, period)
         .await
         .expect("tick");
-    assert_eq!(billed, 1);
 
     // Only the $2 LIVE grant is consumable: credit = min($2, $5) = $2; total = $3.
     let inv = read_invoice_money(&fx.state, organization, period)
@@ -892,15 +721,10 @@ async fn expired_grant_is_not_consumed() {
 // (f) a non-USD grant is NOT drawn against a USD bill (currency filter).
 // ===========================================================================
 
-// See the allow on `finalize_consumes_oldest_first_and_balances` above.
-#[allow(clippy::await_holding_lock)]
 #[compio::test(crate = "crate::common::live")]
 async fn non_usd_grant_is_not_drawn_against_usd_bill() {
     let url = db_url();
     let fx = build_fixture(&url, "currency").await;
-    let _recon = RECONCILE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -937,10 +761,9 @@ async fn non_usd_grant_is_not_drawn_against_usd_bill() {
 
     ingest_at(&fx.state, &app, 500, period, 1).await; // $5 usage
 
-    let billed = billing_reconcile::tick_with(&fx.state, &RecordingStripe::default(), now)
+    billing_reconcile::sweep(&fx.state, period)
         .await
         .expect("tick");
-    assert_eq!(billed, 1);
 
     // Only the $1 USD grant is drawn — the EUR grant is invisible to the USD bill.
     let inv = read_invoice_money(&fx.state, organization, period)

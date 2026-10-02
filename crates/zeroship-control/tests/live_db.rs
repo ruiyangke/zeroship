@@ -12,6 +12,7 @@
 //! module with `cargo test -p zeroship-control --test live_db env_store::`.
 
 mod common;
+mod isolated_case;
 
 mod account_status_test;
 mod app_logs_http_test;

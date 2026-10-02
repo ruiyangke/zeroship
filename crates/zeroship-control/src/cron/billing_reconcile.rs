@@ -16,38 +16,42 @@
 //! single-valued and always present, so every consumer bills the same subject
 //! for an app and no app is silently skipped for lack of a billable owner.
 //!
-//! Idempotency — three airtight layers under at-least-once delivery (mapped onto
-//! the provider-agnostic invoice model: `invoices` + `invoice_lines` +
+//! Idempotency - layered under at-least-once delivery (mapped onto the
+//! provider-agnostic invoice model: `invoices` + `invoice_lines` +
 //! `billing_provider_refs` / `billing_line_provider_refs`):
-//!   1. `invoices(organization_id, period)` UNIQUE, claimed BEFORE any Stripe call via
-//!      `INSERT … 'draft' ON CONFLICT DO NOTHING`. A `status='finalized'` row ⇒
-//!      already billed this period ⇒ skip entirely (no pricing, no Stripe call).
-//!      A `status='draft'` row is a crash-window remnant we re-drive.
-//!   2. The `invoice_lines(invoice_id, app_id)` LEDGER is the DURABLE per-app
-//!      double-bill guard, written CLAIM-THEN-CALL: the line (carrying the
-//!      frozen charge SNAPSHOT) is `INSERT`ed BEFORE `create_invoice_item`, and a
-//!      `billing_line_provider_refs(provider='stripe', ref_kind='invoice_item')`
-//!      row (a REAL composite FK → the line) is written AFTER. So the durable
-//!      record PRECEDES the irreversible Stripe POST. On (re-)drive: a line whose
-//!      provider-ref EXISTS is skipped outright; a line with NO provider-ref (intent recorded, outcome unknown —
-//!      the crash-mid-call case) is reconciled by LOOKING UP the item via its
-//!      deterministic `metadata.zs_item_key` (`find_invoice_item_by_key`) and
-//!      adopting it if present, else posting fresh. This guarantees each app's
-//!      item posts AT MOST ONCE even when Stripe's 24h Idempotency-Key window has
-//!      expired (a >24h re-drive). The line + ref + metadata lookup — not Stripe's
-//!      key — is what makes the no-double-bill guarantee hold.
-//!   3. The invoice is created (draft) and FINALIZED in distinct steps: the
-//!      draft id is persisted to a `billing_provider_refs(ref_kind='draft_invoice')`
-//!      row the instant the draft exists, BEFORE finalize. A crash before finalize
+//!   1. `invoices(organization_id, period)` UNIQUE (partial, `WHERE status <>
+//!      'void'`), claimed BEFORE any Stripe call via `INSERT ... 'draft' ON CONFLICT
+//!      DO NOTHING`. A `status='finalized'` row => already billed this period => skip
+//!      entirely (no pricing, no Stripe call). A `status='draft'` row is a
+//!      crash-window remnant we re-drive. This admits exactly ONE active invoice
+//!      per `(organization, period)` even when two lock-free drives race.
+//!   2. The `invoice_lines(invoice_id, app_id, segment_no)` row carries the frozen
+//!      charge SNAPSHOT and the `billing_line_provider_refs` row (a composite FK ->
+//!      the line) records the posted item. On a SEQUENTIAL (re-)drive this is the
+//!      guard: a line whose provider-ref EXISTS is skipped; a line with NO
+//!      provider-ref (intent recorded, outcome unknown - the crash-mid-call case)
+//!      is reconciled by LOOKING UP the item via its deterministic
+//!      `metadata.zs_item_key` (`find_invoice_item_by_key`) and adopting it if
+//!      present, else posting fresh. This makes each app's item post at most once
+//!      across a re-drive even after Stripe's 24h Idempotency-Key window expired.
+//!      It is NOT the concurrent multi-node arbiter: `posted_rows` is read before
+//!      the POST and the ref is inserted after it, so two lock-free drives can
+//!      both read it empty and both POST.
+//!   3. Concurrent at-most-once for the CHARGE comes from Stripe's deterministic
+//!      `Idempotency-Key` per item/invoice (`billitem:...` / `billrun:...`, derived
+//!      from the organization and period, plus the app and segment for an item),
+//!      which replays the original object inside Stripe's window. Credit is consumed once by
+//!      `credit::consume_at_finalize` under its per-organization
+//!      `pg_advisory_xact_lock`, keyed to the invoice id so a re-drive of the same
+//!      draft recomputes the same applied credit.
+//!   4. The invoice is created (draft) and FINALIZED in distinct steps: the draft
+//!      id is persisted to a `billing_provider_refs(ref_kind='draft_invoice')` row
+//!      the instant the draft exists, BEFORE finalize. A crash before finalize
 //!      re-drives by finalizing THAT draft (which carries the real items) rather
 //!      than creating a fresh empty draft — which a >24h create-key-expired
 //!      re-drive would otherwise finalize at $0 (under-bill). FINALIZE writes
 //!      subtotal/credit/tax/total/status/finalized_at in ONE UPDATE so the
 //!      `invoice_total_balances` CHECK never sees a half-written row.
-//!   4. A DETERMINISTIC Stripe `Idempotency-Key` per item/invoice derived from
-//!      `(organization_id, app_id, period_start)` — belt-and-suspenders for the
-//!      <24h replay case (Stripe returns the original object rather than
-//!      creating a duplicate).
 //!
 //! Zero tokio: a `compio::time` interval; `compio-postgres`; `cyper` Stripe.
 //! Multi-instance safety: a `pg_try_advisory_lock` around the sweep (the same
@@ -68,7 +72,7 @@ use crate::metering::provider::{
 use crate::metering::{period_date, Metering};
 use crate::pricing::{charge_cents, MetricWeight, MetricWeights};
 use crate::registry::RegistryError;
-use crate::stripe_client::{Period, StripeApi, StripeClient};
+use crate::stripe_client::{Period, StripeApi};
 use crate::AppState;
 
 /// Default tick cadence in seconds (~hourly). The closed-period claim is
@@ -388,23 +392,22 @@ pub async fn run(state: Arc<AppState>, tick_secs: u64) {
 /// resulted in a finalized invoice).
 #[allow(clippy::future_not_send)]
 pub async fn tick(state: &AppState) -> Result<usize, RegistryError> {
-    let stripe = StripeClient::new(crate::SecretString::new(
-        state.stripe_secret_key.expose_secret().to_string(),
-    ))
-    .with_base_url(state.stripe_base_url.clone());
-    tick_with(state, &stripe, Utc::now().timestamp()).await
+    tick_with(state, Utc::now().timestamp()).await
 }
 
-/// Sweep core, parameterized on the [`StripeApi`] and the wall-clock `now` (unix
-/// seconds) so an integration test can drive a single deterministic tick against
-/// a mock-Stripe server, or a unit test against a recording fake.
+/// Sweep core, parameterized on the wall-clock `now` (unix seconds) so a test can
+/// drive a single deterministic tick.
 ///
 /// Takes the advisory lock for the whole sweep (multi-instance safety), bills
 /// the CLOSED previous month, and returns the number of organizations billed.
+///
+/// # Errors
+/// Returns [`RegistryError`] when the advisory-lock query, the sweep itself, or
+/// the unlock fails. A per-organization failure is logged and skipped; only a
+/// missing global default FX aborts the whole sweep.
 #[allow(clippy::future_not_send)]
-pub async fn tick_with<S: StripeApi>(
+pub async fn tick_with(
     state: &AppState,
-    stripe: &S,
     now_unix: i64,
 ) -> Result<usize, RegistryError> {
     let period_start = previous_period_start_unix(now_unix);
@@ -447,7 +450,7 @@ pub async fn tick_with<S: StripeApi>(
         return Ok(0);
     }
 
-    let result = sweep(state, stripe, period_start).await;
+    let result = sweep(state, period_start).await;
 
     if let Err(e) = lock_conn
         .execute(
@@ -462,13 +465,22 @@ pub async fn tick_with<S: StripeApi>(
     result
 }
 
-/// The advisory-lock-protected body: group owned apps by organization, bill each.
+/// The sweep body: group owned apps by organization and bill each.
+///
+/// `pub` so an integration test can drive the sweep DIRECTLY, without the
+/// single-flight advisory lock, exactly as [`crate::cron::billing_notify::sweep`]
+/// is. At-most-once for a CHARGE under concurrent lock-free drives does not come
+/// from the per-line provider-ref ledger - that ledger is read before the POST and
+/// written after it, so two drives can both read it empty and both POST. It comes
+/// from Stripe's deterministic `Idempotency-Key` (`billitem:...` / `billrun:...`)
+/// inside Stripe's replay window, and from `credit::consume_at_finalize`'s
+/// per-organization `pg_advisory_xact_lock` for credit. The per-`(organization,
+/// period)` `invoices` claim still admits one active invoice. A test that must
+/// observe the sweep's own write cannot wait on a sibling's tick, because a sweep
+/// only bills the closed period it is given.
+#[doc(hidden)] // test-only door: drives the sweep body without the fleet advisory lock
 #[allow(clippy::future_not_send)]
-async fn sweep<S: StripeApi>(
-    state: &AppState,
-    _stripe: &S,
-    period_start: i64,
-) -> Result<usize, RegistryError> {
+pub async fn sweep(state: &AppState, period_start: i64) -> Result<usize, RegistryError> {
     // Organization -> apps is ONE column read. `apps.organization_id` is a
     // copy the composite key `(project_id, organization_id) -> projects(id,
     // organization_id)` consumes, so it cannot disagree with the project's
