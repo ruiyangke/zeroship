@@ -9,6 +9,7 @@ use crate::common::{auth_server::AuthServer, database::Database};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
 use std::io::Write as _;
+use std::sync::Arc;
 use zeroship_mailer::suppressions;
 
 struct Webhook {
@@ -27,7 +28,8 @@ impl Webhook {
                 credentials.path().to_str().unwrap(),
             ]);
         }
-        let auth = AuthServer::configured(database, None, &extra).await;
+        let auth = AuthServer::configured(database, Arc::new(AuthServer::fixture_issuer()), &extra)
+            .await;
         Self {
             auth,
             _credentials: credentials,

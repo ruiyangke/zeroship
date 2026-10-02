@@ -20,10 +20,18 @@ pub(super) struct RequestedLogin {
 
 impl RequestedLogin {
     pub async fn start(server: &AuthServer, mailer: &CapturingMailer, email: &str) -> Self {
+        register_magic_client(server).await;
         let return_to =
             common::native_authorize_return_to("magic-test-client", "http://127.0.0.1:9999/cb");
         let response = start_request(server, email, &return_to).await;
         assert_eq!(response.status().as_u16(), 200);
+        let csp =
+            common::response_header(&response, "content-security-policy").expect("check-email CSP");
+        assert_eq!(
+            common::csp_directive(&csp, "form-action").as_deref(),
+            Some("form-action 'self' http://127.0.0.1:9999"),
+            "the completion form document must name the callback origin: {csp}"
+        );
         let csrf = common::read_set_cookie(&response, "__Host-zsidp_csrf")
             .expect("requesting browser receives completion CSRF");
         let nonce = common::read_set_cookie(&response, "__Host-zsidp_magic_csrf")
@@ -120,6 +128,71 @@ pub(super) async fn start_request(
         Some(&format!("__Host-zsidp_csrf={csrf}")),
     )
     .await
+}
+
+/// Register the native OAuth client every magic continuation target names.
+///
+/// A form document's `form-action` is widened only for a callback the client
+/// registry owns, so the fixture must register the exact client / redirect its
+/// `return_to` carries rather than relying on the target's shape.
+pub(super) async fn register_magic_client(server: &AuthServer) {
+    server
+        .pg
+        .execute(
+            "INSERT INTO zeroship.oauth_clients \
+                 (client_id, client_name, redirect_uris, scopes, skip_consent) \
+             VALUES ('magic-test-client', 'Magic login fixture', \
+                     ARRAY['http://127.0.0.1:9999/cb']::text[], ARRAY['openid']::text[], FALSE) \
+             ON CONFLICT (client_id) DO NOTHING",
+            &[],
+        )
+        .await
+        .expect("register the magic fixture oauth client");
+}
+
+/// The exact `form-action` directive on a rendered form document.
+pub(super) fn assert_form_action(response: &cyper::Response, expected: &str) {
+    let csp = common::response_header(response, "content-security-policy").expect("CSP header");
+    assert_eq!(
+        common::csp_directive(&csp, "form-action").as_deref(),
+        Some(expected),
+        "unexpected form-action; CSP was {csp}"
+    );
+}
+
+/// GET `/magic/await` for a continuation target.
+pub(super) async fn await_request(server: &AuthServer, return_to: &str) -> cyper::Response {
+    let query = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("return_to", return_to)
+        .append_pair("csrf_nonce", "nonce-form-action")
+        .append_pair("email", "magic-csp@example.test")
+        .finish();
+    server
+        .http
+        .get(format!("{}/magic/await?{query}", server.auth_base))
+        .unwrap()
+        .send()
+        .await
+        .unwrap()
+}
+
+/// GET `/magic/verify` for a token and continuation target.
+pub(super) async fn verify_request(
+    server: &AuthServer,
+    token: &str,
+    return_to: &str,
+) -> cyper::Response {
+    let query = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("token", token)
+        .append_pair("return_to", return_to)
+        .finish();
+    server
+        .http
+        .get(format!("{}/magic/verify?{query}", server.auth_base))
+        .unwrap()
+        .send()
+        .await
+        .unwrap()
 }
 
 async fn post_form(

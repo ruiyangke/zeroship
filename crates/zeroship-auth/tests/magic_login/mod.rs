@@ -12,6 +12,7 @@ use zeroship_auth::identity::magic_link;
 async fn cookie_less_get_preserves_the_link_until_explicit_redemption() {
     Database::run(async |database| {
         let server = AuthServer::start(database).await;
+        fixtures::register_magic_client(&server).await;
         let email = "magic@example.test";
         let issued = magic_link::issue(&server.pg, email, "login").await.unwrap();
         let return_to = common::native_authorize_return_to(
@@ -25,6 +26,17 @@ async fn cookie_less_get_preserves_the_link_until_explicit_redemption() {
             .unwrap().send().await.unwrap();
         assert_eq!(response.status().as_u16(), 200);
         assert_eq!(response.headers().get("cache-control").unwrap(), "no-store");
+        let csp =
+            common::response_header(&response, "content-security-policy").expect("interstitial CSP");
+        assert!(
+            csp.contains("'nonce-"),
+            "the interstitial keeps its per-response script nonce: {csp}"
+        );
+        assert_eq!(
+            common::csp_directive(&csp, "form-action").as_deref(),
+            Some("form-action 'self' http://127.0.0.1:9999"),
+            "the interstitial's own nonce CSP must name the callback origin: {csp}"
+        );
         let csrf = common::read_set_cookie(&response, "__Host-zsidp_magic_csrf")
             .expect("interstitial supplies its CSRF cookie");
         assert_ne!(csrf, issued.csrf_nonce, "this browser did not request the link");
@@ -76,4 +88,64 @@ async fn cookie_less_get_preserves_the_link_until_explicit_redemption() {
         assert!(verified);
         assert!(magic_link::redeem_pending(&server.pg, &issued.raw).await.unwrap().is_none());
     }).await;
+}
+
+/// A form document's `form-action` names the relying-party origin only when the
+/// continuation target's `redirect_uri` is registered to its `client_id`. A
+/// forged target that merely has the right shape - an unregistered `redirect_uri`
+/// on a real client, or an unknown `client_id` - must stay at exactly `'self'`,
+/// and a registered callback must still be named.
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn form_action_names_only_a_registered_callback() {
+    Database::run(async |database| {
+        let server = AuthServer::with_mailer(
+            database,
+            std::sync::Arc::new(common::CapturingMailer::default()),
+        )
+        .await;
+        fixtures::register_magic_client(&server).await;
+        let email = "magic-csp@example.test";
+
+        let unregistered = common::native_authorize_return_to(
+            "magic-test-client",
+            "https://evil.attacker.example/cb",
+        );
+        let unknown = common::native_authorize_return_to(
+            "magic-unknown-client",
+            "http://127.0.0.1:9999/cb",
+        );
+        let registered = common::native_authorize_return_to(
+            "magic-test-client",
+            "http://127.0.0.1:9999/cb",
+        );
+        let callback_origin = "form-action 'self' http://127.0.0.1:9999";
+
+        for target in [&unregistered, &unknown] {
+            let response = fixtures::start_request(&server, email, target).await;
+            assert_eq!(response.status().as_u16(), 200, "/magic/start");
+            fixtures::assert_form_action(&response, "form-action 'self'");
+        }
+        let response = fixtures::start_request(&server, email, &registered).await;
+        fixtures::assert_form_action(&response, callback_origin);
+
+        for target in [&unregistered, &unknown] {
+            let response = fixtures::await_request(&server, target).await;
+            assert_eq!(response.status().as_u16(), 200, "/magic/await");
+            fixtures::assert_form_action(&response, "form-action 'self'");
+        }
+        let response = fixtures::await_request(&server, &registered).await;
+        fixtures::assert_form_action(&response, callback_origin);
+
+        for target in [&unregistered, &unknown] {
+            let issued = magic_link::issue(&server.pg, email, "login").await.unwrap();
+            let response = fixtures::verify_request(&server, &issued.raw, target).await;
+            assert_eq!(response.status().as_u16(), 200, "/magic/verify");
+            fixtures::assert_form_action(&response, "form-action 'self'");
+        }
+        let issued = magic_link::issue(&server.pg, email, "login").await.unwrap();
+        let response = fixtures::verify_request(&server, &issued.raw, &registered).await;
+        fixtures::assert_form_action(&response, callback_origin);
+    })
+    .await;
 }

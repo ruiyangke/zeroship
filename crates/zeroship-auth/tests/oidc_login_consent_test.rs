@@ -15,10 +15,13 @@ use zeroship_auth::oidc::Issuer;
 use zeroship_auth::sessions::login as session_cookie;
 use zeroship_auth::store::{sessions as session_store, totp as totp_store};
 
-use common::{location, pkce_challenge_s256, pkce_verifier, read_set_cookie};
+use common::{
+    csp_directive, location, pkce_challenge_s256, pkce_verifier, read_set_cookie, response_header,
+};
 
 const ISSUER: &str = "https://auth.zeroship.test/oauth2";
 const REDIRECT_URI: &str = "http://127.0.0.1:9999/native-cb";
+const REDIRECT_ORIGIN: &str = "http://127.0.0.1:9999";
 const SECTOR: &str = "https://native-app.zeroship.test";
 const PASSWORD: &str = "correct native password phrase";
 
@@ -52,7 +55,7 @@ impl Fixture {
 
         let server = AuthServer::configured(
             database,
-            Some(issuer),
+            issuer,
             &["--google-client-id", "mock-google-client"],
         )
         .await;
@@ -162,6 +165,9 @@ async fn end_to_end_native_authorize_login_consent_token_flow() {
 
         let consent_get = get(&fx, &consent_loc, Some(&cookies)).await;
         assert_eq!(consent_get.status().as_u16(), 200);
+        // The consent document's form chains through `/oauth2/authorize` to the
+        // registered callback, so its `form-action` must name that origin.
+        assert_form_action(&consent_get, REDIRECT_ORIGIN);
         let csrf = read_set_cookie(&consent_get, "__Host-zsidp_csrf").expect("consent csrf");
         let accept_body = form(&[
             ("csrf", csrf.as_str()),
@@ -197,6 +203,266 @@ async fn end_to_end_native_authorize_login_consent_token_flow() {
         assert!(token.scope.contains("openid"));
         assert!(!token.access_token.is_empty());
         assert!(!token.id_token.is_empty());
+    })
+    .await;
+}
+
+/// A consent page the user cannot grant renders no decision form, so it must
+/// keep the baseline `form-action 'self'` and carry no callback origin. This is
+/// the control that makes the widened assertion in the end-to-end case mean
+/// something: without it, a handler that always widened the directive would
+/// pass there while leaking an origin onto a page with nothing to submit.
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn consent_without_grant_keeps_the_tight_form_action() {
+    Database::run(async |database| {
+        let fx = Fixture::boot(database).await;
+        // Register a delegated platform scope on this client so consent renders
+        // the cannot-grant page rather than rejecting the scope as
+        // out-of-registration. The fixture user holds no delegation policy, so
+        // the scope is not grantable.
+        fx.db
+            .execute(
+                "UPDATE zeroship.oauth_clients \
+                 SET scopes = array_append(scopes, 'apps:deploy') \
+                 WHERE client_id = $1",
+                &[&fx.client_id],
+            )
+            .await
+            .expect("register delegated scope");
+        let cookies = fx.create_session_cookie().await;
+        let authorize_path = authorize_path(
+            &fx.client_id,
+            "apps:deploy",
+            &pkce_verifier(),
+            "state-cannot-grant",
+            Some("nonce-cannot-grant"),
+        );
+        let consent_loc = format!(
+            "/consent?{}",
+            form(&[("return_to", authorize_path.as_str())])
+        );
+        let consent_get = get(&fx, &consent_loc, Some(&cookies)).await;
+        assert_eq!(consent_get.status().as_u16(), 200);
+        let csp = response_header(&consent_get, "content-security-policy").expect("CSP header");
+        assert_eq!(
+            csp_directive(&csp, "form-action").as_deref(),
+            Some("form-action 'self'"),
+            "a page with no decision form must not name a callback origin: {csp}"
+        );
+        assert!(
+            csp.contains("frame-ancestors 'self'"),
+            "the consent page stays a framed render: {csp}"
+        );
+    })
+    .await;
+}
+
+/// The login form and the TOTP challenge document both chain to the relying
+/// party: the login POST 303s to `/oauth2/authorize` (which, with a prior
+/// grant, 303s to the callback), and the challenge POST does the same. Both
+/// documents must therefore name the registered callback origin.
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn native_login_and_second_factor_documents_name_the_callback_origin() {
+    Database::run(async |database| {
+        let fx = Fixture::boot(database).await;
+        let authorize_path = authorize_path(
+            &fx.client_id,
+            "openid email",
+            &pkce_verifier(),
+            "state-form-csp",
+            Some("nonce-form-csp"),
+        );
+
+        let login_get = get(
+            &fx,
+            &format!("/login?{}", form(&[("return_to", authorize_path.as_str())])),
+            None,
+        )
+        .await;
+        assert_eq!(login_get.status().as_u16(), 200);
+        assert_form_action(&login_get, REDIRECT_ORIGIN);
+
+        // A TOTP-enabled user's password POST renders the challenge document on
+        // the same path before `/login/2fa` completes the chain.
+        let secret = totp::generate_secret();
+        let key = totp::key_from_config(fx.server.config.settings.totp_enc_key.expose_str())
+            .expect("totp key");
+        totp_store::enroll(
+            &fx.db,
+            &fx.user_id,
+            &totp::encrypt_secret(&key, &fx.user_id, &secret).expect("encrypt totp"),
+            false,
+        )
+        .await
+        .expect("enroll totp");
+        let (_, hashes) = totp::generate_backup_codes().await.expect("backup codes");
+        totp_store::confirm(&fx.db, &fx.user_id, &hashes)
+            .await
+            .expect("confirm totp");
+
+        let csrf = read_set_cookie(&login_get, "__Host-zsidp_csrf").expect("login csrf");
+        let body = form(&[
+            ("csrf", csrf.as_str()),
+            ("email", fx.email.as_str()),
+            ("password", PASSWORD),
+            ("return_to", authorize_path.as_str()),
+        ]);
+        let challenge = post_form(
+            &fx,
+            "/login",
+            &body,
+            Some(&format!("__Host-zsidp_csrf={csrf}")),
+        )
+        .await;
+        assert_eq!(challenge.status().as_u16(), 200);
+        assert_form_action(&challenge, REDIRECT_ORIGIN);
+
+        // The second factor completes the chain to the authorize request.
+        let csrf = read_set_cookie(&challenge, "__Host-zsidp_csrf").expect("totp csrf");
+        let stash = read_set_cookie(&challenge, "__Host-zsidp_2fa").expect("totp stash");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_secs();
+        let code = totp::code_at(&secret, now);
+        let body = form(&[
+            ("csrf", csrf.as_str()),
+            ("code", code.as_str()),
+            ("return_to", authorize_path.as_str()),
+        ]);
+        let done = post_form(
+            &fx,
+            "/login/2fa",
+            &body,
+            Some(&format!(
+                "__Host-zsidp_csrf={csrf}; __Host-zsidp_2fa={stash}"
+            )),
+        )
+        .await;
+        assert_eq!(done.status().as_u16(), 303);
+        assert_eq!(location(&done), authorize_path);
+    })
+    .await;
+}
+
+/// A form document's `form-action` names the relying-party origin only after
+/// the same registry check consent applies: the `client_id` must exist and the
+/// `redirect_uri` must be one of its registered callbacks. A well-formed
+/// `return_to` naming an unregistered redirect or an unknown client must leave
+/// every login form at exactly `'self'`; the registered callback is named.
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn unregistered_or_unknown_return_to_keeps_form_action_self() {
+    Database::run(async |database| {
+        let fx = Fixture::boot(database).await;
+        let unregistered = authorize_path_with_redirect(
+            &fx.client_id,
+            "https://evil.attacker.example/cb",
+            "state-unregistered",
+        );
+        let unknown =
+            authorize_path_with_redirect("oac_unknownclient", REDIRECT_URI, "state-unknown");
+
+        // /login GET.
+        for bad in [&unregistered, &unknown] {
+            let login_get = get(
+                &fx,
+                &format!("/login?{}", form(&[("return_to", bad.as_str())])),
+                None,
+            )
+            .await;
+            assert_eq!(login_get.status().as_u16(), 200);
+            assert_form_action_self(&login_get);
+        }
+        let registered = authorize_path(
+            &fx.client_id,
+            "openid email",
+            &pkce_verifier(),
+            "state-registered",
+            Some("nonce-registered"),
+        );
+        let login_get = get(
+            &fx,
+            &format!("/login?{}", form(&[("return_to", registered.as_str())])),
+            None,
+        )
+        .await;
+        assert_form_action(&login_get, REDIRECT_ORIGIN);
+
+        // Enable TOTP so a password POST renders the challenge document.
+        let secret = totp::generate_secret();
+        let key = totp::key_from_config(fx.server.config.settings.totp_enc_key.expose_str())
+            .expect("totp key");
+        totp_store::enroll(
+            &fx.db,
+            &fx.user_id,
+            &totp::encrypt_secret(&key, &fx.user_id, &secret).expect("encrypt totp"),
+            false,
+        )
+        .await
+        .expect("enroll totp");
+        let (_, hashes) = totp::generate_backup_codes().await.expect("backup codes");
+        totp_store::confirm(&fx.db, &fx.user_id, &hashes)
+            .await
+            .expect("confirm totp");
+
+        // /login/2fa challenge rendered for an unregistered target.
+        let csrf = read_set_cookie(&login_get, "__Host-zsidp_csrf").expect("login csrf");
+        let body = form(&[
+            ("csrf", csrf.as_str()),
+            ("email", fx.email.as_str()),
+            ("password", PASSWORD),
+            ("return_to", unregistered.as_str()),
+        ]);
+        let challenge = post_form(
+            &fx,
+            "/login",
+            &body,
+            Some(&format!("__Host-zsidp_csrf={csrf}")),
+        )
+        .await;
+        assert_eq!(challenge.status().as_u16(), 200);
+        assert_form_action_self(&challenge);
+
+        // /login/2fa error page for the same target.
+        let csrf = read_set_cookie(&challenge, "__Host-zsidp_csrf").expect("totp csrf");
+        let stash = read_set_cookie(&challenge, "__Host-zsidp_2fa").expect("totp stash");
+        let body = form(&[
+            ("csrf", csrf.as_str()),
+            ("code", "000000"),
+            ("return_to", unregistered.as_str()),
+        ]);
+        let error = post_form(
+            &fx,
+            "/login/2fa",
+            &body,
+            Some(&format!(
+                "__Host-zsidp_csrf={csrf}; __Host-zsidp_2fa={stash}"
+            )),
+        )
+        .await;
+        assert_eq!(error.status().as_u16(), 401);
+        assert_form_action_self(&error);
+
+        // /login error page for the unknown-client target.
+        let csrf = read_set_cookie(&login_get, "__Host-zsidp_csrf").expect("login csrf");
+        let body = form(&[
+            ("csrf", csrf.as_str()),
+            ("email", fx.email.as_str()),
+            ("password", "wrong password phrase"),
+            ("return_to", unknown.as_str()),
+        ]);
+        let error = post_form(
+            &fx,
+            "/login",
+            &body,
+            Some(&format!("__Host-zsidp_csrf={csrf}")),
+        )
+        .await;
+        assert_eq!(error.status().as_u16(), 401);
+        assert_form_action_self(&error);
     })
     .await;
 }
@@ -1009,6 +1275,34 @@ async fn totp_login_preserves_native_return_to() {
     .await;
 }
 
+/// The document rendered by a form whose submission chain ends at `origin`
+/// must name it in `form-action`, and the typed marker must never reach the
+/// wire as a header.
+fn assert_form_action(response: &cyper::Response, origin: &str) {
+    let csp = response_header(response, "content-security-policy").expect("CSP header");
+    let expected = format!("form-action 'self' {origin}");
+    assert_eq!(
+        csp_directive(&csp, "form-action").as_deref(),
+        Some(expected.as_str()),
+        "the form document must name the callback origin; CSP was {csp}"
+    );
+    assert!(
+        response_header(response, "x-zeroship-form-action-origins").is_none(),
+        "the callback origin must travel as a typed extension, never as a header"
+    );
+}
+
+/// The form document must carry the untouched baseline `form-action`: an
+/// unregistered redirect target names no origin.
+fn assert_form_action_self(response: &cyper::Response) {
+    let csp = response_header(response, "content-security-policy").expect("CSP header");
+    assert_eq!(
+        csp_directive(&csp, "form-action").as_deref(),
+        Some("form-action 'self'"),
+        "an unregistered return target must not widen form-action; CSP was {csp}"
+    );
+}
+
 fn test_issuer() -> Issuer {
     let signing = ed25519_dalek::SigningKey::from_bytes(&[16; 32]);
     Issuer::from_signing_key(&signing, [9u8; 32], ISSUER.to_string()).expect("issuer")
@@ -1106,6 +1400,23 @@ fn authorize_path(
     nonce: Option<&str>,
 ) -> String {
     authorize_path_with_prompt(client_id, scope, verifier, state, nonce, None)
+}
+
+/// A native authorize path whose `redirect_uri` and `client_id` are supplied
+/// independently, so a case can name an unregistered callback or unknown
+/// client.
+fn authorize_path_with_redirect(client_id: &str, redirect_uri: &str, state: &str) -> String {
+    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+    serializer
+        .append_pair("client_id", client_id)
+        .append_pair("response_type", "code")
+        .append_pair("scope", "openid email")
+        .append_pair("redirect_uri", redirect_uri)
+        .append_pair("state", state)
+        .append_pair("nonce", "nonce-form-action")
+        .append_pair("code_challenge", &pkce_challenge_s256(&pkce_verifier()))
+        .append_pair("code_challenge_method", "S256");
+    format!("/oauth2/authorize?{}", serializer.finish())
 }
 
 fn authorize_path_with_prompt(

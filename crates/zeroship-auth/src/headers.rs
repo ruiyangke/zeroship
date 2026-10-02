@@ -45,6 +45,91 @@ const DEFAULT_CONTENT_SECURITY_POLICY: &str = "default-src 'self'; \
          object-src 'none'; \
          upgrade-insecure-requests";
 
+/// Per-response marker naming the one origin a form on the rendered page may
+/// reach after submission, so [`apply`] can widen that page's `form-action`.
+///
+/// Chromium enforces `form-action` across the WHOLE form-submission redirect
+/// chain: a consent decision is a form POST whose server response 303s to the
+/// relying party's registered `redirect_uri`, and the cross-origin hop is
+/// blocked unless the FORM DOCUMENT's policy names that origin, so the click
+/// silently does nothing. A handler that renders such a form resolves the
+/// origin through the single registry-checking helper
+/// ([`FormActionOrigin::registered`]), inserts this marker, and the
+/// security-header middleware takes it, splices it into whichever CSP the
+/// response carries, and drops the marker.
+///
+/// The wrapped origin is always a tuple (`scheme://host[:port]`); a host-less
+/// custom scheme yields no marker, so it cannot widen the directive.
+#[derive(Clone, Debug)]
+pub(crate) struct FormActionOrigin(url::Origin);
+
+impl FormActionOrigin {
+    /// The marker for a parsed native authorize request, only when the client
+    /// registry registers its `redirect_uri`.
+    ///
+    /// The field is private, so this is the only way to produce a marker:
+    /// [`crate::oidc::auth_request::AuthRequest::parse_return_to`] only
+    /// shape-checks a `return_to` and never consults the registry, and a
+    /// crafted `/login?return_to=...` or `/magic/...` must not name an origin.
+    /// The named client must exist and list the `redirect_uri` verbatim, the
+    /// check consent makes before it renders a decision form. An unknown
+    /// client, an unregistered `redirect_uri` or a non-tuple scheme yields
+    /// `None`, leaving `form-action` exactly `'self'`.
+    pub(crate) async fn registered(
+        db: &compio_postgres::Client,
+        request: &crate::oidc::auth_request::AuthRequest,
+    ) -> Option<Self> {
+        let client = crate::ui::consent::load_native_oauth_client(db, &request.client_id)
+            .await
+            .ok()?;
+        if !client
+            .redirect_uris
+            .iter()
+            .any(|registered| registered == &request.redirect_uri)
+        {
+            return None;
+        }
+        form_action_origin(&request.redirect_uri).map(Self)
+    }
+
+    /// [`Self::registered`] for a call site that holds the raw `return_to`.
+    pub(crate) async fn registered_for_return_to(
+        db: &compio_postgres::Client,
+        return_to: &str,
+    ) -> Option<Self> {
+        let request = crate::oidc::auth_request::AuthRequest::parse_return_to(return_to).ok()?;
+        Self::registered(db, &request).await
+    }
+}
+
+/// The tuple origin of a redirect URI, or `None`.
+///
+/// A redirect URI's path, query and fragment do not name a `form-action`
+/// source; a default port is dropped; userinfo is not part of an origin. An
+/// opaque origin (a host-less custom scheme) has nothing to name and yields
+/// `None`. This is a pure conversion: whether the redirect URI is a REGISTERED
+/// callback is decided by [`FormActionOrigin::registered`].
+#[must_use]
+pub(crate) fn form_action_origin(redirect_uri: &str) -> Option<url::Origin> {
+    let url = url::Url::parse(redirect_uri).ok()?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return None;
+    }
+    let origin = url.origin();
+    origin.is_tuple().then_some(origin)
+}
+
+/// Insert the marker (when there is one) into a rendered form document's
+/// response. See [`FormActionOrigin`] for why only form documents carry it.
+pub(crate) fn attach_form_action_origin(
+    response: &mut ntex::web::HttpResponse,
+    origin: Option<FormActionOrigin>,
+) {
+    if let Some(origin) = origin {
+        response.extensions_mut().insert(origin);
+    }
+}
+
 /// The exact set of request paths whose responses render INSIDE the immersive
 /// login iframe and therefore need the relaxed `frame-ancestors` (design §4.3).
 /// `/login` + `/signup` cover both their GET render and their POST error
@@ -74,27 +159,28 @@ fn is_framed_route(req_path: &str) -> bool {
 /// origin here could not widen the allowlist or break the header value. A `*`
 /// (e.g. `https://*.zeroship.ai`, the bare `*`) would re-admit every creator
 /// app, so it is rejected outright.
+///
+/// The verdict comes from PARSING the value and requiring its origin to
+/// round-trip byte for byte. A prefix check would accept `https://u@h/p?q#f`
+/// (userinfo, path, query, fragment are not origin) and a character denylist
+/// would miss the bytes the URL parser strips. Round-tripping admits exactly
+/// the strings the browser would treat as that origin and nothing else.
 #[must_use]
-fn is_concrete_ancestor_source(origin: &str) -> bool {
+fn is_concrete_origin(origin: &str) -> bool {
     let o = origin.trim();
-    if o.is_empty() {
+    // `https://*.zeroship.ai` is a valid host to the URL parser and round-trips,
+    // but the browser reads the `*` as a CSP host wildcard that re-admits every
+    // creator app. It is a source, not a concrete origin.
+    if o.contains('*') {
         return false;
     }
-    if o.strip_prefix("https://")
-        .or_else(|| o.strip_prefix("http://"))
-        .is_none_or(str::is_empty)
-    {
+    let Ok(url) = url::Url::parse(o) else {
+        return false;
+    };
+    if !matches!(url.scheme(), "http" | "https") {
         return false;
     }
-    !o.chars().any(|c| {
-        c == '*'
-            || c == ';'
-            || c == ','
-            || c == ' '
-            || c == '\t'
-            || c.is_control()
-            || !c.is_ascii()
-    })
+    url.origin().ascii_serialization() == o
 }
 
 /// Build the CSP for a FRAMED login route: the baseline default-src/script-src/
@@ -102,7 +188,7 @@ fn is_concrete_ancestor_source(origin: &str) -> bool {
 /// `frame-ancestors 'self' <origins…>`. `'self'` keeps the auth origin's own
 /// pages framing each other; each configured origin is one cross-site embedder
 /// (the console) the browser will admit. Only CONCRETE origins
-/// ([`is_concrete_ancestor_source`]) are spliced — a wildcard / poison entry is
+/// ([`is_concrete_origin`]) are spliced - a wildcard / poison entry is
 /// dropped (§6.2 defense in depth). With an EMPTY (or all-dropped) `origins`
 /// slice this degrades to `frame-ancestors 'self'` (still strictly tighter than
 /// `'none'` only by admitting same-origin self-framing) — but the middleware
@@ -113,7 +199,7 @@ fn is_concrete_ancestor_source(origin: &str) -> bool {
 fn framed_route_csp(origins: &[String]) -> String {
     let mut ancestors = String::from("'self'");
     for origin in origins {
-        if is_concrete_ancestor_source(origin) {
+        if is_concrete_origin(origin) {
             ancestors.push(' ');
             ancestors.push_str(origin.trim());
         }
@@ -132,6 +218,55 @@ fn framed_route_csp(origins: &[String]) -> String {
          object-src 'none'; \
          upgrade-insecure-requests"
     )
+}
+
+/// Splice already-validated origins into a baseline CSP's `form-action`
+/// directive.
+///
+/// The directive is located by its NAME from the parsed `;`-separated
+/// directive list, not by searching for the substring `form-action` anywhere in
+/// the policy: a value such as `frame-ancestors https://form-action.example`
+/// contains it, and a substring match would splice into the wrong directive.
+/// The rebuilt policy preserves every other directive byte for byte (modulo the
+/// `; ` separators). A policy that carries no `form-action` directive is
+/// returned unchanged and logs at error level - inventing a directive would be
+/// a policy change, not a splice. With no extras the baseline is returned byte
+/// for byte, so the common path does not depend on the marker having been
+/// absent.
+#[must_use]
+fn with_form_action(base: String, extras: &[url::Origin]) -> String {
+    if extras.is_empty() {
+        return base;
+    }
+    let mut sources = String::new();
+    for origin in extras {
+        sources.push(' ');
+        sources.push_str(&origin.ascii_serialization());
+    }
+    let mut rebuilt = String::with_capacity(base.len() + sources.len());
+    let mut found = false;
+    for directive in base.split(';').map(str::trim).filter(|d| !d.is_empty()) {
+        if !rebuilt.is_empty() {
+            rebuilt.push_str("; ");
+        }
+        // The directive NAME is the first whitespace-delimited token; matching
+        // the whole token is what keeps `frame-ancestors
+        // https://form-action.example` from being read as `form-action`.
+        if !found && directive.split_whitespace().next() == Some("form-action") {
+            rebuilt.push_str("form-action 'self'");
+            rebuilt.push_str(&sources);
+            found = true;
+        } else {
+            rebuilt.push_str(directive);
+        }
+    }
+    if !found {
+        tracing::error!(
+            "CSP carries no form-action directive; refusing to splice form-action origins {sources}"
+        );
+        return base;
+    }
+    rebuilt
 }
 
 /// Client IP for rate-limiting and audit, as a string.
@@ -209,11 +344,11 @@ pub fn content_security_policy_with_script_nonce(nonce: &str) -> String {
     )
 }
 
-/// Apply the standard security headers to an outgoing response's header map,
-/// branching on `req_path` for the immersive-login framed-route relax.
+/// Apply the standard security headers to an outgoing response's header map.
 ///
-/// All values except the framed-route `frame-ancestors` are static ASCII
-/// strings; this is a pure writer with no failure modes.
+/// Branches on `req_path` for the immersive-login framed-route relax and
+/// splices in the [`FormActionOrigin`] the response carries, if any. All values
+/// are static ASCII strings; this is a pure writer with no failure modes.
 ///
 /// - **Framed login routes** (`/login`, `/signup`, interactive `/consent` —
 ///   [`is_framed_route`]) AND a non-empty `frame_ancestor_origins`: emit
@@ -227,8 +362,14 @@ pub fn content_security_policy_with_script_nonce(nonce: &str) -> String {
 ///   configured — dev / single-origin): the fail-closed default —
 ///   `X-Frame-Options: DENY` + CSP `frame-ancestors 'none'`. The baseline CSP
 ///   is `_if_absent` so a handler that DID render an inline-script nonce-CSP
-///   (token interstitial, etc.) keeps its own.
-pub fn apply(headers: &mut HeaderMap, req_path: &str, frame_ancestor_origins: &[String]) {
+///   (token interstitial, etc.) keeps its own - but its `form-action` is still
+///   widened by `form_action_origins` (see [`FormActionOrigin`]).
+pub fn apply(
+    headers: &mut HeaderMap,
+    req_path: &str,
+    frame_ancestor_origins: &[String],
+    form_action_origins: &[url::Origin],
+) {
     static_set(
         headers,
         "strict-transport-security",
@@ -259,7 +400,7 @@ pub fn apply(headers: &mut HeaderMap, req_path: &str, frame_ancestor_origins: &[
     let framed = is_framed_route(req_path)
         && frame_ancestor_origins
             .iter()
-            .any(|o| is_concrete_ancestor_source(o));
+            .any(|o| is_concrete_origin(o));
 
     if framed {
         // Framed login document: relaxed `frame-ancestors`, NO `X-Frame-Options`.
@@ -268,19 +409,49 @@ pub fn apply(headers: &mut HeaderMap, req_path: &str, frame_ancestor_origins: &[
         static_insert(
             headers,
             "content-security-policy",
-            &framed_route_csp(frame_ancestor_origins),
+            &with_form_action(framed_route_csp(frame_ancestor_origins), form_action_origins),
         );
     } else {
         // Fail-closed default: never frameable.
         static_set(headers, "x-frame-options", "DENY");
-        // CSP — same shape as proposal §14. `'nonce-...'` and per-page hardening
-        // are added by handlers that render inline scripts; the baseline blocks
-        // everything else (incl. `frame-ancestors 'none'`).
-        static_set_if_absent(
+        apply_default_csp(headers, form_action_origins);
+    }
+}
+
+/// The strict-branch CSP: the baseline `frame-ancestors 'none'` shape, widened
+/// with `form_action_origins` when there are any.
+///
+/// A handler-set policy (an inline-script nonce) keeps every directive it owns,
+/// but its `form-action` is widened too (see [`FormActionOrigin`]).
+fn apply_default_csp(headers: &mut HeaderMap, form_action_origins: &[url::Origin]) {
+    match headers
+        .get("content-security-policy")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned)
+    {
+        Some(existing) if !form_action_origins.is_empty() => {
+            static_insert(
+                headers,
+                "content-security-policy",
+                &with_form_action(existing, form_action_origins),
+            );
+        }
+        Some(_) => {}
+        None if !form_action_origins.is_empty() => {
+            static_insert(
+                headers,
+                "content-security-policy",
+                &with_form_action(
+                    DEFAULT_CONTENT_SECURITY_POLICY.to_owned(),
+                    form_action_origins,
+                ),
+            );
+        }
+        None => static_set_if_absent(
             headers,
             "content-security-policy",
             DEFAULT_CONTENT_SECURITY_POLICY,
-        );
+        ),
     }
 }
 
@@ -302,7 +473,7 @@ fn static_set_if_absent(headers: &mut HeaderMap, name: &'static str, value: &'st
 /// `frame-ancestors` carries the configured console origin(s). A header value
 /// can only fail construction on a control char / non-visible-ASCII byte; both
 /// the config layer ([`AuthConfig::resolve`]) and the builder
-/// ([`is_concrete_ancestor_source`]) reject such origins, so the CSP we build is
+/// ([`is_concrete_origin`]) reject such origins, so the CSP we build is
 /// all printable ASCII and the fallback is unreachable in practice. Should a
 /// future path ever feed a poison value here, fail-closed FULLY: emit the strict
 /// `frame-ancestors 'none'` default AND re-insert `X-Frame-Options: DENY` (which
@@ -483,7 +654,21 @@ where
         // suppress), but it needs the request path to decide framed-vs-strict.
         let req_path = req.path().to_string();
         let mut res = ctx.call(&self.service, req).await?;
-        apply(res.headers_mut(), &req_path, &self.frame_ancestor_origins);
+        // Take the handler's `form-action` marker off the response so it never
+        // reaches the browser, then splice its origin into whichever CSP the
+        // response carries.
+        let form_action_origins: Vec<url::Origin> = res
+            .response()
+            .extensions_mut()
+            .remove::<FormActionOrigin>()
+            .map(|marker| vec![marker.0])
+            .unwrap_or_default();
+        apply(
+            res.headers_mut(),
+            &req_path,
+            &self.frame_ancestor_origins,
+            &form_action_origins,
+        );
         Ok(res)
     }
 }
@@ -510,8 +695,19 @@ mod tests {
     fn applied(path: &str, origins: &[&str]) -> HeaderMap {
         let mut headers = HeaderMap::new();
         let origins: Vec<String> = origins.iter().map(|s| (*s).to_string()).collect();
-        apply(&mut headers, path, &origins);
+        apply(&mut headers, path, &origins, &[]);
         headers
+    }
+
+    fn origin(uri: &str) -> url::Origin {
+        form_action_origin(uri).expect("a tuple origin")
+    }
+
+    fn csp_directive(csp: &str, name: &str) -> Option<String> {
+        csp.split(';')
+            .map(str::trim)
+            .find(|directive| directive.starts_with(name))
+            .map(str::to_owned)
     }
 
     #[test]
@@ -636,11 +832,12 @@ mod tests {
     }
 
     #[test]
-    fn is_concrete_ancestor_source_predicate() {
-        assert!(is_concrete_ancestor_source("https://console.zeroship.ai"));
-        assert!(is_concrete_ancestor_source(
+    fn is_concrete_origin_predicate() {
+        assert!(is_concrete_origin("https://console.zeroship.ai"));
+        assert!(is_concrete_origin(
             "https://console.zeroship.localhost:8443"
         ));
+        assert!(is_concrete_origin("http://127.0.0.1:9999"));
         for bad in [
             "",
             "   ",
@@ -654,10 +851,66 @@ mod tests {
             "https://a.zeroship.ai https://b.ai",
             "https://a.zeroship.ai;script-src *",
             "https://a.zeroship.ai,https://b.ai",
+            // A tab, a raw control byte and a non-ASCII host must not survive
+            // the parser's normalization and round-trip as a concrete origin.
+            "https://console\t.zeroship.ai",
+            "https://console\n.zeroship.ai",
+            "https://console.\u{7}zeroship.ai",
+            "https://éxample.test",
+            // Empty host, a lone directive separator, quotes, userinfo and a
+            // path are not one concrete `scheme://host[:port]`.
+            "https://",
+            ";",
+            "\"https://console.zeroship.ai\"",
+            "https://user:pass@console.zeroship.ai",
+            "https://console.zeroship.ai/path",
         ] {
             assert!(
-                !is_concrete_ancestor_source(bad),
+                !is_concrete_origin(bad),
                 "{bad:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn form_action_origin_names_only_the_tuple_origin() {
+        let named = |uri: &str| form_action_origin(uri).map(|origin| origin.ascii_serialization());
+        // Path, query and fragment are not part of an origin.
+        assert_eq!(
+            named("http://127.0.0.1:9999/native-cb?code=x#frag").as_deref(),
+            Some("http://127.0.0.1:9999")
+        );
+        // A default port is dropped; a non-default one is kept.
+        assert_eq!(
+            named("https://rp.example:443/cb").as_deref(),
+            Some("https://rp.example")
+        );
+        assert_eq!(
+            named("http://rp.example:80/cb").as_deref(),
+            Some("http://rp.example")
+        );
+        assert_eq!(
+            named("https://rp.example:8443/cb").as_deref(),
+            Some("https://rp.example:8443")
+        );
+        // Userinfo is not part of an origin.
+        assert_eq!(
+            named("https://user:pass@rp.example/cb").as_deref(),
+            Some("https://rp.example")
+        );
+        // Opaque and non-browser schemes name no `form-action` destination.
+        for opaque in [
+            "javascript:alert(1)",
+            "data:text/html,<h1>x</h1>",
+            "blob:https://rp.example/00000000-0000-0000-0000-000000000000",
+            "myapp://callback",
+            "file:///tmp/x",
+            "not a url",
+        ] {
+            assert_eq!(
+                named(opaque),
+                None,
+                "{opaque:?} must not become a form-action origin"
             );
         }
     }
@@ -676,6 +929,194 @@ mod tests {
         assert!(
             csp.contains("frame-ancestors 'none'"),
             "no concrete origin ⇒ strict default; got {csp}"
+        );
+    }
+
+    /// The consent-page contract: the one registered cross-origin callback is
+    /// spliced into `form-action` on the framed consent document, and every
+    /// other directive is unchanged.
+    #[test]
+    fn form_action_extends_a_framed_csp() {
+        let mut headers = HeaderMap::new();
+        apply(
+            &mut headers,
+            "/consent",
+            &[CONSOLE.to_string()],
+            &[origin("http://127.0.0.1:9999/native-cb")],
+        );
+
+        let csp = header(&headers, "content-security-policy").expect("csp");
+        assert_eq!(
+            csp_directive(&csp, "form-action").as_deref(),
+            Some("form-action 'self' http://127.0.0.1:9999"),
+            "the registered callback origin must extend form-action: {csp}"
+        );
+        assert!(
+            csp.contains(&format!("frame-ancestors 'self' {CONSOLE}")),
+            "framed ancestors are unchanged: {csp}"
+        );
+    }
+
+    /// The same extension must work when no console origin is configured (dev /
+    /// single-origin), where the consent page takes the strict CSP branch.
+    #[test]
+    fn form_action_extends_the_strict_csp_too() {
+        let mut headers = HeaderMap::new();
+        apply(
+            &mut headers,
+            "/consent",
+            &[],
+            &[origin("https://rp.example/cb")],
+        );
+
+        let csp = header(&headers, "content-security-policy").expect("csp");
+        assert_eq!(
+            csp_directive(&csp, "form-action").as_deref(),
+            Some("form-action 'self' https://rp.example"),
+            "strict-branch form-action must be extended: {csp}"
+        );
+        assert!(
+            csp.contains("frame-ancestors 'none'"),
+            "the strict branch stays never-frameable: {csp}"
+        );
+    }
+
+    /// A handler that rendered its own nonce policy keeps it, but its
+    /// `form-action` is widened too: the magic-link interstitial is exactly such
+    /// a document, and its form's redirect chain ends at the relying party.
+    #[test]
+    fn form_action_extends_a_handler_set_csp() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HeaderName::from_static("content-security-policy"),
+            HeaderValue::from_static(
+                "default-src 'self'; script-src 'self' 'nonce-abc'; \
+                 form-action 'self'; frame-ancestors 'none'",
+            ),
+        );
+        apply(
+            &mut headers,
+            "/magic/verify",
+            &[],
+            &[origin("https://rp.example/cb")],
+        );
+
+        let csp = header(&headers, "content-security-policy").expect("csp");
+        assert!(
+            csp.contains("script-src 'self' 'nonce-abc'"),
+            "the handler's nonce must survive the splice: {csp}"
+        );
+        assert_eq!(
+            csp_directive(&csp, "form-action").as_deref(),
+            Some("form-action 'self' https://rp.example"),
+            "a handler-set form-action must be widened: {csp}"
+        );
+    }
+
+    /// With no origins, the builder is byte-identical to the baseline. The
+    /// common path must not change shape just because the extension exists.
+    #[test]
+    fn form_action_without_extras_is_byte_identical() {
+        assert_eq!(
+            with_form_action(DEFAULT_CONTENT_SECURITY_POLICY.to_owned(), &[]),
+            DEFAULT_CONTENT_SECURITY_POLICY
+        );
+    }
+
+    /// The directive is rebuilt from its parsed extent, so a spelling change in
+    /// the baseline cannot make the splice silently no-op. A policy with no
+    /// `form-action` directive is refused rather than mutated.
+    #[test]
+    fn with_form_action_rebuilds_the_directive_rather_than_matching_its_text() {
+        let widened = with_form_action(
+            "default-src 'self'; form-action 'self' https://stale.example; \
+             frame-ancestors 'none'"
+                .to_owned(),
+            &[origin("https://rp.example/cb")],
+        );
+        assert_eq!(
+            csp_directive(&widened, "form-action").as_deref(),
+            Some("form-action 'self' https://rp.example"),
+            "an existing widened directive must be replaced, not left stale: {widened}"
+        );
+        assert!(
+            !widened.contains("stale.example"),
+            "the old directive must not survive: {widened}"
+        );
+        assert!(
+            widened.contains("frame-ancestors 'none'"),
+            "the rest of the policy is unchanged: {widened}"
+        );
+
+        let no_directive = with_form_action(
+            "default-src 'self'; frame-ancestors 'none'".to_owned(),
+            &[origin("https://rp.example/cb")],
+        );
+        assert_eq!(
+            no_directive, "default-src 'self'; frame-ancestors 'none'",
+            "a policy without form-action must not be rewritten"
+        );
+    }
+
+    /// The directive is located by NAME, so a value in an EARLIER directive that
+    /// merely contains the substring `form-action` is not mistaken for the
+    /// directive. With a substring match, `frame-ancestors
+    /// https://form-action-demo.example` would be the match, the real
+    /// `form-action` would be left stale, and the ancestor directive would be
+    /// corrupted.
+    #[test]
+    fn with_form_action_matches_the_directive_name_not_a_substring() {
+        let widened = with_form_action(
+            "frame-ancestors https://form-action-demo.example; \
+             form-action 'self'; \
+             default-src 'self'"
+                .to_owned(),
+            &[origin("https://rp.example/cb")],
+        );
+        assert_eq!(
+            csp_directive(&widened, "frame-ancestors").as_deref(),
+            Some("frame-ancestors https://form-action-demo.example"),
+            "a directive value containing the substring must survive untouched: {widened}"
+        );
+        assert_eq!(
+            csp_directive(&widened, "form-action").as_deref(),
+            Some("form-action 'self' https://rp.example"),
+            "only the real form-action directive is widened: {widened}"
+        );
+    }
+
+    /// The middleware is the consumer: it takes the typed marker off the
+    /// response, so it can never reach the browser, and splices its origin into
+    /// the CSP the handler rendered.
+    #[ntex::test]
+    async fn middleware_consumes_the_marker_and_widens_the_rendered_csp() {
+        let app = test::init_service(
+            ntex::web::App::new()
+                .middleware(SecurityHeaders::new(vec![CONSOLE.to_string()]))
+                .default_service(ntex::web::to(|| async {
+                    let response = ntex::web::HttpResponse::Ok().body("form");
+                    response.extensions_mut().insert(FormActionOrigin(
+                        form_action_origin("https://rp.example/cb").expect("tuple origin"),
+                    ));
+                    response
+                })),
+        )
+        .await;
+        let req = test::TestRequest::with_uri("/consent").to_request();
+        let res = test::call_service(&app, req).await;
+
+        assert!(
+            res.response()
+                .extensions()
+                .get::<FormActionOrigin>()
+                .is_none(),
+            "the marker must be consumed before the response leaves the middleware"
+        );
+        let csp = header(res.headers(), "content-security-policy").expect("csp");
+        assert_eq!(
+            csp_directive(&csp, "form-action").as_deref(),
+            Some("form-action 'self' https://rp.example"),
+            "the rendered CSP must carry the widened directive: {csp}"
         );
     }
 

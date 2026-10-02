@@ -141,6 +141,25 @@ pub fn location(resp: &cyper::Response) -> String {
         .to_string()
 }
 
+/// Read one response header as a string.
+pub fn response_header(resp: &cyper::Response, name: &str) -> Option<String> {
+    resp.headers()
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned)
+}
+
+/// The exact value of one `;`-separated CSP directive, or `None`.
+///
+/// EXACT match, not `contains`: a substring check would accept a widened
+/// `form-action 'self' https://evil.test`.
+pub fn csp_directive(csp: &str, name: &str) -> Option<String> {
+    csp.split(';')
+        .map(str::trim)
+        .find(|directive| directive.starts_with(name))
+        .map(str::to_owned)
+}
+
 pub fn assert_redirect(resp: &cyper::Response, what: &str) {
     let s = resp.status().as_u16();
     assert!(

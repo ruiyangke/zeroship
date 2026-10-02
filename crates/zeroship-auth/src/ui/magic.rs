@@ -374,7 +374,19 @@ pub async fn start(
     if let Some(ref i) = issued {
         resp.header(SET_COOKIE, magic_csrf_set_cookie(&i.csrf_nonce));
     }
-    resp.body(body)
+    let form_action = match target.return_to() {
+        Some(return_to) => {
+            crate::headers::FormActionOrigin::registered_for_return_to(db.as_ref(), return_to)
+                .await
+        }
+        None => None,
+    };
+    let mut response = resp.body(body);
+    // The completion form posts to `/magic/complete`, which redirects to the
+    // native authorize request and then the relying party; this document's
+    // `form-action` must name that origin across the chain.
+    crate::headers::attach_form_action_origin(&mut response, form_action);
+    response
 }
 
 // ─── GET /magic/await ────────────────────────────────────────────────
@@ -392,10 +404,11 @@ pub struct MagicAwaitQuery {
 /// check-email page.) The check-email page already embeds the same
 /// form inside a `<details>`; this route is for explicit deep-link
 /// entry.
-#[allow(clippy::future_not_send, clippy::unused_async)]
+#[allow(clippy::future_not_send)]
 pub async fn await_code(
     query: ntex::web::types::Query<MagicAwaitQuery>,
     _cfg: ntex::web::types::State<Arc<AuthConfig>>,
+    db: ntex::web::types::State<Arc<compio_postgres::Client>>,
 ) -> HttpResponse {
     let target = match MagicTarget::from_return_to(query.return_to.as_deref()) {
         Some(target) => target,
@@ -415,7 +428,17 @@ pub async fn await_code(
     let mut resp = HttpResponse::Ok();
     resp.content_type("text/html; charset=utf-8");
     resp.header(SET_COOKIE, csrf::set_cookie(&new_csrf));
-    resp.body(body)
+    let form_action = match target.return_to() {
+        Some(return_to) => {
+            crate::headers::FormActionOrigin::registered_for_return_to(db.as_ref(), return_to)
+                .await
+        }
+        None => None,
+    };
+    let mut response = resp.body(body);
+    // Same completion form as `/magic/start`; name the relying-party origin.
+    crate::headers::attach_form_action_origin(&mut response, form_action);
+    response
 }
 
 // ─── GET /magic/verify ───────────────────────────────────────────────
@@ -440,6 +463,7 @@ pub async fn verify(
     req: HttpRequest,
     query: ntex::web::types::Query<MagicVerifyQuery>,
     _cfg: ntex::web::types::State<Arc<AuthConfig>>,
+    db: ntex::web::types::State<Arc<compio_postgres::Client>>,
 ) -> HttpResponse {
     let target = match MagicTarget::from_return_to(query.return_to.as_deref()) {
         Some(target) => target,
@@ -464,7 +488,19 @@ pub async fn verify(
         extra_fields: vec![(target.query_key(), target.value())],
     };
     let csrf_set_cookie = magic_csrf_set_cookie(&csrf_token);
-    render_token_interstitial(&page, &csrf_set_cookie)
+    let form_action = match target.return_to() {
+        Some(return_to) => {
+            crate::headers::FormActionOrigin::registered_for_return_to(db.as_ref(), return_to)
+                .await
+        }
+        None => None,
+    };
+    let mut response = render_token_interstitial(&page, &csrf_set_cookie);
+    // The interstitial's own nonce CSP is widened by the middleware; the form
+    // posts to `/magic/verify/redeem`, then the native authorize request, then
+    // the relying party.
+    crate::headers::attach_form_action_origin(&mut response, form_action);
+    response
 }
 
 /// `/magic/verify/redeem` — atomically redeem the token, then branch on
@@ -707,7 +743,7 @@ async fn same_device_finish(
                 },
             )
             .await;
-            return magic_challenge(cfg, orm, user_id, native_return_to).await;
+            return magic_challenge(db, cfg, orm, user_id, native_return_to).await;
         }
         Ok(false) => {}
         Err(e) => {
@@ -791,6 +827,7 @@ async fn same_device_finish(
 /// password path's challenge carries.
 #[allow(clippy::future_not_send)]
 async fn magic_challenge(
+    db: &compio_postgres::Client,
     cfg: &AuthConfig,
     orm: &Database,
     user_id: &UserId,
@@ -804,6 +841,11 @@ async fn magic_challenge(
             return render_error_page(PublicErrorMessage::ContactSupport);
         }
     };
+    let form_action = crate::headers::FormActionOrigin::registered_for_return_to(
+        db,
+        native_return_to,
+    )
+    .await;
     let mut resp = render_challenge(
         cfg,
         &TotpChallenge::new(
@@ -812,6 +854,7 @@ async fn magic_challenge(
             native_return_to.to_string(),
             FirstFactor::Magic,
         ),
+        form_action,
     );
     // Clear the requesting-device nonce here too: the magic row backing it is
     // already consumed, so keeping it would only preserve a stale replay input.
@@ -1199,7 +1242,7 @@ pub async fn complete(
             )
             .await;
             let MagicTarget::ReturnTo(native_return_to) = &form_target;
-            return magic_challenge(&cfg, &orm, &user_id, native_return_to).await;
+            return magic_challenge(db.as_ref(), &cfg, &orm, &user_id, native_return_to).await;
         }
         Ok(false) => {}
         Err(e) => {

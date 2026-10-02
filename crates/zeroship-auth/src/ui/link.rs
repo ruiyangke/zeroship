@@ -343,6 +343,12 @@ pub async fn post(
     // stash and is applied by `finish_after_second_factor`.
     match totp_store::is_enabled(db.as_ref(), &u.id).await {
         Ok(true) => {
+            let form_action =
+                crate::headers::FormActionOrigin::registered_for_return_to(
+                    db.as_ref(),
+                    native_return_to,
+                )
+                .await;
             return render_challenge(
                 &cfg,
                 &TotpChallenge::new(
@@ -355,6 +361,7 @@ pub async fn post(
                         email: pending.email.clone(),
                     },
                 ),
+                form_action,
             );
         }
         Ok(false) => {}

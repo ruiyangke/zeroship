@@ -111,7 +111,7 @@ async fn get_consent_native(
         return oauth_error_redirect(&ctx, "invalid_scope", issuer.issuer());
     }
 
-    render_consent_page(
+    let mut response = render_consent_page(
         &return_to,
         &info,
         db,
@@ -119,7 +119,22 @@ async fn get_consent_native(
         classified.can_grant,
         &app_scope_defs,
     )
-    .await
+    .await;
+
+    // The decision forms post to a handler that 303s the browser to the
+    // registered `redirect_uri`; the consent document's `form-action` must name
+    // that origin across the redirect chain (see `FormActionOrigin`). The origin
+    // comes from the shared registry check, the same one
+    // `load_native_consent_context` applied above. Only the grantable render
+    // carries a form.
+    if classified.can_grant {
+        crate::headers::attach_form_action_origin(
+            &mut response,
+            crate::headers::FormActionOrigin::registered(db, &ctx.request).await,
+        );
+    }
+
+    response
 }
 
 // ─── POST /consent/accept and /consent/deny ──────────────────────────────
@@ -359,10 +374,10 @@ async fn open_dedicated_auth_pg(db_url: &str) -> crate::error::Result<compio_pos
 }
 
 #[derive(Clone, Debug)]
-struct NativeOAuthClient {
+pub(crate) struct NativeOAuthClient {
     client_id: String,
     client_name: String,
-    redirect_uris: Vec<String>,
+    pub(crate) redirect_uris: Vec<String>,
     scopes: Vec<String>,
 }
 
@@ -410,7 +425,7 @@ async fn load_native_consent_context(
     Ok(NativeConsentContext { request, client })
 }
 
-async fn load_native_oauth_client(
+pub(crate) async fn load_native_oauth_client(
     db: &compio_postgres::Client,
     client_id: &str,
 ) -> Result<NativeOAuthClient, String> {

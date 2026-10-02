@@ -35,8 +35,28 @@ use zeroship_mailer::{Email, Mailer, MailerError, MessageId};
 /// stable strings so a spec failure names a client an operator can find.
 const APP_ID: &str = "app_0000000000000000000000001";
 const CLIENT_ID: &str = "oac_0000000000000000000000001";
-const REDIRECT_URI: &str = "http://127.0.0.1:9999/native-cb";
 const SECTOR: &str = "https://auth-ui.zeroship.test";
+
+/// A real relying-party callback origin on a random loopback port.
+///
+/// The specs exercise the browser's form submission through to the RP, and a
+/// fixed port would collide across concurrent runs; the port is therefore the
+/// ephemeral one this server actually bound, and the client's registered
+/// `redirect_uri` is seeded with it. Returning 200 for every path means the
+/// spec can assert the browser landed here.
+#[allow(clippy::future_not_send)]
+async fn start_rp_callback_server() -> (ntex::web::test::TestServer, String) {
+    let server = ntex::web::test::server(|| async {
+        ntex::web::App::new().default_service(ntex::web::to(|| async {
+            ntex::web::HttpResponse::Ok()
+                .content_type("text/html; charset=utf-8")
+                .body("<!doctype html><title>RP callback</title><h1>RP callback</h1>")
+        }))
+    })
+    .await;
+    let base = format!("http://{}", server.addr());
+    (server, base)
+}
 
 /// A `Mailer` that appends the same `=== MAIL ===` block `StdoutMailer` prints,
 /// to a file the specs can read.
@@ -94,7 +114,7 @@ impl Mailer for EnvelopeFileMailer {
 /// The specs sign up their own users; what they cannot create is the app
 /// registration, which is platform data. Mirrors the rows the Rust consent cases
 /// seed, minus the user.
-async fn seed_browser_client(pg: &compio_postgres::Client) {
+async fn seed_browser_client(pg: &compio_postgres::Client, redirect_uri: &str) {
     let project_id = common::unowned_project(pg).await;
     pg.execute(
         "INSERT INTO zeroship.plans \
@@ -119,7 +139,7 @@ async fn seed_browser_client(pg: &compio_postgres::Client) {
          VALUES ($1, 'Auth UI consent fixture', $2, $3, FALSE)",
         &[
             &CLIENT_ID,
-            &vec![REDIRECT_URI.to_string()],
+            &vec![redirect_uri.to_string()],
             &vec![
                 "openid".to_string(),
                 "profile".to_string(),
@@ -152,10 +172,11 @@ async fn seed_browser_client(pg: &compio_postgres::Client) {
 /// and why. A child that inherits stdio is silenced by the test harness, which
 /// turns every failure into "the specs failed" and sends the next reader to the
 /// source to find out which one.
-fn run_playwright(
+async fn run_playwright(
     base_url: &str,
     auth_log: &str,
     results_json: &str,
+    redirect_uri: &str,
 ) -> std::process::Output {
     let web = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/web");
     assert!(
@@ -177,16 +198,28 @@ fn run_playwright(
         String::from_utf8_lossy(&link.stdout),
         String::from_utf8_lossy(&link.stderr)
     );
-    Command::new("playwright")
+    let mut command = Command::new("playwright");
+    command
         .arg("test")
         .current_dir(&web)
         .env("ZEROSHIP_AUTH_UI_BASE_URL", base_url)
         .env("ZEROSHIP_AUTH_UI_AUTH_LOG", auth_log)
         .env("ZEROSHIP_AUTH_UI_RESULTS_JSON", results_json)
         .env("ZEROSHIP_AUTH_UI_OIDC_CLIENT_ID", CLIENT_ID)
-        .env("ZEROSHIP_AUTH_UI_OIDC_REDIRECT_URI", REDIRECT_URI)
-        .output()
-        .expect("spawn `playwright test`; run this inside `nix develop`")
+        .env("ZEROSHIP_AUTH_UI_OIDC_REDIRECT_URI", redirect_uri);
+    // The runner is a long-lived child, and its whole life is spent driving
+    // HTTP against the in-process server. Running it on the blocking pool
+    // keeps the test's event loop free for the duration: the server's
+    // PostgreSQL connections are tasks on THIS runtime, so a child awaited
+    // inline would park those tasks and every database-backed request the
+    // browser makes would never finish.
+    compio::runtime::spawn_blocking(move || {
+        command
+            .output()
+            .expect("spawn `playwright test`; run this inside `nix develop`")
+    })
+    .await
+    .expect("the Playwright runner task panicked")
 }
 
 /// Wait until `/readyz` answers 200, bounded.
@@ -242,9 +275,19 @@ async fn the_auth_ui_browser_specs_pass() {
         // auth role, which is deliberately denied INSERT on
         // `zeroship.organizations` - the refusal is the scoping working, not a
         // fixture defect.
-        let db = database.connect().await;
-        seed_browser_client(&db).await;
+        // A real RP callback on a random port, alive for the whole run. The
+        // client's registered `redirect_uri` is seeded with it so the specs
+        // follow the same-origin-to-RP redirect chain the browser enforces
+        // `form-action` across, instead of a fixed port that can collide.
+        let (_rp_server, rp_base) = start_rp_callback_server().await;
+        let redirect_uri = format!("{rp_base}/native-cb");
 
+        let db = database.connect().await;
+        seed_browser_client(&db, &redirect_uri).await;
+
+        // `with_mailer` registers the fixture's OP issuer, the same app shape
+        // the production binary serves (`/logout` POST and the OIDC routes
+        // extract `State<Arc<Issuer>>`).
         let server = AuthServer::with_mailer(
             database,
             Arc::new(EnvelopeFileMailer {
@@ -258,13 +301,19 @@ async fn the_auth_ui_browser_specs_pass() {
             &server.auth_base,
             auth_log.to_str().expect("UTF-8 auth log path"),
             results_json.to_str().expect("UTF-8 results path"),
-        );
+            &redirect_uri,
+        )
+        .await;
+        // Re-emit the captured stdout beside the case. A passing run otherwise
+        // reports only the Playwright exit status, which does not say how many
+        // specs ran; a reader verifying the browser tier needs the runner's own
+        // per-spec summary. stderr stays in the failure message.
+        eprintln!("--- playwright stdout ---\n{}", String::from_utf8_lossy(&run.stdout));
         assert!(
             run.status.success(),
-            "the auth UI browser specs failed ({})\nresults at {}\n--- playwright stdout ---\n{}\n--- playwright stderr ---\n{}",
+            "the auth UI browser specs failed ({})\nresults at {}\n--- playwright stderr ---\n{}",
             run.status,
             results_json.display(),
-            String::from_utf8_lossy(&run.stdout),
             String::from_utf8_lossy(&run.stderr),
         );
     })

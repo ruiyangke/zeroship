@@ -327,40 +327,47 @@ test(CONSENT_TITLE, async ({ page }) => {
     `CONSENT_EVIDENCE render ${JSON.stringify({ authorizeStatus: authorizeResponse.status(), consentStatus: consentResponse?.status(), scopes: scopeEvidence, allowBackground, denyBackground })}`,
   );
 
-  let callbackRequestUrl: string | undefined;
-  await page.route(`${redirectUri}**`, async (route) => {
-    callbackRequestUrl = route.request().url();
-    await route.fulfill({
-      status: 200,
-      contentType: "text/html; charset=utf-8",
-      body: "<!doctype html><title>RP callback</title><h1>RP callback</h1>",
-    });
+  // A real RP callback is a real process, not a fixture. Playwright does not
+  // intercept the request a redirect produces, so the browser must actually
+  // follow the form-submission chain to the seeded callback. If `form-action`
+  // did not name the callback origin, Chromium blocks that chain and the
+  // browser never reaches here.
+  const cspViolations: string[] = [];
+  page.on("console", (message) => {
+    const text = message.text();
+    if (/content security policy|refused to send form data|form-action/i.test(text)) {
+      cspViolations.push(`[${message.type()}] ${text}`);
+    }
   });
-  const denyResponsePromise = waitForHttpResponse(page, "POST", "/consent/deny");
-  const callbackResponsePromise = page.waitForResponse((response) => {
+  const rpCallback = (response: Response): boolean => {
     const url = new URL(response.url());
     const expected = new URL(redirectUri);
     return url.origin === expected.origin && url.pathname === expected.pathname;
-  });
+  };
+
+  const denyResponsePromise = waitForHttpResponse(page, "POST", "/consent/deny");
+  const denyCallbackPromise = page.waitForResponse(rpCallback);
   await deny.click();
-  const [denyResponse, callbackResponse] = await Promise.all([
+  const [denyResponse, denyCallbackResponse] = await Promise.all([
     denyResponsePromise,
-    callbackResponsePromise,
+    denyCallbackPromise,
   ]);
   expect(denyResponse.status(), "consent denial status").toBe(303);
-  expect(callbackResponse.status(), "RP callback status").toBe(200);
+  expect(denyCallbackResponse.status(), "deny RP callback status").toBe(200);
   await expect(page, "consent denial RP destination").toHaveURL((url) => {
     const expected = new URL(redirectUri);
     return url.origin === expected.origin && url.pathname === expected.pathname;
   });
-  const callback = new URL(page.url());
-  expect(callback.searchParams.get("error"), "consent denial error").toBe("access_denied");
-  expect(callback.searchParams.get("state"), "consent denial state").toBe(state);
-  expect(callback.searchParams.get("code"), "consent denial authorization code").toBeNull();
+  const denied = new URL(denyCallbackResponse.url());
+  expect(denied.searchParams.get("error"), "consent denial error").toBe("access_denied");
+  expect(denied.searchParams.get("state"), "consent denial state").toBe(state);
+  expect(denied.searchParams.get("code"), "consent denial authorization code").toBeNull();
   console.log(
-    `CONSENT_EVIDENCE denial ${JSON.stringify({ denyStatus: denyResponse.status(), callbackStatus: callbackResponse.status(), callbackUrl: callbackRequestUrl, error: callback.searchParams.get("error"), state: callback.searchParams.get("state"), code: callback.searchParams.get("code") })}`,
+    `CONSENT_EVIDENCE denial ${JSON.stringify({ denyStatus: denyResponse.status(), callbackStatus: denyCallbackResponse.status(), callbackUrl: denied.href, error: denied.searchParams.get("error"), state: denied.searchParams.get("state"), code: denied.searchParams.get("code") })}`,
   );
 
+  // Re-run the same authorize request: the denial must not have been recorded,
+  // so the consent page renders again and Allow can proceed to a real callback.
   const secondAuthorizeResponsePromise = waitForHttpResponse(
     page,
     "GET",
@@ -378,4 +385,29 @@ test(CONSENT_TITLE, async ({ page }) => {
   console.log(
     `CONSENT_EVIDENCE denial_not_grant ${JSON.stringify({ authorizeStatus: secondAuthorizeResponse.status(), consentStatus: secondConsentResponse?.status(), destination: new URL(page.url()).pathname })}`,
   );
+
+  const allowResponsePromise = waitForHttpResponse(page, "POST", "/consent/accept");
+  const allowCallbackPromise = page.waitForResponse(rpCallback);
+  await allow.click();
+  const [allowResponse, allowCallbackResponse] = await Promise.all([
+    allowResponsePromise,
+    allowCallbackPromise,
+  ]);
+  expect(allowResponse.status(), "consent acceptance status").toBe(303);
+  expect(allowCallbackResponse.status(), "allow RP callback status").toBe(200);
+  await expect(page, "consent acceptance RP destination").toHaveURL((url) => {
+    const expected = new URL(redirectUri);
+    return url.origin === expected.origin && url.pathname === expected.pathname;
+  });
+  const granted = new URL(allowCallbackResponse.url());
+  expect(granted.searchParams.get("code"), "consent acceptance code").toBeTruthy();
+  expect(granted.searchParams.get("state"), "consent acceptance state").toBe(state);
+  console.log(
+    `CONSENT_EVIDENCE allowance ${JSON.stringify({ allowStatus: allowResponse.status(), callbackStatus: allowCallbackResponse.status(), callbackUrl: granted.href, state: granted.searchParams.get("state"), hasCode: Boolean(granted.searchParams.get("code")) })}`,
+  );
+
+  expect(
+    cspViolations,
+    `the form submission chain must not raise a CSP violation:\n${cspViolations.join("\n")}`,
+  ).toEqual([]);
 });

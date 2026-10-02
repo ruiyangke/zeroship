@@ -129,10 +129,14 @@ async fn every_security_header_is_present_on_a_ui_route() {
             forgot_header("content-security-policy")
         );
 
+        // EXACT directive match. A `contains` check would pass a widened
+        // `form-action 'self' https://evil.test`, which is exactly the
+        // regression the extension must not introduce on a response with no
+        // extension.
         for directive in CSP_DIRECTIVES {
             assert!(
-                csp.contains(directive),
-                "CSP missing {directive:?}: {csp:?}"
+                csp.split(';').map(str::trim).any(|actual| actual == directive),
+                "CSP missing exact directive {directive:?}: {csp:?}"
             );
         }
         // The directive that the browser tier caught being violated. Neither

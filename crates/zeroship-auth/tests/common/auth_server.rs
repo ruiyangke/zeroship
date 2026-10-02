@@ -29,12 +29,26 @@ pub struct AuthServer {
 }
 
 impl AuthServer {
+    /// The production app registers its OP issuer unconditionally; every
+    /// fixture constructor registers one too, so a fixture cannot silently
+    /// serve a different app shape than the binary (`/logout` POST and the OIDC
+    /// routes extract `State<Arc<Issuer>>`).
+    #[must_use]
+    pub fn fixture_issuer() -> Issuer {
+        Issuer::from_signing_key(
+            &ed25519_dalek::SigningKey::from_bytes(&[17; 32]),
+            [9; 32],
+            "https://auth.zeroship.test/oauth2".to_owned(),
+        )
+        .expect("build the fixture issuer")
+    }
+
     pub async fn start(database: &Database) -> Self {
-        Self::configured(database, None, &[]).await
+        Self::configured(database, Arc::new(Self::fixture_issuer()), &[]).await
     }
 
     pub async fn with_issuer(database: &Database, issuer: Arc<Issuer>) -> Self {
-        Self::configured(database, Some(issuer), &[]).await
+        Self::configured(database, issuer, &[]).await
     }
 
     pub async fn with_mailer(
@@ -49,7 +63,15 @@ impl AuthServer {
         mailer: Arc<dyn zeroship_mailer::Mailer>,
         extra: &[&str],
     ) -> Self {
-        Self::build(database, None, extra, Some(mailer), None, None).await
+        Self::build(
+            database,
+            Arc::new(Self::fixture_issuer()),
+            extra,
+            Some(mailer),
+            None,
+            None,
+        )
+        .await
     }
 
     pub async fn with_relay_mailer(
@@ -59,7 +81,7 @@ impl AuthServer {
     ) -> Self {
         Self::build(
             database,
-            None,
+            Arc::new(Self::fixture_issuer()),
             extra,
             None,
             Some(zeroship_mailer::RelayForwardMailer(mailer)),
@@ -68,21 +90,25 @@ impl AuthServer {
         .await
     }
 
-    pub async fn configured(
-        database: &Database,
-        issuer: Option<Arc<Issuer>>,
-        extra: &[&str],
-    ) -> Self {
+    pub async fn configured(database: &Database, issuer: Arc<Issuer>, extra: &[&str]) -> Self {
         Self::build(database, issuer, extra, None, None, None).await
     }
 
     pub async fn with_listener(database: &Database, listener: TcpListener, extra: &[&str]) -> Self {
-        Self::build(database, None, extra, None, None, Some(listener)).await
+        Self::build(
+            database,
+            Arc::new(Self::fixture_issuer()),
+            extra,
+            None,
+            None,
+            Some(listener),
+        )
+        .await
     }
 
     async fn build(
         database: &Database,
-        issuer: Option<Arc<Issuer>>,
+        issuer: Arc<Issuer>,
         extra: &[&str],
         mailer: Option<Arc<dyn zeroship_mailer::Mailer>>,
         relay_mailer: Option<zeroship_mailer::RelayForwardMailer>,
@@ -91,12 +117,10 @@ impl AuthServer {
         let database_url = database.auth_url().to_string();
         let pg = Arc::new(database.connect_as_auth().await);
         let orm = database.orm().await;
-        if let Some(issuer) = &issuer {
-            issuer
-                .publish_active_key(&pg)
-                .await
-                .expect("publish fixture signing key");
-        }
+        issuer
+            .publish_active_key(&pg)
+            .await
+            .expect("publish fixture signing key");
         let listener = listener.unwrap_or_else(|| TcpListener::bind("127.0.0.1:0").unwrap());
         let auth_base = format!("http://{}", listener.local_addr().unwrap());
         let config = Arc::new(test_auth_config_at(&database_url, &auth_base, extra));
@@ -137,12 +161,8 @@ impl AuthServer {
                         zeroship_core::readiness::ReadinessGate::with_defaults(),
                     ))
                     .middleware(SecurityHeaders::new(frame_ancestor_origins))
-                    .configure(server::configure(google_enabled, github_enabled));
-                let app = if let Some(issuer) = issuer {
-                    app.state(issuer)
-                } else {
-                    app
-                };
+                    .configure(server::configure(google_enabled, github_enabled))
+                    .state(issuer);
                 let app = if let Some(jwks) = google_jwks {
                     app.state(jwks)
                 } else {

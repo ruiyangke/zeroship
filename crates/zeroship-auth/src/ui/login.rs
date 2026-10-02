@@ -76,12 +76,17 @@ async fn get_native(
             .finish();
     }
 
+    let form_action = match auth_request.as_ref() {
+        Some(request) => crate::headers::FormActionOrigin::registered(db, request).await,
+        None => None,
+    };
     render_login_form_native(
         &return_to,
         &native_client_name(auth_request.as_ref()),
         cfg,
         None,
         200,
+        form_action,
     )
 }
 
@@ -168,6 +173,13 @@ async fn post_native(
     let client_id = "native".to_string();
     let auth_request = AuthRequest::parse_return_to(&return_to).ok();
     let client_name = native_client_name(auth_request.as_ref());
+    // Resolve the form document's `form-action` origin through the registry
+    // check, so a forged `return_to` off the `/oauth2/authorize` path cannot
+    // name an arbitrary origin on any of this handler's re-renders.
+    let form_action = match auth_request.as_ref() {
+        Some(request) => crate::headers::FormActionOrigin::registered(db, request).await,
+        None => None,
+    };
 
     let cookie_header = req
         .headers()
@@ -179,7 +191,7 @@ async fn post_native(
         .as_deref()
         .is_none_or(|c| !csrf::matches(&form.csrf, c))
     {
-        return render_login_error(&return_to, &client_name, cfg, "invalid request", 400);
+        return render_login_error(&return_to, &client_name, cfg, "invalid request", 400, form_action);
     }
 
     let ip = crate::headers::client_ip(&req);
@@ -195,6 +207,7 @@ async fn post_native(
                     cfg,
                     "too many attempts, try again later",
                     429,
+                    form_action,
                 );
             }
             Err(CredentialError::InvalidCredentials) => {
@@ -204,6 +217,7 @@ async fn post_native(
                     cfg,
                     "invalid email or password",
                     401,
+                    form_action,
                 );
             }
             Err(CredentialError::Ineligible) => {
@@ -213,6 +227,7 @@ async fn post_native(
                     cfg,
                     PublicErrorMessage::AccountTemporarilyLocked.as_str(),
                     403,
+                    form_action,
                 );
             }
             Err(CredentialError::Internal) => {
@@ -230,6 +245,7 @@ async fn post_native(
                     return_to.clone(),
                     FirstFactor::Password,
                 ),
+                form_action,
             );
         }
         Ok(false) => {}
@@ -260,7 +276,11 @@ async fn post_native(
 /// carries the `return_to` the form echoes back, which `post_2fa` re-compares
 /// against the signed copy.
 #[must_use]
-pub(crate) fn render_challenge(cfg: &AuthConfig, stash: &TotpChallenge) -> HttpResponse {
+pub(crate) fn render_challenge(
+    cfg: &AuthConfig,
+    stash: &TotpChallenge,
+    form_action: Option<crate::headers::FormActionOrigin>,
+) -> HttpResponse {
     let cookie = stash.encode(cfg.settings.stash_signing_key.expose_str().as_bytes());
     let csrf_token = csrf::generate_token();
     let page = TotpChallengePage {
@@ -279,7 +299,12 @@ pub(crate) fn render_challenge(cfg: &AuthConfig, stash: &TotpChallenge) -> HttpR
     resp.content_type("text/html; charset=utf-8");
     resp.header(SET_COOKIE, csrf::set_cookie(&csrf_token));
     resp.header(SET_COOKIE, totp_challenge::set_cookie(&cookie));
-    resp.body(body)
+    let mut response = resp.body(body);
+    // The challenge form posts to `/login/2fa`, whose tail redirects to the
+    // native authorize request and then the relying party; the challenge
+    // document's `form-action` must name that origin across the chain.
+    crate::headers::attach_form_action_origin(&mut response, form_action);
+    response
 }
 
 /// Complete a verified login: create the IdP session row, bump `last_login_at`,
@@ -391,6 +416,13 @@ pub async fn post_2fa(
         form.return_to.as_deref().or(query.return_to.as_deref()),
         return_to::SAFE_DEFAULT,
     );
+    // The challenge re-renders resolve the form's `form-action` origin through
+    // the registry check, never from the shape of `return_to` alone.
+    let form_action = crate::headers::FormActionOrigin::registered_for_return_to(
+        db.as_ref(),
+        &return_to,
+    )
+    .await;
 
     // 1. CSRF.
     let cookie_header = req
@@ -427,7 +459,12 @@ pub async fn post_2fa(
         }
     };
     if user.credential_version != stash.credential_version {
-        return render_2fa_error(&return_to, cfg.as_ref(), "session expired, sign in again");
+        return render_2fa_error(
+            &return_to,
+            cfg.as_ref(),
+            "session expired, sign in again",
+            form_action,
+        );
     }
 
     // 4. Rate-limit the verify (per-user).
@@ -439,6 +476,7 @@ pub async fn post_2fa(
                 &return_to,
                 cfg.as_ref(),
                 "too many attempts, try again later",
+                form_action,
             );
         }
         Err(e) => {
@@ -515,7 +553,7 @@ pub async fn post_2fa(
             },
         )
         .await;
-        return render_2fa_error(&return_to, cfg.as_ref(), "invalid code");
+        return render_2fa_error(&return_to, cfg.as_ref(), "invalid code", form_action);
     }
 
     audit::emit(
@@ -581,7 +619,12 @@ pub async fn post_2fa(
 }
 
 /// Re-render the 2FA challenge page with an error banner + fresh CSRF cookie.
-fn render_2fa_error(return_to: &str, _cfg: &AuthConfig, err: &str) -> HttpResponse {
+fn render_2fa_error(
+    return_to: &str,
+    _cfg: &AuthConfig,
+    err: &str,
+    form_action: Option<crate::headers::FormActionOrigin>,
+) -> HttpResponse {
     let csrf_token = csrf::generate_token();
     let page = TotpChallengePage {
         return_to,
@@ -592,7 +635,9 @@ fn render_2fa_error(return_to: &str, _cfg: &AuthConfig, err: &str) -> HttpRespon
     let mut resp = HttpResponse::build(ntex::http::StatusCode::UNAUTHORIZED);
     resp.content_type("text/html; charset=utf-8");
     resp.header(SET_COOKIE, csrf::set_cookie(&csrf_token));
-    resp.body(body)
+    let mut response = resp.body(body);
+    crate::headers::attach_form_action_origin(&mut response, form_action);
+    response
 }
 
 fn redirect_to_login(return_to: &str) -> HttpResponse {
@@ -618,6 +663,7 @@ fn render_login_error(
     cfg: &AuthConfig,
     err: &str,
     status: u16,
+    form_action: Option<crate::headers::FormActionOrigin>,
 ) -> HttpResponse {
     let csrf_token = csrf::generate_token();
     let page = LoginPage {
@@ -636,7 +682,9 @@ fn render_login_error(
     let mut resp = HttpResponse::build(code);
     resp.content_type("text/html; charset=utf-8");
     resp.header(SET_COOKIE, csrf::set_cookie(&csrf_token));
-    resp.body(body)
+    let mut response = resp.body(body);
+    crate::headers::attach_form_action_origin(&mut response, form_action);
+    response
 }
 
 fn render_login_form_native(
@@ -645,6 +693,7 @@ fn render_login_form_native(
     cfg: &AuthConfig,
     err: Option<&str>,
     status: u16,
+    form_action: Option<crate::headers::FormActionOrigin>,
 ) -> HttpResponse {
     let csrf_token = csrf::generate_token();
     let page = LoginPage {
@@ -665,7 +714,9 @@ fn render_login_form_native(
     let mut resp = HttpResponse::build(code);
     resp.content_type("text/html; charset=utf-8");
     resp.header(SET_COOKIE, csrf::set_cookie(&csrf_token));
-    resp.body(body)
+    let mut response = resp.body(body);
+    crate::headers::attach_form_action_origin(&mut response, form_action);
+    response
 }
 
 #[allow(clippy::future_not_send)]
