@@ -1337,7 +1337,8 @@ fn setup_globals_with_descriptor(
     // exfiltrate them.
     //
     // Worker-internal `env_vars` (e.g. `APP_ID` injected by
-    // `crates/zeroship-worker/src/cache.rs`) is layered on first as a base; user
+    // `crates/zeroship-worker/src/cache.rs`) is layered above the runtime's
+    // own default as a base; user
     // `vars` override on collision because user config is the
     // authoritative surface. Exposed secrets are then layered last for
     // any names in the per-app expose list — but we deliberately let
@@ -1357,8 +1358,24 @@ fn setup_globals_with_descriptor(
             .expect("RuntimeState not in isolate slot")
             .clone();
 
-        // Layer 1: worker-internal env_vars (APP_ID, ...). Always last
-        // resort — any user-controlled var of the same name wins.
+        // Layer 0: the runtime's own `NODE_ENV`, the lowest-precedence
+        // default. A deployed isolate reports `production`; the local dev
+        // tier reports `development`. Every layer above overrides it, so a
+        // creator's `NODE_ENV` app variable still wins.
+        {
+            let default = if state.borrow().dev {
+                "development"
+            } else {
+                "production"
+            };
+            let k = v8::String::new(scope, "NODE_ENV").unwrap();
+            let v = v8::String::new(scope, default).unwrap();
+            env_obj.set(scope, k.into(), v.into());
+        }
+
+        // Layer 1: worker-internal env_vars (APP_ID, ...). Overrides the
+        // runtime default, and loses to any user-controlled var of the
+        // same name.
         let worker_env = state.borrow().env_vars.clone();
         for (key, value) in &worker_env {
             let k = v8::String::new(scope, key).unwrap();

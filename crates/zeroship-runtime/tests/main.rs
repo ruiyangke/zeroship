@@ -148,6 +148,7 @@ mod plugin_modules;
 mod native_source_cancel_race;
 mod next_tick_ordering;
 mod node_buffer;
+mod node_env;
 mod node_module_registration;
 mod node_os;
 mod node_path;

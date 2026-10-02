@@ -583,6 +583,12 @@ pub struct RuntimeState {
     /// Host-supplied environment metadata, separate from creator vars and secrets.
     pub env_vars: HashMap<String, String>,
 
+    /// Whether this isolate serves the local dev tier, captured at
+    /// construction from the process's stated dev mode. The `process.env`
+    /// builder uses it to pick the lowest-precedence `NODE_ENV` default:
+    /// `development` here, `production` in every deployed isolate.
+    pub dev: bool,
+
     /// **Migration-first cutover** — the bundled
     /// `RuntimeSchemaDescriptor` JSON (`schema.runtime.json`; v2 is
     /// `{ version, collections: { fields, options, indexes } }`) carried in
@@ -783,6 +789,7 @@ impl RuntimeState {
             kv_store: HashMap::new(),
             app_id,
             env_vars,
+            dev: false,
             runtime_descriptor: None,
             env_app_vars: BTreeMap::new(),
             env_app_secrets: BTreeMap::new(),

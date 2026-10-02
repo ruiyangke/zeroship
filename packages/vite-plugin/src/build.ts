@@ -370,6 +370,29 @@ export function findServerEntry(root: string, explicit?: string): string | null 
 }
 
 /**
+ * The `NODE_ENV` spellings the worker build replaces, all from one node env.
+ *
+ * `process.env.NODE_ENV` and its `global`/`globalThis` spellings decide the
+ * dead branches (React and friends), and `import.meta.env.MODE`/`PROD`/`DEV`
+ * decide the Vite-style ones. Vite derives `PROD`/`DEV` from the build
+ * process's own `NODE_ENV`, so a shell that says `development` would otherwise
+ * flip a production worker's `PROD` to false; pinning every spelling to the
+ * worker's tier keeps the bundle independent of the shell that built it.
+ */
+function workerNodeEnvDefines(nodeEnv: string): Record<string, string> {
+  const value = JSON.stringify(nodeEnv);
+  const isProduction = nodeEnv !== "development";
+  return {
+    "process.env.NODE_ENV": value,
+    "global.process.env.NODE_ENV": value,
+    "globalThis.process.env.NODE_ENV": value,
+    "import.meta.env.MODE": value,
+    "import.meta.env.PROD": isProduction ? "true" : "false",
+    "import.meta.env.DEV": isProduction ? "false" : "true",
+  };
+}
+
+/**
  * Pin the worker environment's build to the worker contract.
  *
  * The `zeroship` environment inherits the app's top-level `define`, `resolve`
@@ -398,14 +421,12 @@ export function applyWorkerBuildOptions(environment: EnvironmentOptions, clientO
   // app's exposed secrets), so every spelling of it stays live: Vite's own
   // replacement would turn `globalThis.process.env` into `{}`. `NODE_ENV` is
   // replaced statically in each spelling, which is what removes development
-  // branches, and never with the value of the shell that runs the build.
+  // branches. A deployable worker is the production tier, never the value of
+  // the shell that runs the build.
   environment.keepProcessEnv = true;
-  const production = JSON.stringify("production");
   environment.define = {
     ...environment.define,
-    "process.env.NODE_ENV": production,
-    "global.process.env.NODE_ENV": production,
-    "globalThis.process.env.NODE_ENV": production,
+    ...workerNodeEnvDefines("production"),
   };
   const {
     rollupOptions: legacyRollupOptions,
@@ -782,15 +803,10 @@ export function buildPlugins(
     async buildDevWorker(builder, options) {
       const entry = serverEntry;
       if (!entry) throw new Error("[zeroship] the app has no server entry to build the worker from");
-      const nodeEnv = JSON.stringify(options.nodeEnv);
       passDependencies = [];
       try {
         await buildWorker(builder, entry, {
-          define: {
-            "process.env.NODE_ENV": nodeEnv,
-            "global.process.env.NODE_ENV": nodeEnv,
-            "globalThis.process.env.NODE_ENV": nodeEnv,
-          },
+          define: workerNodeEnvDefines(options.nodeEnv),
           build: { outDir: options.outDir },
         });
       } catch (error) {

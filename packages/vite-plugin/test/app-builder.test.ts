@@ -53,6 +53,9 @@ export const environment = query(async () => [
   process.env.NODE_ENV,
   globalThis.process.env.NODE_ENV,
   global.process.env.NODE_ENV,
+  import.meta.env.MODE,
+  import.meta.env.PROD,
+  import.meta.env.DEV,
   String(globalThis.process.env.PROBE_KEY),
   String(global.process.env.PROBE_KEY),
 ], { id: "probe.environment" });
@@ -435,6 +438,9 @@ describe("vite build compiles the worker from the app's config", () => {
         "production",
         "production",
         "production",
+        "production",
+        true,
+        false,
         "from the runtime env",
         "from the runtime env",
       ]);

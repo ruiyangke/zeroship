@@ -49,6 +49,9 @@ export class Probe extends Workflow {
       String(globalThis.process.env.PROBE_KEY),
       String(process.env.NODE_ENV),
       String(globalThis.process.env.NODE_ENV),
+      import.meta.env.MODE,
+      import.meta.env.PROD,
+      import.meta.env.DEV,
     ];
   }
 }
@@ -198,6 +201,9 @@ test("the dev archive compiles server code from the dev server's Vite config", a
       "from the runtime env",
       "development",
       "development",
+      "development",
+      false,
+      true,
     ]);
   } finally {
     await fs.rm(root, { recursive: true, force: true });

@@ -1327,6 +1327,11 @@ impl RuntimeInner {
             app_id.clone(),
             meter_handle,
         )));
+        // The dev tier is a stated process input, captured once here rather
+        // than read again when the isolate builds `process.env`. The worker
+        // never states it, so a leaked `ZEROSHIP_DEV` cannot make a deployed
+        // isolate report `NODE_ENV=development`.
+        state.borrow_mut().dev = crate::dev_mode_enabled();
         state.borrow_mut().set_net_policy(net_policy);
         if let Some(resolver) = egress_resolver {
             state.borrow_mut().set_egress_resolver(resolver);
