@@ -1,4 +1,9 @@
-//! Own a migrated `PostgreSQL` server and join its clients before removing it.
+//! Own one migrated `PostgreSQL` server for the whole test binary, and hand each
+//! case its own pair of connections to it.
+//!
+//! The server lives in a `static`, started and migrated the first time a case asks
+//! for it. It is started through the shared [`container_reaper`], so it is removed
+//! once this process has ended, however the process ends.
 
 #![allow(
     clippy::future_not_send,
@@ -11,38 +16,53 @@ use std::panic::AssertUnwindSafe;
 use std::sync::OnceLock;
 use std::time::Duration;
 use testcontainers::core::{IntoContainerPort, WaitFor};
-use testcontainers::{runners::SyncRunner, Container, GenericImage, ImageExt};
+use testcontainers::{Container, GenericImage, ImageExt};
 
 mod migrations;
 
+#[path = "../../../../../tests/fixtures/container_reaper.rs"]
+mod container_reaper;
+
+use container_reaper::{start_owned, DockerCli, OwnedContainer, Ownership};
+
 pub struct Database {
-    postgres: Container<GenericImage>,
     pub admin: Client,
     pub service: Client,
     admin_driver: compio::runtime::JoinHandle<Result<(), compio_postgres::Error>>,
     service_driver: compio::runtime::JoinHandle<Result<(), compio_postgres::Error>>,
 }
 
+/// The server this test binary owns, started the first time anything asks for it.
+fn server() -> &'static OwnedContainer {
+    static SERVER: OnceLock<OwnedContainer> = OnceLock::new();
+    SERVER.get_or_init(|| {
+        start_owned(&DockerCli::system(), &Ownership::mint(), image()).unwrap_or_else(|error| {
+            panic!("authorization database tests require Docker and PostgreSQL: {error}")
+        })
+    })
+}
+
+/// The server's URL once the platform migrations and the shared reference rows
+/// are in. Every case connects here; none of them owns the server.
+fn migrated() -> &'static url::Url {
+    static MIGRATED: OnceLock<url::Url> = OnceLock::new();
+    MIGRATED.get_or_init(|| {
+        let container = server().container();
+        let url = database_url(container);
+        migrations::apply(url.as_str());
+        migrations::seed_plan(container);
+        url
+    })
+}
+
 impl Database {
     pub async fn run(test: impl AsyncFnOnce(&Self)) {
-        static SEED: OnceLock<migrations::Seed> = OnceLock::new();
-        let seed = SEED.get_or_init(migrations::Seed::build);
-        let postgres = image()
-            .with_env_var("POSTGRES_DB", "postgres")
-            .with_copy_to("/docker-entrypoint-initdb.d/roles.sql", seed.roles.clone())
-            .with_copy_to(
-                "/docker-entrypoint-initdb.d/schema.sql",
-                seed.database.clone(),
-            )
-            .start()
-            .expect("authorization database tests require Docker and PostgreSQL");
-        let mut url = database_url(&postgres);
+        let mut url = migrated().clone();
         let (admin, admin_driver) = connect(&url).await;
         url.set_username("zeroship_control").unwrap();
         url.set_password(Some("zeroship_control")).unwrap();
         let (service, service_driver) = connect(&url).await;
         let database = Self {
-            postgres,
             admin,
             service,
             admin_driver,
@@ -50,16 +70,15 @@ impl Database {
         };
         let outcome = AssertUnwindSafe(async {
             compio::time::timeout(Duration::from_secs(45), Box::pin(async {
-                database.admin.execute(
-                    "INSERT INTO zeroship.plans (id, name, runtime_limits_json) VALUES ('free', 'Free', '{}')",
-                    &[],
-                ).await.expect("seed the required plan");
                 test(&database).await;
-            })).await.expect("authorization database case timed out");
-        }).catch_unwind().await;
+            }))
+            .await
+            .expect("authorization database case timed out");
+        })
+        .catch_unwind()
+        .await;
 
         let Self {
-            postgres,
             admin,
             service,
             admin_driver,
@@ -69,7 +88,6 @@ impl Database {
         let service_closed = compio::time::timeout(Duration::from_secs(15), service_driver).await;
         drop(admin);
         let admin_closed = compio::time::timeout(Duration::from_secs(15), admin_driver).await;
-        let removed = postgres.rm();
         service_closed
             .expect("service connection timed out")
             .expect("service task")
@@ -78,7 +96,6 @@ impl Database {
             .expect("observer connection timed out")
             .expect("observer task")
             .expect("observer connection");
-        removed.expect("remove the owned authorization database");
         if let Err(panic) = outcome {
             std::panic::resume_unwind(panic);
         }
@@ -130,17 +147,44 @@ fn database_url(postgres: &Container<GenericImage>) -> url::Url {
     url
 }
 
+/// The child test the lifetime measurements drive, by its full path in this binary.
+const CHILD_TEST: &str = "tests::database::the_shared_database_reports_its_container";
+
+#[test]
+fn the_shared_database_reports_its_container() {
+    container_reaper::lifetime::report_owner();
+    let id = server().container().id().to_owned();
+    container_reaper::lifetime::report_container(&id);
+}
+
+#[test]
+fn the_shared_database_is_removed_when_its_process_ends() {
+    container_reaper::lifetime::assert_removed_after_the_child_exits(CHILD_TEST);
+}
+
+#[test]
+fn the_shared_database_is_removed_when_its_process_is_killed_while_starting() {
+    container_reaper::lifetime::assert_removed_after_a_kill_during_startup(CHILD_TEST);
+}
+
 #[compio::test]
-async fn a_failed_case_removes_its_database_and_preserves_the_failure() {
+async fn a_failed_case_re_raises_its_failure_and_closes_its_connections() {
     use std::cell::RefCell;
-    let failed_id = RefCell::new(String::new());
+    let pids = RefCell::new(Vec::new());
     let failure = AssertUnwindSafe(Database::run(async |database| {
-        *failed_id.borrow_mut() = database.postgres.id().to_owned();
-        database
-            .service
-            .query_one("SELECT current_user", &[])
+        let admin: i32 = database
+            .admin
+            .query_one("SELECT pg_backend_pid()", &[])
             .await
-            .unwrap();
+            .unwrap()
+            .get(0);
+        let service: i32 = database
+            .service
+            .query_one("SELECT pg_backend_pid()", &[])
+            .await
+            .unwrap()
+            .get(0);
+        *pids.borrow_mut() = vec![admin, service];
         panic!("intentional authorization fixture failure");
     }))
     .catch_unwind()
@@ -150,29 +194,21 @@ async fn a_failed_case_removes_its_database_and_preserves_the_failure() {
         failure.downcast_ref::<&str>(),
         Some(&"intentional authorization fixture failure")
     );
-    let containers = std::process::Command::new("docker")
-        .args(["ps", "--all", "--quiet", "--no-trunc"])
-        .output()
-        .expect("list fixture containers");
-    assert!(containers.status.success());
-    assert!(
-        !String::from_utf8(containers.stdout)
-            .unwrap()
-            .lines()
-            .any(|id| id == *failed_id.borrow()),
-        "failed case leaked its server"
-    );
+    let failed_pids = pids.borrow().clone();
     Database::run(async |database| {
-        let row = database
-            .service
+        let live: i64 = database
+            .admin
             .query_one(
-                "SELECT current_user, (SELECT count(*) FROM zeroship.users)",
-                &[],
+                "SELECT count(*) FROM pg_stat_activity WHERE pid = ANY($1)",
+                &[&failed_pids],
             )
             .await
-            .unwrap();
-        assert_eq!(row.get::<_, String>(0), "zeroship_control");
-        assert_eq!(row.get::<_, i64>(1), 0, "a new case starts without users");
+            .unwrap()
+            .get(0);
+        assert_eq!(
+            live, 0,
+            "a failed case must close the connections it opened"
+        );
     })
     .await;
 }

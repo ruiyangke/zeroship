@@ -1,72 +1,13 @@
-//! Restore authorization cases from this process's actual platform migrations.
+//! Apply this binary's platform migrations to the shared authorization database.
 
-use super::{database_url, image};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 use testcontainers::core::{CmdWaitFor, ExecCommand};
-use testcontainers::{runners::SyncRunner, Container, GenericImage, ImageExt};
+use testcontainers::{Container, GenericImage};
 
-pub(super) struct Seed {
-    pub(super) roles: Vec<u8>,
-    pub(super) database: Vec<u8>,
-}
-
-impl Seed {
-    pub(super) fn build() -> Self {
-        eprintln!("authorization fixture: preparing the platform database seed");
-        let postgres = image()
-            .with_env_var("POSTGRES_DB", "authz_tests")
-            .start()
-            .expect("prepare the migrated authorization database seed");
-        apply_migrations(database_url(&postgres).as_str());
-        eprintln!("authorization fixture: platform migrations applied; capturing the seed");
-        let roles = dump(
-            &postgres,
-            &["pg_dumpall", "-U", "postgres", "--globals-only"],
-        );
-        // initdb already created postgres. Preserve its dumped attributes
-        // and every other role; only the redundant creation is omitted.
-        let roles = String::from_utf8(roles)
-            .expect("UTF-8 role dump")
-            .replacen("CREATE ROLE postgres;\n", "", 1)
-            .into_bytes();
-        let database = dump(
-            &postgres,
-            &[
-                "pg_dump",
-                "-U",
-                "postgres",
-                "--create",
-                "--dbname",
-                "authz_tests",
-            ],
-        );
-        postgres.rm().expect("remove migration seed container");
-        Self { roles, database }
-    }
-}
-
-fn dump(postgres: &Container<GenericImage>, arguments: &[&str]) -> Vec<u8> {
-    let mut result = postgres
-        .exec(
-            ExecCommand::new(arguments.iter().copied())
-                .with_cmd_ready_condition(CmdWaitFor::exit_code(0)),
-        )
-        .expect("dump the migrated platform database");
-    result.stdout_to_vec().expect("read database seed")
-}
-
-fn root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(2)
-        .expect("authorization crate lives under crates/")
-        .to_owned()
-}
-
-fn apply_migrations(url: &str) {
+pub(super) fn apply(url: &str) {
     let root = root();
     let cli = root.join("packages/zero-migrate-cli/dist/cli-bin.js");
     assert!(
@@ -124,6 +65,36 @@ fn apply_migrations(url: &str) {
         read(&mut stdout),
         read(&mut stderr)
     );
+}
+
+/// Seed the one reference row the authorization cases share.
+pub(super) fn seed_plan(container: &Container<GenericImage>) {
+    let arguments = [
+        "psql",
+        "-U",
+        "postgres",
+        "-d",
+        "authz_tests",
+        "-v",
+        "ON_ERROR_STOP=1",
+        "-c",
+        "INSERT INTO zeroship.plans (id, name, runtime_limits_json) \
+         VALUES ('free', 'Free', '{}') ON CONFLICT (id) DO NOTHING",
+    ];
+    container
+        .exec(
+            ExecCommand::new(arguments.iter().copied())
+                .with_cmd_ready_condition(CmdWaitFor::exit_code(0)),
+        )
+        .expect("seed the required plan");
+}
+
+fn root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("authorization crate lives under crates/")
+        .to_owned()
 }
 
 #[allow(
