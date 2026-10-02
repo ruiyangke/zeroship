@@ -7,15 +7,18 @@
 //! new connection pool). This module fixes that with three pieces wired
 //! together:
 //!
-//! 1. **One reused `cyper::Client` per worker thread.** `cyper::Client`'s
-//!    connector wraps its connect future in `send_wrapper::SendWrapper`
-//!    (cyper-0.8 `connector.rs`), which *panics* if the client is used on a
-//!    thread other than the one that created it. It is therefore effectively
-//!    `!Send` in practice — exactly like the compio-postgres [`compio_postgres::Pool`] in
-//!    [`crate::db`]. We mirror that crate's per-worker-thread `thread_local`:
-//!    the first OP touch on a worker thread builds the client; every
-//!    subsequent call on that thread reuses it. NO `cyper::Client::new()`
-//!    per call anywhere on the auth path.
+//! 1. **One reused `cyper::Client` per worker thread, retired at an idle
+//!    bound.** `cyper::Client`'s connector wraps its connect future in
+//!    `send_wrapper::SendWrapper` (cyper-0.8 `connector.rs`), which *panics* if
+//!    the client is used on a thread other than the one that created it. It is
+//!    therefore effectively `!Send` in practice — exactly like the
+//!    compio-postgres [`compio_postgres::Pool`] in [`crate::db`]. We mirror that
+//!    crate's per-worker-thread `thread_local`: the first OP touch on a worker
+//!    thread builds the client and later touches reuse it, rebuilding it once it
+//!    has lived for its idle bound. That bound is a fraction of the auth
+//!    server's keep-alive (see [`zeroship_core::op_link`]), so the pool never
+//!    hands a request a connection the server has already retired. NO
+//!    `cyper::Client::new()` per call anywhere on the auth path.
 //!
 //! 2. **Bounded per-call timeout.** Each outbound call runs under a
 //!    [`compio::time::timeout`] (the same primitive the worker-proxy path
@@ -51,27 +54,58 @@ pub const DEFAULT_FAILURE_THRESHOLD: u32 = 5;
 /// How long the breaker stays open before allowing a single half-open probe.
 pub const DEFAULT_COOLDOWN: Duration = Duration::from_secs(10);
 
+/// A worker thread's reused `cyper::Client` plus the age at which it must be
+/// discarded.
+struct PooledClient {
+    client: cyper::Client,
+    created: Instant,
+    idle_timeout: Duration,
+}
+
 thread_local! {
     /// One reused `cyper::Client` per worker thread. `cyper::Client` is
     /// `!Send`-in-practice (its connector panics off the creating thread),
     /// so — exactly like the compio-postgres pool in [`crate::db`] — we
-    /// build it lazily on first use per worker thread and reuse it for the
-    /// life of that thread. `cyper::Client` is internally `Arc<ClientInner>`,
-    /// so the clone the connection machinery makes is a cheap refcount bump,
-    /// not a new connection pool.
-    static CLIENT: RefCell<Option<cyper::Client>> = const { RefCell::new(None) };
+    /// build it lazily on first use per worker thread and reuse it until it
+    /// outlives its idle bound. `cyper::Client` is internally
+    /// `Arc<ClientInner>`, so the clone the connection machinery makes is a
+    /// cheap refcount bump, not a new connection pool.
+    static CLIENT: RefCell<Option<PooledClient>> = const { RefCell::new(None) };
 }
 
-/// Get (build-once) this worker thread's reused `cyper::Client`.
-fn thread_client() -> cyper::Client {
+/// The pool reuse bound the production gateway uses: a fraction of the auth
+/// server's keep-alive ([`zeroship_core::op_link`]).
+#[must_use]
+pub fn default_idle_timeout() -> Duration {
+    zeroship_core::op_link::op_client_idle_timeout(zeroship_core::op_link::AUTH_KEEP_ALIVE)
+}
+
+/// Get this worker thread's reused `cyper::Client`, rebuilding it once it has
+/// been alive for `idle_timeout` (or when a caller asks for a different bound).
+///
+/// `idle_timeout` is [`default_idle_timeout`] in production — strictly shorter
+/// than the auth server's keep-alive — so a connection this pool hands out is
+/// never older than the server's window. Bounding the CLIENT's age bounds every
+/// connection in it: a connection is created no earlier than its client, so at
+/// any call that keeps the client every pooled connection is younger than the
+/// bound.
+fn thread_client(idle_timeout: Duration) -> cyper::Client {
     CLIENT.with(|c| {
         let mut slot = c.borrow_mut();
-        if let Some(existing) = slot.as_ref() {
-            return existing.clone();
+        let rebuild = slot.as_ref().is_none_or(|pooled| {
+            pooled.idle_timeout != idle_timeout || pooled.created.elapsed() >= idle_timeout
+        });
+        if rebuild {
+            *slot = Some(PooledClient {
+                client: cyper::Client::new(),
+                created: Instant::now(),
+                idle_timeout,
+            });
         }
-        let client = cyper::Client::new();
-        *slot = Some(client.clone());
-        client
+        slot.as_ref()
+            .expect("the pool slot was filled immediately above")
+            .client
+            .clone()
     })
 }
 
@@ -333,10 +367,14 @@ pub enum OpError {
 /// Run one outbound OP call through the shared reused client, the bounded
 /// timeout, and the circuit breaker.
 ///
-/// `make` is given this worker thread's reused [`cyper::Client`] and returns
-/// the request future. We keep the closure shape (rather than taking a built
-/// future) so the client is only cloned on the admitted path and the caller
-/// reads the same reused client every other call site does.
+/// `idle_timeout` bounds how long this worker thread's pooled client may live
+/// before it is rebuilt, keeping every pooled connection shorter-lived than the
+/// auth server's keep-alive (see [`zeroship_core::op_link`]). Callers pass
+/// [`default_idle_timeout`]; tests pass a short value. `make` is given this
+/// worker thread's reused [`cyper::Client`] and returns the request future. We
+/// keep the closure shape (rather than taking a built future) so the client is
+/// only cloned on the admitted path and the caller reads the same reused client
+/// every other call site does.
 ///
 /// On `Ok(resp)` — ANY completed HTTP response, including a OP 4xx/5xx —
 /// the failure counter resets (a 4xx is a valid upstream answer, not a breaker
@@ -371,6 +409,7 @@ pub enum OpError {
 pub async fn call<F, Fut>(
     breaker: &CircuitBreaker,
     timeout: Duration,
+    idle_timeout: Duration,
     make: F,
 ) -> Result<cyper::Response, OpError>
 where
@@ -388,7 +427,7 @@ where
     // (`is_probe == false`) the guard is inert — it owns no slot to release.
     let mut probe_guard = is_probe.then(|| ProbeGuard::new(breaker));
 
-    let client = thread_client();
+    let client = thread_client(idle_timeout);
     let fut = make(client);
 
     match compio::time::timeout(timeout, fut).await {

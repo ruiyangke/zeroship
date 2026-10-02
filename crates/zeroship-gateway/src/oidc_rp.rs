@@ -82,6 +82,11 @@ pub struct OidcRp {
     /// returns a fast `OpError::Timeout` (counted as a breaker
     /// failure) rather than an unbounded await pinning a connection.
     pub op_timeout: std::time::Duration,
+    /// How long the per-worker-thread pooled OP client may live before it is
+    /// rebuilt. Derived from the auth server's keep-alive
+    /// ([`zeroship_core::op_link`]) and strictly shorter than it, so a pooled
+    /// connection is never handed to a request after the server has closed it.
+    pub op_client_idle_timeout: std::time::Duration,
 }
 
 impl OidcRp {
@@ -110,6 +115,7 @@ impl OidcRp {
             stash_signing_key: stash_signing_key.into(),
             breaker: Arc::new(crate::op_client::CircuitBreaker::default()),
             op_timeout: crate::op_client::DEFAULT_OP_TIMEOUT,
+            op_client_idle_timeout: crate::op_client::default_idle_timeout(),
         }
     }
 
@@ -129,6 +135,14 @@ impl OidcRp {
     #[must_use]
     pub fn with_op_timeout(mut self, timeout: std::time::Duration) -> Self {
         self.op_timeout = timeout;
+        self
+    }
+
+    /// Override the pooled OP client reuse bound (tests use a short value
+    /// matched to their mock server's keep-alive).
+    #[must_use]
+    pub fn with_op_client_idle_timeout(mut self, idle_timeout: std::time::Duration) -> Self {
+        self.op_client_idle_timeout = idle_timeout;
         self
     }
 
@@ -261,14 +275,19 @@ impl OidcRp {
         // build is a programming error (bad URL), not a transport failure, so
         // it never reaches the breaker; the `send()` await is what the breaker
         // and timeout wrap.
-        let resp = crate::op_client::call(&self.breaker, self.op_timeout, |client| async move {
-            client
-                .request(http::Method::POST, &token_url)?
-                .header("content-type", "application/x-www-form-urlencoded")?
-                .body(body)
-                .send()
-                .await
-        })
+        let resp = crate::op_client::call(
+            &self.breaker,
+            self.op_timeout,
+            self.op_client_idle_timeout,
+            |client| async move {
+                client
+                    .request(http::Method::POST, &token_url)?
+                    .header("content-type", "application/x-www-form-urlencoded")?
+                    .body(body)
+                    .send()
+                    .await
+            },
+        )
         .await
         .map_err(|e| OidcRpError::from_op(e, "token"))?;
 
@@ -487,14 +506,19 @@ impl OidcRp {
             .finish();
         let url = format!("{}/revoke", self.op_base_url());
         // Reused, breaker-guarded, bounded-timeout client (§8.7).
-        let resp = crate::op_client::call(&self.breaker, self.op_timeout, |client| async move {
-            client
-                .request(http::Method::POST, &url)?
-                .header("content-type", "application/x-www-form-urlencoded")?
-                .body(body)
-                .send()
-                .await
-        })
+        let resp = crate::op_client::call(
+            &self.breaker,
+            self.op_timeout,
+            self.op_client_idle_timeout,
+            |client| async move {
+                client
+                    .request(http::Method::POST, &url)?
+                    .header("content-type", "application/x-www-form-urlencoded")?
+                    .body(body)
+                    .send()
+                    .await
+            },
+        )
         .await
         .map_err(|e| OidcRpError::from_op(e, "revoke"))?;
         let status = resp.status().as_u16();
@@ -513,14 +537,19 @@ impl OidcRp {
         // mint hot path — `exchange_code_public` / `refresh_token_public` both
         // funnel through here, so the breaker here is what protects the
         // gateway from an OP `/token` brownout.
-        let resp = crate::op_client::call(&self.breaker, self.op_timeout, |client| async move {
-            client
-                .request(http::Method::POST, &token_url)?
-                .header("content-type", "application/x-www-form-urlencoded")?
-                .body(body)
-                .send()
-                .await
-        })
+        let resp = crate::op_client::call(
+            &self.breaker,
+            self.op_timeout,
+            self.op_client_idle_timeout,
+            |client| async move {
+                client
+                    .request(http::Method::POST, &token_url)?
+                    .header("content-type", "application/x-www-form-urlencoded")?
+                    .body(body)
+                    .send()
+                    .await
+            },
+        )
         .await
         .map_err(|e| OidcRpError::from_op(e, "token"))?;
         let status = resp.status().as_u16();

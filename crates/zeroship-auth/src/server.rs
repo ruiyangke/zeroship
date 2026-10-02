@@ -3,8 +3,10 @@
 
 use std::sync::Arc;
 
+use ntex::http::HttpServiceConfig;
 use ntex::web;
 use zeroship_core::oidc_verify::JwksCache;
+use zeroship_core::op_link::AUTH_KEEP_ALIVE_SECS;
 use zeroship_core::readiness::ReadinessGate;
 
 use crate::config::AuthConfig;
@@ -365,6 +367,14 @@ pub async fn run(
         app.configure(configure(google_enabled, github_enabled))
     })
     .workers(http_threads)
+    // The idle keep-alive window the gateway's pooled OP client derives its
+    // reuse bound from ([`zeroship_core::op_link`]). Set explicitly from the
+    // shared value so the server side of the contract cannot drift from it.
+    .config(
+        ntex::SharedCfg::new("auth").add(
+            HttpServiceConfig::new().set_keepalive(usize::from(AUTH_KEEP_ALIVE_SECS)),
+        ),
+    )
     .bind(&addr)?
     .run()
     .await

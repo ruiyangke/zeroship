@@ -27,6 +27,7 @@ pub mod logout_token;
 pub mod net_policy;
 pub mod observability;
 pub mod oidc_verify;
+pub mod op_link;
 pub mod pkce;
 pub mod project_data_key;
 pub mod readiness;
