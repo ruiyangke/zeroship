@@ -1,22 +1,13 @@
-#![recursion_limit = "256"]
 #![expect(
     clippy::future_not_send,
     reason = "native queue fixtures stay on their compio runtime"
 )]
 
-#[allow(dead_code, reason = "other manager suites share these fixture helpers")]
-mod support;
+use crate::support;
 
-#[allow(
-    dead_code,
-    reason = "the native declaration includes other manager tables"
-)]
-#[path = "../src/models/schema_definition.rs"]
-mod native_schema;
-
-use native_schema::schema::{jobs, queue_scopes};
+use crate::native_schema::schema::{jobs, queue_scopes};
 use std::cell::Cell;
-use support::{Backend, Fixture};
+use crate::support::{Backend, Fixture};
 use zeroship_core::{
     app_id::AppId,
     workflow_coordination::{Assignment, RunId, VerifyAssignment, WorkerId},

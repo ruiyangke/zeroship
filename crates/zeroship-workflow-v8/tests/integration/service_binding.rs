@@ -3,6 +3,7 @@
     reason = "compio and V8 execute on their owning thread"
 )]
 
+use crate::support::{deployment_fixture, orm as orm_fixture};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{rc::Rc, sync::Arc, time::Duration};
@@ -600,9 +601,3 @@ async fn engine_refusals_carry_a_code_and_shape_faults_stay_type_errors() {
     assert_eq!(observed["malformed"]["code"], Value::Null);
     assert_eq!(observed["malformed"]["isTypeError"], true);
 }
-
-#[path = "support/orm.rs"]
-mod orm_fixture;
-
-#[path = "../../../tests/fixtures/workflow_deployments.rs"]
-mod deployment_fixture;

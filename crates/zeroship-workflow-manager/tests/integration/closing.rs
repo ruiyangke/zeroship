@@ -1,16 +1,11 @@
 //! The closing lane: idle and archived triggers, attempt timeout and backoff,
 //! and abandonment of responsibility for apps Control deleted.
-#![recursion_limit = "256"]
 #![allow(
     clippy::future_not_send,
     reason = "native closing fixtures stay on their compio runtime"
 )]
 
-#[allow(
-    dead_code,
-    reason = "shared queue fixtures also expose backend administration"
-)]
-mod support;
+use crate::support;
 
 use futures::future::ready;
 use std::{
@@ -22,7 +17,7 @@ use std::{
     rc::Rc,
     time::{Duration, Instant},
 };
-use support::{Backend, Fixture};
+use crate::support::{Backend, Fixture};
 use zeroship_core::{
     app_id::AppId,
     workflow_coordination::{

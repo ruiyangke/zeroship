@@ -4,6 +4,15 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Generated workflow journal schema artifacts, their version and their stamp"
+# The end-to-end suites run the shipped JavaScript generator and binder as
+# external processes, so they compile into one test binary instead of one per
+# `tests/e2e/*.rs`. `tests/e2e/main.rs` registers each suite module; a new
+# `tests/e2e/<name>.rs` is compiled by nothing until it is declared there.
+autotests = false
+
+[[test]]
+name = "e2e"
+path = "tests/e2e/main.rs"
 
 [dependencies]
 serde_json = { workspace = true }

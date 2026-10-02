@@ -1,12 +1,10 @@
-#![recursion_limit = "256"]
 #![allow(
     clippy::future_not_send,
     reason = "native catalog and queue fixtures stay on their compio runtime"
 )]
 
-#[path = "support/retention.rs"]
-mod catalog_support;
-mod support;
+use crate::support;
+use crate::support::retention as catalog_support;
 
 use catalog_support::{Catalog, Published};
 use futures::channel::oneshot;
@@ -17,7 +15,7 @@ use std::{
     rc::Rc,
     time::Duration,
 };
-use support::{Admin, Backend, Fixture};
+use crate::support::{Admin, Backend, Fixture};
 use zeroship_core::{
     app_id::AppId,
     workflow_coordination::{Assignment, RunId, WorkerId},

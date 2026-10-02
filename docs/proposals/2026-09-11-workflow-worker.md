@@ -3262,14 +3262,14 @@ management delivery and bounded payload collection are implemented.
 Native management contracts exercise frozen selection, refused acceptance, a
 refused wire deployment, deployment presence under the deploy policy and
 competing acceptance in
-`crates/zeroship-workflow-manager/tests/management/acceptance.rs`, and damaged
+`crates/zeroship-workflow-manager/tests/integration/management/acceptance.rs`, and damaged
 request anchors, pending barriers and ordered settlement in its `barriers.rs`
 neighbour. Backlog cases cross native page boundaries under the normal queue
 transaction deadline. PostgreSQL lock observations verify that status waits
 behind acceptance before reading the linked command and job; SQLite exercises
 the same receipt and
 unknown-scope behavior. These tests live in
-`crates/zeroship-workflow-manager/tests/management.rs` and its companion modules.
+`crates/zeroship-workflow-manager/tests/integration/management.rs` and its companion modules.
 
 Canonical parent primary keys eliminate the conflicting duplicate identities in
 concurrent first registration. Native PostgreSQL/SQLite coordinator and queue

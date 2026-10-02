@@ -3,6 +3,15 @@ name = "zeroship-workflow-v8"
 version = "0.1.0"
 edition = "2021"
 description = "V8 binding and local executor for zeroship workflows"
+# The integration suites compile into one test binary instead of one per
+# `tests/*.rs`. `tests/integration/main.rs` registers each suite module; a new
+# `tests/integration/<name>.rs` is compiled by nothing until it is declared
+# there.
+autotests = false
+
+[[test]]
+name = "integration"
+path = "tests/integration/main.rs"
 
 [dependencies]
 zeroship-bundle = { workspace = true }

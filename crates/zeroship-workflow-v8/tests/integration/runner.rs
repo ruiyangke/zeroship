@@ -1,3 +1,4 @@
+use crate::support::{deployment_fixture, orm as orm_fixture};
 use async_trait::async_trait;
 use serde_json::json;
 use std::{
@@ -2797,9 +2798,3 @@ async fn a_child_output_over_the_inline_threshold_reaches_the_parent_as_its_valu
     assert_eq!(settled.state, RunState::Completed, "{settled:?}");
     assert_eq!(returned_value(&fixture, &run).await, json!(4096));
 }
-
-#[path = "support/orm.rs"]
-mod orm_fixture;
-
-#[path = "../../../tests/fixtures/workflow_deployments.rs"]
-mod deployment_fixture;

@@ -548,7 +548,7 @@ protocol. This extends a working client rather than inventing one.
    fields.
 
    **Two measurement traps here.** `impl JobTransport for` misses an implementor -
-   `crates/zeroship-workflow-v8/tests/runner.rs` spells it fully qualified - so a sweep for the
+   `crates/zeroship-workflow-v8/tests/integration/runner.rs` spells it fully qualified - so a sweep for the
    test doubles to update has to match `JobTransport for` instead. And the merged body adds a
    journal object to the delivery envelope while the end-to-end fixture
    (`crates/zeroship-workflow-server/tests/support/server_process.rs`) caps request bodies far
@@ -645,7 +645,7 @@ protocol. This extends a working client rather than inventing one.
    counting before the journal half runs, or an attempt that reached creator code goes uncounted
    and redelivery unbounded. The outcome batch the fold consumes reaches `fold_outcomes`
    (`crates/zeroship-workflow/src/engine.rs`) through `tasks::complete_in` and `frontier::apply`;
-   note that `crates/zeroship-workflow/tests/execution.rs` calls `fold_outcomes` directly and
+   note that `crates/zeroship-workflow/tests/integration/execution.rs` calls `fold_outcomes` directly and
    bypasses `complete_job`, so that target alone is a false green for this step. Counting a
    reported execution once is `settle_attempt` in
    `crates/zeroship-workflow/src/service/journal.rs`, which reads the held count inside the same
@@ -913,7 +913,7 @@ protocol. This extends a working client rather than inventing one.
    **The `TaskPayloads` seam, which is smaller than it looks.** `stage` does NOT run
    mid-execution. `V8Execution::wait` (`crates/zeroship-workflow-v8/src/executor.rs`) calls
    `self.stop().await` first - "app code has finished its frontier" - and
-   `crates/zeroship-workflow-v8/tests/runner.rs` asserts every isolate probe is disposed before
+   `crates/zeroship-workflow-v8/tests/integration/runner.rs` asserts every isolate probe is disposed before
    a stage arrives. Nor is it without a neighbour: between `stage` returning and `complete_job`
    in `crates/zeroship-workflow-runner/src/delivery.rs` there is no I/O at all, and
    `complete_job` already reads and writes the same payload rows through `promote` and `attach`.
@@ -1543,13 +1543,13 @@ protocol. This extends a working client rather than inventing one.
    nothing, and an empty `NotIn` collapses to an always-true clause naming the field
    (`crates/zeroship-data-orm/src/orm/read_builder/predicates.rs`), so the worker's claim is
    unchanged. `sqlite_refused_kind_at_the_head_does_not_hide_the_rows_behind_it` and its postgres
-   twin (`crates/zeroship-workflow-manager/tests/queue.rs`) put a refused kind at the head with an
+   twin (`crates/zeroship-workflow-manager/tests/integration/queue.rs`) put a refused kind at the head with an
    admitted row behind it and assert the row behind is what answers; the control differs only in
    the claimant, and a third arm settles the admitted row so the restricted claimant answers
    nothing rather than the head. The literal predicates already on that column, `management` and
    `advance` in `management_eligibility`, are bound by
    `sqlite_management_barriers_filter_before_candidate_limit` and its postgres twin
-   (`crates/zeroship-workflow-manager/tests/management/barriers.rs`) and by nothing else, so an
+   (`crates/zeroship-workflow-manager/tests/integration/management/barriers.rs`) and by nothing else, so an
    edit to either spelling has one test standing behind it.
 
    **And `candidate` has a second caller, which decides something else.** `Capacity::visit`
@@ -1704,7 +1704,7 @@ protocol. This extends a working client rather than inventing one.
    has to be dealt with rather than lifted.
 
 **Latency is not the gate; payload is, and its bound is settled.** Open 1 holds the answer and
-names `crates/zeroship-workflow-client/tests/round_trip_cost.rs` as the instrument: re-run it
+names `crates/zeroship-workflow-client/tests/integration/round_trip_cost.rs` as the instrument: re-run it
 rather than trusting a paragraph. The bounds a crossing payload meets answer to the ceiling
 constants in `crates/zeroship-core/src/workflow_policy.rs`, so step 4 plans against a bound
 instead of choosing one. Read Open 4 alongside it, because every reading behind Open 1 was taken
@@ -1738,7 +1738,7 @@ part that dates, not the verdict.
 | 8 | ANSWERED - a run input is an ordinary payload object | an inline arm below a size line, deferred with its accounting stated |
 
 1. **ANSWERED - latency is not the gate; payload is.** Measured before anything was built, by
-   `crates/zeroship-workflow-client/tests/round_trip_cost.rs`, which exercises the shipped
+   `crates/zeroship-workflow-client/tests/integration/round_trip_cost.rs`, which exercises the shipped
    transport with a real assertion minted per call and a peer that really verifies it. Re-run it
    rather than trusting this paragraph.
 
@@ -2180,7 +2180,7 @@ part that dates, not the verdict.
    `the_two_zones_run_a_workflow_without_reaching_each_other` in
    `crates/zeroship-control/tests/workflow_private_zones_e2e.rs` holds zone isolation for the
    creator-schema placement this replaces; a relocated journal needs its own. The numbers Open 1
-   rests on come from `crates/zeroship-workflow-client/tests/round_trip_cost.rs`, so a decision
+   rests on come from `crates/zeroship-workflow-client/tests/integration/round_trip_cost.rs`, so a decision
    that the service may sit further away is one to re-measure there rather than re-argue here.
 
 5. **What happens to in-flight runs at cutover?** Pre-launch, nothing: there are no runs. That
@@ -2540,7 +2540,7 @@ part that dates, not the verdict.
   nothing, and the only axis left is journal work against creator code. `Work`
   (`crates/zeroship-workflow-manager/src/models.rs`) is `Maintenance | Creator`;
   `Claimant::Placed.denied()` is the nine sweeps and `Claimant::Maintenance.denied()` is
-  `["advance"]`, asserted as whole sets in `crates/zeroship-workflow-manager/tests/queue.rs` so a
+  `["advance"]`, asserted as whole sets in `crates/zeroship-workflow-manager/tests/integration/queue.rs` so a
   kind classified as neither, or a tenth operation added without a class, fails there rather than
   landing on whichever host asked first.
   What a host running creator code must not hold is the JOURNAL. That is the privilege the

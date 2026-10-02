@@ -29,12 +29,15 @@ use zeroship_workflow_manager::{
     Error, Queue,
 };
 
+pub mod deployments;
+pub mod placement;
+pub mod retention;
+
 /// The settlement the journal decided for `delivery`'s logical job.
 ///
 /// A settlement is constructible only from a receipt, so a contract that drives
 /// the queue directly builds that receipt here rather than naming an outcome a
 /// caller could have chosen.
-#[allow(dead_code, reason = "only queue-settling contracts build a settlement")]
 pub fn settlement(delivery: &Delivery, outcome: JobOutcome) -> JournalSettlement {
     JournalSettlement::from_receipt(
         &JobReceipt {
@@ -47,33 +50,28 @@ pub fn settlement(delivery: &Delivery, outcome: JobOutcome) -> JournalSettlement
 }
 
 /// The same, for a caller that already owns the delivery it settles.
-#[allow(dead_code, reason = "only queue-settling contracts build a settlement")]
 pub fn settlement_from(delivery: Delivery, outcome: JobOutcome) -> JournalSettlement {
     settlement(&delivery, outcome)
 }
 
 /// Trusted single-zone facts for contracts that do not exercise eligibility:
 /// every app and worker is in the seeded zone and active.
-#[allow(dead_code, reason = "placement contracts compose their own facts")]
 pub fn local_eligibility() -> Rc<dyn EligibilitySource> {
     Rc::new(LocalEligibility::new(ZoneId::default_zone()))
 }
 
 /// A coordinator over `queue` under trusted single-zone facts.
-#[allow(dead_code, reason = "queue-only contracts construct no coordinator")]
 pub fn coordinator(queue: &Queue, options: coordinator::Options) -> Coordinator {
     Coordinator::new(queue.clone(), options, local_eligibility()).unwrap()
 }
 
 /// A driver whose placement lane runs under trusted single-zone facts and the
 /// local host's always-satisfied capacity. No app is ever deleted.
-#[allow(dead_code, reason = "only maintenance contracts run a driver")]
 pub fn local_driver(queue: &Queue, options: driver::Options) -> Driver {
     driver_for(queue, options, Rc::new(Undeletable))
 }
 
 /// The same driver under a caller's deletion source, for the closing lane.
-#[allow(dead_code, reason = "only closing contracts report deletions")]
 pub fn driver_for(
     queue: &Queue,
     options: driver::Options,
@@ -83,7 +81,6 @@ pub fn driver_for(
 }
 
 /// The same construction, reporting its option validation instead of panicking.
-#[allow(dead_code, reason = "only option contracts assert a refusal")]
 pub fn try_driver(
     queue: &Queue,
     options: driver::Options,
@@ -99,10 +96,6 @@ pub fn try_driver(
 
 /// Queue state-machine tests use invented deployment identities. Retention
 /// safety tests instead compose the real catalog and published app artifacts.
-#[allow(
-    dead_code,
-    reason = "retention safety tests bind the real deployment catalog"
-)]
 pub fn synthetic_holds() -> Rc<dyn HoldClient> {
     Rc::new(SyntheticHolds)
 }
@@ -220,7 +213,7 @@ impl Fixture {
             .await
             .unwrap();
         admin
-            .batch_execute(include_str!("../../schema/postgres.sql"))
+            .batch_execute(include_str!("../../../schema/postgres.sql"))
             .await
             .expect("generated manager PostgreSQL schema must apply");
         admin
@@ -249,7 +242,7 @@ impl Fixture {
             .execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")
             .unwrap();
         admin
-            .execute_batch(include_str!("../../schema/sqlite.sql"))
+            .execute_batch(include_str!("../../../schema/sqlite.sql"))
             .expect("generated manager SQLite schema must apply");
         Self {
             admin: Admin::Sqlite(admin),
@@ -306,7 +299,6 @@ pub async fn connect(url: &str) -> compio_postgres::Client {
 
 /// The app's configured delivery budget, for cases that exercise something
 /// other than the ceiling itself.
-#[allow(dead_code, reason = "each integration target uses its own fixtures")]
 pub fn delivery_ceiling() -> i64 {
     AppPolicy::default().max_delivery_attempts
 }

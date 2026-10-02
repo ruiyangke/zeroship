@@ -1,13 +1,12 @@
-#![recursion_limit = "256"]
 #![allow(
     clippy::future_not_send,
     reason = "native fixtures stay on their compio runtime"
 )]
 
-mod support;
+use crate::support;
 
 use std::{cell::Cell, future::ready, time::Duration};
-use support::{Admin, Backend, Fixture};
+use crate::support::{Admin, Backend, Fixture};
 use zeroship_core::{
     app_id::AppId,
     workflow_coordination::{Assignment, RunId, VerifyAssignment, WorkerId},

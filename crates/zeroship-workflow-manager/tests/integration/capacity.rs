@@ -1,15 +1,11 @@
 //! The declarative per-zone capacity target, on one eligibility predicate.
-#![recursion_limit = "256"]
 #![allow(
     clippy::future_not_send,
     reason = "native capacity fixtures stay on their compio runtime"
 )]
 
-#[allow(dead_code, reason = "shared fixtures expose other manager contracts")]
-mod support;
-#[allow(dead_code, reason = "shared placement fixtures serve the placement suite too")]
-#[path = "support/placement.rs"]
-mod placement_support;
+use crate::support;
+use crate::support::placement as placement_support;
 
 use futures::{channel::oneshot, future::ready};
 use placement_support::{
@@ -17,7 +13,7 @@ use placement_support::{
     LONG,
 };
 use std::{rc::Rc, time::Duration};
-use support::{Admin, Backend, Fixture};
+use crate::support::{Admin, Backend, Fixture};
 use zeroship_core::{
     app_id::AppId,
     workflow_coordination::{AssignedScope, ReleaseReason, ReleaseScope, RequestId, WorkerId},

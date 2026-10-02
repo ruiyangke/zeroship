@@ -130,7 +130,6 @@ impl EligibilitySource for Facts {
 }
 
 pub const LONG: Duration = Duration::from_secs(3600);
-pub const SOON: Duration = Duration::from_millis(1);
 
 pub fn revision(value: i64) -> Revision {
     value.try_into().unwrap()
@@ -285,8 +284,6 @@ impl Starter {
 /// A scripted deviation for one provider call, consumed in order.
 #[derive(Debug)]
 pub enum Step {
-    /// Apply the request and reply normally.
-    Proceed,
     /// Apply the request, then lose the reply as a crash or timeout would.
     Lose,
     /// Fail without applying, as an unreachable provider does.
@@ -371,7 +368,7 @@ impl CapacityProvider for Pool {
                     Err(Error::Unavailable)
                 }
                 Some(Step::Gate { .. }) => unreachable!("gates release a step"),
-                Some(Step::Proceed) | None => Ok(self.apply(request).await),
+                None => Ok(self.apply(request).await),
             }
         })
     }

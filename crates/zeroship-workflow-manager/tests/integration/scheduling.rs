@@ -1,17 +1,12 @@
-#![recursion_limit = "256"]
 #![allow(
     clippy::future_not_send,
     reason = "scheduler contracts use compio-local database fixtures"
 )]
 
-#[allow(
-    dead_code,
-    reason = "shared fixtures expose other manager test helpers"
-)]
-mod support;
+use crate::support;
 
 use std::future::ready;
-use support::{Admin, Backend, Fixture};
+use crate::support::{Admin, Backend, Fixture};
 use zeroship_core::{
     app_id::AppId,
     workflow_coordination::{Assignment, WorkerId},

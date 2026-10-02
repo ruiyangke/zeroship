@@ -1,16 +1,10 @@
-#![recursion_limit = "256"]
 #![expect(
     clippy::future_not_send,
     reason = "native manager fixtures stay on their compio runtime"
 )]
 
-#[path = "support/deployments.rs"]
-mod deployment_support;
-#[allow(
-    dead_code,
-    reason = "shared database fixtures support other manager suites"
-)]
-mod support;
+use crate::support;
+use crate::support::deployments as deployment_support;
 
 use futures::channel::oneshot;
 use std::{
@@ -19,7 +13,7 @@ use std::{
     future::ready,
     rc::Rc,
 };
-use support::{Backend, Fixture};
+use crate::support::{Backend, Fixture};
 use zeroship_core::{
     app_id::AppId,
     service_peers::{service_issuer, CONTROL_SERVICE_NAME},

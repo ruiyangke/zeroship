@@ -1,17 +1,13 @@
 //! The retention lane releases queue holds of deployments the app no longer
 //! selects, never while their code is needed and never under an activation
 //! that is confirming the same hold.
-#![recursion_limit = "256"]
 #![allow(
     clippy::future_not_send,
     reason = "native catalog and queue fixtures stay on their compio runtime"
 )]
 
-#[allow(dead_code, reason = "shared fixtures expose other manager contracts")]
-#[path = "support/retention.rs"]
-mod catalog_support;
-#[allow(dead_code, reason = "shared fixtures expose other manager contracts")]
-mod support;
+use crate::support;
+use crate::support::retention as catalog_support;
 
 use catalog_support::{Catalog, Published};
 use std::{
@@ -22,7 +18,7 @@ use std::{
     rc::Rc,
     time::Duration,
 };
-use support::{Backend, Fixture};
+use crate::support::{Backend, Fixture};
 use zeroship_core::{
     app_id::AppId,
     workflow_coordination::{Assignment, RunId, WorkerId},

@@ -1,17 +1,12 @@
-#![recursion_limit = "256"]
 #![allow(
     clippy::future_not_send,
     reason = "native fixtures stay on their compio runtime"
 )]
 
-#[allow(
-    dead_code,
-    reason = "shared queue fixtures also expose backend administration"
-)]
-mod support;
+use crate::support;
 
 use std::{cell::Cell, future::ready, num::NonZeroU32, time::Duration};
-use support::{Admin, Backend, Fixture};
+use crate::support::{Admin, Backend, Fixture};
 use zeroship_core::{
     app_id::AppId,
     service_peers::{service_issuer, CONTROL_SERVICE_NAME, WORKER_SERVICE_NAME},

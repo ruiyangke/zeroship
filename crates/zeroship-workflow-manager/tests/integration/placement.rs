@@ -1,22 +1,18 @@
 //! Placement eligibility: Control's zone and enrollment facts, read under the
 //! placement locks and again before commit, decide every placement. Spare
 //! capacity is never authority.
-#![recursion_limit = "256"]
 #![allow(
     clippy::future_not_send,
     reason = "native placement fixtures stay on their compio runtime"
 )]
 
-#[allow(dead_code, reason = "shared fixtures expose other manager contracts")]
-mod support;
-#[allow(dead_code, reason = "shared placement fixtures serve two contract suites")]
-#[path = "support/placement.rs"]
-mod placement_support;
+use crate::support;
+use crate::support::placement as placement_support;
 
 use futures::future::ready;
 use placement_support::{blocked_manager, Facts, Host, LONG};
 use std::rc::Rc;
-use support::{Admin, Backend, Fixture};
+use crate::support::{Admin, Backend, Fixture};
 use zeroship_core::{
     app_id::AppId,
     workflow_coordination::{

@@ -1,14 +1,10 @@
-#![recursion_limit = "256"]
 #![allow(
     clippy::future_not_send,
     reason = "manager driver fixtures run on their owning compio runtime"
 )]
 
-#[allow(dead_code, reason = "shared fixtures expose other manager contracts")]
-#[path = "support/retention.rs"]
-mod catalog_support;
-#[allow(dead_code, reason = "shared fixtures expose other manager contracts")]
-mod support;
+use crate::support;
+use crate::support::retention as catalog_support;
 
 use catalog_support::{Catalog, Published};
 use futures::{
@@ -20,7 +16,7 @@ use std::{
     rc::Rc,
     time::Duration,
 };
-use support::{Admin, Backend, Fixture};
+use crate::support::{Admin, Backend, Fixture};
 use zeroship_core::{
     app_id::AppId,
     typed_id,

@@ -1,20 +1,12 @@
-#![recursion_limit = "256"]
 #![allow(
     clippy::future_not_send,
     reason = "native policy fixtures stay on their compio runtime"
 )]
 
-#[allow(
-    dead_code,
-    reason = "native declarations include unrelated manager tables"
-)]
-#[path = "../src/models/schema_definition.rs"]
-mod native_schema;
-#[allow(dead_code, reason = "other manager suites use backend administration")]
-mod support;
+use crate::support;
 
 use futures::{channel::oneshot, future::ready};
-use native_schema::schema::{assignments, queue_scopes, workers};
+use crate::native_schema::schema::{assignments, queue_scopes, workers};
 use std::{
     cell::{Cell, RefCell},
     future::Future,
@@ -22,7 +14,7 @@ use std::{
     pin::Pin,
     time::{Duration, Instant},
 };
-use support::{Backend, Fixture};
+use crate::support::{Backend, Fixture};
 use zeroship_core::{
     app_id::AppId,
     workflow_coordination::{
