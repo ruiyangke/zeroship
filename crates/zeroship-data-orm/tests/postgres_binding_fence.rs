@@ -17,8 +17,7 @@
 //! `pg_authid` and `pg_auth_members` are cluster-shared, so the role DDL below
 //! would be visible to every database on a shared instance.
 
-#[path = "../../../tests/fixtures/postgres/mod.rs"]
-mod postgres_fixture;
+use zeroship_testkit::postgres::server::Postgres;
 
 use compio_postgres::error::SqlState;
 use compio_postgres::{Client, NoTls};
@@ -236,7 +235,7 @@ async fn drain() {
 /// grants were never issued would satisfy the refusal below.
 #[compio::test]
 async fn a_narrowed_session_reaches_its_own_database_and_is_refused_its_neighbours() {
-    let postgres = postgres_fixture::Postgres::start();
+    let postgres = Postgres::start();
     let fence = Fence::build(postgres.url()).await;
 
     // CONTROL: each binding reads its own database through the ORM.
@@ -280,7 +279,7 @@ async fn a_narrowed_session_reaches_its_own_database_and_is_refused_its_neighbou
 /// what distinguishes a withdrawn membership from a removed object.
 #[compio::test]
 async fn a_revoked_binding_is_reported_as_a_terminal_grant_refusal() {
-    let postgres = postgres_fixture::Postgres::start();
+    let postgres = Postgres::start();
     let fence = Fence::build(postgres.url()).await;
 
     // CONTROL: the binding reads before anything is revoked.
@@ -341,7 +340,7 @@ async fn a_revoked_binding_is_reported_as_a_terminal_grant_refusal() {
 /// control is the same statement under the binding role.
 #[compio::test]
 async fn the_shared_worker_login_reaches_no_converged_schema_without_narrowing() {
-    let postgres = postgres_fixture::Postgres::start();
+    let postgres = Postgres::start();
     let fence = Fence::build(postgres.url()).await;
     let schema = database_derivation::schema_name(&fence.mine);
 
@@ -386,7 +385,7 @@ async fn the_shared_worker_login_reaches_no_converged_schema_without_narrowing()
 /// claims that succeeded and then reached nothing would pass.
 #[compio::test]
 async fn one_app_holds_a_transaction_on_each_of_its_two_databases() {
-    let postgres = postgres_fixture::Postgres::start();
+    let postgres = Postgres::start();
     let fence = Fence::build(postgres.url()).await;
 
     let to_mine = Database::connect(
@@ -494,7 +493,7 @@ async fn one_app_holds_a_transaction_on_each_of_its_two_databases() {
 async fn one_app_s_two_databases_do_not_cross_deliver_a_shared_collection_name() {
     use zeroship_data_orm::cdc::broker::{self, SubscriptionMessage};
 
-    let postgres = postgres_fixture::Postgres::start();
+    let postgres = Postgres::start();
     let fence = Fence::build(postgres.url()).await;
 
     let to_mine = Database::connect(
@@ -874,7 +873,7 @@ async fn masked_ssn(database: &Database) -> Result<Value, DbError> {
 /// arm is not passing because the raw value happened to be projected anyway.
 #[compio::test]
 async fn an_audited_unmask_reaches_the_real_value_a_binding_role_cannot_select() {
-    let postgres = postgres_fixture::Postgres::start();
+    let postgres = Postgres::start();
     let fence = MaskedFence::build(postgres.url()).await;
     let database = fence.open().await;
 
@@ -921,7 +920,7 @@ async fn an_audited_unmask_reaches_the_real_value_a_binding_role_cannot_select()
 /// statement names - and the control is the mask column, which must come back.
 #[compio::test]
 async fn the_binding_role_is_refused_the_real_value_column_and_the_whole_row() {
-    let postgres = postgres_fixture::Postgres::start();
+    let postgres = Postgres::start();
     let fence = MaskedFence::build(postgres.url()).await;
     let table = fence.table();
     let role = fence.binding_role();
@@ -971,7 +970,7 @@ async fn the_binding_role_is_refused_the_real_value_column_and_the_whole_row() {
 /// nothing at all would satisfy every refusal below.
 #[compio::test]
 async fn the_unmask_role_reaches_the_real_value_and_no_other_column_or_verb() {
-    let postgres = postgres_fixture::Postgres::start();
+    let postgres = Postgres::start();
     let fence = MaskedFence::build(postgres.url()).await;
     let table = fence.table();
     let role = fence.unmask_role();
@@ -1061,7 +1060,7 @@ async fn the_unmask_role_reaches_the_real_value_and_no_other_column_or_verb() {
 /// - so that failure cannot leak the elevation and cannot measure the restore.
 #[compio::test]
 async fn the_unmask_bracket_gives_the_binding_role_back_on_both_outcomes() {
-    let postgres = postgres_fixture::Postgres::start();
+    let postgres = Postgres::start();
     let fence = MaskedFence::build(postgres.url()).await;
     let binding = fence.binding();
     let backend = zeroship_data_orm::ConnectOptions::new(&fence.url, ProjectKeySource::unavailable())

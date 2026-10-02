@@ -32,8 +32,7 @@
 //! would be visible to every database on a shared instance. Each arm owns its
 //! own server through the repository's `PostgreSQL` fixture.
 
-#[path = "../../../tests/fixtures/postgres/mod.rs"]
-mod postgres_fixture;
+use zeroship_testkit::postgres::server::Postgres;
 
 use compio_postgres::error::{DbError, SqlState};
 use compio_postgres::Pool;
@@ -58,7 +57,7 @@ const MINIMUM_SERVER_VERSION_NUM: i32 = 160_000;
 const FIXTURE_PASSWORD: &str = "fixture";
 
 /// Connect as the fixture's superuser and refuse a server older than the pin.
-async fn superuser(postgres: &postgres_fixture::Postgres) -> Rc<Pool> {
+async fn superuser(postgres: &Postgres) -> Rc<Pool> {
     let pool = Rc::new(
         Pool::connect(&postgres.url(), 4)
             .await
@@ -82,7 +81,7 @@ async fn superuser(postgres: &postgres_fixture::Postgres) -> Rc<Pool> {
 }
 
 /// Connect as one of the fixture's login roles.
-async fn login(postgres: &postgres_fixture::Postgres, role: &str) -> Rc<Pool> {
+async fn login(postgres: &Postgres, role: &str) -> Rc<Pool> {
     let mut url = url::Url::parse(&postgres.url()).expect("the fixture URL parses");
     url.set_username(role)
         .expect("the fixture URL accepts a username");
@@ -149,7 +148,7 @@ async fn drain(pools: Vec<Rc<Pool>>) {
 /// edge below it is decorative.
 #[compio::test]
 async fn a_worker_login_reaches_a_shared_database_only_through_a_live_binding_role() {
-    let postgres = postgres_fixture::Postgres::start();
+    let postgres = Postgres::start();
     let admin = superuser(&postgres).await;
 
     admin
@@ -238,7 +237,7 @@ async fn a_worker_login_reaches_a_shared_database_only_through_a_live_binding_ro
 /// design had no isolation at all.
 #[compio::test]
 async fn only_a_noninheriting_membership_keeps_a_binding_out_of_ambient_login_privileges() {
-    let postgres = postgres_fixture::Postgres::start();
+    let postgres = Postgres::start();
     let admin = superuser(&postgres).await;
 
     admin
@@ -353,7 +352,7 @@ async fn only_a_noninheriting_membership_keeps_a_binding_out_of_ambient_login_pr
 /// `session_user`, and the run below shows the split vanishing when it is.
 #[compio::test]
 async fn set_role_separates_a_missing_role_from_a_role_the_session_may_not_assume() {
-    let postgres = postgres_fixture::Postgres::start();
+    let postgres = Postgres::start();
     let admin = superuser(&postgres).await;
 
     admin
@@ -437,7 +436,7 @@ async fn set_role_separates_a_missing_role_from_a_role_the_session_may_not_assum
 /// deleted rather than supplemented.
 #[compio::test]
 async fn a_table_level_grant_returns_the_column_a_column_list_withheld() {
-    let postgres = postgres_fixture::Postgres::start();
+    let postgres = Postgres::start();
     let admin = superuser(&postgres).await;
 
     admin
@@ -529,7 +528,7 @@ async fn a_table_level_grant_returns_the_column_a_column_list_withheld() {
 /// doing the filtering.
 #[compio::test]
 async fn logical_decoding_ignores_the_column_acl_and_obeys_the_publication_column_list() {
-    let postgres = postgres_fixture::Postgres::start();
+    let postgres = Postgres::start();
     let admin = superuser(&postgres).await;
 
     // The relay, not the worker, is the role that holds REPLICATION: the
@@ -626,7 +625,7 @@ async fn logical_decoding_ignores_the_column_acl_and_obeys_the_publication_colum
 /// creator's table silently becoming append-only.
 #[compio::test]
 async fn a_column_list_and_replica_identity_full_are_accepted_then_make_writes_fail() {
-    let postgres = postgres_fixture::Postgres::start();
+    let postgres = Postgres::start();
     let admin = superuser(&postgres).await;
 
     admin
@@ -728,7 +727,7 @@ async fn a_column_list_and_replica_identity_full_are_accepted_then_make_writes_f
 /// not be told from any other way a narrow fails.
 #[compio::test]
 async fn the_driver_reports_the_setup_batch_s_first_failure_by_sqlstate() {
-    let postgres = postgres_fixture::Postgres::start();
+    let postgres = Postgres::start();
     let admin = superuser(&postgres).await;
 
     admin
@@ -906,7 +905,7 @@ const POOLED_RESET_LOGIN: &str = "zeroship_worker";
 ///   database.
 #[compio::test]
 async fn a_lease_abandoned_mid_statement_lends_the_next_checkout_no_database() {
-    let postgres = postgres_fixture::Postgres::start();
+    let postgres = Postgres::start();
     let admin = superuser(&postgres).await;
 
     // The role and the schema are DERIVED by the binding the data plane

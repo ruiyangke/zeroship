@@ -18,13 +18,11 @@
 
 use bytes::Bytes;
 use compio_s3::client::{PutOptions, S3Client};
-
-#[path = "../../../tests/fixtures/s3.rs"]
-mod s3_fixture;
+use zeroship_testkit::s3::S3Server;
 
 #[test]
 fn s3_full_surface_and_multipart() {
-    let server = s3_fixture::S3Server::start();
+    let server = S3Server::start();
     let client = S3Client::new(server.config("smoke"), server.credentials());
     compio::runtime::Runtime::new()
         .expect("compio runtime")

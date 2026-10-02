@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Backend-independent ORM with native Rust models, protected execution, and database driver adapters."
+autotests = false
 
 [dependencies]
 indexmap = { workspace = true }
@@ -49,9 +50,14 @@ zeroship-migrate = { workspace = true }
 zeroship-migrate-sqlite = { workspace = true }
 zeroship-migrate-server = { workspace = true }
 tracing-subscriber = { workspace = true }
+zeroship-testkit = { path = "../../tests/testkit" }
 
 [lints]
 workspace = true
+
+[[test]]
+name = "main"
+path = "tests/main.rs"
 
 [[bench]]
 name = "bench_row_decode"

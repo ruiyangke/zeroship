@@ -16,7 +16,7 @@ and make Docker available. `pg_dump` and `pg_restore` clients matching the
 fixture server major version must be on PATH; the development shell supplies
 them, so this applies to a shell built another way. The task rejects a version
 mismatch before building the suite. The fixture server is declared in
-`tests/fixtures/postgres/Dockerfile`, and the shell's client attribute in
+`tests/testkit/src/postgres/Dockerfile`, and the shell's client attribute in
 `flake.nix` is bumped with it.
 Build the workspace SDKs with `pnpm install --frozen-lockfile` and `pnpm build`
 before compiling the V8 runtime.

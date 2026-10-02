@@ -1,7 +1,6 @@
 //! Declared keys and reference targets reach real databases without name conventions.
 
-#[path = "../../../tests/fixtures/postgres/mod.rs"]
-mod postgres_fixture;
+use zeroship_testkit::postgres::server::Postgres;
 
 use serde_json::json;
 use zeroship_migrate::schema::query::{FkEmission, build_create_table_with_fks_for_dialect};
@@ -50,7 +49,7 @@ fn ddl(schema: &str, dialect: &DialectId) -> String {
 
 #[test]
 fn postgres_enforces_the_declared_reference_target() {
-    let server = postgres_fixture::Postgres::start();
+    let server = Postgres::start();
     let mut db =
         postgres::Client::connect(&server.url(), postgres::NoTls).expect("connect PostgreSQL");
     db.batch_execute(&ddl("public", &zeroship_migrate_postgres::DIALECT))

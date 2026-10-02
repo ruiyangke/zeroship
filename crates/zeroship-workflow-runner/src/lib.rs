@@ -47,7 +47,7 @@ mod journal_fixture;
 #[path = "../../../tests/fixtures/workflow_service_binding.rs"]
 mod service_binding;
 #[cfg(test)]
-#[path = "../../../tests/fixtures/s3.rs"]
+#[path = "../../../tests/testkit/src/s3.rs"]
 mod s3_fixture;
 
 use async_trait::async_trait;

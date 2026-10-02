@@ -3,6 +3,7 @@ name = "compio-s3"
 version = "0.1.0"
 edition = "2024"
 description = "Minimal compio-native S3 client — hand-rolled SigV4, multipart, streaming, zero tokio"
+autotests = false
 
 [dependencies]
 compio = { workspace = true }
@@ -29,6 +30,11 @@ httpdate = { workspace = true }
 testcontainers = { version = "0.28", default-features = false, features = ["blocking"] }
 compio = { workspace = true }
 bytes = { workspace = true }
+zeroship-testkit = { path = "../../tests/testkit" }
 
 [lints]
 workspace = true
+
+[[test]]
+name = "main"
+path = "tests/main.rs"

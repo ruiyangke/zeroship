@@ -13,9 +13,15 @@
 //!   process is killed while the container is still starting.
 //! - [`postgres`] is the reaper-owned platform database one test process shares.
 //! - [`tenant`] mints the scoped org/project/app/user ids a case owns.
+//! - [`s3`] owns an S3-compatible server with Docker-assigned ports.
+//! - [`session_keys`] writes the key files in-process auth servers read.
+//! - [`nested_cargo`] starts a cargo from inside a process cargo started.
 
 pub mod docker;
+pub mod nested_cargo;
 pub mod postgres;
+pub mod s3;
+pub mod session_keys;
 pub mod tenant;
 
 pub use docker::lifetime;

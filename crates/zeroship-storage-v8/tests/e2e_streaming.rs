@@ -38,8 +38,7 @@ use zeroship_runtime::{
 use zeroship_storage::{LocalFs, StorageStore};
 use zeroship_storage_v8::StorageBinding;
 
-#[path = "../../../tests/fixtures/s3.rs"]
-mod s3_fixture;
+use zeroship_testkit::s3::S3Server;
 
 // The app exercises the native streaming surface directly (NOT the SDK),
 // then self-asserts. A multi-chunk ReadableStream forces the upload read
@@ -581,7 +580,7 @@ fn e2e_storage_streaming_backpressure_over_cap() {
 
 #[test]
 fn e2e_storage_streaming_s3() {
-    let server = s3_fixture::S3Server::start();
+    let server = S3Server::start();
     let backend = zeroship_storage::S3::with_tuning(
         server.config("v8"),
         server.credentials(),

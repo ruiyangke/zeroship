@@ -373,5 +373,4 @@ pub async fn validated_session(
     (created.proof, person_id)
 }
 
-#[path = "../../../../tests/fixtures/session_keys.rs"]
-mod session_keys;
+use zeroship_testkit::session_keys;

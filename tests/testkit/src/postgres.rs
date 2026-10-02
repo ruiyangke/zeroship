@@ -20,10 +20,15 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use compio_postgres::{Client, NoTls};
-use testcontainers::core::{CmdWaitFor, ExecCommand, IntoContainerPort, WaitFor};
+use testcontainers::core::{CmdWaitFor, ExecCommand, IntoContainerPort};
 use testcontainers::{Container, GenericImage, ImageExt};
 
 use crate::docker::{start_owned, DockerCli, OwnedContainer, Ownership};
+
+mod image;
+pub mod server;
+
+pub use image::build;
 
 /// The database the shared platform migration is applied to.
 const DATABASE: &str = "zeroship_testkit";
@@ -36,17 +41,13 @@ pub struct Server {
 
 impl Server {
     fn start() -> Self {
-        let request = GenericImage::new("postgres", "17")
-            .with_exposed_port(5432.tcp())
-            .with_wait_for(WaitFor::message_on_stdout(
-                "PostgreSQL init process complete; ready for start up.",
-            ))
-            .with_wait_for(WaitFor::message_on_stderr(
-                "database system is ready to accept connections",
-            ))
-            .with_env_var("POSTGRES_PASSWORD", "fixture")
-            .with_env_var("POSTGRES_DB", DATABASE)
-            .with_startup_timeout(Duration::from_secs(120));
+        let image = image::build().unwrap_or_else(|error| {
+            panic!("platform database tests require Docker and PostgreSQL: {error}")
+        });
+        let request =
+            image::await_ready(image.with_exposed_port(5432.tcp()))
+                .with_env_var("POSTGRES_PASSWORD", "fixture")
+                .with_env_var("POSTGRES_DB", DATABASE);
         let owned = start_owned(&DockerCli::system(), &Ownership::mint(), request)
             .unwrap_or_else(|error| panic!("platform database tests require Docker and PostgreSQL: {error}"));
         let container = owned.container();

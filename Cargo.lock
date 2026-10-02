@@ -1356,6 +1356,7 @@ dependencies = [
  "time",
  "tracing",
  "url",
+ "zeroship-testkit",
 ]
 
 [[package]]
@@ -7781,6 +7782,7 @@ dependencies = [
  "zeroship-core",
  "zeroship-data-orm",
  "zeroship-mailer",
+ "zeroship-testkit",
 ]
 
 [[package]]
@@ -8091,6 +8093,7 @@ dependencies = [
  "zeroship-migrate-postgres",
  "zeroship-migrate-server",
  "zeroship-migrate-sqlite",
+ "zeroship-testkit",
 ]
 
 [[package]]
@@ -8564,6 +8567,7 @@ dependencies = [
  "tracing",
  "uuid",
  "zeroship-core",
+ "zeroship-testkit",
 ]
 
 [[package]]
@@ -8583,6 +8587,7 @@ dependencies = [
  "zeroship-metering",
  "zeroship-runtime",
  "zeroship-storage",
+ "zeroship-testkit",
 ]
 
 [[package]]
@@ -8606,6 +8611,7 @@ version = "0.1.0"
 dependencies = [
  "compio",
  "compio-postgres",
+ "compio-s3",
  "serde_json",
  "tempfile",
  "testcontainers",

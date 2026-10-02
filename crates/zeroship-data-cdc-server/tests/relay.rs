@@ -1,6 +1,6 @@
 //! Separate-process relay test. PostgreSQL is mandatory.
 
-#[path = "../../../tests/fixtures/postgres/mod.rs"]
+#[path = "../../../tests/testkit/src/postgres/server.rs"]
 mod postgres_fixture;
 
 #[path = "../../../tests/fixtures/data/platform.rs"]

@@ -29,7 +29,7 @@
 use std::collections::HashMap;
 #[path = "../../../tests/fixtures/data/platform.rs"]
 mod platform;
-#[path = "../../../tests/fixtures/postgres/mod.rs"]
+#[path = "../../../tests/testkit/src/postgres/server.rs"]
 mod postgres;
 mod relay_fixture;
 #[path = "../../../tests/fixtures/data/roles.rs"]

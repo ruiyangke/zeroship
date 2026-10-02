@@ -7,8 +7,7 @@ use zeroship_storage::{
 };
 
 #[cfg(feature = "s3")]
-#[path = "../../../tests/fixtures/s3.rs"]
-mod s3_fixture;
+use zeroship_testkit::s3::S3Server;
 
 async fn drain(mut stream: BoxByteStream) -> Vec<u8> {
     let mut bytes = Vec::new();
@@ -229,7 +228,7 @@ fn local_scoped_storage_contract() {
 #[cfg(feature = "s3")]
 #[test]
 fn s3_scoped_storage_contract() {
-    let server = s3_fixture::S3Server::start();
+    let server = S3Server::start();
     let backend = zeroship_storage::S3::with_tuning(
         server.config("scoped"),
         server.credentials(),

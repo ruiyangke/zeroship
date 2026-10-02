@@ -29,7 +29,7 @@ pub fn root() -> PathBuf {
         .expect("workspace root")
 }
 
-#[path = "../../../../tests/fixtures/nested_cargo.rs"]
+#[path = "../../../../tests/testkit/src/nested_cargo.rs"]
 mod nested_cargo;
 
 /// Build the targets `selection` names for the host with the dev profile, and

@@ -92,6 +92,7 @@ async-trait = { workspace = true }
 futures = { workspace = true }
 # Capture structured retirement fields in the live retention test.
 tracing-subscriber = { workspace = true }
+zeroship-testkit = { path = "../../tests/testkit" }
 
 [lints]
 workspace = true

@@ -3,7 +3,7 @@
 #[path = "sqlite.rs"]
 pub mod tables;
 
-#[path = "../postgres/mod.rs"]
+#[path = "../../testkit/src/postgres/server.rs"]
 pub mod postgres;
 
 fn quote_ident(ident: &str) -> String {

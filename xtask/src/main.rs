@@ -6,12 +6,6 @@ mod storage;
 mod worker;
 mod workflow;
 
-#[path = "../../tests/fixtures/postgres/image.rs"]
-mod postgres_image;
-
-#[path = "../../tests/fixtures/nested_cargo.rs"]
-mod nested_cargo;
-
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::process::{Command, ExitCode};
@@ -210,7 +204,7 @@ fn root() -> PathBuf {
 /// under `cargo run`, so the command leaves out the variables describing the
 /// xtask package; [`nested_cargo`] says why.
 fn cargo() -> Command {
-    let mut command = nested_cargo::cargo();
+    let mut command = zeroship_testkit::nested_cargo::cargo();
     command.current_dir(root());
     command
 }

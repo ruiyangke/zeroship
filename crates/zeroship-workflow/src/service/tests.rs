@@ -122,7 +122,7 @@ pub(super) mod publication;
 mod reconciliation;
 mod requests;
 mod restart_models;
-#[path = "../../../../tests/fixtures/s3.rs"]
+#[path = "../../../../tests/testkit/src/s3.rs"]
 mod s3_fixture;
 mod schema_binding;
 mod schema_metadata;

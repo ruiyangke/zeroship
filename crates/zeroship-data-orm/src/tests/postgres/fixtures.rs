@@ -112,7 +112,7 @@ pub(super) async fn require_pgvector(pool: &Pool) {
         .is_empty();
     assert!(
         installed,
-        "The PostgreSQL testcontainer must provide the `vector` extension; check tests/fixtures/postgres/Dockerfile and extensions.sql."
+        "The PostgreSQL testcontainer must provide the `vector` extension; check tests/testkit/src/postgres/Dockerfile and extensions.sql."
     );
 }
 
@@ -276,7 +276,7 @@ pub(super) async fn require_postgis(pool: &Pool) {
         .is_empty();
     assert!(
         installed,
-        "The PostgreSQL testcontainer must provide the `postgis` extension; check tests/fixtures/postgres/Dockerfile and extensions.sql."
+        "The PostgreSQL testcontainer must provide the `postgis` extension; check tests/testkit/src/postgres/Dockerfile and extensions.sql."
     );
 }
 

@@ -1,16 +1,15 @@
 //! Owned PostgreSQL and generated configuration for the orchestration tests.
-#[path = "../../../tests/fixtures/postgres/mod.rs"]
-mod postgres;
 
+use zeroship_testkit::postgres::server::Postgres;
 use xtask::platform_db::{admin, overlay};
 
 pub struct Database {
-    _postgres: postgres::Postgres,
+    _postgres: Postgres,
     directory: tempfile::TempDir,
 }
 impl Database {
     pub fn start() -> Self {
-        let postgres = postgres::Postgres::start();
+        let postgres = Postgres::start();
         let directory = tempfile::tempdir().expect("fixture configuration directory");
         std::fs::create_dir_all(directory.path().join("deploy/ops")).unwrap();
         std::fs::write(

@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Scoped object storage with local filesystem and S3-compatible backends"
+autotests = false
 
 [dependencies]
 zeroship-core = { workspace = true }
@@ -24,6 +25,11 @@ s3 = ["dep:compio-s3", "dep:futures", "dep:tracing"]
 [dev-dependencies]
 tempfile = { workspace = true }
 testcontainers = { version = "0.28", default-features = false, features = ["blocking"] }
+zeroship-testkit = { path = "../../tests/testkit" }
 
 [lints]
 workspace = true
+
+[[test]]
+name = "main"
+path = "tests/main.rs"

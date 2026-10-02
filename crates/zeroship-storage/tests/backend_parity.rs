@@ -18,8 +18,7 @@
 #![allow(clippy::future_not_send)]
 
 #[cfg(feature = "s3")]
-#[path = "../../../tests/fixtures/s3.rs"]
-mod s3_fixture;
+use zeroship_testkit::s3::S3Server;
 use zeroship_storage::StorageError;
 #[cfg(feature = "s3")]
 use std::time::Duration;
@@ -581,7 +580,7 @@ fn localfs_parity_and_large_stream() {
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "s3")]
-fn make_s3(server: &s3_fixture::S3Server) -> zeroship_storage::S3 {
+fn make_s3(server: &S3Server) -> zeroship_storage::S3 {
     make_s3_tuned(server, zeroship_storage::S3UploadTuning::DEFAULTS)
 }
 
@@ -590,7 +589,7 @@ fn make_s3(server: &s3_fixture::S3Server) -> zeroship_storage::S3 {
 /// here; nothing plants a process-global environment variable to do it.
 #[cfg(feature = "s3")]
 fn make_s3_tuned(
-    server: &s3_fixture::S3Server,
+    server: &S3Server,
     tuning: zeroship_storage::S3UploadTuning,
 ) -> zeroship_storage::S3 {
     zeroship_storage::S3::with_tuning(server.config("it"), server.credentials(), tuning)
@@ -599,7 +598,7 @@ fn make_s3_tuned(
 #[cfg(feature = "s3")]
 #[test]
 fn s3_parity_and_large_stream() {
-    let server = s3_fixture::S3Server::start();
+    let server = S3Server::start();
 
     let backend = make_s3(&server);
     compio::runtime::Runtime::new()
@@ -624,7 +623,7 @@ fn s3_parity_and_large_stream() {
 /// A raw `compio_s3::S3Client` over the same S3 bucket, for asserting that an
 /// aborted multipart leaves no orphaned upload.
 #[cfg(feature = "s3")]
-fn s3_raw_client(server: &s3_fixture::S3Server) -> compio_s3::S3Client {
+fn s3_raw_client(server: &S3Server) -> compio_s3::S3Client {
     compio_s3::S3Client::new(server.config("it"), server.credentials())
 }
 
@@ -700,7 +699,7 @@ impl ChunkSource for SlowChunks {
 /// drives the producer and the in-flight PUTs concurrently so a
 /// slow-but-progressing source finishes.
 #[cfg(feature = "s3")]
-async fn run_s3_slow_producer_overlap(server: &s3_fixture::S3Server) {
+async fn run_s3_slow_producer_overlap(server: &S3Server) {
     use zeroship_storage::S3UploadTuning;
     const PART_SIZE: usize = 8 * 1024 * 1024;
 
@@ -753,7 +752,7 @@ async fn run_s3_slow_producer_overlap(server: &s3_fixture::S3Server) {
 /// C1 regression (plugin-storage `S3::put_stream`): a mid-upload error must
 /// abort the multipart explicitly — no panic/process-abort, no orphaned upload.
 #[cfg(feature = "s3")]
-async fn run_s3_mid_upload_abort(backend: &zeroship_storage::S3, server: &s3_fixture::S3Server) {
+async fn run_s3_mid_upload_abort(backend: &zeroship_storage::S3, server: &S3Server) {
     // 8 MiB part size; yield 1.25 parts then error → create_multipart + ≥1
     // upload_part have run before the failure.
     const PART_SIZE: usize = 8 * 1024 * 1024;
@@ -793,7 +792,7 @@ async fn run_s3_mid_upload_abort(backend: &zeroship_storage::S3, server: &s3_fix
 /// H2 regression: a stream that would exceed the configured max object size
 /// fails fast (and the C1-style abort leaves no orphaned upload).
 #[cfg(feature = "s3")]
-async fn run_s3_part_limit_fast_fail(server: &s3_fixture::S3Server) {
+async fn run_s3_part_limit_fast_fail(server: &S3Server) {
     use zeroship_storage::S3UploadTuning;
     // Cap at 12 MiB so the first full 8 MiB part is flushed (creating a real
     // multipart upload) before the running total trips the cap - exercising the
@@ -836,7 +835,7 @@ async fn run_s3_part_limit_fast_fail(server: &s3_fixture::S3Server) {
 /// mis-sorted or duplicated list makes `complete_multipart` reject the upload.
 /// (Pre-change this path was strictly sequential, so the sort line is new.)
 #[cfg(feature = "s3")]
-async fn run_s3_parallel_many_parts(server: &s3_fixture::S3Server) {
+async fn run_s3_parallel_many_parts(server: &S3Server) {
     use zeroship_storage::S3UploadTuning;
     const PART_SIZE: usize = 8 * 1024 * 1024;
 
@@ -892,7 +891,7 @@ async fn run_s3_parallel_many_parts(server: &s3_fixture::S3Server) {
 /// other in-flight uploads are dropped/cancelled and no orphaned (billed)
 /// multipart upload remains listable.
 #[cfg(feature = "s3")]
-async fn run_s3_parallel_mid_upload_abort(server: &s3_fixture::S3Server) {
+async fn run_s3_parallel_mid_upload_abort(server: &S3Server) {
     use zeroship_storage::S3UploadTuning;
     const PART_SIZE: usize = 8 * 1024 * 1024;
 

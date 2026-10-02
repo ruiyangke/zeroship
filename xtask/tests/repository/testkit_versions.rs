@@ -105,7 +105,7 @@ fn testkit_dependencies_match_the_workspace_requirements() {
 
     let (examined, violations) = mismatches(&testkit, &workspace);
     assert!(
-        examined >= 7,
+        examined >= 8,
         "the shared-dependency scan lost its entries: {examined}"
     );
     assert!(

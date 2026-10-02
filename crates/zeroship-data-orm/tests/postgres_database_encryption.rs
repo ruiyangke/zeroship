@@ -21,8 +21,7 @@
 //! `pg_authid` and `pg_auth_members` are cluster-shared, so the role DDL below
 //! would be visible to every database on a shared instance.
 
-#[path = "../../../tests/fixtures/postgres/mod.rs"]
-mod postgres_fixture;
+use zeroship_testkit::postgres::server::Postgres;
 
 use std::sync::Arc;
 
@@ -357,7 +356,7 @@ fn assert_aead_refusal(error: &DbError, what: &str) {
 /// schema, so the read is the ORM's and not a shortcut.
 #[compio::test]
 async fn two_apps_bound_to_one_database_read_each_others_encrypted_rows() {
-    let postgres = postgres_fixture::Postgres::start();
+    let postgres = Postgres::start();
     let cluster = Cluster::build(postgres.url()).await;
 
     let writer = cluster
@@ -441,7 +440,7 @@ async fn two_apps_bound_to_one_database_read_each_others_encrypted_rows() {
 /// one variable constant at a time, and pins that each fence refuses alone.
 #[compio::test]
 async fn a_ciphertext_lifted_into_another_database_does_not_verify() {
-    let postgres = postgres_fixture::Postgres::start();
+    let postgres = Postgres::start();
     let cluster = Cluster::build(postgres.url()).await;
 
     let here = cluster

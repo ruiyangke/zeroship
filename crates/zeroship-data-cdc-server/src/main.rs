@@ -13,7 +13,7 @@ mod source;
 mod transaction;
 
 #[cfg(test)]
-#[path = "../../../tests/fixtures/postgres/mod.rs"]
+#[path = "../../../tests/testkit/src/postgres/server.rs"]
 mod postgres_fixture;
 
 #[cfg(test)]
