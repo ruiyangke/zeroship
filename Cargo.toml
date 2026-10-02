@@ -375,9 +375,32 @@ debug = "line-tables-only"
 # evaluation costs many times what the product pays, so an auth case's
 # wall-clock budget goes to the KDF rather than to the flow it measures, and a
 # loaded machine turns that into a case timeout. The two crates that compute it
-# are built optimized; nothing else changes.
+# are built optimized.
 [profile.dev.package.argon2]
 opt-level = 3
 
 [profile.dev.package.blake2]
+opt-level = 3
+
+# The same holds for the primitives every service call and secret path runs:
+# each inter-service request verifies an ed25519 service assertion, sha2
+# digests tokens and payloads, and AES-GCM seals secrets. Their hot loops live
+# in these crates, so they build optimized too. Generic code a caller
+# instantiates still follows the caller's profile.
+[profile.dev.package.ed25519-dalek]
+opt-level = 3
+
+[profile.dev.package.curve25519-dalek]
+opt-level = 3
+
+[profile.dev.package.sha2]
+opt-level = 3
+
+[profile.dev.package.aes]
+opt-level = 3
+
+[profile.dev.package.ghash]
+opt-level = 3
+
+[profile.dev.package.polyval]
 opt-level = 3
