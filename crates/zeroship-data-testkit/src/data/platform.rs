@@ -14,7 +14,6 @@
 //! with, from the superuser rather than from Control's login. What these rows
 //! are is the platform's; who writes them is not what the relay's tests are
 //! about, and only the relay's own reads run under a production login.
-#![allow(dead_code)]
 
 use compio_postgres::Pool;
 use std::io::{Read, Seek, SeekFrom};

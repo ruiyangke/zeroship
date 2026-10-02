@@ -22,7 +22,6 @@ futures = { workspace = true }
 
 [dev-dependencies]
 async-trait = { workspace = true }
-testcontainers = { version = "0.28", default-features = false, features = ["blocking", "watchdog"] }
 compio-postgres = { workspace = true }
 sha2 = { workspace = true }
 rcgen = "0.14"
@@ -38,14 +37,12 @@ zeroship-migrate-server = { workspace = true }
 zeroship-migrate-sqlite = { workspace = true }
 zeroship-migrate = { workspace = true }
 zeroship-migrate-postgres = { workspace = true }
+zeroship-data-testkit = { path = "../zeroship-data-testkit" }
+zeroship-testkit = { path = "../../tests/testkit" }
 
 [[test]]
 name = "main"
 path = "tests/main.rs"
-
-[[test]]
-name = "distributed_live"
-path = "tests/distributed_live.rs"
 
 [lints]
 workspace = true

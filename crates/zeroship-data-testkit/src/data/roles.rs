@@ -10,50 +10,36 @@
 //! Which COLUMNS a capability role may touch is the apply path's business in
 //! production; here the helper grants the whole schema, which is what a fixture
 //! that creates its own tables needs.
-#![allow(dead_code)]
+//!
+//! The functions take the plain [`HarnessBinding`](super::HarnessBinding) and
+//! return the driver's own error, so a consumer that classifies failures maps it
+//! into its own error type rather than the testkit naming that type.
 
+use super::{quote_ident, HarnessBinding};
 use compio_postgres::Pool;
 use zeroship_core::database_derivation;
-use zeroship_core::database_role::DatabaseCapability;
-use zeroship_data_orm::binding::DbBinding;
-use zeroship_data_orm::{backend::pg_error, error::DbError};
 
-/// Add database context while preserving the driver's SQLSTATE classification.
-pub(crate) fn coded_sql(context: &str, error: compio_postgres::Error) -> DbError {
-    pg_error::coded_sql(&format!("fixture/roles: {context}"), error)
-}
-
-pub(crate) async fn create_role_if_missing(
+async fn create_role_if_missing(
     pool: &Pool,
     name: &str,
     attrs: &str,
-) -> Result<bool, DbError> {
+) -> Result<bool, compio_postgres::Error> {
     let exists = !pool
-        .query_text_params("SELECT 1 FROM pg_roles WHERE rolname = $1", &[name])
-        .await
-        .map_err(|error| coded_sql(&format!("probe pg_roles {name}"), error))?
+        .query_text_params("SELECT 1 FROM pg_roles WHERE rolname = $1", &[&name])
+        .await?
         .is_empty();
     if exists {
         return Ok(false);
     }
     pool.execute(&format!(r#"CREATE ROLE "{name}" {attrs}"#), &[])
-        .await
-        .map_err(|error| coded_sql(&format!("CREATE ROLE {name}"), error))?;
+        .await?;
     Ok(true)
 }
 
 /// Build the transaction-scoped role switch the data plane sends.
-pub fn set_local_role_sql(binding: &DbBinding) -> Result<String, DbError> {
-    let role = binding.session_role().ok_or_else(|| {
-        DbError::config(
-            "binding_not_resolved",
-            "a fixture narrowing to a role needs a binding that names one",
-        )
-    })?;
-    Ok(format!(
-        "SET LOCAL ROLE {}",
-        zeroship_data_orm::sql::mapping::quote_ident(role)
-    ))
+#[must_use]
+pub fn set_local_role_sql(binding: &HarnessBinding) -> String {
+    format!("SET LOCAL ROLE {}", quote_ident(&binding.session_role()))
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -83,27 +69,20 @@ pub struct BindingLadderOutcome {
 /// measuring what its test is about.
 pub async fn ensure_binding_ladder(
     pool: &Pool,
-    binding: &DbBinding,
-) -> Result<BindingLadderOutcome, DbError> {
-    let database = binding.database().ok_or_else(|| {
-        DbError::config(
-            "binding_not_resolved",
-            "a fixture ladder needs a binding that addresses a database",
-        )
-    })?;
-    let binding_role = binding.session_role().ok_or_else(|| {
-        DbError::config(
-            "binding_not_resolved",
-            "a fixture ladder needs a binding that names a role",
-        )
-    })?;
-    let capability = database_derivation::capability_role_name(database, DatabaseCapability::ReadWrite)?;
-    let unmask = database_derivation::unmask_role_name(database)?;
+    binding: &HarnessBinding,
+) -> Result<BindingLadderOutcome, compio_postgres::Error> {
+    let capability = database_derivation::capability_role_name(
+        binding.database(),
+        binding.capability(),
+    )
+    .expect("a minted database composes a legal capability role name");
+    let unmask = binding.unmask_role();
+    let binding_role = binding.session_role();
 
-    let schema = zeroship_data_orm::sql::mapping::quote_ident(binding.schema().as_str());
-    let capability_q = zeroship_data_orm::sql::mapping::quote_ident(&capability);
-    let unmask_q = zeroship_data_orm::sql::mapping::quote_ident(&unmask);
-    let binding_q = zeroship_data_orm::sql::mapping::quote_ident(binding_role);
+    let schema = quote_ident(&binding.schema());
+    let capability_q = quote_ident(&capability);
+    let unmask_q = quote_ident(&unmask);
+    let binding_q = quote_ident(&binding_role);
 
     create_role_if_missing(
         pool,
@@ -119,7 +98,7 @@ pub async fn ensure_binding_ladder(
     .await?;
     let created = create_role_if_missing(
         pool,
-        binding_role,
+        &binding_role,
         "NOLOGIN NOREPLICATION NOCREATEDB NOCREATEROLE INHERIT",
     )
     .await?;
@@ -149,11 +128,7 @@ pub async fn ensure_binding_ladder(
         format!("GRANT {unmask_q} TO {binding_q} WITH INHERIT FALSE"),
         format!("GRANT {binding_q} TO CURRENT_USER WITH INHERIT FALSE"),
     ] {
-        pool.execute(&statement, &[])
-            .await
-            .map_err(|error| {
-                coded_sql(&format!("provision ladder for {}", binding.app_id()), error)
-            })?;
+        pool.execute(&statement, &[]).await?;
     }
 
     Ok(BindingLadderOutcome {
@@ -162,28 +137,23 @@ pub async fn ensure_binding_ladder(
 }
 
 /// Drop a binding's roles after its schema has been removed.
-pub async fn drop_binding_ladder(pool: &Pool, binding: &DbBinding) -> Result<(), DbError> {
+pub async fn drop_binding_ladder(
+    pool: &Pool,
+    binding: &HarnessBinding,
+) -> Result<(), compio_postgres::Error> {
     let mut roles = Vec::new();
-    if let Some(role) = binding.session_role() {
-        roles.push(role.to_owned());
-    }
-    if let Some(database) = binding.database() {
-        roles.push(database_derivation::capability_role_name(
-            database,
-            DatabaseCapability::ReadWrite,
-        )?);
-        roles.push(database_derivation::unmask_role_name(database)?);
-    }
+    roles.push(binding.session_role());
+    roles.push(
+        database_derivation::capability_role_name(binding.database(), binding.capability())
+            .expect("a minted database composes a legal capability role name"),
+    );
+    roles.push(binding.unmask_role());
     for role in roles {
         pool.execute(
-            &format!(
-                "DROP ROLE IF EXISTS {}",
-                zeroship_data_orm::sql::mapping::quote_ident(&role)
-            ),
+            &format!("DROP ROLE IF EXISTS {}", quote_ident(&role)),
             &[],
         )
-        .await
-        .map_err(|error| coded_sql(&format!("DROP ROLE {role}"), error))?;
+        .await?;
     }
     Ok(())
 }

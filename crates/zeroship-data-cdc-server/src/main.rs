@@ -13,12 +13,10 @@ mod source;
 mod transaction;
 
 #[cfg(test)]
-#[path = "../../../tests/testkit/src/postgres/server.rs"]
-mod postgres_fixture;
+use zeroship_data_testkit::data::platform as platform_fixture;
 
 #[cfg(test)]
-#[path = "../../../tests/fixtures/data/platform.rs"]
-mod platform_fixture;
+use zeroship_testkit::postgres::server as postgres_fixture;
 
 #[compio::main]
 async fn main() {

@@ -1,13 +1,39 @@
 //! Separate-process relay test. PostgreSQL is mandatory.
 
-#[path = "../../../tests/testkit/src/postgres/server.rs"]
-mod postgres_fixture;
+use zeroship_data_testkit::data::platform as platform_fixture;
+use zeroship_testkit::postgres::server as postgres_fixture;
 
-#[path = "../../../tests/fixtures/data/platform.rs"]
-mod platform_fixture;
+/// The plain identity a creator binding carries, for the shared ladder.
+fn plain_binding(
+    binding: &zeroship_data_orm::binding::DbBinding,
+) -> zeroship_data_testkit::data::HarnessBinding {
+    let edge = binding
+        .edge()
+        .expect("a creator binding addresses a database");
+    zeroship_data_testkit::data::HarnessBinding::new(
+        binding.app_id(),
+        binding.deploy_token(),
+        edge.database().clone(),
+        edge.binding().clone(),
+        edge.database_capability(),
+    )
+}
 
-#[path = "../../../tests/fixtures/data/roles.rs"]
-mod roles;
+/// The shared role ladder, adapted to this binary's ORM binding type.
+mod roles {
+    pub(super) use zeroship_data_testkit::data::roles::BindingLadderOutcome;
+
+    pub(super) async fn ensure_binding_ladder(
+        pool: &compio_postgres::Pool,
+        binding: &zeroship_data_orm::binding::DbBinding,
+    ) -> Result<BindingLadderOutcome, compio_postgres::Error> {
+        zeroship_data_testkit::data::roles::ensure_binding_ladder(
+            pool,
+            &super::plain_binding(binding),
+        )
+        .await
+    }
+}
 
 use compio_postgres::Pool;
 use compio_tls::TlsConnector;

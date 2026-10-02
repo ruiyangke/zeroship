@@ -13,4 +13,5 @@
 
 mod audit_table_parity;
 mod capability;
+mod distributed_live;
 mod subscription_finalizer;

@@ -8086,7 +8086,6 @@ dependencies = [
  "rcgen",
  "rustls",
  "tempfile",
- "testcontainers",
  "toml 0.8.23",
  "tracing",
  "tracing-subscriber",
@@ -8094,6 +8093,8 @@ dependencies = [
  "zeroship-core",
  "zeroship-data-cdc-wire",
  "zeroship-data-orm",
+ "zeroship-data-testkit",
+ "zeroship-testkit",
 ]
 
 [[package]]
@@ -8136,7 +8137,6 @@ dependencies = [
  "sha2 0.10.9",
  "sqlite-vec",
  "tempfile",
- "testcontainers",
  "time",
  "tracing",
  "tracing-subscriber",
@@ -8147,6 +8147,7 @@ dependencies = [
  "zeroship-core",
  "zeroship-data-cdc-wire",
  "zeroship-data-macros",
+ "zeroship-data-testkit",
  "zeroship-migrate",
  "zeroship-migrate-backend",
  "zeroship-migrate-core",
@@ -8155,6 +8156,25 @@ dependencies = [
  "zeroship-migrate-server",
  "zeroship-migrate-sqlite",
  "zeroship-testkit",
+]
+
+[[package]]
+name = "zeroship-data-testkit"
+version = "0.1.0"
+dependencies = [
+ "compio-postgres",
+ "rusqlite",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "toml 0.8.23",
+ "tracing-subscriber",
+ "url",
+ "zeroship-core",
+ "zeroship-migrate",
+ "zeroship-migrate-postgres",
+ "zeroship-migrate-server",
+ "zeroship-migrate-sqlite",
 ]
 
 [[package]]
@@ -8172,7 +8192,6 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
- "testcontainers",
  "tracing",
  "tracing-subscriber",
  "url",
@@ -8180,6 +8199,7 @@ dependencies = [
  "v8",
  "zeroship-core",
  "zeroship-data-orm",
+ "zeroship-data-testkit",
  "zeroship-metering",
  "zeroship-migrate",
  "zeroship-migrate-postgres",
@@ -8187,6 +8207,7 @@ dependencies = [
  "zeroship-migrate-sqlite",
  "zeroship-runtime",
  "zeroship-runtime-macros",
+ "zeroship-testkit",
 ]
 
 [[package]]

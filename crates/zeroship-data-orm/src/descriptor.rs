@@ -45,7 +45,7 @@ mod tests {
 
     fn identity_corpus() -> serde_json::Value {
         serde_json::from_str(include_str!(
-            "../../../tests/fixtures/data/collection-identity.json"
+            "../../zeroship-data-testkit/src/data/collection-identity.json"
         ))
         .unwrap()
     }

@@ -1,7 +1,7 @@
 // compio-postgres gained per-connection deadline state, which deepens the
 // generated future here past rustc's default layout-query depth. The depth
-// is in the async body, not in anything this file can restructure.
-#![recursion_limit = "256"]
+// is in the async body, not in anything this file can restructure. The crate
+// root (`main.rs`) raises `recursion_limit` for this binary.
 
 //! Distributed `db.live` regression against PostgreSQL and a real relay process.
 //!
@@ -27,16 +27,52 @@
 //! ```
 
 use std::collections::HashMap;
-#[path = "../../../tests/fixtures/data/platform.rs"]
-mod platform;
-#[path = "../../../tests/testkit/src/postgres/server.rs"]
-mod postgres;
 mod relay_fixture;
-#[path = "../../../tests/fixtures/data/roles.rs"]
-mod roles;
-#[path = "../../../tests/fixtures/data/tracing.rs"]
-mod test_tracing;
 use zeroship_data_orm::cdc::relay::RelayConfig;
+use zeroship_data_testkit::data::tracing as test_tracing;
+use zeroship_data_testkit::data::platform;
+use zeroship_testkit::postgres::server as postgres;
+
+/// The plain identity a creator [`DbBinding`] carries, for the shared ladder.
+fn plain_binding(binding: &DbBinding) -> zeroship_data_testkit::data::HarnessBinding {
+    let edge = binding
+        .edge()
+        .expect("a creator binding addresses a database");
+    zeroship_data_testkit::data::HarnessBinding::new(
+        binding.app_id(),
+        binding.deploy_token(),
+        edge.database().clone(),
+        edge.binding().clone(),
+        edge.database_capability(),
+    )
+}
+
+/// The shared role ladder, adapted to this binary's ORM binding type.
+mod roles {
+    pub(super) use zeroship_data_testkit::data::roles::BindingLadderOutcome;
+
+    pub(super) async fn ensure_binding_ladder(
+        pool: &compio_postgres::Pool,
+        binding: &zeroship_data_orm::binding::DbBinding,
+    ) -> Result<BindingLadderOutcome, compio_postgres::Error> {
+        zeroship_data_testkit::data::roles::ensure_binding_ladder(
+            pool,
+            &super::plain_binding(binding),
+        )
+        .await
+    }
+
+    pub(super) async fn drop_binding_ladder(
+        pool: &compio_postgres::Pool,
+        binding: &zeroship_data_orm::binding::DbBinding,
+    ) -> Result<(), compio_postgres::Error> {
+        zeroship_data_testkit::data::roles::drop_binding_ladder(
+            pool,
+            &super::plain_binding(binding),
+        )
+        .await
+    }
+}
 
 use std::sync::Arc;
 use std::thread::{self, JoinHandle, ThreadId};

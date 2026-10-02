@@ -4,7 +4,7 @@
 //! as `zeroship_cdc` and the worker as `zeroship_worker`, each with exactly the
 //! reach `db/migrations-ts` grants it.
 
-use crate::platform::{self, Platform};
+use super::platform::{self, Platform};
 use compio_postgres::Pool;
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;

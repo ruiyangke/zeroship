@@ -94,26 +94,65 @@ fn mismatches(
     (examined, violations)
 }
 
-#[test]
-fn testkit_dependencies_match_the_workspace_requirements() {
+/// Assert every dependency a manifest shares with `[workspace.dependencies]`
+/// keeps that entry's version requirement, features, default-features and path,
+/// and that the scan examined at least `minimum` shared entries.
+fn assert_manifest_pins(directory: &str, minimum: usize) {
     let root = repo::root();
-    let testkit_dir = root.join("tests/testkit");
+    let dir = root.join(directory);
     let workspace = dependencies(&repo::read("Cargo.toml"), "workspace.dependencies", &root);
-    let testkit_source = std::fs::read_to_string(testkit_dir.join("Cargo.toml"))
-        .expect("read tests/testkit/Cargo.toml");
-    let testkit = dependencies(&testkit_source, "dependencies", &testkit_dir);
+    let source = std::fs::read_to_string(dir.join("Cargo.toml"))
+        .unwrap_or_else(|error| panic!("read {directory}/Cargo.toml: {error}"));
+    let shared = dependencies(&source, "dependencies", &dir);
 
-    let (examined, violations) = mismatches(&testkit, &workspace);
+    let (examined, violations) = mismatches(&shared, &workspace);
     assert!(
-        examined >= 8,
-        "the shared-dependency scan lost its entries: {examined}"
+        examined >= minimum,
+        "the shared-dependency scan for {directory} lost its entries: {examined}"
     );
     assert!(
         violations.is_empty(),
-        "tests/testkit must keep every workspace-shared dependency's version \
+        "{directory} must keep every workspace-shared dependency's version \
          requirement, features, default-features and path; change the workspace \
-         entry or the testkit entry, never one of them:\n{}",
+         entry or the manifest entry, never one of them:\n{}",
         violations.join("\n")
+    );
+}
+
+#[test]
+fn testkit_dependencies_match_the_workspace_requirements() {
+    assert_manifest_pins("tests/testkit", 8);
+}
+
+#[test]
+fn data_testkit_dependencies_match_the_workspace_requirements() {
+    assert_manifest_pins("crates/zeroship-data-testkit", 8);
+}
+
+/// The data testkit speaks plain data and leaf crates, never a data-plane
+/// domain crate.
+///
+/// Those crates' own unit tests reach the testkit as an ordinary
+/// `[dev-dependencies]` entry, so a normal edge back would make cargo build the
+/// crate twice when its unit tests compile and the two copies' types would not
+/// unify. The dependency closure is the thing that has to stay clean; a domain
+/// type named inside the testkit is what would pull the edge back.
+#[test]
+fn data_testkit_depends_on_no_data_plane_crate() {
+    let root = repo::root();
+    let dir = root.join("crates/zeroship-data-testkit");
+    let source = std::fs::read_to_string(dir.join("Cargo.toml"))
+        .expect("read crates/zeroship-data-testkit/Cargo.toml");
+    let declared = dependencies(&source, "dependencies", &dir);
+    let forbidden = declared
+        .keys()
+        .filter(|name| name.starts_with("zeroship-data-"))
+        .collect::<Vec<_>>();
+    assert!(
+        forbidden.is_empty(),
+        "the data testkit must not depend on a data-plane domain crate; a crate \
+         whose unit tests dev-depend on the testkit cannot also be on its normal \
+         edge, or the test build links two copies of it: {forbidden:?}"
     );
 }
 

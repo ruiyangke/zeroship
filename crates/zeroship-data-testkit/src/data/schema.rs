@@ -1,10 +1,13 @@
 //! Database fixtures use the migration engine that creates creator tables.
+//!
+//! The field maps are plain `serde_json::Value`, so a consumer holding its own
+//! value type converts at the boundary rather than the testkit naming that type.
 
-use zeroship_data_orm::sql::SchemaName;
-use zeroship_data_orm::value::Value;
+use crate::data::quote_ident;
+use serde_json::Value;
+use zeroship_core::schema_name::SchemaName;
 use zeroship_migrate::schema::query::{FkEmission, IndexSpec, QueryError};
 
-#[allow(dead_code)]
 pub fn fixture_table_sql(
     schema: &SchemaName,
     collection: &str,
@@ -20,7 +23,6 @@ pub fn fixture_table_sql(
     )
 }
 
-#[allow(dead_code)]
 pub fn fixture_table_sql_sqlite(
     schema: &SchemaName,
     collection: &str,
@@ -63,14 +65,13 @@ fn fixture_table_sql_for(
         zeroship_migrate::shipping_vendors(),
         schema.as_str(),
         collection,
-        &serde_json::to_value(&authored).expect("encode migration descriptor"),
+        &authored,
         fks,
         dialect,
         &policy,
     )
 }
 
-#[allow(dead_code)]
 pub fn fixture_indexes(
     schema: &SchemaName,
     collection: &str,
@@ -80,23 +81,24 @@ pub fn fixture_indexes(
         zeroship_migrate::shipping_vendors(),
         schema.as_str(),
         collection,
-        &serde_json::to_value(fields).expect("encode migration descriptor"),
+        fields,
         &zeroship_migrate_postgres::DIALECT,
     )
 }
 
-#[allow(dead_code)]
+#[must_use]
 pub fn fixture_schema_sql(schema: &SchemaName) -> String {
     format!(
         "CREATE SCHEMA IF NOT EXISTS {}",
-        zeroship_data_orm::sql::mapping::quote_ident(schema.as_str())
+        quote_ident(schema.as_str())
     )
 }
 
 /// Add the fields emitted by the fixture's confined migration policy.
+#[must_use]
 pub fn generated_fields(fields: Value) -> Value {
     let descriptor: Value = serde_json::from_str(include_str!(
-        "../../../crates/zeroship-data-orm/tests/fixtures/schema.runtime.json"
+        "../../../../crates/zeroship-data-orm/tests/fixtures/schema.runtime.json"
     ))
     .expect("generated fixture descriptor");
     let mut generated = descriptor["collections"]["posts"]["fields"]
@@ -105,7 +107,7 @@ pub fn generated_fields(fields: Value) -> Value {
         .iter()
         .filter(|(_, definition)| definition.get("assign").is_some())
         .map(|(name, definition)| (name.clone(), definition.clone()))
-        .collect::<zeroship_data_orm::value::Map<_, _>>();
+        .collect::<serde_json::Map<_, _>>();
     for (name, definition) in fields.as_object().expect("fixture field map") {
         if let Some(existing) = generated.get_mut(name) {
             existing

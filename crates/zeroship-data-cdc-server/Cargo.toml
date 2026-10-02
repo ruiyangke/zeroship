@@ -3,6 +3,9 @@ name = "zeroship-data-cdc-server"
 version = "0.1.0"
 edition = "2021"
 description = "Separate CDC relay service with its own configuration and process boundary."
+# Register the integration modules in tests/main.rs so the relay cases share one
+# binary and the process-wide boot case runs alone through its spawner.
+autotests = false
 
 # No shipped binary links this service. The configuration contract checker is
 # the permitted development consumer; data_crate_closure_gate.sh enforces it.
@@ -17,6 +20,10 @@ reason = "Deployed long-running CDC relay in the server configuration scope, wit
 [[bin]]
 name = "zeroship-data-cdc-server"
 path = "src/main.rs"
+
+[[test]]
+name = "main"
+path = "tests/main.rs"
 
 [dependencies]
 # The generated settings carrier. `clap`'s derive is what `bootstrap_or_exit`
@@ -37,7 +44,6 @@ zeroship-core = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
-testcontainers = { version = "0.28", default-features = false, features = ["blocking", "watchdog"] }
 # Exercise the public ORM client against the separate relay executable.
 zeroship-data-orm = { workspace = true }
 rcgen = "0.14"
@@ -51,6 +57,9 @@ toml = { workspace = true }
 # The capture tests read the structured fields of the warning a stopped capture
 # logs, through a `Layer` over the registry.
 tracing-subscriber = { workspace = true }
+# The reaper-owned bare server and the Control corpus fixtures.
+zeroship-testkit = { path = "../../tests/testkit" }
+zeroship-data-testkit = { path = "../zeroship-data-testkit" }
 
 [lints]
 workspace = true

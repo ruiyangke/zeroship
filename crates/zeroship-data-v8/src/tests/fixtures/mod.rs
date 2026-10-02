@@ -1,10 +1,12 @@
 //! Private adapter setup and observations through public backend interfaces.
-#[path = "../../../../../tests/fixtures/data/mod.rs"]
-mod data;
-pub(crate) use data::*;
+//!
+//! [`adapter`] converts the shared testkit's plain identities and field maps
+//! into this crate's types; everything below sees the ORM types it always did.
+mod adapter;
+pub(crate) use adapter::*;
+pub(crate) use zeroship_data_testkit::test_app_id;
+pub(crate) use zeroship_testkit::postgres::server as postgres;
 mod context;
-#[path = "../../../../../tests/fixtures/data/schema.rs"]
-pub(crate) mod schema;
 pub(crate) use context::{
     SuppliedProjectKeysGuard, binding, install_cold_schema, install_schema, key_source,
     project_keys, reset_context, set_database_url, supply_app_bindings, supply_project_key,
