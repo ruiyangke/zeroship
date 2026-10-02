@@ -226,6 +226,10 @@ async fn stored(fixture: &Fixture, id: &JobId) -> Option<Value> {
     rows.into_iter().next()
 }
 
+/// Wait until a manager session queues behind a lock the administrator holds.
+/// The predicate names the live waiter and its blocker rather than the
+/// statement text, because the server serves the activity snapshot it cached
+/// at first access for the rest of the administrator's transaction.
 async fn blocked_manager(admin: &compio_postgres::Client, predicate: &str) {
     let sql = format!(
         "SELECT EXISTS (SELECT 1 FROM pg_locks l \
@@ -517,10 +521,18 @@ async fn postgres_authorized_submission_rechecks_revocation_after_app_lock() {
         .await
         .unwrap();
     assert_eq!(locked.len(), 1);
+    // The administrator's transaction materializes its statistics snapshot on
+    // first access and serves it for the rest of the transaction. Touch the
+    // activity view before the manager blocks, so a wait keyed on the cached
+    // statement text would never see the manager reach the lock.
+    admin
+        .query("SELECT count(*) FROM pg_stat_activity", &[])
+        .await
+        .unwrap();
     let release = async {
         blocked_manager(
             admin,
-            "l.locktype='transactionid' AND a.query LIKE '%queue_scopes%' \
+            "l.locktype='transactionid' \
              AND pg_backend_pid()=ANY(pg_blocking_pids(a.pid))",
         )
         .await;
