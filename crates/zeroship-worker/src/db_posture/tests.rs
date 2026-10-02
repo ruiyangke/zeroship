@@ -37,6 +37,84 @@ async fn worker_boot_accepts_the_migrated_role_without_replication() {
     .await;
 }
 
+/// Every boot refusal carries the server's own reason, whichever of the three
+/// exchanges the server refused. The driver's error displays only its kind, so
+/// a refusal built from it alone reads "db error" whatever the server said, and
+/// a connection budget other services had exhausted read as an unexplained
+/// authority failure.
+#[compio::test]
+async fn every_refused_exchange_carries_the_servers_reason() {
+    // THE CONTROL: with nothing refused, both queries run and the verdict is
+    // the posture's own, so each arm below is refused by its setup alone.
+    let arms = [
+        (
+            None,
+            "worker database login must be zeroship_worker",
+            "got fixture_login",
+        ),
+        (
+            Some("ALTER ROLE fixture_login CONNECTION LIMIT 0"),
+            "connect to inspect worker database role: ",
+            r#"too many connections for role "fixture_login""#,
+        ),
+        (
+            Some("REVOKE SELECT ON pg_catalog.pg_roles FROM PUBLIC"),
+            "inspect worker database role: ",
+            "permission denied for view pg_roles",
+        ),
+        (
+            Some("REVOKE SELECT ON pg_catalog.pg_auth_members FROM PUBLIC"),
+            "inspect worker role memberships: ",
+            "permission denied for table pg_auth_members",
+        ),
+    ];
+    // Every arm runs before any is judged, so one verdict covers all of them.
+    let mut mismatched = Vec::new();
+    for (setup, step, reason) in arms {
+        Database::run(async |database| {
+            database
+                .admin
+                .batch_execute("CREATE ROLE fixture_login LOGIN PASSWORD 'fixture_login'")
+                .await
+                .unwrap();
+            if let Some(setup) = setup {
+                database.admin.batch_execute(setup).await.unwrap();
+            }
+            let error = validate_database_url(database.url_as("fixture_login").as_str())
+                .await
+                .expect_err("fixture_login is never the worker's posture");
+            if !(error.starts_with(step) && error.contains(reason)) {
+                mismatched.push(format!(
+                    "expected {step:?} carrying {reason:?}, got: {error}"
+                ));
+            }
+        })
+        .await;
+    }
+    assert!(mismatched.is_empty(), "{mismatched:#?}");
+}
+
+/// Carrying the whole chain never carries the credential: a URL the driver
+/// cannot read is refused by the component it names, not by what it holds.
+/// Nothing is dialled, so no server is needed.
+#[compio::test]
+async fn a_refused_url_names_the_password_without_quoting_it() {
+    for url in [
+        "postgres://zeroship_worker:hunter2secret%zz@127.0.0.1:1/db",
+        "postgres://zeroship_worker:hunter2secret%00@127.0.0.1:1/db",
+    ] {
+        let error = validate_database_url(url)
+            .await
+            .expect_err("a malformed password is refused before any dial");
+        assert!(
+            error.starts_with("connect to inspect worker database role: ")
+                && error.contains("the password")
+                && !error.contains("hunter2secret"),
+            "{error}"
+        );
+    }
+}
+
 /// The worker connects to the CREATOR database. A login that can resolve the
 /// platform schema at all is pointed at Control's database, which is the zone
 /// split this gate exists to hold.

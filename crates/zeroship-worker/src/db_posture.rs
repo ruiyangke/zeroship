@@ -131,13 +131,32 @@ fn validate(posture: &DatabasePosture) -> Result<(), String> {
     Ok(())
 }
 
+/// The boot refusal for a failed `step`, carrying what the server said.
+///
+/// `compio_postgres::Error` displays only its kind, and keeps the server's own
+/// message as its source. A boot refusal is all an operator has to go on, so it
+/// carries the whole chain: "db error" alone cannot tell a refused password from
+/// a connection budget other services have exhausted. The chain carries no
+/// credential, because the driver's URL parser names a component it refuses
+/// and never quotes it.
+fn refusal(step: &str, error: &compio_postgres::Error) -> String {
+    let mut text = format!("{step}: {error}");
+    let mut source = std::error::Error::source(error);
+    while let Some(cause) = source {
+        text.push_str(": ");
+        text.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    text
+}
+
 /// Verify the worker's effective database authority before V8 or a listener is
 /// initialized. This inspects privileges, not the spelling of the DSN, so role
 /// membership and accidental grants cannot bypass the boundary.
 pub async fn validate_database_url(db_url: &str) -> Result<(), String> {
     let (client, connection) = compio_postgres::connect(db_url, NoTls)
         .await
-        .map_err(|error| format!("connect to inspect worker database role: {error}"))?;
+        .map_err(|error| refusal("connect to inspect worker database role", &error))?;
     compio::runtime::spawn(async move {
         if let Err(error) = connection.run().await {
             tracing::error!(%error, "worker database posture connection failed");
@@ -166,12 +185,12 @@ WHERE role.rolname = current_user
             &[],
         )
         .await
-        .map_err(|error| format!("inspect worker database role: {error}"))?;
+        .map_err(|error| refusal("inspect worker database role", &error))?;
 
     let memberships = client
         .query_one(INHERITED_MEMBERSHIPS_SQL, &[])
         .await
-        .map_err(|error| format!("inspect worker role memberships: {error}"))?;
+        .map_err(|error| refusal("inspect worker role memberships", &error))?;
 
     validate(&DatabasePosture {
         current_user: row.get("current_user"),
