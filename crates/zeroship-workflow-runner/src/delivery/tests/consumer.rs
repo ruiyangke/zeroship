@@ -15,7 +15,7 @@ struct Queue {
     claims: RefCell<Vec<AssignedScope>>,
     events: flume::Sender<Event>,
     responses: flume::Receiver<Event>,
-    claim_gate: RefCell<Option<oneshot::Receiver<()>>>,
+    claim_gates: RefCell<VecDeque<oneshot::Receiver<()>>>,
     claim_error: RefCell<Option<WorkflowServiceError>>,
 }
 impl Queue {
@@ -27,7 +27,7 @@ impl Queue {
             claims: RefCell::new(Vec::new()),
             events,
             responses,
-            claim_gate: RefCell::new(None),
+            claim_gates: RefCell::new(VecDeque::new()),
             claim_error: RefCell::new(None),
         });
         for job in jobs {
@@ -84,7 +84,7 @@ impl JobTransport for Queue {
     ) -> Result<Option<Claimed<Lease>>, WorkflowServiceError> {
         self.claims.borrow_mut().push(scope.clone());
         self.events.send(Event::Claimed).unwrap();
-        let gate = self.claim_gate.borrow_mut().take();
+        let gate = self.claim_gates.borrow_mut().pop_front();
         if let Some(gate) = gate {
             let _ = gate.await;
         }
@@ -470,7 +470,7 @@ async fn shutdown_cancels_a_pending_claim_without_admitting_creator_work() {
     let fixture = Fixture::new(AppPolicy::default()).await;
     let queue = Queue::new([fixture.lease.clone()]);
     let (_release, gate) = oneshot::channel();
-    queue.claim_gate.replace(Some(gate));
+    queue.claim_gates.borrow_mut().push_back(gate);
     let (mut host, _) = consumer(
         queue.clone(),
         &fixture.lease.delivery.worker_id,
@@ -505,8 +505,18 @@ async fn a_stalled_claim_times_out_and_releases_capacity_for_another_app() {
     }
     second.lease.delivery.worker_id = first.lease.delivery.worker_id.clone();
     let queue = Queue::new([first.lease.clone(), second.lease.clone()]);
-    let (_release, gate) = oneshot::channel();
-    queue.claim_gate.replace(Some(gate));
+    // Every claim stalls, and the operation timeout is what releases the stall,
+    // so the release is observed on the queue's claim stream. Waiting for a
+    // later settlement instead would tie the assertion to the same bound that
+    // commits an execution, and under load that commit can outlive the bound
+    // the stall is measured against.
+    let (_release_first, first_gate) = oneshot::channel();
+    let (_release_second, second_gate) = oneshot::channel();
+    let (_release_retry, retry_gate) = oneshot::channel();
+    queue
+        .claim_gates
+        .borrow_mut()
+        .extend([first_gate, second_gate, retry_gate]);
     let mut bounds = options(1);
     bounds.delivery.operation_timeout = Duration::from_millis(50);
     bounds.error_backoff = Duration::from_millis(100);
@@ -519,16 +529,43 @@ async fn a_stalled_claim_times_out_and_releases_capacity_for_another_app() {
     host.bindings()
         .replace(vec![scope(&first, 1), scope(&second, 1)])
         .unwrap();
-    finished(host.run_until(queue.settlements(1))).await;
+    // The stalled first claim times out, the released capacity is offered to
+    // the second app, and the first app's per-app reservation is released for a
+    // later attempt. Each is a claim the host issues, and each is observed
+    // before this host is stopped.
+    let released = async {
+        for _ in 0..3 {
+            assert!(matches!(
+                queue.responses.recv_async().await.unwrap(),
+                Event::Claimed
+            ));
+        }
+    };
+    finished(host.run_until(released)).await;
     assert_eq!(first.probe.starts.get(), 0);
-    assert_eq!(second.probe.starts.get(), 1);
+    assert_eq!(second.probe.starts.get(), 0);
+    assert_eq!(queue.claims.borrow().len(), 3);
     assert_eq!(queue.claims.borrow()[0].app_id, *first.app.app_id());
     assert_eq!(queue.claims.borrow()[1].app_id, *second.app.app_id());
+    assert_eq!(queue.claims.borrow()[2].app_id, *first.app.app_id());
     assert!(first.app.job_receipt(&first.job).await.unwrap().is_none());
-    // Timeout released the per-app reservation; a later attempt can proceed.
-    finished(host.run_until(queue.settlements(1))).await;
+    // No claim popped a job while stalled, so a host under ordinary bounds runs
+    // both apps to completion.
+    drop(host);
+    let mut host = JobConsumer::new(
+        queue.clone(),
+        first.lease.delivery.worker_id.clone(),
+        options(1),
+    )
+    .unwrap();
+    host.bindings()
+        .replace(vec![scope(&first, 1), scope(&second, 1)])
+        .unwrap();
+    finished(host.run_until(queue.settlements(2))).await;
     assert_eq!(first.probe.starts.get(), 1);
+    assert_eq!(second.probe.starts.get(), 1);
     assert_eq!(first.task_state().await, "completed");
+    assert_eq!(second.task_state().await, "completed");
 }
 
 #[compio::test]
