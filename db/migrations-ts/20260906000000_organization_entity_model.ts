@@ -89,7 +89,7 @@ const userIdColumnsByTable: Readonly<Record<string, readonly string[]>> = {
 // can tell a deferral from an oversight. Each carries its own consumers to
 // re-plumb.
 //
-// `crates/zeroship-migrate-node/tests/platform_corpus/organization_authority.rs`
+// `crates/zeroship-migrate-node/tests/e2e/platform_corpus/organization_authority.rs`
 // applies the corpus to owned PostgreSQL databases and exercises these
 // constraints, accepted controls, privileges and collations through the Rust
 // driver. Run it with `cargo xtask test migrations`.

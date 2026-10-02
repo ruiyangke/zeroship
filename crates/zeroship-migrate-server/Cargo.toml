@@ -3,6 +3,10 @@ name = "zeroship-migrate-server"
 version = "0.1.0"
 edition = "2021"
 description = "zeroship standalone creator migration service"
+# The integration suites are modules of one `tests/integration/main.rs` target and
+# the binary-launching suite of one `tests/e2e/main.rs`, so the crate links two
+# test executables instead of one per file.
+autotests = false
 
 [[package.metadata.zeroship-config.targets]]
 target = "zeroship-migrate-server"
@@ -89,15 +93,14 @@ v8 = { workspace = true }
 
 # Database verification is mandatory in ordinary cargo test runs. PostgreSQL
 # targets own their servers through private Testcontainers fixtures.
-
 [[test]]
-name = "apply_api_test"
-path = "tests/apply_api_test.rs"
+name = "integration"
+path = "tests/integration/main.rs"
 
-# Exercise the shipped CompioPgSession against a required PostgreSQL server.
+# Launching the shipped binary in a child process.
 [[test]]
-name = "compio_pg_conformance"
-path = "tests/compio_pg_conformance.rs"
+name = "e2e"
+path = "tests/e2e/main.rs"
 
 [lints]
 workspace = true

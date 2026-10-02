@@ -6,7 +6,7 @@
 //
 // One row per (op-kind, variant) recording the token's disposition on each
 // dialect, KEYED BY DIALECT ID — the TS mirror of
-// crates/zeroship-migrate/tests/dialect_matrix/dialect_table.rs.
+// crates/zeroship-migrate/tests/integration/dialect_matrix/dialect_table.rs.
 //
 // There is deliberately NO `Dialect` union here. A closed union of the shipping
 // dialect names is the same "core enumerates the vendors" shape as a struct field

@@ -207,7 +207,7 @@ impl PoolConfig {
     /// sweeps. So this setting takes effect on a pool that never called
     /// [`Pool::start_housekeeper`] - unlike [`PoolConfig::idle_timeout`], which
     /// does not. No-housekeeper checkout rotation is measured and pinned by
-    /// `tests/suite/pool_lifetime.rs`.
+    /// `tests/integration/pool_lifetime.rs`.
     pub fn max_lifetime(&mut self, max_lifetime: Duration) -> &mut Self {
         self.max_lifetime = max_lifetime;
         self

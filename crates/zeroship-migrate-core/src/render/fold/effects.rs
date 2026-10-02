@@ -134,7 +134,7 @@ pub fn ir_state_at(
 /// [`Effect::AddsOnly`] costs a WRONG REFUSAL. Every `AddsOnly` below is therefore a
 /// claim about PostgreSQL's catalog, and the ones the SQL whitelist disagreed with
 /// are adjudicated against a live server in
-/// `crates/zeroship-migrate/tests/pg_engine/pg_plan_precondition_preflight.rs`.
+/// `crates/zeroship-migrate/tests/integration/pg_engine/pg_plan_precondition_preflight.rs`.
 #[must_use]
 #[allow(clippy::match_same_arms)]
 pub fn effect_of(op: &Op) -> Effect {
@@ -282,7 +282,7 @@ mod tests {
     /// Ops that provably only ADD catalog facts.
     ///
     /// `CREATE MATERIALIZED VIEW` is adjudicated against a live server in
-    /// `crates/zeroship-migrate/tests/pg_engine/pg_plan_precondition_preflight.rs`.
+    /// `crates/zeroship-migrate/tests/integration/pg_engine/pg_plan_precondition_preflight.rs`.
     #[test]
     fn the_additive_ops_clear_nothing() {
         for source in [

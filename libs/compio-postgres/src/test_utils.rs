@@ -30,7 +30,7 @@
 //! places in this crate that could have used them deliberately do not, and
 //! their reasons are worth knowing before reaching for one:
 //!
-//! * `tests/suite/raw_value_column_identity.rs` wants the claim to be about what a
+//! * `tests/integration/raw_value_column_identity.rs` wants the claim to be about what a
 //!   real server sends, because a fixture cannot be wrong about a wire format
 //!   in the same direction the driver is.
 //! * `row.rs`'s own test module needs a `DataRow` whose field count does NOT

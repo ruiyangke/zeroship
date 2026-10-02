@@ -1,0 +1,2271 @@
+//! Live replication-protocol tests against a real walsender.
+//!
+//! What these need is `max_wal_senders > 0`, and a spare slot in it. NOT
+//! `wal_level=logical`: `IDENTIFY_SYSTEM` answers on any `replication=database`
+//! connection, and only `CREATE_REPLICATION_SLOT ... LOGICAL` and
+//! `START_REPLICATION ... LOGICAL` need the logical level. `wal_level=minimal`
+//! is the case that breaks them, because it forces `max_wal_senders` to 0.
+//! The `replication=database` startup parameter puts the backend in walsender
+//! mode, where the regular query grammar is gone and only the replication
+//! commands answer.
+//!
+//! Deadline stalls use a bounded scripted peer: PostgreSQL cannot be told to
+//! stop at a chosen byte inside a protocol frame, and its keepalives make a
+//! measured zero-byte streaming interval nondeterministic.
+//!
+//! This file is the live coverage of `src/replication.rs`. Its unit tests
+//! build `IDENTIFY_SYSTEM` row bodies by hand, and the hand-built shape is
+//! not the one `DataRowBody::buffer()` produces, so parser and fixture can
+//! agree on a row layout the server never sends — the defect class the live
+//! tests below pin.
+
+use compio_postgres::Config;
+use compio_postgres::config::SslMode;
+use compio_postgres::replication::{
+    ReplicationMessage, StartReplicationOptions, format_lsn, parse_lsn,
+};
+use std::io::{ErrorKind, Read, Write};
+use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::thread;
+use std::time::{Duration, Instant};
+
+#[allow(unused_imports)]
+use crate::common;
+
+const READ_TIMEOUT: Duration = Duration::from_millis(75);
+const IDLE_EXPOSURE: Duration = Duration::from_millis(225);
+const OPERATION_WATCHDOG: Duration = Duration::from_secs(1);
+const SOCKET_WATCHDOG: Duration = Duration::from_secs(2);
+const ASYNC_WATCHDOG: Duration = Duration::from_secs(5);
+const THREAD_WATCHDOG: Duration = Duration::from_secs(3);
+
+/// A bounded plaintext peer for states a real walsender cannot be instructed
+/// to enter, such as stopping after an exact frame prefix.
+struct ReplicationStub {
+    addr: SocketAddr,
+    done: std::sync::mpsc::Receiver<()>,
+    thread: thread::JoinHandle<()>,
+}
+
+impl ReplicationStub {
+    fn spawn(script: impl FnOnce(TcpListener) + Send + 'static) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind scripted replication peer");
+        listener
+            .set_nonblocking(true)
+            .expect("make scripted replication listener bounded");
+        let addr = listener.local_addr().expect("scripted listener address");
+        let (done_tx, done) = std::sync::mpsc::channel();
+        let thread = thread::spawn(move || {
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                script(listener);
+            }));
+            let _ = done_tx.send(());
+            if let Err(panic) = outcome {
+                std::panic::resume_unwind(panic);
+            }
+        });
+        Self { addr, done, thread }
+    }
+
+    fn finish(self) {
+        self.done
+            .recv_timeout(THREAD_WATCHDOG)
+            .expect("scripted replication peer exceeded its thread watchdog");
+        self.thread
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+    }
+}
+
+fn accept_bounded(listener: &TcpListener) -> TcpStream {
+    let deadline = Instant::now() + SOCKET_WATCHDOG;
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                stream
+                    .set_read_timeout(Some(SOCKET_WATCHDOG))
+                    .expect("set scripted peer read watchdog");
+                stream
+                    .set_write_timeout(Some(SOCKET_WATCHDOG))
+                    .expect("set scripted peer write watchdog");
+                return stream;
+            }
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                assert!(
+                    Instant::now() < deadline,
+                    "replication client missed the scripted accept watchdog"
+                );
+                thread::sleep(Duration::from_millis(5));
+            }
+            Err(error) => panic!("scripted replication accept failed: {error}"),
+        }
+    }
+}
+
+fn backend_frame(tag: u8, body: &[u8]) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(5 + body.len());
+    frame.push(tag);
+    frame.extend_from_slice(&u32::try_from(body.len() + 4).unwrap().to_be_bytes());
+    frame.extend_from_slice(body);
+    frame
+}
+
+fn complete_replication_startup(stream: &mut TcpStream, delay: Duration) {
+    complete_replication_startup_with_key(stream, delay, 0, &[0; 4]);
+}
+
+fn complete_replication_startup_with_key(
+    stream: &mut TcpStream,
+    delay: Duration,
+    process_id: i32,
+    cancel_key: &[u8],
+) {
+    let mut length = [0u8; 4];
+    stream
+        .read_exact(&mut length)
+        .expect("read replication startup length");
+    let length = u32::from_be_bytes(length) as usize;
+    assert!(
+        length >= 8,
+        "replication startup is shorter than its header"
+    );
+    assert!(
+        length <= 1024 * 1024,
+        "replication startup is implausibly large"
+    );
+    let mut body = vec![0u8; length - 4];
+    stream
+        .read_exact(&mut body)
+        .expect("read replication startup body");
+    assert_eq!(&body[..4], &[0, 3, 0, 2]);
+    assert!(
+        body.windows(b"replication\0database\0".len())
+            .any(|window| window == b"replication\0database\0"),
+        "client startup did not request logical replication mode"
+    );
+
+    // Startup is deliberately delayed in one test to prove read_timeout is
+    // not installed until authentication completes.
+    thread::sleep(delay);
+    let mut backend_key = process_id.to_be_bytes().to_vec();
+    backend_key.extend_from_slice(cancel_key);
+    let mut response = backend_frame(b'R', &0u32.to_be_bytes());
+    response.extend_from_slice(&backend_frame(b'K', &backend_key));
+    response.extend_from_slice(&backend_frame(b'Z', b"I"));
+    stream
+        .write_all(&response)
+        .expect("write scripted replication startup response");
+    stream
+        .flush()
+        .expect("flush scripted replication startup response");
+}
+
+fn expect_simple_query(stream: &mut TcpStream) -> Vec<u8> {
+    let mut tag = [0u8; 1];
+    stream.read_exact(&mut tag).expect("read simple-query tag");
+    assert_eq!(tag[0], b'Q');
+    let mut length = [0u8; 4];
+    stream
+        .read_exact(&mut length)
+        .expect("read simple-query length");
+    let length = u32::from_be_bytes(length) as usize;
+    assert!(length >= 5, "simple query has no NUL-terminated body");
+    assert!(length <= 1024 * 1024, "simple query is implausibly large");
+    let mut body = vec![0u8; length - 4];
+    stream
+        .read_exact(&mut body)
+        .expect("read simple-query body");
+    assert_eq!(body.last(), Some(&0), "simple query is not NUL terminated");
+    body
+}
+
+/// A complete, well-formed `IDENTIFY_SYSTEM` response: one row, its completion,
+/// and the `ReadyForQuery` that closes the phase.
+fn identify_system_response() -> Vec<u8> {
+    let mut row = Vec::new();
+    row.extend_from_slice(&4u16.to_be_bytes());
+    for field in [
+        b"scripted-system".as_slice(),
+        b"1".as_slice(),
+        b"0/10".as_slice(),
+        b"scripted-db".as_slice(),
+    ] {
+        row.extend_from_slice(&i32::try_from(field.len()).unwrap().to_be_bytes());
+        row.extend_from_slice(field);
+    }
+
+    let mut response = backend_frame(b'D', &row);
+    response.extend_from_slice(&backend_frame(b'C', b"IDENTIFY_SYSTEM\0"));
+    response.extend_from_slice(&backend_frame(b'Z', b"I"));
+    response
+}
+
+fn send_identify_system(stream: &mut TcpStream) {
+    stream
+        .write_all(&identify_system_response())
+        .expect("write IDENTIFY_SYSTEM response");
+    stream.flush().expect("flush IDENTIFY_SYSTEM response");
+}
+
+fn send_copy_both(stream: &mut TcpStream) {
+    // Overall format byte + zero columns. The driver intentionally ignores
+    // these fields, but this is the real CopyBothResponse shape.
+    stream
+        .write_all(&backend_frame(b'W', &[0, 0, 0]))
+        .expect("write CopyBothResponse");
+    stream.flush().expect("flush CopyBothResponse");
+}
+
+fn send_keepalive(stream: &mut TcpStream, wal_end: u64) {
+    let mut body = vec![b'k'];
+    body.extend_from_slice(&wal_end.to_be_bytes());
+    body.extend_from_slice(&700_000_000_000i64.to_be_bytes());
+    body.push(0);
+    stream
+        .write_all(&backend_frame(b'd', &body))
+        .expect("write PrimaryKeepalive");
+    stream.flush().expect("flush PrimaryKeepalive");
+}
+
+fn send_notice(stream: &mut TcpStream) {
+    stream
+        .write_all(&backend_frame(b'N', b"Mscripted notice\0\0"))
+        .expect("write replication NoticeResponse");
+    stream.flush().expect("flush replication NoticeResponse");
+}
+
+fn expect_disconnect(stream: &mut TcpStream) {
+    let deadline = Instant::now() + SOCKET_WATCHDOG;
+    let mut bytes = [0u8; 256];
+    loop {
+        match stream.read(&mut bytes) {
+            Ok(0) => return,
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ErrorKind::ConnectionReset
+                        | ErrorKind::ConnectionAborted
+                        | ErrorKind::BrokenPipe
+                        | ErrorKind::NotConnected
+                ) =>
+            {
+                return;
+            }
+            Err(error) if matches!(error.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock) => {
+                panic!("replication client kept its timed-out session open: {error}")
+            }
+            Err(error) => panic!("reading replication disconnect failed: {error}"),
+        }
+        assert!(
+            Instant::now() < deadline,
+            "replication client kept sending without retiring its session"
+        );
+    }
+}
+
+fn stub_config(addr: SocketAddr) -> Config {
+    let mut config = Config::new();
+    config
+        .user("scripted-replication-user")
+        .hostaddr(addr.ip())
+        .port(addr.port())
+        .ssl_mode(SslMode::Disable)
+        .connect_timeout(Duration::from_secs(1))
+        .read_timeout(READ_TIMEOUT);
+    config
+}
+
+fn start_options() -> StartReplicationOptions<'static> {
+    StartReplicationOptions {
+        slot_name: "deadline_slot",
+        start_lsn: "0/0",
+        proto_version: 1,
+        publication_names: &["deadline_publication"],
+        ..Default::default()
+    }
+}
+
+fn test_url() -> String {
+    common::test_url()
+}
+
+/// The credentials, database and TLS settings from the test DSN, with no host
+/// or port.
+///
+/// The multi-host tests below need to place the live endpoint at a chosen
+/// position in a list, which a DSN's single host cannot express.
+fn credentials_only(url: &str) -> Config {
+    let parsed: Config = url.parse().expect("test DSN did not parse");
+    let mut config = Config::new();
+    if let Some(user) = parsed.get_user() {
+        config.user(user);
+    }
+    if let Some(password) = parsed.get_password() {
+        config.password(password);
+    }
+    if let Some(dbname) = parsed.get_dbname() {
+        config.dbname(dbname);
+    }
+    config.ssl_mode(parsed.get_ssl_mode());
+    config.ssl_root_cert(parsed.get_ssl_root_cert().clone());
+    config.ssl_cert_mode(parsed.get_ssl_cert_mode());
+    if let Some(cert) = parsed.get_ssl_cert() {
+        config.ssl_cert(cert);
+    }
+    config
+}
+
+/// The host and port the test DSN names.
+fn live_endpoint(url: &str) -> (String, u16) {
+    let parsed: Config = url.parse().expect("test DSN did not parse");
+    let host = match parsed.get_hosts().first().expect("test DSN names no host") {
+        compio_postgres::config::Host::Tcp(host) => host.clone(),
+        #[cfg(unix)]
+        compio_postgres::config::Host::Unix(path) => {
+            panic!(
+                "this test needs a TCP endpoint, got the socket {}",
+                path.display()
+            )
+        }
+    };
+    let port = parsed.get_ports().first().copied().unwrap_or(5432);
+    (host, port)
+}
+
+/// A TCP port on loopback with nothing listening on it.
+///
+/// Bound and released rather than picked from thin air: the kernel hands out
+/// a port it knows is free, and it does not hand the same one out again while
+/// this test runs. A port nobody listens on REFUSES, which is what makes the
+/// first attempt below fail fast instead of hanging on a backlog.
+async fn closed_port() -> u16 {
+    let listener = compio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind a loopback port");
+    let port = listener.local_addr().expect("listener address").port();
+    drop(listener);
+    port
+}
+
+/// A replication connection must try every host in the configuration.
+///
+/// Stopping at `get_hosts().first()` gives a two-endpoint configuration no
+/// failover at all: if the first host is down, the call fails while a
+/// healthy second host sits unused. The same applies to DNS resolution,
+/// which is the more common way to meet this - a name that resolves to both
+/// an AAAA and an A record against a server bound only to IPv4 fails on the
+/// first address every time.
+#[compio::test]
+async fn replication_connect_tries_every_configured_host() {
+    let url = test_url();
+    let (live_host, live_port) = live_endpoint(&url);
+    let dead_port = closed_port().await;
+
+    let mut config = credentials_only(&url);
+    config.host("127.0.0.1");
+    config.port(dead_port);
+    config.host(live_host);
+    config.port(live_port);
+    config.application_name("cpg_replication_failover");
+
+    let mut replication =
+        match compio_postgres::replication::connect_replication(common::suite_tls(), &config).await
+        {
+            Ok(connection) => connection,
+            Err(e) if common::server_answered(&e) => panic!(
+                "the server refused a replication connection: {}",
+                common::error_chain(&e)
+            ),
+            Err(e) => panic!(
+                "a live host listed after a dead one was never tried: {}",
+                common::error_chain(&e)
+            ),
+        };
+
+    let identity = replication
+        .identify_system()
+        .await
+        .expect("IDENTIFY_SYSTEM failed on the host that was reached");
+    assert!(
+        identity.xlogpos.contains('/'),
+        "xlogpos {:?} is not an LSN",
+        identity.xlogpos
+    );
+}
+
+/// The control for the host walk: one port covers every host.
+///
+/// libpq broadcasts a single `port` across all hosts and only requires a
+/// one-per-host list when more than one is given. A host walk that demands
+/// `ports.len() == hosts.len()`, or that indexes the port list by host
+/// position without falling back to the first entry, refuses this
+/// configuration - which is a valid one.
+#[compio::test]
+async fn replication_connect_broadcasts_a_single_port_across_hosts() {
+    let url = test_url();
+    let (live_host, live_port) = live_endpoint(&url);
+
+    let mut config = credentials_only(&url);
+    config.host(live_host.clone());
+    config.host(live_host);
+    config.port(live_port);
+    config.application_name("cpg_replication_one_port");
+
+    let mut replication =
+        match compio_postgres::replication::connect_replication(common::suite_tls(), &config).await
+        {
+            Ok(connection) => connection,
+            Err(e) if common::server_answered(&e) => panic!(
+                "the server refused a replication connection: {}",
+                common::error_chain(&e)
+            ),
+            Err(e) => panic!(
+                "two hosts sharing one port must connect: {}",
+                common::error_chain(&e)
+            ),
+        };
+
+    replication
+        .identify_system()
+        .await
+        .expect("IDENTIFY_SYSTEM failed");
+}
+
+/// The control for the failure path: when no host answers, the error is the
+/// last endpoint's, not a success and not a hang.
+#[compio::test]
+async fn replication_connect_reports_the_error_when_no_host_answers() {
+    let url = test_url();
+    let first_dead = closed_port().await;
+    let second_dead = closed_port().await;
+
+    let mut config = credentials_only(&url);
+    config.host("127.0.0.1");
+    config.port(first_dead);
+    config.host("127.0.0.1");
+    config.port(second_dead);
+
+    let err = compio_postgres::replication::connect_replication(common::suite_tls(), &config)
+        .await
+        .expect_err("no host was listening, so this cannot succeed");
+    assert!(
+        !common::server_answered(&err),
+        "nothing answered, so this must be a connect failure: {}",
+        common::error_chain(&err)
+    );
+}
+
+/// `IDENTIFY_SYSTEM` must return the server's real identity.
+///
+/// `postgres-protocol` consumes the `DataRow`'s `u16` field count during
+/// `Message::parse` and keeps only the length-prefixed fields in
+/// `DataRowBody::storage`, which is what `buffer()` hands back — so the
+/// parser must NOT read a field count of its own: the bytes at offset 0 are
+/// the FIRST FIELD's `i32` length, and treating their high two bytes as a
+/// count of 0 yields empty strings and a zero timeline reported as success.
+///
+/// Asserted against the server's own `pg_control_system()` rather than
+/// against a non-empty string, so the test pins the VALUE and not merely the
+/// absence of the default.
+#[compio::test]
+async fn identify_system_returns_the_servers_real_identity() {
+    let url = test_url();
+
+    // The expected identity, read over an ordinary connection.
+    //
+    // Routed through `postgres_unreachable` rather than `expect`, because a
+    // bare message here would diagnose the wrong cause: a `53300`
+    // too_many_connections refusal is a server that ANSWERED, and printing a
+    // replication-configuration hint for it is the exact mistake
+    // `tests/common/mod.rs` records a measured incident of.
+    let (client, connection) = match compio_postgres::connect(&url, common::suite_tls()).await {
+        Ok(pair) => pair,
+        Err(e) => common::postgres_unreachable(&url, &e),
+    };
+    let driver = compio::runtime::spawn(async move { connection.run().await });
+    let expected_systemid: String = client
+        .query_one_scalar(
+            "SELECT system_identifier::text FROM pg_control_system()",
+            &[],
+        )
+        .await
+        .expect("pg_control_system() failed");
+    drop(client);
+    let _ = driver.await;
+
+    let mut config: Config = url.parse().expect("test DSN did not parse");
+    config.application_name("cpg_identify_system");
+    // Same reasoning as above: let the shared helper decide whether the server
+    // answered before it names a remedy.
+    let mut replication =
+        match compio_postgres::replication::connect_replication(common::suite_tls(), &config).await
+        {
+            Ok(connection) => connection,
+            Err(e) if common::server_answered(&e) => panic!(
+                "the server refused a replication connection: {}",
+                common::error_chain(&e)
+            ),
+            Err(e) => common::postgres_unreachable(&url, &e),
+        };
+
+    let identity = replication
+        .identify_system()
+        .await
+        .expect("IDENTIFY_SYSTEM failed");
+
+    assert_eq!(
+        identity.systemid, expected_systemid,
+        "IDENTIFY_SYSTEM reported a system identifier the server does not have"
+    );
+    assert!(
+        identity.timeline >= 1,
+        "timeline {} is not a real timeline",
+        identity.timeline
+    );
+    assert!(
+        identity.xlogpos.contains('/'),
+        "xlogpos {:?} is not an LSN",
+        identity.xlogpos
+    );
+}
+
+/// A durability acknowledgement cannot pass the highest LSN this stream has
+/// received.
+///
+/// The three positions in a `StandbyStatusUpdate` are ordered facts: WAL cannot
+/// be flushed or applied before it has been written. `PostgreSQL` deliberately
+/// trusts the frontend here. `ProcessStandbyReplyMessage` passes `flush_lsn`
+/// straight to `LogicalConfirmReceivedLocation`, and that advances the slot's
+/// `confirmed_flush_lsn`. `advance_lsn` must therefore refuse an LSN past
+/// what this stream has received: acknowledging an unreceived position makes
+/// WAL below the false checkpoint eligible for recycling even though this
+/// stream has not read one `XLogData` or keepalive frame.
+#[compio::test]
+async fn an_unreceived_lsn_is_not_reported_as_flushed() {
+    Box::pin(compio::time::timeout(Duration::from_secs(20), async {
+        let url = test_url();
+        let (setup, connection) = match compio_postgres::connect(&url, common::suite_tls()).await {
+            Ok(pair) => pair,
+            Err(error) => common::postgres_unreachable(&url, &error),
+        };
+        compio::runtime::spawn(async move {
+            if let Err(error) = connection.run().await {
+                eprintln!("connection error: {}", common::error_chain(&error));
+            }
+        })
+        .detach();
+
+        common::sweep_stale_test_objects(&setup).await;
+        let base = common::test_object_name("cpg replication future flush");
+        let publication = format!("{base}_p");
+        let slot = format!("{base}_s");
+        setup
+            .batch_execute(&format!("CREATE PUBLICATION {publication}"))
+            .await
+            .expect("publication setup failed");
+        setup
+            .batch_execute(&format!(
+                "SELECT pg_create_logical_replication_slot('{slot}', 'pgoutput')"
+            ))
+            .await
+            .expect("slot setup failed");
+
+        let initial: String = setup
+            .query_one_scalar(
+                "SELECT confirmed_flush_lsn::text
+                   FROM pg_replication_slots WHERE slot_name = $1",
+                &[&slot],
+            )
+            .await
+            .expect("read initial confirmed_flush_lsn");
+        let unreceived = parse_lsn(&initial)
+            .and_then(|lsn| lsn.checked_add(1))
+            .expect("the slot's initial LSN must have a successor");
+
+        let replication = compio_postgres::replication::connect_replication(
+            common::suite_tls(),
+            &common::replication_config(&base),
+        )
+        .await
+        .expect("replication connect failed");
+        let mut stream = replication
+            .start_logical_replication(StartReplicationOptions {
+                slot_name: &slot,
+                start_lsn: "0/0",
+                proto_version: 1,
+                publication_names: &[&publication],
+                ..Default::default()
+            })
+            .await
+            .expect("START_REPLICATION failed");
+        assert_eq!(
+            stream.last_received_lsn(),
+            0,
+            "the test must not acknowledge a frame it already read"
+        );
+
+        stream.advance_lsn(unreceived);
+        stream
+            .send_standby_status_update(true)
+            .await
+            .expect("send the bounded status update");
+        match stream
+            .next()
+            .await
+            .expect("read the requested server reply")
+        {
+            Some(ReplicationMessage::PrimaryKeepalive { .. }) => {}
+            other => panic!("expected the requested PrimaryKeepalive, got {other:?}"),
+        }
+
+        let confirmed_after: String = setup
+            .query_one_scalar(
+                "SELECT confirmed_flush_lsn::text
+                   FROM pg_replication_slots WHERE slot_name = $1",
+                &[&slot],
+            )
+            .await
+            .expect("read resulting confirmed_flush_lsn");
+
+        // Cleanup precedes the assertion so a failing run cannot consume
+        // one of the server's finite replication slots.
+        drop(stream);
+        common::drop_replication_slot(&setup, &slot)
+            .await
+            .unwrap_or_else(|error| eprintln!("could not drop slot {slot}: {error}"));
+        let _ = setup
+            .batch_execute(&format!("DROP PUBLICATION IF EXISTS {publication}"))
+            .await;
+
+        assert_eq!(
+            confirmed_after,
+            initial,
+            "the server accepted an LSN this stream never received: requested {}, \
+             confirmed_flush_lsn moved from {initial} to {confirmed_after}",
+            format_lsn(unreceived)
+        );
+    }))
+    .await
+    .expect("future-flush live test exceeded its watchdog");
+}
+
+/// The received and the processed LSN must not report each other.
+///
+/// Both are `u64` on the same struct and mean opposite things: `received`
+/// tracks what the WIRE delivered, `processed` what the CALLER confirmed. A
+/// getter wired to its neighbour is silent and, in one direction, destructive
+/// - `flush_lsn` is built from `processed`, so reporting `received` there
+/// tells the server it may recycle WAL this caller has not handled, and a
+/// restart resumes past data it never saw.
+///
+/// `an_unreceived_lsn_is_not_reported_as_flushed` cannot catch that: it
+/// observes them only while BOTH are zero, where a swap reads identically.
+/// The window below is the one that separates them - a keepalive has arrived,
+/// so `received` has moved, and nothing has been confirmed, so `processed`
+/// has not.
+#[compio::test]
+async fn the_received_and_processed_lsns_do_not_report_each_other() {
+    Box::pin(compio::time::timeout(Duration::from_secs(20), async {
+        let url = test_url();
+        let (setup, connection) = match compio_postgres::connect(&url, common::suite_tls()).await {
+            Ok(pair) => pair,
+            Err(error) => common::postgres_unreachable(&url, &error),
+        };
+        compio::runtime::spawn(async move {
+            if let Err(error) = connection.run().await {
+                eprintln!("connection error: {}", common::error_chain(&error));
+            }
+        })
+        .detach();
+
+        common::sweep_stale_test_objects(&setup).await;
+        let base = common::test_object_name("cpg replication lsn split");
+        let publication = format!("{base}_p");
+        let slot = format!("{base}_s");
+        setup
+            .batch_execute(&format!("CREATE PUBLICATION {publication}"))
+            .await
+            .expect("publication setup failed");
+        setup
+            .batch_execute(&format!(
+                "SELECT pg_create_logical_replication_slot('{slot}', 'pgoutput')"
+            ))
+            .await
+            .expect("slot setup failed");
+
+        let replication = compio_postgres::replication::connect_replication(
+            common::suite_tls(),
+            &common::replication_config(&base),
+        )
+        .await
+        .expect("replication connect failed");
+        let mut stream = replication
+            .start_logical_replication(StartReplicationOptions {
+                slot_name: &slot,
+                start_lsn: "0/0",
+                proto_version: 1,
+                publication_names: &[&publication],
+                ..Default::default()
+            })
+            .await
+            .expect("START_REPLICATION failed");
+
+        // Ask for a keepalive without confirming anything. That moves the
+        // received position and must leave the processed one alone.
+        stream
+            .send_standby_status_update(true)
+            .await
+            .expect("send the status update requesting a reply");
+        match stream
+            .next()
+            .await
+            .expect("read the requested server reply")
+        {
+            Some(ReplicationMessage::PrimaryKeepalive { .. }) => {}
+            other => panic!("expected the requested PrimaryKeepalive, got {other:?}"),
+        }
+
+        let received = stream.last_received_lsn();
+        let processed = stream.last_processed_lsn();
+
+        // Confirm the position that actually arrived, which is the only value
+        // `advance_lsn` accepts, then read both again.
+        stream.advance_lsn(received);
+        let processed_after = stream.last_processed_lsn();
+        let received_after = stream.last_received_lsn();
+
+        drop(stream);
+        common::drop_replication_slot(&setup, &slot)
+            .await
+            .unwrap_or_else(|error| eprintln!("could not drop slot {slot}: {error}"));
+        let _ = setup
+            .batch_execute(&format!("DROP PUBLICATION IF EXISTS {publication}"))
+            .await;
+
+        assert!(
+            received > 0,
+            "the keepalive did not advance the received LSN, so this test \
+             never reached the window where the two positions differ"
+        );
+        assert_eq!(
+            processed,
+            0,
+            "the processed LSN reported the received one: nothing had been \
+             confirmed, but it stood at {}",
+            format_lsn(processed)
+        );
+        assert_eq!(
+            processed_after, received,
+            "confirming the received position did not advance the processed one"
+        );
+        assert_eq!(
+            received_after, received,
+            "confirming a position moved the received LSN, which only the \
+             wire may advance"
+        );
+    }))
+    .await
+    .expect("the LSN split live test exceeded its watchdog");
+}
+
+/// `connect_replication`'s TLS refusal is keyed to the CONTRADICTION, not to
+/// the endpoint.
+///
+/// A matched pair built from ONE config, differing in exactly one call:
+/// `ssl_mode`. `sslrootcert=system` is a contradiction under `Prefer` and is
+/// fine under `VerifyFull`, so the same endpoint must be refused in the first
+/// case and dialled in the second. Both arms are constructed here rather than
+/// leaning on the unit test in `src/replication.rs`, which differs from this
+/// one in host form, listener, timeout and credentials -- pairing against it
+/// would have varied five things at once and proved nothing about which one
+/// mattered.
+#[compio::test]
+async fn replication_tls_refusal_is_keyed_to_the_contradiction_not_the_endpoint() {
+    // One dead port for both arms: the endpoint is held fixed by construction.
+    let port = closed_port().await;
+    let config_with = |mode| {
+        let mut config = credentials_only(&test_url());
+        config.host("127.0.0.1");
+        config.port(port);
+        config.ssl_mode(mode);
+        config.ssl_root_cert(compio_postgres::config::SslRootCert::System);
+        config
+    };
+
+    let refused = compio_postgres::replication::connect_replication(
+        common::suite_tls(),
+        &config_with(compio_postgres::config::SslMode::Prefer),
+    )
+    .await
+    .expect_err("a weak sslmode with sslrootcert=system is a contradiction");
+    let refused_chain = common::error_chain(&refused);
+    assert!(
+        refused_chain.contains("sslrootcert=system"),
+        "the contradiction must be named by the refusal, got: {refused_chain}"
+    );
+
+    let dialled = compio_postgres::replication::connect_replication(
+        common::suite_tls(),
+        &config_with(compio_postgres::config::SslMode::VerifyFull),
+    )
+    .await
+    .expect_err("nothing is listening on that port, so this cannot succeed");
+    let dialled_chain = common::error_chain(&dialled);
+    assert!(
+        !dialled_chain.contains("sslrootcert=system"),
+        "verify-full is not a contradiction, so validation must let it through: {dialled_chain}"
+    );
+    // Asserted POSITIVELY: without this, any unrelated early failure that
+    // merely lacks the literal would satisfy the check above.
+    assert!(
+        !common::server_answered(&dialled),
+        "the second arm must reach the socket and be refused there: {dialled_chain}"
+    );
+}
+
+/// Authentication is still governed by `connect_timeout`; `read_timeout`
+/// starts only on the post-startup `IDENTIFY_SYSTEM` exchange.
+///
+/// One peer holds startup longer than three read budgets, then starts but does
+/// not finish an IDENTIFY_SYSTEM frame. Pairing both phases on one socket makes
+/// it impossible for a disabled deadline to satisfy the startup assertion and
+/// masquerade as coverage of the command deadline.
+#[compio::test]
+async fn replication_read_timeout_starts_after_startup_and_poisons_identify_system() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server = ReplicationStub::spawn(|listener| {
+            let mut stream = accept_bounded(&listener);
+            complete_replication_startup(&mut stream, IDLE_EXPOSURE);
+            assert_eq!(expect_simple_query(&mut stream), b"IDENTIFY_SYSTEM\0");
+
+            // Valid RowDescription tag and declared length, but only one of
+            // the body bytes. The peer stays connected at an unknown frame
+            // boundary until the client retires it.
+            stream
+                .write_all(&[b'T', 0, 0, 0, 29, 0])
+                .expect("write partial IDENTIFY_SYSTEM response");
+            stream
+                .flush()
+                .expect("flush partial IDENTIFY_SYSTEM response");
+            expect_disconnect(&mut stream);
+        });
+
+        let startup_started = Instant::now();
+        let mut replication = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            compio_postgres::replication::connect_replication(
+                common::suite_tls(),
+                &stub_config(server.addr),
+            ),
+        )
+        .await
+        .expect("replication startup exceeded its outer watchdog")
+        .expect("read_timeout incorrectly covered replication startup");
+        assert!(
+            startup_started.elapsed() >= IDLE_EXPOSURE,
+            "scripted startup did not expose three read budgets"
+        );
+
+        let first = compio::time::timeout(OPERATION_WATCHDOG, replication.identify_system())
+            .await
+            .expect("IDENTIFY_SYSTEM exceeded its outer watchdog")
+            .expect_err("partial IDENTIFY_SYSTEM response completed");
+        assert!(
+            first.is_read_timeout(),
+            "IDENTIFY_SYSTEM lost its socket-read timeout: {first}"
+        );
+
+        let second = compio::time::timeout(OPERATION_WATCHDOG, replication.identify_system())
+            .await
+            .expect("poisoned IDENTIFY_SYSTEM retry exceeded its watchdog")
+            .expect_err("timed-out replication connection was reused");
+        assert!(
+            second.is_cancelled(),
+            "IDENTIFY_SYSTEM timeout did not poison the session: {second}"
+        );
+        server.finish();
+    })
+    .await
+    .expect("replication startup/IDENTIFY timeout test exceeded its outer watchdog");
+}
+
+/// `START_REPLICATION` has its own response obligation before CopyBoth mode.
+/// The call consumes the connection, so physical disconnect is the observable
+/// retirement proof; there is deliberately no same-object retry API.
+#[compio::test]
+async fn a_stalled_start_replication_exchange_times_out_and_retires_its_session() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server = ReplicationStub::spawn(|listener| {
+            let mut stream = accept_bounded(&listener);
+            complete_replication_startup(&mut stream, Duration::ZERO);
+            assert_eq!(
+                expect_simple_query(&mut stream),
+                b"START_REPLICATION SLOT \"deadline_slot\" LOGICAL 0/0 (\"proto_version\" '1', \"publication_names\" '\"deadline_publication\"')\0"
+            );
+
+            // CopyBothResponse declares its three-byte body, but only its
+            // format byte arrives. This cannot be reproduced with PostgreSQL.
+            stream
+                .write_all(&[b'W', 0, 0, 0, 7, 0])
+                .expect("write partial CopyBothResponse");
+            stream.flush().expect("flush partial CopyBothResponse");
+            expect_disconnect(&mut stream);
+        });
+
+        let replication = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            compio_postgres::replication::connect_replication(
+                common::suite_tls(),
+                &stub_config(server.addr),
+            ),
+        )
+        .await
+        .expect("scripted replication startup exceeded its watchdog")
+        .expect("connect to scripted replication peer");
+        let start_result = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            replication.start_logical_replication(start_options()),
+        )
+        .await
+        .expect("START_REPLICATION exceeded its outer watchdog");
+        let error = match start_result {
+            Ok(_) => panic!("partial CopyBothResponse started a stream"),
+            Err(error) => error,
+        };
+        assert!(
+            error.is_read_timeout(),
+            "START_REPLICATION lost its socket-read timeout: {error}"
+        );
+        server.finish();
+    })
+    .await
+    .expect("START_REPLICATION timeout test exceeded its outer watchdog");
+}
+
+/// Asynchronous messages do not answer `START_REPLICATION` and cannot replace
+/// the `ErrorResponse` which eventually does.
+///
+/// The pre-CopyBoth loop must skip ALL asynchronous messages — notices,
+/// `ParameterStatus` and `NotificationResponse` alike. Treating any of them
+/// as a local protocol failure lets a local unexpected-tag error win over
+/// PostgreSQL's actual refusal when the two arrive in the same read,
+/// discarding its SQLSTATE.
+#[compio::test]
+async fn start_replication_preserves_an_error_behind_asynchronous_messages() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server = ReplicationStub::spawn(move |listener| {
+            let mut stream = accept_bounded(&listener);
+            complete_replication_startup(&mut stream, Duration::ZERO);
+            assert_eq!(
+                expect_simple_query(&mut stream),
+                b"START_REPLICATION SLOT \"deadline_slot\" LOGICAL 0/0 (\"proto_version\" '1', \"publication_names\" '\"deadline_publication\"')\0"
+            );
+
+            let mut notification = 17i32.to_be_bytes().to_vec();
+            notification.extend_from_slice(b"scripted_channel\0scripted payload\0");
+            let mut response = backend_frame(b'S', b"TimeZone\0UTC\0");
+            response.extend_from_slice(&backend_frame(b'N', b"Mscripted notice\0\0"));
+            response.extend_from_slice(&backend_frame(b'A', &notification));
+            response.extend_from_slice(&backend_frame(
+                b'E',
+                b"SERROR\0C55000\0Mscripted START_REPLICATION refusal\0\0",
+            ));
+            response.extend_from_slice(&backend_frame(b'Z', b"I"));
+            stream
+                .write_all(&response)
+                .expect("write asynchronous START_REPLICATION refusal");
+            stream
+                .flush()
+                .expect("flush asynchronous START_REPLICATION refusal");
+            expect_disconnect(&mut stream);
+        });
+
+        let replication = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            compio_postgres::replication::connect_replication(
+                common::suite_tls(),
+                &stub_config(server.addr),
+            ),
+        )
+        .await
+        .expect("scripted replication startup exceeded its watchdog")
+        .expect("connect to scripted replication peer");
+
+        let outcome = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            replication.start_logical_replication(start_options()),
+        )
+        .await
+        .expect("START_REPLICATION exceeded its watchdog");
+        let error = match outcome {
+            Ok(_) => panic!("the scripted peer refused START_REPLICATION"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.code().map(|code| code.code()),
+            Some("55000"),
+            "START_REPLICATION discarded SQLSTATE 55000 behind an asynchronous message: {}",
+            common::error_chain(&error)
+        );
+
+        server.finish();
+    })
+    .await
+    .expect("asynchronous START_REPLICATION error test exceeded its outer watchdog");
+}
+
+/// Waiting for the first byte of a CopyBoth frame is legitimate idle time.
+/// Keep one `next()` future alive across three read budgets, then require the
+/// exact later keepalive. A second interval follows a skipped NoticeResponse,
+/// proving every complete frame disarms the clock before the next idle wait.
+#[compio::test]
+async fn an_awaited_idle_replication_stream_survives_repeated_read_budgets() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let (begin_idle_tx, begin_idle_rx) = std::sync::mpsc::channel();
+        let server = ReplicationStub::spawn(move |listener| {
+            let mut stream = accept_bounded(&listener);
+            complete_replication_startup(&mut stream, Duration::ZERO);
+            assert_eq!(expect_simple_query(&mut stream), b"IDENTIFY_SYSTEM\0");
+            send_identify_system(&mut stream);
+            assert_eq!(
+                expect_simple_query(&mut stream),
+                b"START_REPLICATION SLOT \"deadline_slot\" LOGICAL 0/0 (\"proto_version\" '1', \"publication_names\" '\"deadline_publication\"')\0"
+            );
+            send_copy_both(&mut stream);
+
+            begin_idle_rx
+                .recv_timeout(SOCKET_WATCHDOG)
+                .expect("client never began the first idle read");
+            thread::sleep(IDLE_EXPOSURE);
+            send_keepalive(&mut stream, 0x100);
+
+            begin_idle_rx
+                .recv_timeout(SOCKET_WATCHDOG)
+                .expect("client never began the post-notice idle read");
+            send_notice(&mut stream);
+            thread::sleep(IDLE_EXPOSURE);
+            send_keepalive(&mut stream, 0x200);
+            expect_disconnect(&mut stream);
+        });
+
+        let mut replication = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            compio_postgres::replication::connect_replication(
+                common::suite_tls(),
+                &stub_config(server.addr),
+            ),
+        )
+        .await
+        .expect("scripted replication startup exceeded its watchdog")
+        .expect("connect to scripted replication peer");
+        let identity = compio::time::timeout(OPERATION_WATCHDOG, replication.identify_system())
+            .await
+            .expect("IDENTIFY_SYSTEM exceeded its watchdog")
+            .expect("scripted IDENTIFY_SYSTEM failed");
+        assert_eq!(identity.systemid, "scripted-system");
+        assert_eq!(identity.timeline, 1);
+        assert_eq!(identity.xlogpos, "0/10");
+        assert_eq!(identity.dbname.as_deref(), Some("scripted-db"));
+        let mut stream = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            replication.start_logical_replication(start_options()),
+        )
+        .await
+        .expect("START_REPLICATION exceeded its watchdog")
+        .expect("scripted peer refused CopyBoth mode");
+
+        for (iteration, expected_wal_end) in [("first", 0x100), ("post-notice", 0x200)] {
+            let started = Instant::now();
+            let message = {
+                let mut next = std::pin::pin!(stream.next());
+                assert!(
+                    futures_util::poll!(next.as_mut()).is_pending(),
+                    "{iteration} idle read completed before the peer was released"
+                );
+                begin_idle_tx
+                    .send(())
+                    .expect("scripted peer dropped its idle trigger");
+                compio::time::timeout(OPERATION_WATCHDOG, next.as_mut())
+                    .await
+                    .unwrap_or_else(|_| panic!("{iteration} idle read exceeded its watchdog"))
+                    .unwrap_or_else(|error| {
+                        panic!("{iteration} idle read spent the read budget: {error}")
+                    })
+                    .unwrap_or_else(|| panic!("{iteration} idle stream ended without a frame"))
+            };
+            assert!(
+                started.elapsed() >= IDLE_EXPOSURE,
+                "{iteration} idle interval did not expose three read budgets"
+            );
+            match message {
+                ReplicationMessage::PrimaryKeepalive { wal_end, .. } => {
+                    assert_eq!(wal_end, expected_wal_end);
+                }
+                other => panic!("{iteration} idle read returned {other:?}"),
+            }
+        }
+
+        drop(stream);
+        server.finish();
+    })
+    .await
+    .expect("idle replication deadline test exceeded its outer watchdog");
+}
+
+/// Once any frame byte arrives, a quiet peer is no longer merely idle: the
+/// driver has lost a frame boundary if that read is cancelled. The timeout is
+/// therefore terminal, observable both as logical poison and physical EOF.
+#[compio::test]
+async fn a_mid_frame_replication_stall_times_out_and_poisons_the_stream() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let (send_prefix_tx, send_prefix_rx) = std::sync::mpsc::channel();
+        let server = ReplicationStub::spawn(move |listener| {
+            let mut stream = accept_bounded(&listener);
+            complete_replication_startup(&mut stream, Duration::ZERO);
+            assert_eq!(
+                expect_simple_query(&mut stream),
+                b"START_REPLICATION SLOT \"deadline_slot\" LOGICAL 0/0 (\"proto_version\" '1', \"publication_names\" '\"deadline_publication\"')\0"
+            );
+            send_copy_both(&mut stream);
+            send_prefix_rx
+                .recv_timeout(SOCKET_WATCHDOG)
+                .expect("client never started the bounded frame read");
+
+            // CopyData length 22 declares an 18-byte PrimaryKeepalive body.
+            // The sub-tag and four WAL bytes prove the frame began, but its
+            // remaining fields never arrive.
+            stream
+                .write_all(&[b'd', 0, 0, 0, 22, b'k', 0, 0, 0, 1])
+                .expect("write partial PrimaryKeepalive");
+            stream
+                .flush()
+                .expect("flush partial PrimaryKeepalive");
+            expect_disconnect(&mut stream);
+        });
+
+        let replication = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            compio_postgres::replication::connect_replication(
+                common::suite_tls(),
+                &stub_config(server.addr),
+            ),
+        )
+        .await
+        .expect("scripted replication startup exceeded its watchdog")
+        .expect("connect to scripted replication peer");
+        let mut stream = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            replication.start_logical_replication(start_options()),
+        )
+        .await
+        .expect("START_REPLICATION exceeded its watchdog")
+        .expect("scripted peer refused CopyBoth mode");
+
+        let first = {
+            let mut next = std::pin::pin!(stream.next());
+            assert!(
+                futures_util::poll!(next.as_mut()).is_pending(),
+                "stream produced a frame before the peer sent its prefix"
+            );
+            send_prefix_tx
+                .send(())
+                .expect("scripted peer dropped its frame-prefix trigger");
+            compio::time::timeout(OPERATION_WATCHDOG, next.as_mut())
+                .await
+                .expect("partial replication frame exceeded its outer watchdog")
+                .expect_err("partial PrimaryKeepalive completed")
+        };
+        assert!(
+            first.is_read_timeout(),
+            "mid-frame stall lost its socket-read timeout: {first}"
+        );
+
+        let second = compio::time::timeout(OPERATION_WATCHDOG, stream.next())
+            .await
+            .expect("poisoned stream retry exceeded its watchdog")
+            .expect_err("timed-out replication framing was reused");
+        assert!(
+            second.is_cancelled(),
+            "mid-frame timeout did not poison the stream: {second}"
+        );
+        server.finish();
+    })
+    .await
+    .expect("mid-frame replication timeout test exceeded its outer watchdog");
+}
+
+/// A CopyBoth `ErrorResponse` is frame-aligned but not protocol-state aligned.
+/// PostgreSQL has ended replication and follows an ordinary ERROR with
+/// `ReadyForQuery`; this stream cannot send a recovery `Sync` or turn back into
+/// a `ReplicationConnection`. Preserve 57014 for the first call, then retire
+/// the stream and socket instead of treating `ReadyForQuery` as replication.
+#[compio::test]
+async fn a_replication_error_response_retires_copy_both_after_preserving_57014() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server = ReplicationStub::spawn(move |listener| {
+            let mut stream = accept_bounded(&listener);
+            complete_replication_startup(&mut stream, Duration::ZERO);
+            assert_eq!(
+                expect_simple_query(&mut stream),
+                b"START_REPLICATION SLOT \"deadline_slot\" LOGICAL 0/0 (\"proto_version\" '1', \"publication_names\" '\"deadline_publication\"')\0"
+            );
+            send_copy_both(&mut stream);
+
+            let mut cancelled =
+                backend_frame(b'E', b"SERROR\0C57014\0Mcanceling statement due to user request\0\0");
+            cancelled.extend_from_slice(&backend_frame(b'Z', b"I"));
+            stream
+                .write_all(&cancelled)
+                .expect("write replication cancellation response");
+            stream
+                .flush()
+                .expect("flush replication cancellation response");
+            expect_disconnect(&mut stream);
+        });
+
+        let replication = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            compio_postgres::replication::connect_replication(
+                common::suite_tls(),
+                &stub_config(server.addr),
+            ),
+        )
+        .await
+        .expect("scripted replication startup exceeded its watchdog")
+        .expect("connect to scripted replication peer");
+        let mut stream = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            replication.start_logical_replication(start_options()),
+        )
+        .await
+        .expect("START_REPLICATION exceeded its watchdog")
+        .expect("scripted peer refused CopyBoth mode");
+
+        let first = compio::time::timeout(OPERATION_WATCHDOG, stream.next())
+            .await
+            .expect("replication cancellation exceeded its watchdog")
+            .expect_err("57014 ended CopyBoth and cannot be a stream item");
+        assert_eq!(
+            first.code().map(|code| code.code()),
+            Some("57014"),
+            "the replication stream lost the server's cancellation SQLSTATE: {}",
+            common::error_chain(&first)
+        );
+
+        // Finish before retrying: logical poison alone is insufficient because
+        // a CopyBoth session left open can still retain WAL and accept feedback.
+        server.finish();
+
+        let second = compio::time::timeout(OPERATION_WATCHDOG, stream.next())
+            .await
+            .expect("retired replication retry exceeded its watchdog")
+            .expect_err("a stream whose CopyBoth exchange ended was reused");
+        assert!(
+            second.is_cancelled(),
+            "the ended CopyBoth exchange was not retired: {}",
+            common::error_chain(&second)
+        );
+    })
+    .await
+    .expect("replication ErrorResponse retirement test exceeded its outer watchdog");
+}
+
+/// Backend `CopyDone` closes only PostgreSQL's sending direction. The client
+/// must acknowledge it with frontend `CopyDone`, then consume the ordinary
+/// command completion through `ReadyForQuery` before reporting success.
+///
+/// A FATAL can arrive after a `CommandComplete` and before `ReadyForQuery`.
+/// PostgreSQL closes the socket behind a FATAL, so the failed read which ends
+/// that response must not replace the SQLSTATE already on the wire.
+#[compio::test]
+async fn copy_done_half_close_preserves_a_fatal_terminal_error() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server = ReplicationStub::spawn(move |listener| {
+            let mut stream = accept_bounded(&listener);
+            complete_replication_startup(&mut stream, Duration::ZERO);
+            assert_eq!(
+                expect_simple_query(&mut stream),
+                b"START_REPLICATION SLOT \"deadline_slot\" LOGICAL 0/0 (\"proto_version\" '1', \"publication_names\" '\"deadline_publication\"')\0"
+            );
+            send_copy_both(&mut stream);
+            stream
+                .write_all(&backend_frame(b'c', b""))
+                .expect("write backend CopyDone");
+            stream.flush().expect("flush backend CopyDone");
+
+            // If the client ends the stream here, its owner drops the socket
+            // below. Let that EOF end the scripted peer cleanly so the
+            // caller's diagnostic assertion, rather than a harness panic, is
+            // what reports the failure.
+            let mut frontend_copy_done = [0u8; 5];
+            if stream.read_exact(&mut frontend_copy_done).is_err() {
+                return;
+            }
+            assert_eq!(
+                frontend_copy_done,
+                [b'c', 0, 0, 0, 4],
+                "the frontend did not acknowledge backend CopyDone"
+            );
+
+            let mut terminal = backend_frame(b'C', b"COPY 0\0");
+            terminal.extend_from_slice(&backend_frame(b'C', b"START_REPLICATION\0"));
+            terminal.extend_from_slice(&backend_frame(
+                b'E',
+                b"SFATAL\0C57P01\0Mterminating connection due to administrator command\0\0",
+            ));
+            stream
+                .write_all(&terminal)
+                .expect("write fatal replication completion");
+            stream
+                .flush()
+                .expect("flush fatal replication completion");
+            stream
+                .shutdown(std::net::Shutdown::Both)
+                .expect("close scripted connection behind FATAL");
+        });
+
+        let replication = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            compio_postgres::replication::connect_replication(
+                common::suite_tls(),
+                &stub_config(server.addr),
+            ),
+        )
+        .await
+        .expect("scripted replication startup exceeded its watchdog")
+        .expect("connect to scripted replication peer");
+        let mut stream = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            replication.start_logical_replication(start_options()),
+        )
+        .await
+        .expect("START_REPLICATION exceeded its watchdog")
+        .expect("scripted peer refused CopyBoth mode");
+
+        let outcome = compio::time::timeout(OPERATION_WATCHDOG, stream.next())
+            .await
+            .expect("backend CopyDone completion exceeded its watchdog");
+        drop(stream);
+        server.finish();
+
+        let error = outcome.expect_err("backend CopyDone discarded SQLSTATE 57P01");
+        assert_eq!(
+            error.code().map(|code| code.code()),
+            Some("57P01"),
+            "backend CopyDone replaced SQLSTATE 57P01: {}",
+            common::error_chain(&error)
+        );
+        assert!(
+            common::error_chain(&error)
+                .contains("terminating connection due to administrator command"),
+            "backend CopyDone replaced the server's FATAL message: {}",
+            common::error_chain(&error)
+        );
+    })
+    .await
+    .expect("CopyDone half-close diagnostic test exceeded its outer watchdog");
+}
+
+/// Replication startup receives the same BackendKeyData capability as an
+/// ordinary session. Keep its complete protocol-3.2 key and use a dedicated
+/// second connection; silently discarding it leaves a live CopyBoth operation
+/// with no cancellation path even though PostgreSQL advertised one.
+#[compio::test]
+async fn a_replication_cancel_token_sends_the_full_key_and_surfaces_57014() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        const PROCESS_ID: i32 = 0x1020_3040;
+        const CANCEL_KEY: [u8; 32] = [0x5a; 32];
+
+        let server = ReplicationStub::spawn(move |listener| {
+            let mut replication = accept_bounded(&listener);
+            complete_replication_startup_with_key(
+                &mut replication,
+                Duration::ZERO,
+                PROCESS_ID,
+                &CANCEL_KEY,
+            );
+            assert_eq!(
+                expect_simple_query(&mut replication),
+                b"START_REPLICATION SLOT \"deadline_slot\" LOGICAL 0/0 (\"proto_version\" '1', \"publication_names\" '\"deadline_publication\"')\0"
+            );
+            send_copy_both(&mut replication);
+
+            let mut cancel = accept_bounded(&listener);
+            let mut packet = [0u8; 44];
+            cancel
+                .read_exact(&mut packet)
+                .expect("read replication CancelRequest");
+            assert_eq!(u32::from_be_bytes(packet[..4].try_into().unwrap()), 44);
+            assert_eq!(
+                u32::from_be_bytes(packet[4..8].try_into().unwrap()),
+                80_877_102
+            );
+            assert_eq!(
+                i32::from_be_bytes(packet[8..12].try_into().unwrap()),
+                PROCESS_ID
+            );
+            assert_eq!(&packet[12..], &CANCEL_KEY);
+            drop(cancel);
+
+            let mut cancelled =
+                backend_frame(b'E', b"SERROR\0C57014\0Mcanceling statement due to user request\0\0");
+            cancelled.extend_from_slice(&backend_frame(b'Z', b"I"));
+            replication
+                .write_all(&cancelled)
+                .expect("write cancelled CopyBoth response");
+            replication
+                .flush()
+                .expect("flush cancelled CopyBoth response");
+            expect_disconnect(&mut replication);
+        });
+
+        let replication = compio_postgres::replication::connect_replication(
+            common::suite_tls(),
+            &stub_config(server.addr),
+        )
+        .await
+        .expect("connect to scripted replication peer");
+        let mut stream = replication
+            .start_logical_replication(start_options())
+            .await
+            .expect("scripted peer refused CopyBoth mode");
+        let token = stream.cancel_token();
+
+        let (stream_result, cancel_result) = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            futures_util::future::join(
+                stream.next(),
+                token.cancel_query(common::suite_tls()),
+            ),
+        )
+        .await
+        .expect("replication cancellation exceeded its watchdog");
+        cancel_result.expect("replication CancelRequest was not consumed");
+        let error = stream_result.expect_err("cancelled CopyBoth returned a stream item");
+        assert_eq!(
+            error.code().map(|code| code.code()),
+            Some("57014"),
+            "the original replication connection lost 57014: {}",
+            common::error_chain(&error)
+        );
+
+        let retired = stream
+            .next()
+            .await
+            .expect_err("a cancelled CopyBoth stream was reused");
+        assert!(retired.is_cancelled());
+        server.finish();
+    })
+    .await
+    .expect("replication cancellation test exceeded its outer watchdog");
+}
+
+/// An out-of-range `start_lsn` must be REFUSED, not silently replaced by 0.
+///
+/// The two parsers involved disagree and neither is obvious (verified against
+/// a live server). `START_REPLICATION ... LOGICAL
+/// 0/100000000` -- nine hex digits in the low half -- is ACCEPTED by the
+/// replication grammar: the command reaches the slot lookup and fails with
+/// `replication slot "..." does not exist`, i.e. never on the LSN. But
+/// `SELECT '0/100000000'::pg_lsn` is REFUSED with `invalid input syntax for
+/// type pg_lsn`. So a server accepts a value that does not fit this driver's
+/// u32-per-half representation.
+///
+/// `parse_lsn` returns `None` there. Zero is not a neutral default for an
+/// LSN -- it is the start of WAL: the server would begin streaming from
+/// wherever it read the oversized value while `LsnTracker` reported
+/// position 0, so every standby status update afterwards would acknowledge a
+/// position the stream had never been at, and nothing anywhere would report
+/// a problem.
+///
+/// The refusal happens BEFORE the command is sent, so a start position this
+/// driver cannot track never starts a replication stream on the server.
+#[compio::test]
+async fn an_unrepresentable_start_lsn_is_refused_before_replication_starts() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server = ReplicationStub::spawn(move |listener| {
+            let mut stream = accept_bounded(&listener);
+            complete_replication_startup(&mut stream, Duration::ZERO);
+            // No START_REPLICATION is expected: the driver must refuse the LSN
+            // without issuing a command. If it issues one anyway, this peer
+            // never answers and the watchdog fires -- a distinguishable
+            // failure from the assertion below.
+            expect_disconnect(&mut stream);
+        });
+
+        let replication = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            compio_postgres::replication::connect_replication(
+                common::suite_tls(),
+                &stub_config(server.addr),
+            ),
+        )
+        .await
+        .expect("scripted replication startup exceeded its watchdog")
+        .expect("connect to scripted replication peer");
+
+        let error = replication
+            .start_logical_replication(StartReplicationOptions {
+                slot_name: "deadline_slot",
+                start_lsn: "0/100000000",
+                proto_version: 1,
+                publication_names: &["deadline_publication"],
+                ..Default::default()
+            })
+            .await
+            .expect_err("an LSN this driver cannot represent must not start a stream");
+
+        let rendered = format!("{error}");
+        let chain = std::iter::successors(std::error::Error::source(&error), |error| {
+            std::error::Error::source(*error)
+        })
+        .map(|cause| cause.to_string())
+        .collect::<Vec<_>>()
+        .join("; ");
+        assert!(
+            rendered.contains("start_lsn") || chain.contains("start_lsn"),
+            "the refusal must name start_lsn so the caller knows which value is \
+             wrong: {rendered} / {chain}"
+        );
+
+        server.finish();
+    })
+    .await
+    .expect("unrepresentable start_lsn test exceeded its outer watchdog");
+}
+
+/// One variable away: a well-formed LSN must still start a stream, or the
+/// refusal above could be satisfied by refusing every start_lsn.
+#[compio::test]
+async fn a_representable_start_lsn_still_starts_replication() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server = ReplicationStub::spawn(move |listener| {
+            let mut stream = accept_bounded(&listener);
+            complete_replication_startup(&mut stream, Duration::ZERO);
+            assert_eq!(
+                expect_simple_query(&mut stream),
+                b"START_REPLICATION SLOT \"deadline_slot\" LOGICAL 0/16B3750 (\"proto_version\" '1', \"publication_names\" '\"deadline_publication\"')\0"
+            );
+            send_copy_both(&mut stream);
+            expect_disconnect(&mut stream);
+        });
+
+        let replication = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            compio_postgres::replication::connect_replication(common::suite_tls(), &stub_config(server.addr)),
+        )
+        .await
+        .expect("scripted replication startup exceeded its watchdog")
+        .expect("connect to scripted replication peer");
+
+        let stream = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            replication.start_logical_replication(StartReplicationOptions {
+                slot_name: "deadline_slot",
+                start_lsn: "0/16B3750",
+                proto_version: 1,
+                publication_names: &["deadline_publication"],
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect("START_REPLICATION exceeded its watchdog")
+        .expect("a representable start_lsn must start a stream");
+
+        drop(stream);
+        server.finish();
+    })
+    .await
+    .expect("representable start_lsn test exceeded its outer watchdog");
+}
+
+/// A malformed `IDENTIFY_SYSTEM` row must be refused, not filled in with
+/// plausible-looking defaults.
+///
+/// No field may be defaulted: a missing or NULL `systemid` must not become
+/// `""`, a missing, NULL or unparseable `timeline` must not become `0`, and
+/// `xlogpos` must not become `""`. Those are not neutral values. `systemid`
+/// is the CLUSTER identity, and callers compare it to notice they have been
+/// failed over onto a different cluster -- two empty strings compare equal,
+/// so the check silently passes exactly when it should fire. `0` is not a
+/// valid timeline either; PostgreSQL numbers them from 1.
+///
+/// A conforming server always sends all three as non-NULL, so reaching this
+/// needs a hostile or broken peer -- the threat model `libs/compio-postgres/tests/integration/hostile_peer.rs`
+/// and the stubs in this file already work in. `dbname` is deliberately NOT in
+/// this test: it is genuinely NULL on a non-database-specific replication
+/// connection, which is why it alone is modelled as an `Option`.
+#[compio::test]
+async fn a_null_field_in_identify_system_is_refused_rather_than_defaulted() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server = ReplicationStub::spawn(move |listener| {
+            let mut stream = accept_bounded(&listener);
+            complete_replication_startup(&mut stream, Duration::ZERO);
+            assert_eq!(expect_simple_query(&mut stream), b"IDENTIFY_SYSTEM\0");
+
+            // Four fields, but systemid and timeline are NULL (length -1).
+            let mut row = Vec::new();
+            row.extend_from_slice(&4u16.to_be_bytes());
+            row.extend_from_slice(&(-1i32).to_be_bytes()); // systemid NULL
+            row.extend_from_slice(&(-1i32).to_be_bytes()); // timeline NULL
+            for field in [b"0/10".as_slice(), b"scripted-db".as_slice()] {
+                row.extend_from_slice(&i32::try_from(field.len()).unwrap().to_be_bytes());
+                row.extend_from_slice(field);
+            }
+
+            let mut response = backend_frame(b'D', &row);
+            response.extend_from_slice(&backend_frame(b'C', b"IDENTIFY_SYSTEM\0"));
+            response.extend_from_slice(&backend_frame(b'Z', b"I"));
+            let _ = stream.write_all(&response);
+            let _ = stream.flush();
+            expect_disconnect(&mut stream);
+        });
+
+        let mut replication = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            compio_postgres::replication::connect_replication(
+                common::suite_tls(),
+                &stub_config(server.addr),
+            ),
+        )
+        .await
+        .expect("scripted replication startup exceeded its watchdog")
+        .expect("connect to scripted replication peer");
+
+        let outcome =
+            compio::time::timeout(OPERATION_WATCHDOG, replication.identify_system()).await;
+        let error = match outcome {
+            Err(_) => panic!("identify_system hung on a malformed row"),
+            Ok(Ok(identity)) => panic!(
+                "a NULL systemid and timeline were accepted as {:?} / {}",
+                identity.systemid, identity.timeline
+            ),
+            Ok(Err(error)) => error,
+        };
+
+        let rendered = format!("{error}");
+        let chain = std::iter::successors(std::error::Error::source(&error), |error| {
+            std::error::Error::source(*error)
+        })
+        .map(|cause| cause.to_string())
+        .collect::<Vec<_>>()
+        .join("; ");
+        assert!(
+            rendered.to_lowercase().contains("identify_system")
+                || chain.to_lowercase().contains("identify_system"),
+            "the refusal should name IDENTIFY_SYSTEM: {rendered} / {chain}"
+        );
+
+        // The peer waits for a close; the refusal leaves the connection in the
+        // caller's hands, so this test has to end the session itself.
+        drop(replication);
+
+        server.finish();
+    })
+    .await
+    .expect("malformed IDENTIFY_SYSTEM test exceeded its outer watchdog");
+}
+
+/// The reply a walsender sends when `IDENTIFY_SYSTEM` produced no row at all:
+/// a completion and a `ReadyForQuery`, and nothing in between.
+fn send_identify_system_without_a_row(stream: &mut TcpStream) {
+    let mut response = backend_frame(b'C', b"IDENTIFY_SYSTEM\0");
+    response.extend_from_slice(&backend_frame(b'Z', b"I"));
+    stream
+        .write_all(&response)
+        .expect("write rowless IDENTIFY_SYSTEM response");
+    stream
+        .flush()
+        .expect("flush rowless IDENTIFY_SYSTEM response");
+}
+
+/// An `IDENTIFY_SYSTEM` response that carried NO `DataRow` must be refused.
+///
+/// The "refused rather than defaulted" rule lives in
+/// `parse_identify_system_row`, which only runs when a row arrives — so the
+/// response loop above it must not seed `systemid = String::new()`,
+/// `timeline = 0` and `xlogpos = String::new()` and return them at
+/// `ReadyForQuery`: a response with no row would return `Ok` carrying exactly
+/// the three sentinels the row parser exists to reject. `systemid` is the
+/// CLUSTER identity a caller compares to notice a failover, and two empty
+/// strings compare EQUAL: the check passes silently in precisely the case it
+/// exists to catch.
+#[compio::test]
+async fn identify_system_refuses_a_response_that_carried_no_row() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server = ReplicationStub::spawn(move |listener| {
+            let mut stream = accept_bounded(&listener);
+            complete_replication_startup(&mut stream, Duration::ZERO);
+            assert_eq!(expect_simple_query(&mut stream), b"IDENTIFY_SYSTEM\0");
+            send_identify_system_without_a_row(&mut stream);
+            expect_disconnect(&mut stream);
+        });
+
+        let mut replication = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            compio_postgres::replication::connect_replication(
+                common::suite_tls(),
+                &stub_config(server.addr),
+            ),
+        )
+        .await
+        .expect("scripted replication startup exceeded its watchdog")
+        .expect("connect to scripted replication peer");
+
+        let outcome =
+            compio::time::timeout(OPERATION_WATCHDOG, replication.identify_system()).await;
+        let error = match outcome {
+            Err(_) => panic!("identify_system hung on a rowless response"),
+            Ok(Ok(identity)) => panic!(
+                "a response carrying no row was accepted as systemid {:?}, timeline {}, \
+                 xlogpos {:?}",
+                identity.systemid, identity.timeline, identity.xlogpos
+            ),
+            Ok(Err(error)) => error,
+        };
+
+        let rendered = common::error_chain(&error).to_lowercase();
+        assert!(
+            rendered.contains("identify_system"),
+            "the refusal should name IDENTIFY_SYSTEM: {rendered}"
+        );
+
+        drop(replication);
+        server.finish();
+    })
+    .await
+    .expect("rowless IDENTIFY_SYSTEM test exceeded its outer watchdog");
+}
+
+/// One variable away from the test above: the SAME script with a row in it must
+/// still return the identity. A refusal that fired on every response would
+/// satisfy the assertion above, and this control is what catches that.
+#[compio::test]
+async fn identify_system_accepts_a_response_that_carried_a_row() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server = ReplicationStub::spawn(move |listener| {
+            let mut stream = accept_bounded(&listener);
+            complete_replication_startup(&mut stream, Duration::ZERO);
+            assert_eq!(expect_simple_query(&mut stream), b"IDENTIFY_SYSTEM\0");
+            send_identify_system(&mut stream);
+            expect_disconnect(&mut stream);
+        });
+
+        let mut replication = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            compio_postgres::replication::connect_replication(
+                common::suite_tls(),
+                &stub_config(server.addr),
+            ),
+        )
+        .await
+        .expect("scripted replication startup exceeded its watchdog")
+        .expect("connect to scripted replication peer");
+
+        let identity = compio::time::timeout(OPERATION_WATCHDOG, replication.identify_system())
+            .await
+            .expect("identify_system exceeded its watchdog")
+            .expect("a well-formed IDENTIFY_SYSTEM row must be accepted");
+
+        assert_eq!(identity.systemid, "scripted-system");
+        assert_eq!(identity.timeline, 1);
+        assert_eq!(identity.xlogpos, "0/10");
+        assert_eq!(identity.dbname.as_deref(), Some("scripted-db"));
+
+        drop(replication);
+        server.finish();
+    })
+    .await
+    .expect("well-formed IDENTIFY_SYSTEM test exceeded its outer watchdog");
+}
+
+/// A `ParameterStatus` inside the response must not fail the command.
+///
+/// `ParameterStatus`, `NoticeResponse` and `NotificationResponse` are
+/// asynchronous: the protocol lets the backend interleave them into any
+/// response, and `connect_raw.rs` / `connection.rs` both fold them out of the
+/// query path for exactly that reason. This loop must fold out all three, not
+/// just `NoticeResponse`: a walsender that reports a changed GUC
+/// mid-`IDENTIFY_SYSTEM` -- a conforming server doing a conforming thing --
+/// must not fall into the unexpected-message arm and fail the command.
+#[compio::test]
+async fn identify_system_tolerates_an_asynchronous_parameter_status() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server = ReplicationStub::spawn(move |listener| {
+            let mut stream = accept_bounded(&listener);
+            complete_replication_startup(&mut stream, Duration::ZERO);
+            assert_eq!(expect_simple_query(&mut stream), b"IDENTIFY_SYSTEM\0");
+            stream
+                .write_all(&backend_frame(b'S', b"TimeZone\0UTC\0"))
+                .expect("write asynchronous ParameterStatus");
+            stream.flush().expect("flush asynchronous ParameterStatus");
+            send_identify_system(&mut stream);
+            expect_disconnect(&mut stream);
+        });
+
+        let mut replication = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            compio_postgres::replication::connect_replication(
+                common::suite_tls(),
+                &stub_config(server.addr),
+            ),
+        )
+        .await
+        .expect("scripted replication startup exceeded its watchdog")
+        .expect("connect to scripted replication peer");
+
+        let identity = compio::time::timeout(OPERATION_WATCHDOG, replication.identify_system())
+            .await
+            .expect("identify_system exceeded its watchdog")
+            .expect("an asynchronous ParameterStatus must not fail IDENTIFY_SYSTEM");
+        assert_eq!(identity.systemid, "scripted-system");
+
+        drop(replication);
+        server.finish();
+    })
+    .await
+    .expect("asynchronous ParameterStatus test exceeded its outer watchdog");
+}
+
+/// A message this phase cannot account for retires the session.
+///
+/// An `ErrorResponse` and a rejected row both carry their reason to
+/// `ReadyForQuery`, because PostgreSQL guarantees one arrives. A message the
+/// phase cannot account for carries no such guarantee, so the driver gives up
+/// where it stands and the response is left undrained -- precisely the state
+/// the `ErrorResponse` test below proves is dangerous. The connection therefore
+/// has to refuse everything afterwards rather than answer the next command from
+/// a frame belonging to this one.
+#[compio::test]
+async fn an_unaccountable_message_retires_the_replication_session() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server = ReplicationStub::spawn(move |listener| {
+            let mut stream = accept_bounded(&listener);
+            complete_replication_startup(&mut stream, Duration::ZERO);
+            assert_eq!(expect_simple_query(&mut stream), b"IDENTIFY_SYSTEM\0");
+            // EmptyQueryResponse: a real backend message, well framed, and one
+            // no IDENTIFY_SYSTEM response can contain. The rest of a complete
+            // response follows it, so the failure is the message and not a
+            // short read.
+            let mut response = backend_frame(b'I', b"");
+            response.extend_from_slice(&identify_system_response());
+            stream
+                .write_all(&response)
+                .expect("write unaccountable IDENTIFY_SYSTEM response");
+            stream
+                .flush()
+                .expect("flush unaccountable IDENTIFY_SYSTEM response");
+            expect_disconnect(&mut stream);
+        });
+
+        let mut replication = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            compio_postgres::replication::connect_replication(
+                common::suite_tls(),
+                &stub_config(server.addr),
+            ),
+        )
+        .await
+        .expect("scripted replication startup exceeded its watchdog")
+        .expect("connect to scripted replication peer");
+
+        let first = compio::time::timeout(OPERATION_WATCHDOG, replication.identify_system())
+            .await
+            .expect("identify_system exceeded its watchdog")
+            .expect_err("a message this phase cannot account for must fail the command");
+        assert!(
+            !first.is_cancelled(),
+            "the first call must report the message, not the refusal: {}",
+            common::error_chain(&first)
+        );
+
+        let second = compio::time::timeout(OPERATION_WATCHDOG, replication.identify_system())
+            .await
+            .expect("the retried identify_system exceeded its watchdog")
+            .expect_err("a retired session must not answer a second command");
+        assert!(
+            second.is_cancelled(),
+            "the session was left undrained, so it must be refused rather than \
+             answered from the stale frames: {}",
+            common::error_chain(&second)
+        );
+
+        drop(replication);
+        server.finish();
+    })
+    .await
+    .expect("unaccountable message test exceeded its outer watchdog");
+}
+
+/// Once `IDENTIFY_SYSTEM` has decoded an `ErrorResponse`, a later local
+/// protocol symptom cannot replace it.
+///
+/// An unaccountable message still retires the session: there is no safe frame
+/// to drain to. The diagnostic returned for that retired session is the first
+/// server failure, not the unexpected-message error observed afterwards.
+#[compio::test]
+async fn an_identify_system_error_outranks_a_later_unaccountable_message() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server = ReplicationStub::spawn(move |listener| {
+            let mut stream = accept_bounded(&listener);
+            complete_replication_startup(&mut stream, Duration::ZERO);
+            assert_eq!(expect_simple_query(&mut stream), b"IDENTIFY_SYSTEM\0");
+
+            let mut response = backend_frame(b'E', b"SERROR\0C22012\0Mdivision by zero\0\0");
+            // EmptyQueryResponse is well framed, but cannot belong to an
+            // IDENTIFY_SYSTEM response.
+            response.extend_from_slice(&backend_frame(b'I', b""));
+            stream
+                .write_all(&response)
+                .expect("write errored and unaccountable IDENTIFY_SYSTEM response");
+            stream
+                .flush()
+                .expect("flush errored and unaccountable IDENTIFY_SYSTEM response");
+            expect_disconnect(&mut stream);
+        });
+
+        let mut replication = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            compio_postgres::replication::connect_replication(
+                common::suite_tls(),
+                &stub_config(server.addr),
+            ),
+        )
+        .await
+        .expect("scripted replication startup exceeded its watchdog")
+        .expect("connect to scripted replication peer");
+
+        let error = compio::time::timeout(OPERATION_WATCHDOG, replication.identify_system())
+            .await
+            .expect("errored identify_system exceeded its watchdog")
+            .expect_err("the scripted ErrorResponse cannot become success");
+        assert_eq!(
+            error.code().map(|code| code.code()),
+            Some("22012"),
+            "IDENTIFY_SYSTEM discarded SQLSTATE 22012 behind an unexpected message: {}",
+            common::error_chain(&error)
+        );
+
+        let retry = compio::time::timeout(OPERATION_WATCHDOG, replication.identify_system())
+            .await
+            .expect("retired identify_system retry exceeded its watchdog")
+            .expect_err("an unaccountable message left the session reusable");
+        assert!(
+            retry.is_cancelled(),
+            "the unaccountable message did not retire the session: {}",
+            common::error_chain(&retry)
+        );
+
+        drop(replication);
+        server.finish();
+    })
+    .await
+    .expect("IDENTIFY_SYSTEM diagnostic precedence test exceeded its outer watchdog");
+}
+
+/// A server-sent `ErrorResponse` must not leave the session one frame behind.
+///
+/// The response loop must drain through the `ReadyForQuery` that closes every
+/// simple-query response before reporting the `ErrorResponse`; returning the
+/// moment it arrives leaves `ReadyForQuery` sitting in the read buffer, and
+/// the NEXT command on that connection reads the stale frame as its own
+/// reply: a second `IDENTIFY_SYSTEM` would parse the leftover
+/// `ReadyForQuery`, break out of its loop before its own response arrived,
+/// and -- with the sentinels above still in place -- report `Ok` with an
+/// empty identity for a command the server had not answered yet.
+#[compio::test]
+async fn an_identify_system_error_leaves_the_session_able_to_answer_the_next_command() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server = ReplicationStub::spawn(move |listener| {
+            let mut stream = accept_bounded(&listener);
+            complete_replication_startup(&mut stream, Duration::ZERO);
+
+            assert_eq!(expect_simple_query(&mut stream), b"IDENTIFY_SYSTEM\0");
+            // A complete simple-query response: the failure, then the
+            // ReadyForQuery that ends the phase. Written as ONE flush so the
+            // driver's read pulls both into its buffer, which is what makes the
+            // stale frame reachable by the next command.
+            let mut refusal =
+                backend_frame(b'E', b"SERROR\0C57P03\0Mscripted identify refusal\0\0");
+            refusal.extend_from_slice(&backend_frame(b'Z', b"I"));
+            stream
+                .write_all(&refusal)
+                .expect("write scripted IDENTIFY_SYSTEM refusal");
+            stream
+                .flush()
+                .expect("flush scripted IDENTIFY_SYSTEM refusal");
+
+            assert_eq!(expect_simple_query(&mut stream), b"IDENTIFY_SYSTEM\0");
+            send_identify_system(&mut stream);
+            expect_disconnect(&mut stream);
+        });
+
+        let mut replication = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            compio_postgres::replication::connect_replication(
+                common::suite_tls(),
+                &stub_config(server.addr),
+            ),
+        )
+        .await
+        .expect("scripted replication startup exceeded its watchdog")
+        .expect("connect to scripted replication peer");
+
+        let refusal = compio::time::timeout(OPERATION_WATCHDOG, replication.identify_system())
+            .await
+            .expect("the refused identify_system exceeded its watchdog")
+            .expect_err("the server refused IDENTIFY_SYSTEM, so this must be an error");
+        let rendered = common::error_chain(&refusal);
+        assert!(
+            rendered.contains("57P03"),
+            "the server's SQLSTATE must survive: {rendered}"
+        );
+
+        let identity = compio::time::timeout(OPERATION_WATCHDOG, replication.identify_system())
+            .await
+            .expect("the retried identify_system exceeded its watchdog")
+            .expect("the session was left in step, so the retry must answer");
+        assert_eq!(
+            identity.systemid, "scripted-system",
+            "the retry answered from a stale frame rather than from the server's reply"
+        );
+
+        drop(replication);
+        server.finish();
+    })
+    .await
+    .expect("IDENTIFY_SYSTEM resynchronisation test exceeded its outer watchdog");
+}
+
+/// A FATAL `ErrorResponse` must reach the caller even though no `ReadyForQuery`
+/// follows it.
+///
+/// The response loop drains to `ReadyForQuery` and only THEN reports the
+/// `ErrorResponse` it stashed. PostgreSQL does not send a `ReadyForQuery` after
+/// a FATAL error - it writes the `ErrorResponse` and closes the connection - so
+/// the next read fails, and the read-error arm must carry the server's
+/// diagnostic rather than report the transport error in its place. `57P01`,
+/// `57P03` and `idle_session_timeout` on a walsender all take this exact path.
+///
+/// The pairing with the test above is the one variable that matters: there the
+/// same `ErrorResponse` is followed by a `ReadyForQuery` and the SQLSTATE
+/// already survived. Here it is not, and only the read-error arm can carry it.
+#[compio::test]
+async fn a_fatal_identify_system_error_survives_the_close_that_follows_it() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server = ReplicationStub::spawn(move |listener| {
+            let mut stream = accept_bounded(&listener);
+            complete_replication_startup(&mut stream, Duration::ZERO);
+
+            assert_eq!(expect_simple_query(&mut stream), b"IDENTIFY_SYSTEM\0");
+            // NO ReadyForQuery: a FATAL is the whole response, and the server
+            // hangs up behind it. That is what makes the driver's next read
+            // fail rather than deliver a terminator.
+            stream
+                .write_all(&backend_frame(
+                    b'E',
+                    b"SFATAL\0C57P01\0Mterminating connection due to administrator command\0\0",
+                ))
+                .expect("write scripted FATAL refusal");
+            stream.flush().expect("flush scripted FATAL refusal");
+            stream
+                .shutdown(std::net::Shutdown::Both)
+                .expect("close the scripted connection behind the FATAL");
+        });
+
+        let mut replication = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            compio_postgres::replication::connect_replication(
+                common::suite_tls(),
+                &stub_config(server.addr),
+            ),
+        )
+        .await
+        .expect("scripted replication startup exceeded its watchdog")
+        .expect("connect to scripted replication peer");
+
+        let refusal = compio::time::timeout(OPERATION_WATCHDOG, replication.identify_system())
+            .await
+            .expect("the refused identify_system exceeded its watchdog")
+            .expect_err("the server refused IDENTIFY_SYSTEM, so this must be an error");
+        let rendered = common::error_chain(&refusal);
+        assert!(
+            rendered.contains("57P01"),
+            "the server's SQLSTATE was replaced by the close that followed it: {rendered}"
+        );
+        assert!(
+            rendered.contains("terminating connection due to administrator command"),
+            "the server's message was replaced by the close that followed it: {rendered}"
+        );
+
+        // The response ended at an unknown frame boundary, so the session must
+        // be retired rather than reused - the same ruling the unaccountable
+        // message test makes, and the reason the read-error arm cannot simply
+        // swap the error it returns.
+        let second = compio::time::timeout(OPERATION_WATCHDOG, replication.identify_system())
+            .await
+            .expect("the retried identify_system exceeded its watchdog")
+            .expect_err("a retired session must not answer a second command");
+        assert!(
+            second.is_cancelled(),
+            "the session survived a transport error mid-response: {}",
+            common::error_chain(&second)
+        );
+
+        drop(replication);
+        server.finish();
+    })
+    .await
+    .expect("FATAL IDENTIFY_SYSTEM test exceeded its outer watchdog");
+}
+
+/// `Config::max_message_size` must govern a REPLICATION connection too.
+///
+/// The ordinary query path applies the ceiling after the handshake
+/// (`connect_raw.rs`: "Applied after the handshake ... so a caller's limit
+/// governs the data phase and cannot make authentication unreachable").
+/// `connect_replication_addr` builds its OWN `BufStream`, which starts at
+/// `DEFAULT_MAX_MESSAGE_SIZE`; it must apply `max_message_size`, not just the
+/// read timeout, or the parameter is accepted and ignored in BOTH directions:
+/// a lowered ceiling would still admit the default maximum, and a ceiling
+/// raised to carry large replication frames would still tear the stream down
+/// at the default maximum.
+///
+/// Driven by a scripted peer rather than a live walsender for two reasons.
+/// PostgreSQL cannot be told to declare a frame of a chosen size, and the
+/// header alone is the whole point: validation must refuse on the DECLARED
+/// length before any body is buffered, so the stub writes five bytes and no
+/// more.
+///
+/// It also has to be START_REPLICATION rather than IDENTIFY_SYSTEM. Those take
+/// different read paths - `read_header` validates the length, while
+/// `read_one_message` parses whatever accumulates and never consults the
+/// ceiling at all - so an IDENTIFY_SYSTEM version of this test passes
+/// identically with the fix reverted.
+#[compio::test]
+async fn a_configured_ceiling_governs_the_replication_stream() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server = ReplicationStub::spawn(|listener| {
+            let mut stream = accept_bounded(&listener);
+            complete_replication_startup(&mut stream, Duration::ZERO);
+            assert_eq!(
+                expect_simple_query(&mut stream),
+                b"START_REPLICATION SLOT \"deadline_slot\" LOGICAL 0/0 (\"proto_version\" '1', \"publication_names\" '\"deadline_publication\"')\0"
+            );
+            // Declares 0x2000 bytes, far above the 64-byte ceiling below, and
+            // sends nothing after the header.
+            stream
+                .write_all(&[b'W', 0, 0, 0x20, 0])
+                .expect("write an oversized frame header");
+            stream.flush().expect("flush the oversized frame header");
+            expect_disconnect(&mut stream);
+        });
+
+        let mut config = stub_config(server.addr);
+        config.max_message_size(64);
+
+        let replication = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            compio_postgres::replication::connect_replication(common::suite_tls(), &config),
+        )
+        .await
+        .expect("scripted replication startup exceeded its watchdog")
+        .expect("a 64-byte data-phase ceiling must not block the handshake");
+
+        let start_result = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            replication.start_logical_replication(start_options()),
+        )
+        .await
+        .expect("START_REPLICATION exceeded its outer watchdog");
+
+        let error = match start_result {
+            Ok(_) => panic!("a frame declaring 0x2000 bytes passed a 64-byte ceiling"),
+            Err(error) => error,
+        };
+        let mut chain = String::new();
+        let mut source: Option<&(dyn std::error::Error + 'static)> = Some(&error);
+        while let Some(err) = source {
+            chain.push_str(&err.to_string());
+            chain.push(' ');
+            source = err.source();
+        }
+        assert!(
+            chain.contains("message too large"),
+            "the configured ceiling never reached the replication stream; \
+             the caller was told: {chain}"
+        );
+        server.finish();
+    })
+    .await
+    .expect("replication ceiling test exceeded its outer watchdog");
+}
+
+/// A declared frame length must be refused BEFORE `Message::parse` sees it.
+///
+/// `read_one_message` - the read path behind `IDENTIFY_SYSTEM` and the other
+/// replication simple-query commands - must validate the peeked length BEFORE
+/// `Message::parse` sees the frame. That order is what matters: when the body
+/// is short of the declared length, postgres-protocol's `Message::parse`
+/// itself does `buf.reserve(total_len - buf.len())` before returning `None`.
+/// So `D ff ff ff ff` asks the allocator for roughly 4 GiB from a five-byte
+/// frame.
+///
+/// `fill` cannot save it. Its ceiling check is on the bytes the CALLER asks
+/// for, and the caller asks for `buf.len() + 1` - a handful of bytes - so the
+/// check passes while the 4 GiB reservation has already happened. A ceiling
+/// consulted only inside `fill` would not govern this path at all, which is
+/// the opposite of what `fill`'s guard looks like it guarantees.
+///
+/// Validating the peeked length first is O(1) and happens before any
+/// reservation, matching what `read_header` already does on the streaming path.
+#[compio::test]
+async fn a_declared_length_is_refused_before_the_parser_reserves_for_it() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server = ReplicationStub::spawn(|listener| {
+            let mut stream = accept_bounded(&listener);
+            complete_replication_startup(&mut stream, Duration::ZERO);
+            assert_eq!(expect_simple_query(&mut stream), b"IDENTIFY_SYSTEM\0");
+            // A DataRow header declaring 0xFFFFFFFF bytes, and nothing after
+            // it. The refusal has to come from the header alone.
+            stream
+                .write_all(&[b'D', 0xFF, 0xFF, 0xFF, 0xFF])
+                .expect("write an oversized frame header");
+            stream.flush().expect("flush the oversized frame header");
+            expect_disconnect(&mut stream);
+        });
+
+        let mut config = stub_config(server.addr);
+        config.max_message_size(4096);
+
+        let mut replication = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            compio_postgres::replication::connect_replication(common::suite_tls(), &config),
+        )
+        .await
+        .expect("scripted replication startup exceeded its watchdog")
+        .expect("a 4 KiB data-phase ceiling must not block the handshake");
+
+        let error = compio::time::timeout(OPERATION_WATCHDOG, replication.identify_system())
+            .await
+            .expect("IDENTIFY_SYSTEM exceeded its outer watchdog")
+            .expect_err("a frame declaring 4 GiB cannot pass a 4 KiB ceiling");
+
+        let mut chain = String::new();
+        let mut source: Option<&(dyn std::error::Error + 'static)> = Some(&error);
+        while let Some(err) = source {
+            chain.push_str(&err.to_string());
+            chain.push(' ');
+            source = err.source();
+        }
+        assert!(
+            chain.contains("message too large"),
+            "the declared length reached the parser instead of the ceiling; \
+             the caller was told: {chain}"
+        );
+        server.finish();
+    })
+    .await
+    .expect("declared-length refusal test exceeded its outer watchdog");
+}

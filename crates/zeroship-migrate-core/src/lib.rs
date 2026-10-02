@@ -77,7 +77,7 @@
 //!
 //! The guard runs **out-of-band at deploy time** (not on the request hot path),
 //! so it is plain synchronous logic - no async runtime - and exhaustively
-//! unit-testable without a database (`crates/zeroship-migrate/tests/policy_charter/guard_security.rs`).
+//! unit-testable without a database (`crates/zeroship-migrate/tests/integration/policy_charter/guard_security.rs`).
 
 // The NEUTRAL guard seam - `GuardConfig`, `GuardError`, `GuardOutcome`,
 // `MigrationGuard` and the structured-IR data-security walk. Re-exported under the

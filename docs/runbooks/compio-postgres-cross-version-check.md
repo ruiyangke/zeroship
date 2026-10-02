@@ -171,7 +171,7 @@ Confirm the server before believing any cross-version figure, rather than
 trusting the variable you exported:
 
 ```bash
-... --test suite -- --nocapture cancel_request::raw_cancel_interrupts_running_query_and_preserves_session
+... --test integration -- --nocapture cancel_request::raw_cancel_interrupts_running_query_and_preserves_session
 # prints: cancel oracle: server_version_num=... protocol=... backend_key_len=...
 ```
 

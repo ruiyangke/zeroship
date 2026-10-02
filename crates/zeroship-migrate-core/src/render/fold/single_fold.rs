@@ -277,14 +277,14 @@ impl AuthoredState<'_> {
             // ways:
             //
             // * against a live PostgreSQL, in
-            //   `crates/zeroship-migrate/tests/fold_live/env_db_ts_matches_the_server_pg.rs`: the migration is applied
+            //   `crates/zeroship-migrate/tests/integration/fold_live/env_db_ts_matches_the_server_pg.rs`: the migration is applied
             //   for real and `pg_class` no longer holds the child;
             // * against `Op::DetachPartition` as the CONTROL, which has no arm here
             //   because a detached partition survives as a standalone table under the
             //   same name - the rule
-            //   `crates/zeroship-migrate/tests/namespaces/partition_claims_the_relation_namespace_pg.rs` enforces;
+            //   `crates/zeroship-migrate/tests/integration/namespaces/partition_claims_the_relation_namespace_pg.rs` enforces;
             // * offline on all three dialects in
-            //   `crates/zeroship-migrate/tests/gen_types/gen_types_authoring_tables_from_the_fold.rs`.
+            //   `crates/zeroship-migrate/tests/integration/gen_types/gen_types_authoring_tables_from_the_fold.rs`.
             //
             // Only PostgreSQL can actually run the stream: `attachPartition` is
             // PostgreSQL-only at lowering (`render/lower.rs`), so off Postgres the
@@ -792,7 +792,7 @@ impl FoldedSchema {
     /// arm, which replays SQLite's own `CREATE TABLE` text. The map's CONTENT reaches a
     /// rebuilt `CREATE TABLE` only on the SDK-value arm, which needs a live snapshot with
     /// no `stored_create_sql` - the shape `engine::refresh_historical_live` builds. Both
-    /// halves are pinned in `crates/zeroship-migrate/tests/fold_live/sqlite_rebuild_field_defs_live.rs`; do not read
+    /// halves are pinned in `crates/zeroship-migrate/tests/integration/fold_live/sqlite_rebuild_field_defs_live.rs`; do not read
     /// "therefore the 12-step rebuild" into this without reading that file first.
     ///
     /// Every facet is DERIVED FROM THE MODEL, never recovered from a rendered

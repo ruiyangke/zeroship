@@ -1,0 +1,112 @@
+//! The crate's integration suites, linked into one test executable.
+//!
+//! `Cargo.toml` sets `autotests = false` and registers this file as the
+//! `integration` target, so a suite is compiled only once it is declared below;
+//! add `mod <name>;` with the file, or its tests never run. Helper names collide
+//! freely across the modules because each file is its own module namespace.
+//!
+//! A crate-level inner attribute belongs here rather than in a module:
+//! `#![recursion_limit]` inside a module is ignored. A test that re-executes
+//! itself by name must name its full module path.
+//!
+//! `tls_live` and `unix_socket_live` stay separate because `required-features`
+//! has to be able to not build them at all. `serialized_loop`, `socket_release`,
+//! `query_debug_logging` and `serialized_teardown_logging` stay separate because
+//! each installs a process-global `log::set_logger` (as does
+//! `transaction_claims` in here), and only the first install in a process takes
+//! effect.
+#![recursion_limit = "256"]
+
+#[path = "../common/mod.rs"]
+pub mod common;
+
+mod backend_termination;
+mod batch_atomicity;
+mod cancel_request;
+mod client_encoding;
+mod column_lookup;
+mod column_metadata;
+mod command_timeout;
+mod concurrent_routing;
+mod config_fuzz;
+mod connect_failure_diagnosis;
+mod connection_churn;
+mod copy_in_failure;
+mod copy_interleaving;
+mod copy_out_abandonment;
+mod copy_out_copy_in_resync;
+mod copy_refusal;
+mod differential_config_parsing;
+mod differential_copy;
+mod differential_server_errors;
+mod differential_tokio;
+mod differential_type_values;
+mod domain_parameters;
+mod error_fields;
+mod execute_row_counts;
+mod extended_query_copy_resync;
+mod frame_fuzz;
+mod frontend_sequence;
+mod generic_client;
+mod hostile_peer;
+mod hostile_session_gucs;
+mod integration;
+mod keyword_quoting;
+mod keyword_whitespace;
+mod libpq_parameter_parity;
+mod lsn_server_parity;
+mod message_size_limit;
+mod nested_transaction;
+mod notice_delivery;
+mod notification_identity;
+mod parameter_status;
+mod passfile_live;
+mod pgoutput_allocation;
+mod pgoutput_fuzz;
+mod pgoutput_live_decode;
+mod pgoutput_options;
+mod pgoutput_streaming;
+mod pgoutput_subtransactions;
+mod pgoutput_two_phase;
+mod pool_close;
+mod pool_fairness;
+mod pool_hooks;
+mod pool_lifetime;
+mod pool_session_state_carry;
+mod pool_transaction_isolation;
+mod portal_abandonment;
+mod portal_name_collision;
+mod portal_paging;
+mod prefer_attestation_fallback;
+mod protocol_version_live;
+mod query_backpressure;
+mod query_claims;
+mod query_observer;
+mod raw_value_column_identity;
+mod read_timeout;
+mod record_array;
+mod replication_live;
+mod replication_publication_names;
+mod require_auth_enforcement;
+mod row_count_resync;
+mod server_wire_conformance;
+mod service_live;
+mod simple_query_copy_chain_resync;
+mod simple_query_copy_resync;
+mod simple_query_protocol;
+mod sqlstate_identity;
+mod startup_options;
+mod target_session_attrs_live;
+mod temporal_edge_values;
+mod timeout_interaction;
+mod transaction_builder;
+mod transaction_claims;
+mod transaction_forwarding;
+mod type_cache_residue;
+mod type_decode_fuzz;
+mod type_edge_values;
+mod unix_socket_path_limit;
+mod url_credentials;
+mod url_parity;
+mod value_round_trip;
+mod vendored_codec_features;

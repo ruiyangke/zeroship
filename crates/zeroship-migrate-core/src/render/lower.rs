@@ -15,7 +15,7 @@
 //! render methods the differ uses (`DeclarativeAuthor::lower_*`, which delegate to
 //! `render_create_table` / the `DdlEmitter`). So the emitted SQL is byte-identical
 //! to the declarative path BY CONSTRUCTION. The cross-path byte-identity
-//! golden (in `crates/zeroship-migrate/tests/ir_contract/ir_author_render_parity.rs`) guards against accidental
+//! golden (in `crates/zeroship-migrate/tests/integration/ir_contract/ir_author_render_parity.rs`) guards against accidental
 //! regression - not against two independent implementations.
 //!
 //! # The only IR-path-specific code: the type/shape MAPPING
@@ -5710,7 +5710,7 @@ impl IrAuthor {
         // Every op that adds, drops, renames or detaches a table must move both
         // sets, not only `createTable`, or a later op goes on referencing the old
         // name; both directions are pinned in
-        // `crates/zeroship-migrate/tests/ir_contract/preview_fold_table_presence.rs`.
+        // `crates/zeroship-migrate/tests/integration/ir_contract/preview_fold_table_presence.rs`.
         crate::render::fold::advance_referenceable_tables(
             op,
             &self.dialect,

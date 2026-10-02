@@ -13,7 +13,7 @@
 //! `MigrationEngine`, `diff_snapshots`, `fold_ops`) cannot live in a vendor crate at
 //! all: `zeroship-migrate` depends on `zeroship-migrate-mysql`, so the edge back is a
 //! cycle Cargo refuses. Those are integration tests OF THE ENGINE driving a MySQL
-//! backend, and they live in `zeroship-migrate/tests/mysql_engine/`.
+//! backend, and they live in `zeroship-migrate/tests/integration/mysql_engine/`.
 //!
 //! A copy of the recorder on each side is the real hazard: its canned
 //! `information_schema` rows are the shared premise of both suites, and two copies
@@ -758,7 +758,7 @@ pub fn id_catalog_columns_with_generated_uuid_extra(
         // engine-owned UUID format CHECK. `text`, NOT `varchar(191)`, because
         // that is what the engine deploys for a plain `ColType::Text` column -
         // measured against a live MySQL server by
-        // `crates/zeroship-migrate/tests/pg_drift/drift_column_physical_type.rs`,
+        // `crates/zeroship-migrate/tests/integration/pg_drift/drift_column_physical_type.rs`,
         // whose `body` column authors `text` and introspects back as
         // `Lob { tier: "text" }`.
         catalog_column_with_generation(

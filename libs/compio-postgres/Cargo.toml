@@ -8,6 +8,11 @@ repository = "https://github.com/zeroship/zeroship"
 keywords = ["database", "postgres", "postgresql", "sql", "compio"]
 categories = ["database"]
 rust-version = "1.85"
+# The integration suites are modules of one `tests/integration/main.rs` target;
+# the remaining targets each need their own process or a feature gate, so they
+# are declared explicitly below and a new `tests/*.rs` is compiled by nothing
+# until it is registered here.
+autotests = false
 
 [lib]
 test = true
@@ -246,7 +251,7 @@ criterion = { workspace = true }
 # (`StreamExt::next`) and drive two pipelined queries concurrently
 # (`future::join`). Same version as the regular dependency above, so this
 # adds no new crate to the lock - it only makes the surface visible to the
-# `libs/compio-postgres/tests/suite/integration.rs` target.
+# `libs/compio-postgres/tests/integration/integration.rs` target.
 futures-util = { version = "0.3", default-features = false, features = ["sink", "async-await"] }
 tempfile = { workspace = true }
 # Self-signed certificates for the in-memory TLS pair in `tls_sansio`'s unit
@@ -282,11 +287,17 @@ name = "soak"
 harness = false
 
 [[test]]
-name = "serialized_loop"
+name = "integration"
+path = "tests/integration/main.rs"
 
 # Its own binary because it installs a process-global `log::set_logger`, and so
-# does `transaction_claims` inside the consolidated suite. Only the first call
-# in a process succeeds; separate binaries are what keep both able to run.
+# does `transaction_claims` inside the integration binary. Only the first
+# install in a process takes effect; separate binaries are what keep both able
+# to run.
+[[test]]
+name = "serialized_loop"
+
+# Its own binary because it installs a process-global `log::set_logger`.
 [[test]]
 name = "socket_release"
 
@@ -295,3 +306,8 @@ name = "socket_release"
 # with another logger would silently select the non-Debug branch instead.
 [[test]]
 name = "query_debug_logging"
+
+# Its own binary because it installs a process-global `log::set_logger` and
+# counts the shutdown log records it receives.
+[[test]]
+name = "serialized_teardown_logging"

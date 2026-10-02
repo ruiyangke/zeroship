@@ -109,7 +109,7 @@ database constraints; authorization decisions remain covered in `zeroship-authz`
 Docker and Node are required. After building the artifacts, the same tests run
 in ordinary `cargo test -p zeroship-migrate-node`; missing prerequisites fail
 instead of skipping database verification. Their private fixture is in
-`crates/zeroship-migrate-node/tests/platform_corpus/fixture.rs`. Each database test
+`crates/zeroship-migrate-node/tests/e2e/platform_corpus/fixture.rs`. Each database test
 owns its container and waits for its Rust connection to close before teardown.
 The tests cover the host CLI and database contract, including organization
 authority and user-erasure foreign keys. The erasure checks inspect the migrated

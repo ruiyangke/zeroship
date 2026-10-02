@@ -20,7 +20,7 @@
 //! Every claim above is proven against a real temp-file SQLite, across two
 //! integration files:
 //!
-//! - `zero-migrate/tests/policy_charter/sqlite_confinement.rs` covers the
+//! - `zero-migrate/tests/integration/policy_charter/sqlite_confinement.rs` covers the
 //!   authorizer line. A creator `up` may
 //!   not drop the journal table (`confine_d_drop_mig_table_denied`) or its triggers
 //!   (`confine_e_drop_mig_trigger_denied`), may not insert a journal row directly

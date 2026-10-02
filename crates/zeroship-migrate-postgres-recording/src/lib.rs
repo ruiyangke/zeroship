@@ -14,7 +14,7 @@
 //! `ops::status::history_via_backend`) cannot live in a vendor crate at all:
 //! `zeroship-migrate` depends on `zeroship-migrate-postgres`, so the edge back is a
 //! cycle Cargo refuses. Those are integration tests OF THE ENGINE driving a
-//! PostgreSQL backend, and they live in `zeroship-migrate/tests/pg_engine/`.
+//! PostgreSQL backend, and they live in `zeroship-migrate/tests/integration/pg_engine/`.
 //!
 //! A copy of the recorder on each side is the real hazard: its canned catalog and
 //! journal rows are the shared premise of both suites, and two copies drift

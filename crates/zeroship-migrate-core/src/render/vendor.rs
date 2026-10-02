@@ -27,7 +27,7 @@
 //!
 //! # The behaviour test the census cannot be
 //!
-//! `crates/zeroship-migrate/tests/dialect_matrix/vendor_ops_dispatch_per_vendor.rs` asserts that exactly ONE
+//! `crates/zeroship-migrate/tests/integration/dialect_matrix/vendor_ops_dispatch_per_vendor.rs` asserts that exactly ONE
 //! shipping vendor renders a vendor op and the other two refuse. A census proves core
 //! does not NAME `zeroship_migrate_postgres`; it cannot prove the dispatch is real, and a
 //! refactor that routed all three vendors to PostgreSQL's renderer would satisfy a

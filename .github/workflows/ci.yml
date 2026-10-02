@@ -83,7 +83,7 @@ jobs:
       # verifies that the Node host must resolve the imported API while the
       # addon exports its registrar.
       - name: napi addon symbol shape
-        run: cargo test --locked -p zeroship-migrate-node --test shipped_symbol_shape
+        run: cargo test --locked -p zeroship-migrate-node --test e2e shipped_symbol_shape
       # crates/zeroship-runtime declares a `wpt` test target whose modules
       # `include_str!` crates/zeroship-runtime/tests/wpt/. The development shell
       # links its pinned `wpt` flake input there (flake.nix shellHook), so the

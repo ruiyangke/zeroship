@@ -3,7 +3,7 @@ name = "zeroship-migrate-mysql-recording"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "The canned MySQL SqlSession both halves of zeroship-migrate's MySQL test coverage drive: the vendor's own unit tests in zeroship-migrate-mysql and the engine's integration tests in zeroship-migrate/tests/mysql_engine. A DEV-ONLY crate - both sides name it under [dev-dependencies]."
+description = "The canned MySQL SqlSession both halves of zeroship-migrate's MySQL test coverage drive: the vendor's own unit tests in zeroship-migrate-mysql and the engine's integration tests in zeroship-migrate/tests/integration/mysql_engine. A DEV-ONLY crate - both sides name it under [dev-dependencies]."
 
 [dependencies]
 # The CONTRACT the double implements and the vocabulary its canned rows are built

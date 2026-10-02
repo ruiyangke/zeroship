@@ -342,7 +342,7 @@ test("PostgreSQL: rolling back a dropSchema rebuilds the schema its create autho
  *  A view rollback on PostgreSQL through the verb is NOT covered here: the SQLite
  *  suite (`crates/zeroship-migrate-node/tests/rollback_sqlite.rs`,
  *  `a_view_dropped_by_a_later_envelope_comes_back_through_the_verb`) drives the same
- *  re-lowering path, and `crates/zeroship-migrate/tests/rollback/drop_view_rollback_pg.rs`
+ *  re-lowering path, and `crates/zeroship-migrate/tests/integration/rollback/drop_view_rollback_pg.rs`
  *  calls the engine directly without reaching the addon's envelope loop.
  *
  *  `citext` rather than `pgcrypto` or `hstore` because it is available and absent in

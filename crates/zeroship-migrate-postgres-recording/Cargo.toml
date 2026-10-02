@@ -3,7 +3,7 @@ name = "zeroship-migrate-postgres-recording"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "The canned PostgreSQL SqlSession both halves of zeroship-migrate's PostgreSQL test coverage drive: the vendor's own unit tests in zeroship-migrate-postgres and the engine's integration tests in zeroship-migrate/tests/pg_engine. A DEV-ONLY crate - both sides name it under [dev-dependencies], and it depends on neither the vendor nor the engine."
+description = "The canned PostgreSQL SqlSession both halves of zeroship-migrate's PostgreSQL test coverage drive: the vendor's own unit tests in zeroship-migrate-postgres and the engine's integration tests in zeroship-migrate/tests/integration/pg_engine. A DEV-ONLY crate - both sides name it under [dev-dependencies], and it depends on neither the vendor nor the engine."
 
 [dependencies]
 # The CONTRACT the double implements and the vocabulary its canned rows are built

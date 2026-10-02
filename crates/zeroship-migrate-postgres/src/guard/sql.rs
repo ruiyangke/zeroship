@@ -3613,7 +3613,7 @@ fn stmt_text(sql: &str, raw_stmt: &protobuf::RawStmt) -> String {
 // extractor's UTF-8 faithfulness + the fail-closed statement-JSON serializer).
 // These probe private fns (`word_present`, `guard_stmt_json`), so they MUST live
 // in-crate. The behaviour-lock suite that drives the guard through the engine's
-// lower pipeline lives in `zero-migrate/tests/policy_charter/guard_vendor_lower.rs`.
+// lower pipeline lives in `zero-migrate/tests/integration/policy_charter/guard_vendor_lower.rs`.
 // ===========================================================================
 #[cfg(test)]
 mod white_box_tests {

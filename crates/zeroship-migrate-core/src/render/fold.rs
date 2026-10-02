@@ -19,7 +19,7 @@
 //! `snapshot_schema(live)` (the `pg_declarative` round-trip tests), the folded
 //! snapshot is structurally identical to live introspection - transitively
 //! `fold == introspect`. The headline correctness net is the round-trip oracle
-//! (`crates/zeroship-migrate/tests/fold_live/fold_roundtrip_pg.rs`): apply a corpus to real PG, introspect, assert
+//! (`crates/zeroship-migrate/tests/integration/fold_live/fold_roundtrip_pg.rs`): apply a corpus to real PG, introspect, assert
 //! equality.
 //!
 //! ## The one exception: a partition on a collapsed dialect
@@ -37,7 +37,7 @@
 //!
 //! The recorded child is NOT removable: the bounds are read back out to derive the
 //! collapsed deletes (`PartitionLowerState::from_live`), and a folded history is fed
-//! straight back into lowering by `crates/zeroship-migrate/tests/authoring_surface/partition_render.rs`. The fold has to keep
+//! straight back into lowering by `crates/zeroship-migrate/tests/integration/authoring_surface/partition_render.rs`. The fold has to keep
 //! it. What follows from that is a comparison contract, stated on
 //! [`diff_snapshots`](crate::apply::drift::diff_snapshots), not a change here.
 //!

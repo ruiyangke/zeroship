@@ -161,7 +161,7 @@ pub enum Capability {
     /// yes - so a backend that claims the capability and refuses an emitter
     /// would panic mid-render rather than refuse cleanly. The shipping registry
     /// census
-    /// (`crates/zeroship-migrate/tests/dialect_matrix/vendor_registry_owns_shipping_descriptors.rs`)
+    /// (`crates/zeroship-migrate/tests/integration/dialect_matrix/vendor_registry_owns_shipping_descriptors.rs`)
     /// holds the two answers together.
     ///
     /// # What answering NO means
@@ -277,7 +277,7 @@ impl CapabilitySet {
 /// drop-side bound is enforced there and NOT on MySQL, whose 64 is a CHARACTER
 /// count. Collapsing them to one number would either refuse a MySQL name that
 /// legitimately exists or under-bound a PostgreSQL one. See
-/// `crates/zeroship-migrate/tests/namespaces/authored_identifier_lengths.rs`.
+/// `crates/zeroship-migrate/tests/integration/namespaces/authored_identifier_lengths.rs`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdentifierLimit {
     /// The catalog imposes no identifier cap (`SQLite`).

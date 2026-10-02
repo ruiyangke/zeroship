@@ -98,7 +98,7 @@ pub const fn shipping_vendors() -> VendorSet {
 /// # Panics
 ///
 /// Never in a shipped build: the shipping ids are constants and
-/// `tests/dialect_matrix/vendor_registry_owns_shipping_descriptors.rs` proves they
+/// `tests/integration/dialect_matrix/vendor_registry_owns_shipping_descriptors.rs` proves they
 /// satisfy the rule. The `expect` is here so a fourth backend added with a bad or
 /// colliding id fails loudly at first use rather than being dropped.
 #[must_use]
@@ -116,6 +116,6 @@ pub fn shipping_backends() -> BackendRegistry {
 //
 // The assertion that would have lived here — the shipping set composes into a
 // `BackendRegistry` with three distinct ids — is
-// `tests/dialect_matrix/vendor_registry_owns_shipping_descriptors.rs`, which drives
+// `tests/integration/dialect_matrix/vendor_registry_owns_shipping_descriptors.rs`, which drives
 // `shipping_backends()` through the public surface and reaches each vendor's `DIALECT`
 // from the vendor crate itself.

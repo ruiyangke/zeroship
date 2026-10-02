@@ -14,7 +14,7 @@
 # to 96 bytes, so the socket path came to 110 and NOTHING could connect to it.
 # The fixture existed, the container ran, and the one capability it was there to
 # prove - that this driver can actually talk over a Unix socket - had no test at
-# all. `libs/compio-postgres/tests/suite/unix_socket_path_limit.rs` covers the
+# all. `libs/compio-postgres/tests/integration/unix_socket_path_limit.rs` covers the
 # REFUSAL of an overlong path; the successful path was never exercised.
 #
 # So keep the directory short and OUTSIDE any per-session scratch tree. The

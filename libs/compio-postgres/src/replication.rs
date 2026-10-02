@@ -3797,7 +3797,7 @@ mod tests {
     // So: adding a variant means adding a LIVE test for it, not just a round
     // trip here. A self-referential round trip is not enough on its own:
     // `parse_lsn`/`format_lsn` also need a live parity check
-    // (`tests/suite/lsn_server_parity.rs`).
+    // (`tests/integration/lsn_server_parity.rs`).
     #[test]
     fn pgoutput_decode_begin() {
         let bytes = pgoutput::encode::begin(0x16B3750, 700_000_000_000, 42);
@@ -5456,7 +5456,7 @@ mod tests {
 
     /// Randomised CopyBoth frames against the bespoke replication framer.
     ///
-    /// `codec.rs` has `tests/suite/frame_fuzz.rs`; this framer is
+    /// `codec.rs` has `tests/integration/frame_fuzz.rs`; this framer is
     /// a SEPARATE, hand-rolled framer -- [`read_header`] plus `next_inner` --
     /// with its own length arithmetic ([`WireHeader::body_len`] subtracts 4 and
     /// documents that underflowing it hands a `usize::MAX`-ish size to
@@ -5465,7 +5465,7 @@ mod tests {
     /// corpus, because a replication stream never goes through
     /// `Message::parse`.
     ///
-    /// Same bargain as `tests/suite/frame_fuzz.rs`: weak per-case assertions, many
+    /// Same bargain as `tests/integration/frame_fuzz.rs`: weak per-case assertions, many
     /// cases. ASSERTED -- the framer terminates, does not panic, and once it
     /// has REFUSED the stream (`Error::cancelled`, which only `InFlight::enter`
     /// produces and which nothing clears) it never decodes another message.
@@ -5494,7 +5494,7 @@ mod tests {
         const MAX_FRAMES_READ: usize = 24;
 
         /// xorshift64*, inline so this adds no dependency (as in
-        /// `tests/suite/frame_fuzz.rs`).
+        /// `tests/integration/frame_fuzz.rs`).
         struct Rng(u64);
         impl Rng {
             fn new(seed: u64) -> Self {

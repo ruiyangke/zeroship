@@ -3,7 +3,7 @@
 // raw-author envelope beside it.
 //
 // This is one half of a two-part check. `recorded.json` is the join: the Rust half
-// (`crates/zeroship-migrate/tests/ir_contract/op_fixture_goldens.rs`) reads the same file, resolves
+// (`crates/zeroship-migrate/tests/integration/ir_contract/op_fixture_goldens.rs`) reads the same file, resolves
 // those recorded ops through the real `resolve_create_table_policy`, and compares
 // the result to `<stem>.golden.json`. Composed, the halves check `.mig.js` ->
 // golden for every named stem. Neither half alone does, and each runs in the job that

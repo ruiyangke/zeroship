@@ -27,7 +27,7 @@ test("the committed typings match the Rust-exported vocabulary", () => {
     after,
     before,
     "src/generated/attributes.ts is stale. Regenerate with:\n" +
-      "  cargo test -p zeroship-migrate-sqlite --test attribute_vocabulary_export -- --ignored update_attribute_vocabulary\n" +
+      "  cargo test -p zeroship-migrate-sqlite --test integration -- --ignored update_attribute_vocabulary\n" +
       "  node packages/zero-migrate-sqlite/scripts/gen-attributes.mjs\n" +
       "and commit both.",
   );

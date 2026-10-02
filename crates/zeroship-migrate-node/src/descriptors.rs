@@ -36,7 +36,7 @@
 //! `token_to_col_type` mapped every `"string"` to `ColType::Text`, so a width crossed
 //! this wire intact and died one layer down. It no longer does - the producer reads
 //! `max_length` to choose between `ColType::String { length }` and `ColType::Text`,
-//! and `zero-migrate/tests/fold_live/pg_bounded_string_producer_live.rs` is the live
+//! and `zero-migrate/tests/integration/fold_live/pg_bounded_string_producer_live.rs` is the live
 //! PostgreSQL oracle for the difference that made.
 
 use zeroship_migrate::render::declarative::{CollectionDescriptor, FieldDescriptor, IndexDescriptor};

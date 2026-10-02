@@ -4,6 +4,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "The zeroship-migrate Policy Decision Point (PDP): the mechanism half of the policy system. Ships the SCOPE LATTICE (Scope { Nothing | All | Of{include, exclude} } with ⊑/⊓/⊔/∖), the knob/rule/document model + strict loader, the per-knob VALUE order, and the COMPOSITION ALGEBRA — RootCharter, admit (pointwise-⊑ untrusted-draft ingress) / restrict (trusted-charter meet), the UNFORGEABLE EffectivePolicy decision-query API, and the identity-bound SealedPolicy HMAC. Escalation-critical checks are proven by brute-force oracles. A true LEAF: pure data + algebra, zero I/O, NO SQL deps, no dependency on the engine."
+# The integration suites are modules of one `tests/integration/main.rs` target, so
+# the crate links one test executable instead of one per file.
+autotests = false
+
+[[test]]
+name = "integration"
+path = "tests/integration/main.rs"
 
 [dependencies]
 serde = { workspace = true }

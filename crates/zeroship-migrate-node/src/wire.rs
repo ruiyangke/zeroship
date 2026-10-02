@@ -915,7 +915,7 @@ pub struct FieldDescriptorDto {
     /// `ColType::Text` both spell it), so `token_to_col_type` must read this value to
     /// pick between them. Ignoring it round-trips a `VARCHAR(64)` as an unbounded
     /// `TEXT`
-    /// (`zero-migrate/tests/fold_live/pg_bounded_string_producer_live.rs`).
+    /// (`zero-migrate/tests/integration/fold_live/pg_bounded_string_producer_live.rs`).
     /// Pinned end to end by `tests/collection_export_round_trip.rs`.
     pub max_length: Option<i64>,
     /// `t.numeric({ precision, scale })` - total digits of a FIXED-PRECISION decimal,

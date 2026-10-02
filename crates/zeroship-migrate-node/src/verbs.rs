@@ -1690,7 +1690,7 @@ pub async fn baseline_ir_with_locked_backend<B: MigrationBackend>(
 /// **`missing` and `altered` refuse.** Both mean the live schema is not what this
 /// corpus produces, and adoption's whole effect is to guarantee nothing will ever
 /// fix that. `diff_snapshots` is the differ the `fold_live` suites
-/// (`crates/zeroship-migrate/tests/fold_live/`) already require to report
+/// (`crates/zeroship-migrate/tests/integration/fold_live/`) already require to report
 /// `is_clean()` for a corpus `PostgreSQL` really applied, so a clean verdict here is
 /// the same verdict a real apply earns.
 ///

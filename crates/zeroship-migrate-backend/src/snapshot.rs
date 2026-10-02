@@ -1011,7 +1011,7 @@ pub struct ConstraintSnapshot {
     /// and reads the same body back byte-identical, so a comparison on that leg needs
     /// no exemption at all. Generalising the differ's rule into this `PartialEq` would
     /// export a PG-shaped concession to every consumer. A consumer that wants the
-    /// differ's semantics applies them itself - `crates/zeroship-migrate/tests/fold_live/fold_roundtrip_sqlite.rs` does,
+    /// differ's semantics applies them itself - `crates/zeroship-migrate/tests/integration/fold_live/fold_roundtrip_sqlite.rs` does,
     /// and says why at its `canonicalize`.
     ///
     /// That same `PartialEq` is why the SQLite rename REBUILD - the OTHER replay that
@@ -1963,7 +1963,7 @@ impl PartialEq for SchemaSnapshot {
         // oracles rather than a real difference.
         //
         // Nothing is lost. Drift does not go through this impl: `diff_snapshots`
-        // compares the field explicitly, `crates/zeroship-migrate/tests/pg_drift/vendor_object_drift.rs` pins that,
+        // compares the field explicitly, `crates/zeroship-migrate/tests/integration/pg_drift/vendor_object_drift.rs` pins that,
         // and `fold_roundtrip_pg::trigger_and_function_lifecycle` runs it against a
         // live catalog.
     }

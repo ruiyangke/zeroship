@@ -16,6 +16,10 @@ edition.workspace = true
 license.workspace = true
 description = "Node/Bun N-API addon for zeroship-migrate: host-driven (pg/mysql2) apply over the dialect-neutral driver::SqlSession seam, zero tokio, zero io_uring, cross-platform .node"
 publish = false
+# The integration suites are modules of one `tests/integration/main.rs` target and
+# the process-spawning suites of one `tests/e2e/main.rs`, so the crate links two
+# test executables instead of one per file.
+autotests = false
 
 # A `cdylib` is terminal (no Rust crate can depend on it) → this is necessarily a
 # leaf, so the graph stays acyclic (`zeroship-migrate-node → zeroship-migrate` is
@@ -26,6 +30,18 @@ publish = false
 # published artifact is the `cdylib` `.node`.
 [lib]
 crate-type = ["cdylib", "rlib"]
+
+# The integration suites are modules of one `tests/integration/main.rs` target and
+# the process-spawning suites of one `tests/e2e/main.rs`, so the crate links two
+# test executables instead of one per file.
+
+[[test]]
+name = "integration"
+path = "tests/integration/main.rs"
+
+[[test]]
+name = "e2e"
+path = "tests/e2e/main.rs"
 
 [features]
 # The napi entrypoints are ONLY reachable when compiled by `napi build` (which
@@ -134,7 +150,7 @@ tempfile = { workspace = true }
 # features unify into the normal edge WHENEVER A TEST TARGET IS IN THE UNIT GRAPH,
 # so `cargo test` gets it and a `--lib`/`--bins` build does not. The shipped
 # cdylib keeps its Node API imports undefined and exports
-# `napi_register_module_v1`; `tests/shipped_symbol_shape.rs` holds both halves.
+# `napi_register_module_v1`; `tests/e2e/shipped_symbol_shape.rs` holds both halves.
 #
 # No Rust test process may call an N-API function. With no host loaded the napi-sys stub
 # prints `Node-API symbol ... has not been loaded` to stderr and returns 1 for a

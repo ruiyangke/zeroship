@@ -509,7 +509,7 @@ pub fn render_schema_export(
     // The fold is the fail-closed gate: `single_fold::fold` runs the catalog
     // rules, and the refusal set this projection path admits is pinned as a
     // biconditional with the catalog replay's by
-    // `crates/zeroship-migrate/tests/gen_types/gen_types_field_defs_from_the_fold.rs`.
+    // `crates/zeroship-migrate/tests/integration/gen_types/gen_types_field_defs_from_the_fold.rs`.
     //
     // The catalog rules are driven one op at a time beside the authored half, so
     // a stream both halves refuse could in principle report the authored half's

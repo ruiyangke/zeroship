@@ -354,7 +354,7 @@ were returned rather than merely stable.
 The workload kills individual backends with `pg_terminate_backend`, which is
 NOT the same event as the server going away. A restart drops every connection
 at once, refuses new ones for several seconds, and returns with different
-backend PIDs. `libs/compio-postgres/tests/suite/connection_churn.rs` and the pool's mass-termination test
+backend PIDs. `libs/compio-postgres/tests/integration/connection_churn.rs` and the pool's mass-termination test
 cover the first; nothing covers the second, because a suite test cannot restart
 a server other tests are using.
 
@@ -419,7 +419,7 @@ No watchdog fired - the only lines containing `watchdog` are the three
 phase-start budget declarations, which is worth stating because a grep for
 `watchdog` matches those and can be misread as a firing. No panic, no hang.
 Recovery: 63 `pool_` tests passed against the restarted server on the FIRST
-attempt (7 in `--lib`, 56 in `--test suite`); the 2026-08-27 run recorded 49,
+attempt (7 in `--lib`, 56 in `--test integration`); the 2026-08-27 run recorded 49,
 the difference being tests added since.
 
 This run is the check on `4404f6981`, which changed when a cancel retires a

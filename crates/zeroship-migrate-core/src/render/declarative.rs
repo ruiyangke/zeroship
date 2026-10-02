@@ -8419,7 +8419,7 @@ mod inline_check_rename_tests {
     //! The quoted-run walk behind [`rename_column_in_inline_checks`], at the level the
     //! end-to-end SQLite suite cannot reach.
     //!
-    //! `crates/zeroship-migrate/tests/rename/rename_column_inline_check_sqlite.rs` proves the behaviour against a real
+    //! `crates/zeroship-migrate/tests/integration/rename/rename_column_inline_check_sqlite.rs` proves the behaviour against a real
     //! database on the one dialect that rebuilds. These pin the DISCRIMINATIONS that
     //! make text surgery admissible here at all - literal vs identifier, exact vs
     //! prefix, quoted vs bare - and the refusal that keeps a body it cannot read STALE

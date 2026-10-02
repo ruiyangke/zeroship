@@ -12,7 +12,7 @@
 // fourth backend adds a column to the sidecar and this script does not change.
 //
 // The artifacts:
-//   (a) crates/zeroship-migrate/tests/dialect_matrix/dialect_table.rs - the Rust
+//   (a) crates/zeroship-migrate/tests/integration/dialect_matrix/dialect_table.rs - the Rust
 //       integration-test review artifact; its parity gate compares every generated
 //       cell with the registered backend policies.
 //   (b) packages/zero-migrate/src/generated/dialect-table.ts - the TS mirror,
@@ -29,7 +29,7 @@
 // This script only transcribes the sidecar into the two typed artifacts. What
 // proves the sidecar itself is split across three tests, and naming one of them
 // for all three is how a gap hides:
-//   * `crates/zeroship-migrate/tests/dialect_matrix/dialect_table_faithfulness.rs` —
+//   * `crates/zeroship-migrate/tests/integration/dialect_matrix/dialect_table_faithfulness.rs` -
 //     corpus ⟷ table bijection and sidecar ⟷ table transcription.
 //   * `generated_cells_match_registered_backend_policies` in the generated Rust
 //     artifact — all generated cells ⟷ the registered backends' required policy
@@ -57,7 +57,7 @@ const sidecarPath = process.env.GEN_DIALECT_SIDECAR
 // diff" freshness gate, matching gen-ir-types' GEN_IR_OUT).
 const rustOut = process.env.GEN_DIALECT_RUST_OUT
   ? resolve(process.env.GEN_DIALECT_RUST_OUT)
-  : resolve(here, "../../../crates/zeroship-migrate/tests/dialect_matrix/dialect_table.rs");
+  : resolve(here, "../../../crates/zeroship-migrate/tests/integration/dialect_matrix/dialect_table.rs");
 const tsOut = process.env.GEN_DIALECT_TS_OUT
   ? resolve(process.env.GEN_DIALECT_TS_OUT)
   : resolve(here, "../src/generated/dialect-table.ts");
@@ -190,7 +190,7 @@ function emitRust(rows) {
 //! field per vendor. That keying is the point: a fourth backend adds a column to
 //! the sidecar and nothing here, in the generator, or in core changes shape.
 //!
-//! Which test proves what: \`crates/zeroship-migrate/tests/dialect_matrix/dialect_table_faithfulness.rs\` proves the
+//! Which test proves what: \`crates/zeroship-migrate/tests/integration/dialect_matrix/dialect_table_faithfulness.rs\` proves the
 //! corpus ⟷ table bijection and the sidecar ⟷ table transcription. The integration
 //! test below compares all generated cells with the registered backends' required
 //! policies. \`op_support_matrix.rs\` is the behavioural gate;
@@ -348,7 +348,7 @@ function emitTs(rows) {
 //
 // One row per (op-kind, variant) recording the token's disposition on each
 // dialect, KEYED BY DIALECT ID — the TS mirror of
-// crates/zeroship-migrate/tests/dialect_matrix/dialect_table.rs.
+// crates/zeroship-migrate/tests/integration/dialect_matrix/dialect_table.rs.
 //
 // There is deliberately NO \`Dialect\` union here. A closed union of the shipping
 // dialect names is the same "core enumerates the vendors" shape as a struct field
