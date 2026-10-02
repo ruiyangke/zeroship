@@ -36,7 +36,7 @@
 //
 // The failure is provoked with a real engine refusal rather than a synthetic
 // string: `perRow.typeId(...)` into a generic `t.text()` column is refused because
-// generic text carries no value-format contract, and that refusal quotes the table
+// generic text declares no typed-id prefix, and that refusal quotes the table
 // name. Using a real diagnostic means the test breaks if the engine stops naming
 // the table at all, which is worth knowing too.
 //
@@ -129,7 +129,7 @@ export default {
 export const name = "b";
 export default {
   data() {
-    // Refused: a generic text column declares no value format for a TypeID.
+    // Refused: a generic text column declares no typed-id prefix.
     table("${TABLE}").backfill({
       set: { tid: perRow.typeId({ prefix: "order" }) },
       cursorColumns: ["id"],
@@ -209,7 +209,7 @@ test("a username matching a word in the diagnostic does not eat that word", asyn
     // substring redactor was consuming it.
     assert.match(
       text,
-      new RegExp(`${TABLE}\\.tid is generic text`),
+      new RegExp(`${TABLE}\\.tid is logical type Text with no typed-id prefix`),
       `the diagnostic must keep the table it names; got: ${text}`,
     );
     assert.doesNotMatch(

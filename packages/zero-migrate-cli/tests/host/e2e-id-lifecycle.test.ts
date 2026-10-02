@@ -59,7 +59,6 @@ type ForeignKeyFacet = {
 };
 
 type IdFacetSnapshot = {
-  formatCheck: { name: string; definition: string } | null;
   identity: string | null;
   foreignKey: ForeignKeyFacet | null;
 };
@@ -67,7 +66,7 @@ type IdFacetSnapshot = {
 type FacetDrift = {
   table: string;
   object: string;
-  field: "format" | "identity" | "reference";
+  field: "identity" | "reference";
   expected: unknown;
   actual: unknown;
 };
@@ -543,15 +542,6 @@ async function mysqlIdentityCounter(
 
 function diffIdFacets(expected: IdFacetSnapshot, actual: IdFacetSnapshot): FacetDrift[] {
   const drift: FacetDrift[] = [];
-  if (JSON.stringify(expected.formatCheck) !== JSON.stringify(actual.formatCheck)) {
-    drift.push({
-      table: "drift_parents",
-      object: "column id",
-      field: "format",
-      expected: expected.formatCheck,
-      actual: actual.formatCheck,
-    });
-  }
   if (expected.identity !== actual.identity) {
     drift.push({
       table: "drift_children",
@@ -573,30 +563,22 @@ function diffIdFacets(expected: IdFacetSnapshot, actual: IdFacetSnapshot): Facet
   return drift;
 }
 
-async function pgIdFacetSnapshot(client: PgClient, schema: string): Promise<IdFacetSnapshot> {
+/** Every CHECK constraint on `drift_parents`, by name. */
+async function pgParentChecks(client: PgClient, schema: string): Promise<string[]> {
   const checks = await client.query(
-    `SELECT con.conname::text AS constraint_name,
-            pg_catalog.pg_get_constraintdef(con.oid, true) AS definition
+    `SELECT con.conname::text AS constraint_name
        FROM pg_catalog.pg_constraint con
        JOIN pg_catalog.pg_class tbl ON tbl.oid = con.conrelid
        JOIN pg_catalog.pg_namespace ns ON ns.oid = tbl.relnamespace
-       JOIN pg_catalog.pg_attribute att
-         ON att.attrelid = tbl.oid AND att.attnum = con.conkey[1]
-      WHERE ns.nspname = $1 AND tbl.relname = 'drift_parents'
-        AND att.attname = 'id' AND con.contype = 'c'
-        AND pg_catalog.array_length(con.conkey, 1) = 1
+      WHERE ns.nspname = $1 AND tbl.relname = 'drift_parents' AND con.contype = 'c'
       ORDER BY con.conname`,
     [schema],
   );
-  assert.ok(checks.rows.length <= 1, "at most one TypeID format CHECK is recovered");
-  const formatCheck = checks.rows[0]
-    ? {
-        name: String(checks.rows[0].constraint_name),
-        definition: String(checks.rows[0].definition),
-      }
-    : null;
+  return checks.rows.map((row) => String(row.constraint_name));
+}
+
+async function pgIdFacetSnapshot(client: PgClient, schema: string): Promise<IdFacetSnapshot> {
   return {
-    formatCheck,
     identity: await pgIdentityKind(client, schema, "drift_children", "id"),
     foreignKey: await pgForeignKeyFacet(
       client,
@@ -606,32 +588,29 @@ async function pgIdFacetSnapshot(client: PgClient, schema: string): Promise<IdFa
   };
 }
 
+/** Every CHECK constraint on `drift_parents`, by name. */
+async function mysqlParentChecks(
+  connection: MysqlConnection,
+  database: string,
+): Promise<string[]> {
+  const [rows] = await connection.query(
+    `SELECT CONSTRAINT_NAME AS constraint_name
+       FROM information_schema.TABLE_CONSTRAINTS
+      WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'drift_parents'
+        AND CONSTRAINT_TYPE = 'CHECK'
+      ORDER BY CONSTRAINT_NAME`,
+    [database],
+  );
+  return (rows as Array<Record<string, unknown>>).map((row) =>
+    String(row.constraint_name ?? row.CONSTRAINT_NAME),
+  );
+}
+
 async function mysqlIdFacetSnapshot(
   connection: MysqlConnection,
   database: string,
 ): Promise<IdFacetSnapshot> {
-  const [rows] = await connection.query(
-    `SELECT tc.CONSTRAINT_NAME AS constraint_name,
-            cc.CHECK_CLAUSE AS definition
-       FROM information_schema.TABLE_CONSTRAINTS tc
-       JOIN information_schema.CHECK_CONSTRAINTS cc
-         ON cc.CONSTRAINT_SCHEMA = tc.CONSTRAINT_SCHEMA
-        AND cc.CONSTRAINT_NAME = tc.CONSTRAINT_NAME
-      WHERE tc.TABLE_SCHEMA = ? AND tc.TABLE_NAME = 'drift_parents'
-        AND tc.CONSTRAINT_TYPE = 'CHECK'
-      ORDER BY tc.CONSTRAINT_NAME`,
-    [database],
-  );
-  const checks = rows as Array<Record<string, unknown>>;
-  assert.ok(checks.length <= 1, "at most one TypeID format CHECK is recovered");
-  const formatCheck = checks[0]
-    ? {
-        name: String(checks[0].constraint_name ?? checks[0].CONSTRAINT_NAME),
-        definition: String(checks[0].definition ?? checks[0].DEFINITION),
-      }
-    : null;
   return {
-    formatCheck,
     identity: await mysqlIdentityKind(connection, database, "drift_children", "id"),
     foreignKey: await mysqlForeignKeyFacet(
       connection,
@@ -1139,9 +1118,11 @@ test("PostgreSQL clean ID facets survive host status and the catalog oracle repo
     await client.query(`CREATE SCHEMA ${pgIdent(schema)}`);
     await applyInitial(migration, schema, driver);
     const clean = await pgIdFacetSnapshot(client, schema);
-    assert.ok(clean.formatCheck, "TypeID format CHECK exists in the live catalog");
-    assert.match(clean.formatCheck.definition, /CHECK/i);
-    assert.match(clean.formatCheck.definition, /parent_/i, "CHECK retains the TypeID prefix");
+    assert.deepEqual(
+      await pgParentChecks(client, schema),
+      [],
+      "a typed id is an ordinary bounded string: its DDL carries no format CHECK",
+    );
     assert.equal(clean.identity, "by default", "identity facet is catalog-visible");
     assert.ok(clean.foreignKey, "typed foreign key exists in the live catalog");
     assert.deepEqual({
@@ -1163,17 +1144,20 @@ test("PostgreSQL clean ID facets survive host status and the catalog oracle repo
     assert.deepEqual(diffIdFacets(clean, await pgIdFacetSnapshot(client, schema)), []);
 
     await client.query(
-      `ALTER TABLE ${pgIdent(schema)}.drift_parents
-         DROP CONSTRAINT ${pgIdent(clean.formatCheck.name)};
-       ALTER TABLE ${pgIdent(schema)}.drift_children
+      `ALTER TABLE ${pgIdent(schema)}.drift_children
          ALTER COLUMN id DROP IDENTITY;
        ALTER TABLE ${pgIdent(schema)}.drift_children
-         DROP CONSTRAINT ${pgIdent(clean.foreignKey.name)}`,
+         DROP CONSTRAINT ${pgIdent(clean.foreignKey.name)};
+       ALTER TABLE ${pgIdent(schema)}.drift_parents
+         ADD CONSTRAINT probe_check CHECK (payload IS NULL OR payload <> '')`,
     );
+    // CONTROL for the no-CHECK assertion above: the same read sees a CHECK once one
+    // exists, so its empty answer was not a blind query.
+    assert.deepEqual(await pgParentChecks(client, schema), ["probe_check"]);
     const drift = diffIdFacets(clean, await pgIdFacetSnapshot(client, schema));
     assert.deepEqual(
       drift.map((entry) => entry.field).sort(),
-      ["format", "identity", "reference"],
+      ["identity", "reference"],
       `catalog drift report: ${JSON.stringify(drift)}`,
     );
     assert.ok(drift.every((entry) => entry.actual === null), "each dropped facet is reported");
@@ -1206,9 +1190,11 @@ test("MySQL clean ID facets survive host status and the catalog oracle reports t
     await admin.query(`CREATE DATABASE ${mysqlIdent(database)}`);
     await applyInitial(migration, database, driver);
     const clean = await mysqlIdFacetSnapshot(admin, database);
-    assert.ok(clean.formatCheck, "TypeID format CHECK exists in the live catalog");
-    assert.ok(clean.formatCheck.definition.length > 0, "format CHECK definition is recovered");
-    assert.match(clean.formatCheck.definition, /parent_/i, "CHECK retains the TypeID prefix");
+    assert.deepEqual(
+      await mysqlParentChecks(admin, database),
+      [],
+      "a typed id is an ordinary bounded string: its DDL carries no format CHECK",
+    );
     assert.equal(clean.identity, "auto_increment", "identity facet is catalog-visible");
     assert.ok(clean.foreignKey, "typed foreign key exists in the live catalog");
     assert.deepEqual({
@@ -1228,17 +1214,20 @@ test("MySQL clean ID facets survive host status and the catalog oracle reports t
     assert.deepEqual(diffIdFacets(clean, await mysqlIdFacetSnapshot(admin, database)), []);
 
     await admin.query(
-      `ALTER TABLE ${mysqlIdent(database)}.drift_parents
-         DROP CHECK ${mysqlIdent(clean.formatCheck.name)};
-       ALTER TABLE ${mysqlIdent(database)}.drift_children
+      `ALTER TABLE ${mysqlIdent(database)}.drift_children
          MODIFY COLUMN id BIGINT NOT NULL;
        ALTER TABLE ${mysqlIdent(database)}.drift_children
-         DROP FOREIGN KEY ${mysqlIdent(clean.foreignKey.name)}`,
+         DROP FOREIGN KEY ${mysqlIdent(clean.foreignKey.name)};
+       ALTER TABLE ${mysqlIdent(database)}.drift_parents
+         ADD CONSTRAINT probe_check CHECK (payload IS NULL OR payload <> '')`,
     );
+    // CONTROL for the no-CHECK assertion above: the same read sees a CHECK once one
+    // exists, so its empty answer was not a blind query.
+    assert.deepEqual(await mysqlParentChecks(admin, database), ["probe_check"]);
     const drift = diffIdFacets(clean, await mysqlIdFacetSnapshot(admin, database));
     assert.deepEqual(
       drift.map((entry) => entry.field).sort(),
-      ["format", "identity", "reference"],
+      ["identity", "reference"],
       `catalog drift report: ${JSON.stringify(drift)}`,
     );
     assert.ok(drift.every((entry) => entry.actual === null), "each dropped facet is reported");

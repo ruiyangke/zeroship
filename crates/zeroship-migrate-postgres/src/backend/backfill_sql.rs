@@ -709,6 +709,15 @@ fn pg_cursor_scalar_type(database_type: &str) -> Option<CursorScalarType> {
     }
 }
 
+/// One cursor component's catalog type, spelled the way the plan's contract spells it.
+///
+/// The planned contract takes its `database_type` from the folded snapshot, which
+/// carries a length-qualified type's length INLINE (`character varying(36)` for a
+/// typed id, `character(8)` for `t.char(8)`). `information_schema` splits that
+/// length out into `character_maximum_length` and reports the bare base name, so it
+/// is recomposed here. Keyed on the catalog datum rather than on type names, exactly
+/// as drift introspection recomposes it: PostgreSQL populates the column only for
+/// the length-taking types and leaves it NULL everywhere else.
 fn normalize_catalog_type(
     data_type: &str,
     udt_name: &str,
@@ -731,10 +740,8 @@ fn normalize_catalog_type(
         .collect::<Vec<_>>()
         .join(" ")
         .to_ascii_lowercase();
-    if normalized == "character" {
-        if let Some(length) = character_maximum_length.filter(|length| *length > 0) {
-            return Ok(format!("character({length})"));
-        }
+    if let Some(length) = character_maximum_length.filter(|length| *length > 0) {
+        return Ok(format!("{normalized}({length})"));
     }
     Ok(normalized)
 }

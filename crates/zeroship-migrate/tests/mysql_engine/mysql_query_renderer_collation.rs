@@ -92,6 +92,22 @@ const CHARACTER_COLUMNS: [(&str, &str); 7] = [
     ("mystery", "VARCHAR(191)"),
 ];
 
+/// The collation the renderer pins on each of [`CHARACTER_COLUMNS`].
+///
+/// `pointer` is a `ref`: the stored copy of another row's typed id. It pins BYTEWISE
+/// comparison (`utf8mb4_0900_bin`, through `ddl_column_type_for_def`) so it shares the
+/// comparison domain of the bytewise id it references - MySQL refuses a foreign key
+/// between string columns of different collations. Every other character column pins
+/// the case-sensitive default. Both are case-sensitive, so the comparison and
+/// uniqueness claims below hold for all seven.
+fn pinned_collation(column: &str) -> &'static str {
+    if column == "pointer" {
+        "utf8mb4_0900_bin"
+    } else {
+        "utf8mb4_0900_as_cs"
+    }
+}
+
 /// The NON-character columns, which must carry no collation at all. `JSON COLLATE ...`
 /// is a parse error rather than a harmless redundancy, so a wrong pin here would fail
 /// the `CREATE TABLE` outright.
@@ -455,10 +471,11 @@ async fn the_catalog_reports_a_pinned_case_sensitive_collation_on_every_characte
                          does not do for a character column"
                     )
                 })?;
-            if collation != "utf8mb4_0900_as_cs" {
+            let pinned = pinned_collation(column);
+            if collation != pinned {
                 return Err(format!(
-                    "{column} ({spelling}) carries {collation}; the engine's \
-                     case-sensitive default is utf8mb4_0900_as_cs. Table text:\n{create}"
+                    "{column} ({spelling}) carries {collation}; the renderer pins \
+                     {pinned}. Table text:\n{create}"
                 ));
             }
             // The corroborating witness. A catalog row alone cannot tell a pin from an
@@ -468,7 +485,7 @@ async fn the_catalog_reports_a_pinned_case_sensitive_collation_on_every_characte
                 .lines()
                 .find(|line| line.trim_start().starts_with(&clause.to_ascii_lowercase()))
                 .ok_or_else(|| format!("no line for {column} in the table text:\n{create}"))?;
-            if !line.contains("collate utf8mb4_0900_as_cs") {
+            if !line.contains(&format!("collate {pinned}")) {
                 return Err(format!(
                     "the table text carries no EXPLICIT collation on {column}, so the \
                      catalog reading above is inherited rather than pinned:\n{create}"

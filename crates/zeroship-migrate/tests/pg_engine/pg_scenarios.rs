@@ -583,16 +583,19 @@ async fn per_row_backfill_generates_fresh_exact_values_on_live_postgres() {
         ]}"#,
     )
     .expect("parse per-row schema fixture");
-    let resolved =
-        resolve_create_table_policy(&authored, &support::no_inject("app"), &cfg.project_schema)
-            .expect("resolve no-inject table policy");
+    let resolved = resolve_create_table_policy(
+        &authored,
+        &support::no_inject(&cfg.project_schema),
+        &cfg.project_schema,
+    )
+    .expect("resolve no-inject table policy");
     let ir = serde_json::to_string(&resolved).expect("serialize resolved per-row IR");
     let author = IrAuthor::new(
         zeroship_migrate::shipping_vendors(),
         &cfg.project_schema,
         "app_test",
         &POSTGRES,
-        &support::no_inject("app"),
+        &support::no_inject(&cfg.project_schema),
     );
     let guard_cfg = GuardConfig::from_policy(
         support::no_inject(&cfg.project_schema),
@@ -725,7 +728,7 @@ async fn per_row_backfill_generates_fresh_exact_values_on_live_postgres() {
     assert!(
         error
             .to_string()
-            .contains("generic text with no value-format contract"),
+            .contains("plain_text is logical type Text with no typed-id prefix"),
         "unexpected generic-text validation error: {error}"
     );
     let changed_plain_text: i64 = session
@@ -744,6 +747,143 @@ async fn per_row_backfill_generates_fresh_exact_values_on_live_postgres() {
         changed_plain_text, 0,
         "destination-family rejection must happen before the first row change"
     );
+
+    drop_schemas(&session, &cfg).await;
+}
+
+// ---------------------------------------------------------------------------
+// Scenario - a backfill keyed on a BOUNDED string cursor applies
+//
+// A typed id is `character varying(36)` storage, and `t.string({ length })` is the
+// same family. The plan pins the cursor's type from the folded snapshot, which spells
+// the length inline; the apply re-reads it from `information_schema`, which reports
+// the length in a column of its own. Unless the two are recomposed into one spelling,
+// every backfill keyed on such a column is refused as a drifted cursor contract on a
+// table nobody touched.
+// ---------------------------------------------------------------------------
+#[compio::test]
+async fn a_backfill_keyed_on_a_bounded_string_cursor_applies_on_live_postgres() {
+    use zeroship_migrate::driver::SqlSession;
+
+    let url = crate::support::pg_database();
+    let session = PgDevSession::connect(&url);
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
+
+    let backend = PostgresBackend::new_generic(&session);
+    backend.ensure_journal(&cfg).await.expect("ensure journal");
+    let policy = support::no_inject(&cfg.project_schema);
+    let author = IrAuthor::new(
+        zeroship_migrate::shipping_vendors(),
+        &cfg.project_schema,
+        "app_test",
+        &POSTGRES,
+        &policy,
+    );
+    let guard_cfg = GuardConfig::from_policy(policy.clone(), POSTGRES, &cfg.project_schema);
+    let schema_ir: MigrationIr = serde_json::from_str(
+        r#"{"ir_version":1,"name":"bounded_cursor_schema","ops":[
+          {"op":"createTable","name":"keyed","columns":[
+            {"name":"id","type":{"string":{"length":36}},"nullable":false,"idPrefix":"emp"},
+            {"name":"label","type":"text"}
+          ],"primaryKey":["id"]}
+        ]}"#,
+    )
+    .expect("parse the bounded-cursor schema fixture");
+    let schema_artifact = author
+        .load_and_lower_guarded(
+            &serde_json::to_string(&schema_ir).expect("serialize the schema fixture"),
+            "app_test",
+            &BTreeMap::new(),
+            &LiveSchema::default(),
+            &guard_cfg,
+        )
+        .expect("the schema envelope lowers");
+    let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
+    engine
+        .apply_plan(
+            &schema_artifact.plan.steps,
+            Approval::Approved,
+            &backend,
+            &cfg,
+            "bounded-cursor-schema",
+            LockMode::Acquire,
+        )
+        .await
+        .expect("the schema envelope applies");
+
+    // The data envelope lowers against the folded history, as a deploy hands the
+    // lowerer every earlier migration. That snapshot is what pins the cursor
+    // contract the apply then re-proves against the live catalog.
+    let folded = zeroship_migrate::fold_ops(
+        zeroship_migrate::shipping_vendors(),
+        &schema_ir.ops,
+        &POSTGRES,
+        &cfg.project_schema,
+        &policy,
+    )
+    .expect("fold the schema envelope");
+    let mut live = LiveSchema::from_tables(folded.tables.keys().cloned().collect());
+    live.table_snapshots = folded.tables;
+    let data_ir = r#"{"ir_version":1,"name":"bounded_cursor_data","irreversible":"overwrites label without recording its pre-images","ops":[
+          {"op":"insert","table":"keyed","columns":["id"],
+           "rows":[["emp_0000000000000000000000000a"],["emp_0000000000000000000000000b"],["emp_0000000000000000000000000c"]]},
+          {"op":"backfill","table":"keyed","name":"fill_label",
+           "cursorColumns":["id"],"cursorStability":{"mode":"guardUpdates"},"batchSize":2,
+           "set":{"label":{"node":"literal","value":"filled"}}}
+        ]}"#;
+    let registry: BTreeMap<String, String> = [("keyed".to_string(), "app_test".to_string())]
+        .into_iter()
+        .collect();
+    let data_artifact = author
+        .load_and_lower_guarded(data_ir, "app_test", &registry, &live, &guard_cfg)
+        .expect("the bounded-cursor backfill lowers");
+
+    // NON-VACUITY: the plan must actually pin the bounded cursor type, or the apply
+    // has no planned contract to compare the live catalog against.
+    let pinned: Vec<String> = data_artifact
+        .plan
+        .steps
+        .iter()
+        .filter_map(|step| match step {
+            PlanStep::Backfill { spec, .. } => spec.cursor_contract.as_ref(),
+            _ => None,
+        })
+        .flat_map(|contract| contract.columns.iter().map(|c| c.database_type.clone()))
+        .collect();
+    assert_eq!(
+        pinned,
+        vec!["character varying(36)".to_string()],
+        "the backfill must pin the bounded cursor's type from the folded snapshot"
+    );
+
+    engine
+        .apply_plan(
+            &data_artifact.plan.steps,
+            Approval::Approved,
+            &backend,
+            &cfg,
+            "bounded-cursor-data",
+            LockMode::Acquire,
+        )
+        .await
+        .expect("a backfill keyed on a bounded string cursor applies on live PostgreSQL");
+
+    let filled: i64 = session
+        .query_one(
+            &format!(
+                "SELECT count(*) AS filled FROM \"{}\".keyed WHERE label = 'filled'",
+                cfg.project_schema
+            ),
+            &[],
+        )
+        .await
+        .expect("count the backfilled rows")
+        .try_get("filled")
+        .expect("decode the backfilled-row count");
+    assert_eq!(filled, 3, "every row in the cohort must be backfilled");
 
     drop_schemas(&session, &cfg).await;
 }
@@ -6546,16 +6686,19 @@ async fn a_resumed_per_row_backfill_does_not_regenerate_values_it_already_wrote(
         ]}"#,
     )
     .expect("parse the per-row resume schema fixture");
-    let resolved =
-        resolve_create_table_policy(&authored, &support::no_inject("app"), &cfg.project_schema)
-            .expect("resolve no-inject table policy");
+    let resolved = resolve_create_table_policy(
+        &authored,
+        &support::no_inject(&cfg.project_schema),
+        &cfg.project_schema,
+    )
+    .expect("resolve no-inject table policy");
     let ir = serde_json::to_string(&resolved).expect("serialize resolved IR");
     let author = IrAuthor::new(
         zeroship_migrate::shipping_vendors(),
         &cfg.project_schema,
         "app_test",
         &POSTGRES,
-        &support::no_inject("app"),
+        &support::no_inject(&cfg.project_schema),
     );
     let guard_cfg = GuardConfig::from_policy(
         support::no_inject(&cfg.project_schema),

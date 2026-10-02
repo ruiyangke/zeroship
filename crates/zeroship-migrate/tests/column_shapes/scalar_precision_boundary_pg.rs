@@ -86,7 +86,7 @@ async fn round_trip(
         &cfg.project_schema,
         OWNER,
         &zeroship_migrate_postgres::DIALECT,
-        &support::confined_charter(),
+        &support::no_inject(&cfg.project_schema),
     );
     let guard_cfg = GuardConfig::from_policy(
         support::no_inject(&cfg.project_schema),

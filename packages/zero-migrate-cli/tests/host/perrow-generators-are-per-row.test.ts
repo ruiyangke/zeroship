@@ -24,9 +24,9 @@
 //                         memoised per intent would tie them together.
 //   format honoured       the TypeID prefix survives into the stored value
 //
-// The value-format contract is load-bearing rather than decorative: the engine
+// The typed-id prefix is load-bearing rather than decorative: the engine
 // REFUSES `perRow.typeId({prefix})` into a generic `t.text()` column, because
-// generic text carries no value-format contract to validate against. The `tid`
+// generic text declares no typed-id prefix to validate against. The `tid`
 // column here is declared `t.typedId(...)` for that reason.
 //
 // GATE: the run's PostgreSQL container.

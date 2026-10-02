@@ -28,6 +28,7 @@
 
 use crate::support;
 use std::collections::BTreeMap;
+use zeroship_migrate::apply::backend::MigrationBackend;
 use zeroship_migrate::apply::executor::LockMode;
 use zeroship_migrate::render::step::PlanStep;
 use zeroship_migrate::{Approval, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, MigrationEngine};
@@ -74,6 +75,10 @@ async fn an_engine_rendered_down_restores_the_schema_its_up_changed() {
         let dir = tempfile::tempdir().expect("tempdir");
         let be = SqliteBackend::open(&dir.path().join("r.sqlite")).expect("open");
         let cfg = ExecutorConfig::new(PROJECT, PROJECT, support::no_inject(PROJECT));
+        // The journal lives in the app file, so the first apply creates its tables.
+        // Ensuring it up front keeps them out of the comparison: a rollback reverses
+        // the migration, not the journal that records it.
+        be.ensure_journal(&cfg).await.expect("ensure the journal");
         let eng = MigrationEngine::new(zeroship_migrate::shipping_vendors());
         let mut live = LiveSchema::default();
         let reg: BTreeMap<String, String> = [
@@ -87,7 +92,7 @@ async fn an_engine_rendered_down_restores_the_schema_its_up_changed() {
             PROJECT,
             APP,
             &zeroship_migrate_sqlite::DIALECT,
-            &support::confined_charter(),
+            &support::no_inject(PROJECT),
         );
         let gc = GuardConfig::from_policy(
             support::no_inject(PROJECT),

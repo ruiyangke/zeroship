@@ -57,7 +57,7 @@ async fn a_plan_that_fails_halfway_leaves_the_journal_agreeing_with_the_database
         PROJECT,
         APP,
         &zeroship_migrate_sqlite::DIALECT,
-        &support::confined_charter(),
+        &support::no_inject(PROJECT),
     )
     .load_and_lower_guarded(
         TWO_STEP_PLAN,

@@ -89,7 +89,7 @@ fn lower_for(
         PROJECT,
         APP,
         dialect,
-        &support::confined_charter(),
+        &support::no_inject(PROJECT),
     )
     .load_and_lower_guarded(
         bytes,
