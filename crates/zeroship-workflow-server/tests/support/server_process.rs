@@ -1,3 +1,8 @@
+#![allow(
+    clippy::future_not_send,
+    reason = "a spawned process and its compio clients stay on the test runtime"
+)]
+
 use ntex::{client::Client, http::StatusCode};
 #[path = "queue_control.rs"]
 mod queue_control;
@@ -60,7 +65,6 @@ impl ServerProcess {
     }
 
     /// How many app-facts observations the Control peer has answered.
-    #[allow(dead_code, reason = "the http binary shares this support but counts no app facts")]
     pub fn control_facts_requests(&self) -> usize {
         self._control.facts_requests()
     }

@@ -6,14 +6,7 @@
     reason = "platform fixtures stay on their compio runtime"
 )]
 
-#[path = "support/holds.rs"]
-mod holds;
-#[allow(
-    dead_code,
-    reason = "the shared platform fixture also supports process tests"
-)]
-#[path = "support/platform.rs"]
-mod platform;
+use crate::support::{holds, platform};
 
 use std::{num::NonZeroU32, rc::Rc, time::Duration};
 use zeroship_core::{
@@ -166,7 +159,7 @@ async fn control_zone_facts_decide_placement() {
     let home_worker = joined(
         &platform,
         &service,
-        &platform.default_join_signer_id,
+        platform::DEFAULT_JOIN_SIGNER_ID,
         ZoneId::default_zone().as_str(),
     )
     .await;
@@ -261,7 +254,7 @@ async fn archived_apps_stay_placeable_and_deleted_apps_do_not() {
     let worker = joined(
         &platform,
         &service,
-        &platform.default_join_signer_id,
+        platform::DEFAULT_JOIN_SIGNER_ID,
         ZoneId::default_zone().as_str(),
     )
     .await;
@@ -417,7 +410,7 @@ async fn an_instance_whose_lease_has_run_out_is_not_placed() {
     let worker = joined(
         &platform,
         &service,
-        &platform.default_join_signer_id,
+        platform::DEFAULT_JOIN_SIGNER_ID,
         ZoneId::default_zone().as_str(),
     )
     .await;

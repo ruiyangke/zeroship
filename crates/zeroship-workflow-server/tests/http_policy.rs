@@ -4,14 +4,7 @@
     reason = "HTTP fixtures use the owning ntex compio runtime"
 )]
 
-#[path = "support/holds.rs"]
-mod holds;
-#[allow(
-    dead_code,
-    reason = "the shared platform fixture also supports process tests"
-)]
-#[path = "support/platform.rs"]
-mod platform;
+use crate::support::{holds, platform};
 
 use futures::{
     channel::oneshot,
@@ -158,7 +151,7 @@ impl Fixture {
             .unwrap(),
             key: ServiceSigningKey::generate(),
         };
-        platform.admin.execute("INSERT INTO zeroship.worker_instances(id,ring_key,public_key,advertise_host,advertise_port,status,join_signer_id,join_token_id,execution_zone_id,expires_at) VALUES($1,$2,$3,'127.0.0.1',8080,'active',$4,'tok_testfixturedefault','ezn_default000000000000000000',now() + interval '1 hour')", &[&worker.as_str(), &vec![1_u8], &signer.key.verifying_key_bytes().to_vec(), &platform.default_join_signer_id]).await.unwrap();
+        platform.admin.execute("INSERT INTO zeroship.worker_instances(id,ring_key,public_key,advertise_host,advertise_port,status,join_signer_id,join_token_id,execution_zone_id,expires_at) VALUES($1,$2,$3,'127.0.0.1',8080,'active',$4,'tok_testfixturedefault','ezn_default000000000000000000',now() + interval '1 hour')", &[&worker.as_str(), &vec![1_u8], &signer.key.verifying_key_bytes().to_vec(), &platform::DEFAULT_JOIN_SIGNER_ID]).await.unwrap();
         // Production eligibility: Control's own rows under the manager's grants.
         let eligibility = Rc::new(
             connect_eligibility(&platform.runtime_url, Options::default())

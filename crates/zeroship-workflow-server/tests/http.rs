@@ -4,16 +4,7 @@
     reason = "native HTTP clients run on the ntex compio test runtime"
 )]
 
-#[path = "support/platform.rs"]
-mod platform;
-#[path = "support/app_facts.rs"]
-mod app_facts;
-#[path = "support/holds.rs"]
-mod holds;
-#[path = "support/policy.rs"]
-mod policy_fixture;
-#[path = "support/server_process.rs"]
-mod server_process;
+use crate::support::{holds, platform, policy as policy_fixture, server_process};
 
 use compio::io::{AsyncRead, AsyncWriteExt};
 use ntex::{client::Client, http::StatusCode};
@@ -176,7 +167,7 @@ async fn native_worker_client_uses_the_authenticated_coordinator_api() {
         Error::Refused(FailureCode::Unauthenticated)
     );
     fixture.admin.execute("INSERT INTO zeroship.worker_instances(id,ring_key,public_key,advertise_host,advertise_port,status,join_signer_id,join_token_id,execution_zone_id,expires_at) VALUES($1,$2,$3,'127.0.0.1',8080,'active',$4,'tok_testfixturedefault','ezn_default000000000000000000',now() + interval '1 hour')",
-        &[&worker.as_str(), &vec![7u8], &public, &fixture.default_join_signer_id]).await.unwrap();
+        &[&worker.as_str(), &vec![7u8], &public, &platform::DEFAULT_JOIN_SIGNER_ID]).await.unwrap();
     client.register(&registration).await.unwrap();
     // Independent requests must mint fresh assertions despite sharing a signer.
     client.register(&registration).await.unwrap();
@@ -375,7 +366,7 @@ async fn native_worker_client_uses_the_authenticated_coordinator_api() {
     let backup = WorkerId::mint();
     let key = ServiceSigningKey::generate();
     fixture.admin.execute("INSERT INTO zeroship.worker_instances(id,ring_key,public_key,advertise_host,advertise_port,status,join_signer_id,join_token_id,execution_zone_id,expires_at) VALUES($1,$2,$3,'127.0.0.1',8080,'active',$4,'tok_testfixturedefault','ezn_default000000000000000000',now() + interval '1 hour')",
-        &[&backup.as_str(), &vec![8u8], &key.verifying_key_bytes().to_vec(), &fixture.default_join_signer_id]).await.unwrap();
+        &[&backup.as_str(), &vec![8u8], &key.verifying_key_bytes().to_vec(), &platform::DEFAULT_JOIN_SIGNER_ID]).await.unwrap();
     let issuer = ServiceIssuer::parse(&format!(
         "spiffe://zeroship.ai/svc/worker/{}",
         backup.as_str()
@@ -478,7 +469,7 @@ async fn a_lapsed_instance_lease_refuses_a_worker_and_is_covered_by_readiness() 
     ));
     let client = WorkerCoordinator::new(&server.url, auth, Options::default()).unwrap();
     fixture.admin.execute("INSERT INTO zeroship.worker_instances(id,ring_key,public_key,advertise_host,advertise_port,status,join_signer_id,join_token_id,execution_zone_id,expires_at) VALUES($1,$2,$3,'127.0.0.1',8080,'active',$4,'tok_testfixturedefault','ezn_default000000000000000000',now() + interval '1 hour')",
-        &[&worker.as_str(), &vec![9u8], &public, &fixture.default_join_signer_id]).await.unwrap();
+        &[&worker.as_str(), &vec![9u8], &public, &platform::DEFAULT_JOIN_SIGNER_ID]).await.unwrap();
     client
         .register(&RegisterWorker {
             capacity: NonZeroU32::new(1).unwrap(),
@@ -798,7 +789,7 @@ async fn replicas_authenticate_metadata_and_keep_customer_execution_off_the_prot
         StatusCode::UNAUTHORIZED
     );
     fixture.admin.execute("INSERT INTO zeroship.worker_instances(id,ring_key,public_key,advertise_host,advertise_port,status,join_signer_id,join_token_id,execution_zone_id,expires_at) VALUES($1,$2,$3,'127.0.0.1',8080,'active',$4,'tok_testfixturedefault','ezn_default000000000000000000',now() + interval '1 hour')",
-        &[&worker.as_str(),&vec![1u8],&worker_key.verifying_key_bytes().to_vec(),&fixture.default_join_signer_id]).await.unwrap();
+        &[&worker.as_str(),&vec![1u8],&worker_key.verifying_key_bytes().to_vec(),&platform::DEFAULT_JOIN_SIGNER_ID]).await.unwrap();
     assert_eq!(
         post(
             &client,

@@ -9,10 +9,6 @@
 //! ([`ScriptedAppFacts`]).
 
 #![allow(
-    dead_code,
-    reason = "each including target uses the source its own cases need"
-)]
-#![allow(
     clippy::future_not_send,
     reason = "fixture clients stay on their compio runtime"
 )]

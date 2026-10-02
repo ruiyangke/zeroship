@@ -9,18 +9,7 @@
     reason = "journal and queue fixtures stay on their compio runtime"
 )]
 
-#[path = "support/deployments.rs"]
-mod deployments;
-#[path = "support/holds.rs"]
-mod holds;
-#[path = "support/journal.rs"]
-mod journal;
-#[allow(
-    dead_code,
-    reason = "the shared platform fixture also supports process tests"
-)]
-#[path = "support/platform.rs"]
-mod platform;
+use crate::support::{deployments, holds, journal, platform};
 
 use futures::{
     channel::oneshot,

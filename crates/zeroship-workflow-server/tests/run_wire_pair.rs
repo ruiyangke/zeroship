@@ -28,22 +28,9 @@
     reason = "HTTP and database fixtures stay on the ntex compio runtime"
 )]
 
-#[path = "support/app_facts.rs"]
-mod app_facts;
-#[path = "support/holds.rs"]
-mod holds;
-#[path = "support/journal.rs"]
-mod journal;
-#[path = "support/platform.rs"]
-mod platform;
-#[path = "support/policy.rs"]
-mod policy_fixture;
-#[allow(
-    dead_code,
-    reason = "the shared process fixture also supports host failure tests"
-)]
-#[path = "support/server_process.rs"]
-mod server_process;
+use crate::support::{
+    holds, journal, platform, policy as policy_fixture, run_journal, server_process,
+};
 
 use ntex::client::Client;
 use serde_json::json;
@@ -115,7 +102,7 @@ impl Fixture {
         platform.admin.execute(
             "INSERT INTO zeroship.worker_instances(id,ring_key,public_key,advertise_host,advertise_port,status,join_signer_id,join_token_id,execution_zone_id,expires_at) \
              VALUES($1,$2,$3,'127.0.0.1',8080,'active',$4,'tok_testfixturedefault','ezn_default000000000000000000',now() + interval '1 hour')",
-            &[&worker.as_str(), &vec![1_u8], &public, &platform.default_join_signer_id],
+            &[&worker.as_str(), &vec![1_u8], &public, &platform::DEFAULT_JOIN_SIGNER_ID],
         ).await.unwrap();
 
         let issuer = ServiceIssuer::parse(&format!(
@@ -480,7 +467,7 @@ async fn the_client_and_the_service_agree_on_every_run_call() {
 async fn the_client_and_the_service_agree_on_a_task_payload_read() {
     let fixture = Box::pin(Fixture::new()).await;
     let run = journal::seed_run(&fixture.platform, &fixture.app).await;
-    let leased = journal::seed_leased_task(
+    let leased = run_journal::seed_leased_task(
         &fixture.platform,
         &fixture.app,
         &run,
@@ -566,8 +553,8 @@ async fn the_client_and_the_service_agree_on_a_task_executable_resolution() {
     let run = journal::seed_run(&fixture.platform, &fixture.app).await;
     // Admission has to be OPEN for a pin to resolve: the journal reads an
     // `admission_generation` under the hold scope and refuses without one.
-    let deploy = journal::seed_journal_hold(&fixture.platform, &fixture.app).await;
-    let leased = journal::seed_leased_task(
+    let deploy = run_journal::seed_journal_hold(&fixture.platform, &fixture.app).await;
+    let leased = run_journal::seed_leased_task(
         &fixture.platform,
         &fixture.app,
         &run,
@@ -651,7 +638,7 @@ async fn the_client_and_the_service_agree_on_a_task_executable_resolution() {
 async fn the_client_and_the_service_agree_on_a_release_and_a_receipt() {
     let fixture = Box::pin(Fixture::new()).await;
     let run = journal::seed_run(&fixture.platform, &fixture.app).await;
-    journal::seed_journal_hold(&fixture.platform, &fixture.app).await;
+    run_journal::seed_journal_hold(&fixture.platform, &fixture.app).await;
     // NO SEEDED DISPATCH HERE, deliberately: `tasks::assign` claims a run only
     // while `runs.task_id` is null, so a hand-seeded task would hold the run and
     // the claim below would answer deferred instead of handing out work. The
@@ -765,7 +752,7 @@ async fn the_client_and_the_service_agree_on_a_release_and_a_receipt() {
 async fn the_client_and_the_service_agree_on_a_payload_reservation() {
     let fixture = Box::pin(Fixture::new()).await;
     let run = journal::seed_run(&fixture.platform, &fixture.app).await;
-    let leased = journal::seed_leased_task(
+    let leased = run_journal::seed_leased_task(
         &fixture.platform,
         &fixture.app,
         &run,

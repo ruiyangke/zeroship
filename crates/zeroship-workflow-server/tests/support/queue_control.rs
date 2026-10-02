@@ -6,6 +6,11 @@
 //! catalog its own seeding never wrote. It answers from the same fixture source
 //! the in-process cases bind, rather than a second copy of the query.
 
+#![allow(
+    clippy::future_not_send,
+    reason = "the signed peer serves on its compio runtime"
+)]
+
 use ntex::web::{
     self, test,
     types::{Json, State},
@@ -107,7 +112,6 @@ impl Control {
         format!("http://{}/", self.server.addr())
     }
     /// How many app-facts observations this peer has answered.
-    #[allow(dead_code, reason = "the http binary shares this support but counts no app facts")]
     pub fn facts_requests(&self) -> usize {
         self.facts_requests.load(Ordering::SeqCst)
     }

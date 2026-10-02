@@ -4,22 +4,7 @@
     reason = "process, HTTP and database fixtures share the ntex compio runtime"
 )]
 
-#[path = "support/holds.rs"]
-mod holds;
-#[path = "support/platform.rs"]
-mod platform;
-#[path = "support/app_facts.rs"]
-mod app_facts;
-#[path = "support/journal.rs"]
-mod journal;
-#[path = "support/policy.rs"]
-mod policy_fixture;
-#[allow(
-    dead_code,
-    reason = "the shared process fixture also exposes explicit connection-failure probes"
-)]
-#[path = "support/server_process.rs"]
-mod server_process;
+use crate::support::{holds, journal, platform, policy as policy_fixture, server_process};
 
 use ntex::{client::Client, http::StatusCode};
 use serde_json::json;

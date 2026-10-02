@@ -4,16 +4,7 @@
     reason = "HTTP fixtures use the owning ntex compio runtime"
 )]
 
-#[path = "support/holds.rs"]
-mod holds;
-#[path = "support/journal.rs"]
-mod journal;
-#[allow(
-    dead_code,
-    reason = "the shared platform fixture also supports process tests"
-)]
-#[path = "support/platform.rs"]
-mod platform;
+use crate::support::{holds, journal, platform, run_journal};
 
 use futures::future::LocalBoxFuture;
 use ntex::{
@@ -97,7 +88,7 @@ impl Fixture {
             worker.as_str()
         ))
         .unwrap();
-        platform.admin.execute("INSERT INTO zeroship.worker_instances(id,ring_key,public_key,advertise_host,advertise_port,status,join_signer_id,join_token_id,execution_zone_id,expires_at) VALUES($1,$2,$3,'127.0.0.1',8080,'active',$4,'tok_testfixturedefault','ezn_default000000000000000000',now() + interval '1 hour')", &[&worker.as_str(), &vec![1_u8], &key.verifying_key_bytes().to_vec(), &platform.default_join_signer_id]).await.unwrap();
+        platform.admin.execute("INSERT INTO zeroship.worker_instances(id,ring_key,public_key,advertise_host,advertise_port,status,join_signer_id,join_token_id,execution_zone_id,expires_at) VALUES($1,$2,$3,'127.0.0.1',8080,'active',$4,'tok_testfixturedefault','ezn_default000000000000000000',now() + interval '1 hour')", &[&worker.as_str(), &vec![1_u8], &key.verifying_key_bytes().to_vec(), &platform::DEFAULT_JOIN_SIGNER_ID]).await.unwrap();
 
         let eligibility = Rc::new(
             connect_eligibility(&platform.runtime_url, Options::default())
@@ -601,7 +592,7 @@ async fn restart_is_served_only_with_the_journals_deployment_hold() {
     assert!(matches!(failure, RunFailure::Unavailable {}), "{failure:?}");
 
     // The served arm: the one row added, and the same request again.
-    let deploy = journal::seed_journal_hold(&fixture.platform, &fixture.app).await;
+    let deploy = run_journal::seed_journal_hold(&fixture.platform, &fixture.app).await;
     let response = test::call_service(&app, fixture.restart_request(&run).to_request()).await;
     let status = response.status();
     let body = test::read_body(response).await;

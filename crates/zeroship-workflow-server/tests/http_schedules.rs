@@ -4,16 +4,7 @@
     reason = "the HTTP process fixture and native clients share the ntex compio runtime"
 )]
 
-#[path = "support/platform.rs"]
-mod platform;
-#[path = "support/app_facts.rs"]
-mod app_facts;
-#[allow(
-    dead_code,
-    reason = "shared process fixture supports other failure probes"
-)]
-#[path = "support/server_process.rs"]
-mod server_process;
+use crate::support::{platform, server_process};
 
 use compio::io::{AsyncRead, AsyncWriteExt};
 use ntex::{client::Client, http::StatusCode};

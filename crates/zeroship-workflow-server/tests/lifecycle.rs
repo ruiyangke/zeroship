@@ -5,15 +5,7 @@
     reason = "platform fixtures use their compio runtime"
 )]
 
-#[path = "support/app_facts.rs"]
-mod app_facts;
-#[path = "support/holds.rs"]
-mod holds;
-#[allow(dead_code, reason = "the platform fixture also supports process tests")]
-#[path = "support/platform.rs"]
-mod platform;
-#[path = "support/zone.rs"]
-mod zone;
+use crate::support::{app_facts, holds, platform, zone};
 
 use std::{collections::BTreeSet, rc::Rc, time::Duration};
 use zeroship_core::{

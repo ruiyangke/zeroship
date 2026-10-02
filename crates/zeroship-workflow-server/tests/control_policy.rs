@@ -5,13 +5,7 @@
     reason = "platform fixtures use their compio runtime"
 )]
 
-#[path = "support/app_facts.rs"]
-mod app_facts;
-#[allow(dead_code, reason = "the platform fixture also supports process tests")]
-#[path = "support/platform.rs"]
-mod platform;
-#[path = "support/policy.rs"]
-mod policy_fixture;
+use crate::support::{app_facts, platform, policy as policy_fixture};
 
 use policy_fixture::rollout;
 use std::{

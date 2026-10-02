@@ -1,3 +1,8 @@
+#![allow(
+    clippy::future_not_send,
+    reason = "fixture connections stay on their compio runtime"
+)]
+
 use super::{app_facts::DatabaseAppFacts, platform};
 use zeroship_core::{AppId, schema_name::SchemaName, workflow_policy::AppPolicy};
 use zeroship_data_orm::{
@@ -29,10 +34,6 @@ fn admin_url(platform: &platform::Platform) -> String {
 /// Control's plan rows under the administrative credential. This is the
 /// operator path `docs/runbooks/workflows.md` describes, and the only writer of
 /// `zeroship.plans.workflow_policy_json` outside explicit SQL.
-#[allow(
-    dead_code,
-    reason = "targets that only read policy bind the service role instead"
-)]
 pub async fn plan_admin(platform: &platform::Platform) -> PlanPolicyStore {
     let inputs = Database::connect(
         DbBinding::platform(
@@ -53,10 +54,6 @@ pub async fn plan_admin(platform: &platform::Platform) -> PlanPolicyStore {
 /// rollout switches a deployment publishes. Its facts come from the fixture's
 /// own database source; a case that needs to dictate them binds
 /// `ScriptedAppFacts` instead.
-#[allow(
-    dead_code,
-    reason = "targets that only read policy bind the service role instead"
-)]
 pub async fn operator(platform: &platform::Platform) -> ControlPolicyStore {
     let url = admin_url(platform);
     let publication = Database::connect(
@@ -76,7 +73,6 @@ pub async fn operator(platform: &platform::Platform) -> ControlPolicyStore {
 /// The operator switches a deployment publishes alongside its plan policies.
 /// The migration corpus creates the table and no row: an observation joins the
 /// `global` row, so an app whose deployment never published one is unavailable.
-#[allow(dead_code, reason = "rollout cases publish their own switches")]
 pub const fn rollout() -> RolloutPolicy {
     RolloutPolicy {
         dispatch_paused: false,
@@ -92,7 +88,6 @@ pub const fn rollout() -> RolloutPolicy {
 /// published rollout switches - has no ceiling and every claim is refused
 /// `unavailable`. Fixtures that deliver jobs provision both, the way a
 /// deployment does, rather than relying on a default the source does not carry.
-#[allow(dead_code, reason = "policy-source cases publish their own revisions")]
 pub async fn provision(platform: &platform::Platform, app: &AppId, policy: &AppPolicy) -> String {
     let plan = seed_app(platform, app).await;
     let plans = plan_admin(platform).await;

@@ -4,26 +4,9 @@
     reason = "HTTP and database fixtures stay on the ntex compio runtime"
 )]
 
-#[path = "support/platform.rs"]
-mod platform;
-#[path = "support/app_facts.rs"]
-mod app_facts;
-#[allow(
-    dead_code,
-    reason = "shared journal seeding also serves the creator-facing run suites"
-)]
-#[path = "support/journal.rs"]
-mod journal;
-#[path = "support/holds.rs"]
-mod holds;
-#[path = "support/policy.rs"]
-mod policy_fixture;
-#[allow(
-    dead_code,
-    reason = "shared process fixture also supports host failure tests"
-)]
-#[path = "support/server_process.rs"]
-mod server_process;
+use crate::support::{
+    holds, journal, platform, policy as policy_fixture, server_process,
+};
 
 #[path = "http_jobs/authority.rs"]
 mod authority;
@@ -475,7 +458,7 @@ async fn enroll(platform: &platform::Platform, http: &Client, url: &str, worker:
     platform.admin.execute(
         "INSERT INTO zeroship.worker_instances(id,ring_key,public_key,advertise_host,advertise_port,status,join_signer_id,join_token_id,execution_zone_id,expires_at) \
          VALUES($1,$2,$3,'127.0.0.1',8080,'active',$4,'tok_testfixturedefault','ezn_default000000000000000000',now() + interval '1 hour')",
-        &[&worker.id.as_str(), &vec![1_u8], &worker.key.verifying_key_bytes().to_vec(), &platform.default_join_signer_id],
+        &[&worker.id.as_str(), &vec![1_u8], &worker.key.verifying_key_bytes().to_vec(), &platform::DEFAULT_JOIN_SIGNER_ID],
     ).await.unwrap();
     let (status, body) = post(
         http,
@@ -1066,7 +1049,7 @@ async fn revoking_a_join_signer_denies_its_worker_while_a_sibling_signer_stays_a
         .admin
         .execute(
             "SELECT zeroship.purge_worker_join_signer($1)",
-            &[&fixture.platform.default_join_signer_id],
+            &[&platform::DEFAULT_JOIN_SIGNER_ID],
         )
         .await
         .unwrap();

@@ -42,10 +42,7 @@ use zeroship_workflow_server::{
 
 type StoredIds = BTreeMap<(String, String, String), String>;
 
-#[path = "support/holds.rs"]
-mod holds;
-#[path = "support/zone.rs"]
-mod zone;
+use crate::support::{holds, zone};
 
 struct Fixture {
     _postgres: Container<GenericImage>,

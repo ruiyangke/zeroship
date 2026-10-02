@@ -1,8 +1,5 @@
 //! Verify platform provisioning and workflow metadata database authority.
-#[path = "support/holds.rs"]
-mod holds;
-#[path = "support/platform.rs"]
-mod platform;
+use crate::support::{holds, platform};
 
 use std::rc::Rc;
 use zeroship_workflow_server::coordinator::{connect_eligibility, Coordinator, Options};

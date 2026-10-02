@@ -13,24 +13,17 @@ use testcontainers::{
 /// The single execution zone these migrations seed
 /// (`db/migrations-ts/20260914000450_execution_zones_default_zone.ts`).
 pub const DEFAULT_ZONE_ID: &str = "ezn_default000000000000000000";
+/// The `active` `zeroship.worker_join_signers` row [`Platform::new`] seeds, so
+/// a contract that joins a worker instance directly has a satisfying value to
+/// reference without minting a signer per call site. Contracts that exercise
+/// signer behaviour itself (revocation, a second signer) seed their own rows.
+pub const DEFAULT_JOIN_SIGNER_ID: &str = "wjs_testfixturedefault0000000";
 
 pub struct Platform {
     _postgres: Container<GenericImage>,
     pub admin: compio_postgres::Client,
     pub runtime_url: String,
     pub work: tempfile::TempDir,
-    /// An `active` `zeroship.worker_join_signers` row this fixture seeds once,
-    /// so every test that joins a worker instance directly (`worker_instances.
-    /// join_signer_id` is NOT NULL with a restrict FK to this table) has a
-    /// satisfying value to reference without minting its own signer per call
-    /// site. Tests exercising signer-level behaviour itself (revocation, a
-    /// second signer) seed their own rows instead.
-    #[allow(
-        dead_code,
-        reason = "Control's deployment-hold suite includes this file and joins through a \
-                  signer whose private key it holds, so it never reads this row"
-    )]
-    pub default_join_signer_id: String,
 }
 impl Platform {
     pub async fn new() -> Self {
@@ -76,7 +69,7 @@ impl Platform {
             String::from_utf8_lossy(&result.stderr)
         );
         let admin = connect(&url).await;
-        let default_join_signer_id = "wjs_testfixturedefault0000000".to_string();
+        let default_join_signer_id = DEFAULT_JOIN_SIGNER_ID.to_owned();
         admin
             .execute(
                 "INSERT INTO zeroship.worker_join_signers (id, public_key, status) \
@@ -98,7 +91,6 @@ impl Platform {
             admin,
             runtime_url: format!("postgres://zeroship_workflow@{address}/postgres"),
             work,
-            default_join_signer_id,
         }
     }
 }
@@ -106,7 +98,6 @@ impl Platform {
     /// A live Control app in the deployment's seeded zone, created the way
     /// Control creates one, so placement can read its zone and deletion.
     /// Seeding an app that exists changes nothing.
-    #[allow(dead_code, reason = "not every host contract places apps")]
     pub async fn seed_app(&self, app: &zeroship_core::AppId) -> String {
         self.seed_app_in(app, None).await
     }
@@ -114,7 +105,6 @@ impl Platform {
     /// As [`Self::seed_app`], in `zone` when given. An app's zone is fixed
     /// when the app is created. Returns the app's plan, which allows
     /// workflows.
-    #[allow(dead_code, reason = "not every host contract places apps")]
     pub async fn seed_app_in(&self, app: &zeroship_core::AppId, zone: Option<&str>) -> String {
         let existing = self
             .admin
@@ -176,7 +166,6 @@ impl Platform {
     /// the job, policy and registry endpoints need only a live placement to
     /// authenticate against, and selection needs claimable work this fixture
     /// has no reason to publish.
-    #[allow(dead_code, reason = "not every host contract holds a placement")]
     pub async fn seed_placement(
         &self,
         app: &zeroship_core::AppId,
