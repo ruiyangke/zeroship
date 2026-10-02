@@ -3,14 +3,12 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "pnpm i18n:compile && vite",
-    "build": "pnpm i18n:check && vite build",
+    "dev": "vite",
+    "build": "pnpm i18n:extract && vite build",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "deploy": "zeroship deploy",
-    "i18n:extract": "pnpm --dir ../../packages/shared i18n:extract",
-    "i18n:check": "pnpm --dir ../../packages/shared i18n:check",
-    "i18n:compile": "pnpm --dir ../../packages/shared i18n:compile"
+    "i18n:extract": "pnpm --dir ../../packages/shared i18n:extract"
   },
   "dependencies": {
     "@base-ui/react": "^1.5.0",

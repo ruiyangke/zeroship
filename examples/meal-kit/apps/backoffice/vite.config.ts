@@ -17,7 +17,14 @@ export default defineConfig({
   publicDir: fileURLToPath(new URL("../../packages/shared/public", import.meta.url)),
   plugins: [
     react(),
-    lingui({ configPath: fileURLToPath(new URL("../../packages/shared/lingui.config.ts", import.meta.url)) }),
+    // Catalogs compile here, from the PO source, with nothing written to disk,
+    // for the browser and for the worker alike. A missing translation or a
+    // malformed message fails the catalog's load.
+    lingui({
+      configPath: fileURLToPath(new URL("../../packages/shared/lingui.config.ts", import.meta.url)),
+      failOnMissing: true,
+      failOnCompileError: true,
+    }),
     babel({ presets: [linguiTransformerBabelPreset()] }),
     tailwindcss(),
     zeroship({

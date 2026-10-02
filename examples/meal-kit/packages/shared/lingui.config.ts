@@ -5,7 +5,6 @@ import { locales, sourceLocale } from "@gather/meal-kit/locales";
 export default defineConfig({
   locales: Object.keys(locales),
   sourceLocale,
-  compileNamespace: "es",
   catalogs: [
     { path: "<rootDir>/locales/{locale}/messages", include: ["<rootDir>/src", "<rootDir>/../../apps/storefront/src", "<rootDir>/../../apps/backoffice/src"] },
   ],

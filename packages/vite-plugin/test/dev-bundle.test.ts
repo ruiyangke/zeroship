@@ -307,6 +307,34 @@ test("failed workflow builds remove staging and never produce a partial archive"
   }
 });
 
+test("a worker pass that fails early still names the sources the discovery pass read", async () => {
+  // The discovery pass reads the whole server graph and succeeds; the worker
+  // pass fails before it reads anything. The greeting, which no extension
+  // marks as a source, must stay watched.
+  const root = await fixture();
+  try {
+    await fs.writeFile(join(root, "vite.config.mjs"), VITE_CONFIG.replace(
+      "plugins: [greeting(), ",
+      `plugins: [greeting(), {
+    name: "fixture:worker-pass-fails",
+    buildStart() {
+      if (this.environment?.name === "zeroship" && this.environment.config.build.write !== false) {
+        throw new Error("the worker pass failed");
+      }
+    },
+  }, `,
+    ));
+    const failure = await buildDevBundle(options(root)).then(
+      () => assert.fail("the build must fail"),
+      (error: unknown) => error as { message: string; dependencies?: string[] },
+    );
+    assert.match(failure.message, /the worker pass failed/);
+    assert.ok(failure.dependencies?.includes(join(root, "src/hello.greeting")), JSON.stringify(failure.dependencies));
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 test("a failed build names the sources it read, so fixing one of them can rebuild", async () => {
   // The dev server watches what a build read. A build that fails reads a
   // partial graph, which still includes the source that broke it.

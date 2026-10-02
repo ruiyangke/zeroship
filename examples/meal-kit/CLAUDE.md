@@ -55,8 +55,10 @@ explicitly requests it.
 
 Recipe content is persisted application data. Render `recipeText` directly; do
 not pass editorial strings through Lingui. The PO catalogs own interface copy
-and sample translations. Compile them as ES modules for the server-side sample
-loader. Public catalog reads must never seed data or invent remaining capacity.
+and sample translations. Lingui's Vite plugin compiles them for the browser
+and for the worker alike; nothing compiles them to disk. Never add a compiled
+catalog for any code to import, because a stale one answers for a newer PO.
+Public catalog reads must never seed data or invent remaining capacity.
 
 Checkout attempts own timed recipe and delivery reservations. Accepted prices
 remain fixed during verification. Expiry releases capacity without inventing a

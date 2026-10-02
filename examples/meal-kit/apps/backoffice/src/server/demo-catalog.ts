@@ -3,7 +3,7 @@ import type { Id } from "@zeroship/db";
 import { mutation } from "@zeroship/rpc/server";
 import { z } from "zod";
 import { setupI18n } from "@lingui/core";
-import { messages } from "@gather/meal-kit/locales/zh/messages.mjs";
+import { messages } from "@gather/meal-kit/locales/zh/messages.po";
 import { recipes, marketOfferings, seedRecipeDraft } from "../seed-catalog";
 import {
   markets,

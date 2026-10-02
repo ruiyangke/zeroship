@@ -574,8 +574,9 @@ export function buildPlugins(
   // production-mode gate (every procedure must have an explicit `id`
   // when shipping a production build).
   let viteMode: "production" | "development" = "production";
-  // The absolute module ids the last worker build read.
-  let workerDependencies: string[] = [];
+  // The absolute module ids each pass of the worker build read, in order:
+  // the discovery pass, then the worker pass.
+  let passDependencies: string[][] = [];
   // Vite's resolved logger. Manifest warnings (notably the fail-closed
   // auth notice, which names procedures that will 401 once deployed) go
   // through it so they land in a normal `vite build` / `pnpm build`
@@ -782,7 +783,7 @@ export function buildPlugins(
       const entry = serverEntry;
       if (!entry) throw new Error("[zeroship] the app has no server entry to build the worker from");
       const nodeEnv = JSON.stringify(options.nodeEnv);
-      workerDependencies = [];
+      passDependencies = [];
       try {
         await buildWorker(builder, entry, {
           define: {
@@ -793,9 +794,11 @@ export function buildPlugins(
           build: { outDir: options.outDir },
         });
       } catch (error) {
-        throw new WorkerBuildError(error, workerDependencies);
+        // A pass that failed partway read only part of the graph, so every
+        // source any pass read stays a dependency.
+        throw new WorkerBuildError(error, [...new Set(passDependencies.flat())].sort());
       }
-      return { state, dependencies: workerDependencies };
+      return { state, dependencies: passDependencies.at(-1) ?? [] };
     },
   };
 
@@ -1007,7 +1010,7 @@ export function buildPlugins(
       },
     })),
     workerBuildOnly(serverGraphPlugin((ids) => {
-      workerDependencies = ids;
+      passDependencies.push(ids);
     })),
   ];
 }

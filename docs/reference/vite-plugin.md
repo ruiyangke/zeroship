@@ -308,6 +308,11 @@ opts the build into. It builds the client environment, then the worker in the
   replaced with `"production"` whatever the shell sets; every other
   `process.env` reference, in any of those spellings, stays live for the
   runtime to answer.
+- Plugin names that begin with `zeroship:` are reserved for this package.
+  `pnpm dev` builds the worker for its local deployment from your Vite config
+  too, and in that build it replaces every plugin carrying one of the
+  package's names with a fresh instance, so an app plugin must not use the
+  prefix.
 - A tool that calls `vite.build()` with the app's config, such as a test
   harness or a deploy script, is refused before the client writes anything:
   `vite.build()` builds a single environment, so it would pack no worker.

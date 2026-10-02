@@ -17,12 +17,6 @@ const apps = [
   { name: "storefront", url: "http://127.0.0.1:5197/" },
 ];
 
-await new Promise((resolve, reject) => {
-  const child = spawn("pnpm", ["--dir", "packages/shared", "i18n:compile"], { cwd: root, stdio: "inherit" });
-  child.on("error", reject);
-  child.on("exit", code => code === 0 ? resolve() : reject(new Error("Translation compilation failed")));
-});
-
 const children = new Set();
 let closing = false;
 function close(code) {

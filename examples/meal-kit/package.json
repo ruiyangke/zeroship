@@ -10,9 +10,7 @@
     "typecheck": "pnpm --dir apps/backoffice typecheck && pnpm --dir apps/storefront typecheck && tsc --noEmit -p tests/tsconfig.json",
     "test": "pnpm --dir apps/backoffice test && pnpm --dir apps/storefront test",
     "test:browser": "playwright test",
-    "i18n:extract": "pnpm --dir packages/shared i18n:extract",
-    "i18n:check": "pnpm --dir packages/shared i18n:check",
-    "i18n:compile": "pnpm --dir packages/shared i18n:compile"
+    "i18n:extract": "pnpm --dir packages/shared i18n:extract"
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.11.0",

@@ -6,6 +6,3 @@ playwright-report/
 tests/.artifacts/
 .env
 .env.local
-locales/*/messages.js
-
-locales/**/messages.mjs
