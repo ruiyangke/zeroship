@@ -3,7 +3,7 @@
 # do not survive transaction pooling, so these failures are the contract,
 # not a regression.
 #
-# commit:   a6f45cd9b
+# commit:   5191d56bd
 # features: tls,live-tls-tests,live-unix-socket   target: --test suite
 # observed: two full runs at THIS commit, 69 failures and 65 failures.
 #
@@ -11,14 +11,14 @@
 # still matches this file:
 #
 #   read_timeout::copy_input_time_is_not_charged_as_server_read_silence
-#       2 of 3 runs at f4ad1e5a0, 0 of 1 at 57af3991a.
+#       2 of 3 runs at d77af0819, 0 of 1 at 444dae431.
 #
 #   differential_tokio::a_copy_without_a_producer_costs_tokio_the_connection_and_not_this_one
 #   differential_tokio::both_drivers_agree_on_binary_copy_roundtrip
 #   differential_tokio::both_drivers_agree_on_copy_in_results
 #   differential_tokio::both_drivers_agree_on_copy_out_bytes
 #       These four move AS A GROUP - all four fail or all four pass - and
-#       did exactly that across two runs at bea404133 (absent, then present).
+#       did exactly that across two runs at 672600859 (absent, then present).
 #       They looked like four tests fixed by the intervening 38 commits; only
 #       11 production lines changed in those, none touching COPY, and a second
 #       run at the same commit brought all four back. Each also passes on its

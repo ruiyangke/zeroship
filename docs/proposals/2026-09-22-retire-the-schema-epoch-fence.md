@@ -1,6 +1,6 @@
 # Retire the schema epoch fence
 
-**Status.** BUILT on `main`, in `2bf158f04`. The platform stops promising that code built against
+**Status.** BUILT on `main`, in `15b00e5bd`. The platform stops promising that code built against
 an older schema shape is refused before it runs. Creators own migration/deploy sequencing, by
 expand-and-contract, the way every system with migrations does. The binding role and its two
 membership edges stay exactly as they are: that is the tenant boundary and it is not what this
@@ -14,7 +14,7 @@ The three membership arms that distinguish this from weakening isolation pass by
 
 Removing the rotation also removed the trigger for re-resolving an app's binding SET, which was
 never part of what this retires. That was restored separately, keyed on the live binding set
-rather than on any schema shape, in `7064b2448`.
+rather than on any schema shape, in `fcaf6f5fc`.
 
 ---
 

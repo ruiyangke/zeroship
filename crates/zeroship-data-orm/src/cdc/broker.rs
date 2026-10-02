@@ -842,7 +842,7 @@ pub fn emit_local(
 /// another worker thread in the same process.
 ///
 /// This doc block sat 139 lines above, orphaned from its item by the
-/// suppression section banner that `746cdd123` inserted between them. That is
+/// suppression section banner that `30860d774` inserted between them. That is
 /// not a formatting nit: `clippy::empty_line_after_doc_comments` is deny-level
 /// here, so the lib failed to lint, and because cargo ABORTS SCHEDULING on a
 /// lib error, every test target in this crate went unlinted with it.

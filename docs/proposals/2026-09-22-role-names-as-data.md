@@ -135,7 +135,7 @@ channel the binding id arrives on now, and PostgreSQL still decides what it open
 
    NARROWED, and by a change that has landed rather than by an argument here. With the schema
    epoch retired (`docs/proposals/2026-09-22-retire-the-schema-epoch-fence.md`, built in
-   `2bf158f04`), a binding role name has no version component, so no reader parses one to learn a
+   `15b00e5bd`), a binding role name has no version component, so no reader parses one to learn a
    number. Exactly one site still reads anything back OUT of a name: `classify_role_name`
    (`crates/zeroship-migrate-server/src/datastore/cluster.rs`), which parses the binding id and
    then re-composes the name to confirm the parse.

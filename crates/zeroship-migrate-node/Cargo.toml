@@ -3,7 +3,7 @@
 # the single root lockfile. `cargo build -p zeroship-migrate-node` (or `napi build`)
 # compiles it, and so does a plain workspace-wide `cargo build` / `cargo test`.
 #
-# THIS COMMENT CLAIMED A PROTECTION THAT NEVER EXISTED, from `79b339aa7` until
+# THIS COMMENT CLAIMED A PROTECTION THAT NEVER EXISTED, from `5706b07fd` until
 # 2026-09-04. It said: "The root keeps it OUT of the default build/test flow via
 # `default-members`, so a plain `cargo build`/`cargo test` never pulls the napi
 # toolchain path." Every clause of that is false, and checking took one command:
@@ -52,7 +52,7 @@ crate-type = ["cdylib", "rlib"]
 # earlier versions of this comment were both wrong, in opposite directions: one
 # said the bare command worked when it did not, and its correction said no test
 # binary could ever link the Node ABI. The second was true of the manifest as it
-# then stood, not of the linker. Measured at 1144d787c: the bare command exited
+# then stood, not of the linker. Measured at 154b019c6: the bare command exited
 # 101 with 1719 `undefined reference` lines, the first `napi_create_function`
 # from src/bridge.rs:1222 in `_napi_rs_internal_register_status`.
 #

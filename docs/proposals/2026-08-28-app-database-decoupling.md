@@ -1007,7 +1007,7 @@ lock follows the database rather than the app. The publication reconciler's lock
 is keyed on the datastore publication, because that is the object being edited and every
 database on the cluster contends for it.
 
-**The deploy gate verifies bindings, not schemas. This landed.** `265f988a9` ("verify database
+**The deploy gate verifies bindings, not schemas. This landed.** `727bce272` ("verify database
 bindings at deploy, not schemas") made the precondition binding admission.
 `crates/zeroship-control/src/registry.rs` predicates the deploy UPDATE on nothing about schema,
 and `admit_bindings` (`crates/zeroship-control/src/publication/catalog.rs`) is the admission

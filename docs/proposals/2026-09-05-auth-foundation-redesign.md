@@ -3058,7 +3058,7 @@ ABOVE the declared-network comparison. The operator could therefore declare
 which is every developer machine and every harness that launches a worker. The
 arm read as caution and behaved as a defect: a fence whose declared input cannot
 express a case the operator states outright is not a policy. Fixed at
-`2f697c01e` by letting the networks rule on loopback, keeping `ProxyFronted` and
+`a1368acc6` by letting the networks rule on loopback, keeping `ProxyFronted` and
 the unspecified-address arm unconditional.
 
 *The lesson is in how it was caught.* A suite of REFUSALS cannot detect a fence
@@ -3071,7 +3071,7 @@ refusal arm stays GREEN while only the admit arm reddens.
 NAME WAS READ AS A CALL.** It recorded `crates/zeroship-gateway/src/oidc_rp.rs`
 as the only non-definition consumer of `UserEnvelopeSigner`. That file names the
 TYPE in a parameter position and never calls the accessor; every live call is in
-`crates/zeroship-gateway/src/router/auth.rs`. Corrected at `e9d7f21a0`.
+`crates/zeroship-gateway/src/router/auth.rs`. Corrected at `c494220b1`.
 
 The error came from grepping the type name and treating a type-position match as
 a consumer. **When the question is who EXERCISES a capability, search for the
@@ -3084,7 +3084,7 @@ Both were hit in one session.
 SURVIVE.** `db/migrations-ts/20260907000300_worker_instances.ts` listed what
 per-instance identity buys as "attribution, per-instance revocation, a countable
 and RATE-LIMITABLE event". Nothing rate-limits enrolment: no budget, no quota, no
-duplicate check on the endpoint. Corrected at `516531c68`.
+duplicate check on the endpoint. Corrected at `6ba187c00`.
 
 The word sat one line below that file's careful refusal to call the mechanism a
 boundary - which is exactly why it survived review. In a list of benefits, beside

@@ -25,7 +25,7 @@
 //! The regen switch is an `#[ignore]`d test rather than an env var. This crate's tests
 //! take no input from their own process environment (`clippy.toml`'s `disallowed-methods`
 //! ban on `std::env::var`: a name read with a `&str` is a name nothing has declared), and
-//! `#[ignore]` + `cargo test -- --ignored <name>` is the idiom `33a9c59a1` already applied
+//! `#[ignore]` + `cargo test -- --ignored <name>` is the idiom `2a97290a1` already applied
 //! to this engine's other golden-regen switches.
 
 use std::path::PathBuf;

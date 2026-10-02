@@ -1089,7 +1089,7 @@ mod tests {
     /// explicit transaction.
     ///
     /// This is bound through a READ. The write formulation it replaces is no
-    /// longer expressible: `BEGIN IMMEDIATE` (`a160c4179`) takes the write lock
+    /// longer expressible: `BEGIN IMMEDIATE` (`e609c54cc`) takes the write lock
     /// at BEGIN, so a concurrent autocommit WRITE is refused whether the
     /// connections are split or not, and the refusal tells you nothing about
     /// which. `a_transaction_holds_the_write_lock_from_begin_before_any_statement`

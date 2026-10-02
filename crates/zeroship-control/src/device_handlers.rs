@@ -4,7 +4,7 @@
 //! wrote `provider = 'platform'` rows, `/api/device/approve` bound a principal
 //! to one, and `/api/device/token` minted a deploy token through the auth
 //! service's `/internal/platform-token`. `zeroship login` moved onto the OP's
-//! own device grant in `5ae8c7f7d`, which hands the CLI a bounded access token
+//! own device grant in `7240dc589`, which hands the CLI a bounded access token
 //! plus a rotating refresh family that this flow could never issue, and both
 //! halves were deleted once nothing drove them.
 //!

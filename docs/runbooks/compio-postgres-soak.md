@@ -406,7 +406,7 @@ retirement after a server ErrorResponse. A defect in any of them shows up here
 as a non-zero live count or a hang, and in neither case would the ordinary
 suite have noticed: it never restarts a server.
 
-RE-MEASURED 2026-08-29 at `aef4e2e54`, on the dedicated 16.15 container
+RE-MEASURED 2026-08-29 at `a039ce960`, on the dedicated 16.15 container
 (`zs-soak-5470`), restart issued 40s into `phase=measure`. All three signals
 reproduced again:
 
@@ -422,11 +422,11 @@ Recovery: 63 `pool_` tests passed against the restarted server on the FIRST
 attempt (7 in `--lib`, 56 in `--test suite`); the 2026-08-27 run recorded 49,
 the difference being tests added since.
 
-This run is the check on `ae8ba17f4`, which changed when a cancel retires a
+This run is the check on `4404f6981`, which changed when a cancel retires a
 session: a defect there surfaces here as a non-zero live count or a hang, and
 the ordinary suite would not notice because it never restarts a server.
 
-RE-MEASURED again after the read-framing unification, at `0c06e95f5`:
+RE-MEASURED again after the read-framing unification, at `e7774e877`:
 
 ```text
 soak result=failed: pooled query worker: run pooled scalar query failed: db error
@@ -478,7 +478,7 @@ rather than left in limbo, and the connection was released.
 **`is_closed` ON THE TIMEOUT ERROR IS THE WRONG SIGNAL, and this section said to
 read it until 2026-08-28.** The text above asked for `is_closed=true` and warned
 that `false` "would hand a poisoned session to the next caller". Re-measured at
-`506bab466` with the committed probe, the timeout error reports:
+`cd1263a4e` with the committed probe, the timeout error reports:
 
 ```text
 PROBE query ended after 5.000649053s is_closed=false err=socket read timeout expired
@@ -489,7 +489,7 @@ PROBE reuse=refused is_closed=true err=connection closed
 `is_closed()` is `kind == Kind::Closed`, and a read timeout carries
 `Kind::ReadTimeout` (`src/error/mod.rs`), so `false` is what the driver MUST
 report - the error says why it failed rather than only that the socket is gone.
-`Kind::ReadTimeout` predates both earlier measurements (`45313c6a6`,
+`Kind::ReadTimeout` predates both earlier measurements (`cfe4cb28d`,
 2026-08-21), so the older transcripts came from a different, uncommitted probe
 and cannot be reproduced; that is why the probe is now committed.
 
@@ -541,7 +541,7 @@ All three signals hold: 0.5ms past the bound, no descriptor outliving the
 failure, and the poisoned session refused on reuse. `is_closed=false` on the
 timeout error is the CORRECT value per the 2026-08-28 note above.
 
-RE-MEASURED again after the read-framing unification, at `c856afc62`:
+RE-MEASURED again after the read-framing unification, at `deb5c75d4`:
 
 ```text
 PROBE query ended after 5.000526215s is_closed=false err=socket read timeout expired
@@ -603,7 +603,7 @@ symptom, and this is the shape where a regression would be invisible: the pool
 refuses either way, and only the CAUSE distinguishes "the server is full" from
 "something went wrong".
 
-RE-MEASURED 2026-08-28 at `bcd6dcb69` with the committed
+RE-MEASURED 2026-08-28 at `21de6de95` with the committed
 `libs/compio-postgres/examples/chaos_slots.rs`, which reports BOTH arms because they are different
 measurements:
 
@@ -785,7 +785,7 @@ after the `#[cfg(test)]` marker.
 
 **THE MARKER HEURISTIC IS UNSOUND, AND FAILS IN THE DANGEROUS DIRECTION.** It
 assumes everything after the first `#[cfg(test)]` is test code. Measured
-2026-08-31 over the twelve `src/` files touched since `5b11ab1fb`, that is FALSE
+2026-08-31 over the twelve `src/` files touched since `cd2f6b42b`, that is FALSE
 for three of them:
 
     cancel_token.rs    995 non-empty lines of PRODUCTION code after its first marker
@@ -800,7 +800,7 @@ re-run" on a real behaviour change.
 A tool that reports zero is only useful if you have watched it report non-zero.
 
 **THE TOOL DETECTS TEXT CHANGE, NOT BEHAVIOUR CHANGE, and the difference bit
-the same day.** Re-run at `70bb94b17` over the same base it reports **87**
+the same day.** Re-run at `e7be83136` over the same base it reports **87**
 production lines across seven files. Nearly all of them are
 `unwrap()` -> `expect("named invariant")` rewrites plus one behaviour-preserving
 seam extraction (`read_private_key_file` delegating to
@@ -813,7 +813,7 @@ that turns out to be wrong. Just do not read a non-zero count as evidence that
 behaviour moved - read it as "the cheap argument for skipping is unavailable,
 so spend the four minutes".
 
-Re-run accordingly at `70bb94b17`, 180s on the dedicated 5470:
+Re-run accordingly at `e7be83136`, 180s on the dedicated 5470:
 
     counts pooled_queries=34635 pool_acquires=35227 pool_releases=35227
            cancellations=592 cancellation_recoveries=592 total_operations=43125
@@ -836,13 +836,13 @@ shape: a db error reached the caller rather than a hang, the driver's live
 connection count was zero at the failure so connections were released rather
 than leaked, and the container came back healthy.
 
-Measured 2026-08-31, `5b11ab1fb..8df74effc` (about fifty commits): **0 production
+Measured 2026-08-31, `cd2f6b42b..0eec1e671` (about fifty commits): **0 production
 lines across all twelve changed files.** Every one of the 837 changed non-comment
 lines is inside a test span. So the soak, the three chaos scenarios and the
-pgbouncer classification from `5b11ab1fb` still describe this tree, and
+pgbouncer classification from `cd2f6b42b` still describe this tree, and
 re-running them would exercise a byte-identical production path.
 
-Measured 2026-08-30, `bf8517d0b..5bb482384` (nine commits):
+Measured 2026-08-30, `27fbc01ef..7ed66e479` (nine commits):
 
     cancel_query_raw.rs  171 non-comment   cfg(test)@234   lowest touched 233
     config.rs              9 non-comment   cfg(test)@3387  lowest touched 3501
@@ -853,7 +853,7 @@ Measured 2026-08-30, `bf8517d0b..5bb482384` (nine commits):
 test module. `cancel_query_raw.rs`'s one line below its marker, 233, is the
 blank separator before `#[cfg(test)]` - confirm that by reading it, do not
 assume it. Conclusion: production behaviour unchanged, so the soak and chaos
-results from `bf8517d0b` still describe this tree.
+results from `27fbc01ef` still describe this tree.
 
 **Do not stretch this.** It licenses skipping a RE-RUN when the diff is inert;
 it says nothing once a single production line moves. And it is not a substitute
@@ -891,7 +891,7 @@ test items; `cancel_query_raw.rs:233` is the blank line before its module; and
 verdict stands** - the shortcut happened to be right because those files have
 one test module, or their last one, near the end. It was luck, not method.
 
-## RE-RUN 2026-08-31 at `3983a4e5d`: soak plus all three chaos shapes
+## RE-RUN 2026-08-31 at `8fe160459`: soak plus all three chaos shapes
 
 Re-run because another session had merged 187 commits since the last
 measurement, so no figure above had been exercised against the code in the

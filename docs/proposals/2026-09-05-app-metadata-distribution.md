@@ -66,15 +66,15 @@ not blocked on a placement design.
 ## How to read this document
 
 **Provenance.** Every citation below was re-derived by opening the file on
-2026-09-05. The first pass ran against `58deea301` on `main` with a dirty
-working tree; those modifications landed the same day as `cb0742195` and
-`825de4112`, so the readings taken from them describe committed code rather than
+2026-09-05. The first pass ran against `46795f543` on `main` with a dirty
+working tree; those modifications landed the same day as `4dc0be203` and
+`b72e464ab`, so the readings taken from them describe committed code rather than
 an unsaved edit. The only one of them cited here is
 `crates/zeroship-gateway/src/router/dispatch.rs`, for the `enforce::check_account`
 and `enforce::check_spend` call sites and `extract_app_name`; those were
 re-opened after the commit and hold.
 
-**Re-audited on 2026-09-05 against `ed161c341`**, the commit that added this
+**Re-audited on 2026-09-05 against `3c8fb968e`**, the commit that added this
 file. That pass opened every citation a second time and found wrong citations,
 wrong counts, an unreproducible measurement cluster and an over-general claim,
 all recorded in the corrections section below rather than silently repaired.
@@ -375,7 +375,7 @@ reconcile path touches `info.manifest` at more than one site
 MEASURED. `load_app`'s doc states the intent: the manifest "is what makes the
 worker a real enforcer of the declared route policy rather than a tier that
 trusts the gateway to have gated already." That behaviour landed in the HEAD
-commit itself, `58deea301` ("feat(worker)!: refuse a dispatch the declared policy
+commit itself, `46795f543` ("feat(worker)!: refuse a dispatch the declared policy
 does not admit").
 
 So the sentence "the worker carries the entire manifest on every poll to extract
@@ -2360,7 +2360,7 @@ descriptor hash. MEASURED, `reconcile_once`
 (`crates/zeroship-worker/src/sync.rs`) also clones the whole manifest and passes it
 to `cache::load_app` (`crates/zeroship-worker/src/cache.rs`), which compiles it
 into the per-isolate declared policy. That behaviour landed in the HEAD commit
-itself (`58deea301`). The design conclusion is unchanged and slightly strengthened
+itself (`46795f543`). The design conclusion is unchanged and slightly strengthened
 - both tiers need the manifest, neither needs it re-transmitted on a timer - but
 the sentence as drafted described the tree of one commit earlier.
 
@@ -2503,7 +2503,7 @@ wrong one - a general-purpose compressor recovers most of the JSON's penalty, so
 the penalty is resident memory and not bandwidth. **A ratio between two numbers is
 not a measurement of either.**
 
-## Found by the adversarial re-audit of `ed161c341`
+## Found by the adversarial re-audit of `3c8fb968e`
 
 **24. Wrong line citations at several sites, in a document whose own opening said
 the line is a courtesy.** A worker-cache parameter cited at its closing paren and

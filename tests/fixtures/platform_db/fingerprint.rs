@@ -42,7 +42,7 @@ use std::process::Command;
 
 /// The set hashed is exactly `discover_ts_files`'s
 /// (`crates/zeroship-migrate-adapter/src/platform.rs`, DELETED 2026-08-28 in
-/// `ccda4bb42` with the rest of the platform-migrate binary; neither the file
+/// `58db329f4` with the rest of the platform-migrate binary; neither the file
 /// nor that function is in the tree today): `*.ts` in this directory, ordered
 /// by filename.
 pub const MIGRATIONS_DIR: &str = "db/migrations-ts";

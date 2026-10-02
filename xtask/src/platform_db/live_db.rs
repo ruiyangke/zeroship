@@ -10,7 +10,7 @@ mod tests {
     /// back to guessing which of the eleven databases on :5440 it meant.
     ///
     /// THE APPLIER ASSERTION USED TO NAME A DELETED BINARY. It asked for
-    /// `zeroship-platform-migrate`, which `ccda4bb42` removed on 2026-08-28 in
+    /// `zeroship-platform-migrate`, which `58db329f4` removed on 2026-08-28 in
     /// the same change that rewrote `UNMIGRATED_REMEDY` to name
     /// `deploy/ops/db-migrate.sh`. The constant's own doc comment recorded the
     /// swap; the test did not, and stayed red from that day. It now asks for

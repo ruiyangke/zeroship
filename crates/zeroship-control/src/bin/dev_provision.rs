@@ -1,4 +1,4 @@
-// The explicit-database-creation step (47ad97a28) added another await to `main`'s
+// The explicit-database-creation step (3bbba5708) added another await to `main`'s
 // already-large async block, and rustc's layout query for it now exceeds the
 // default 128 depth: "query depth increased by 130 when computing layout of
 // {async block ...dev_provision.rs:92}". RELEASE ONLY - `cargo check` in debug

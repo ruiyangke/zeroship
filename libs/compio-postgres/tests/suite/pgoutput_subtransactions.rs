@@ -18,7 +18,7 @@
 //! EXCEPTION handler opens an implicit subtransaction, so it reaches code that
 //! never types the word SAVEPOINT.
 //!
-//! This file exists because that check shipped. `17c09e7ce` added
+//! This file exists because that check shipped. `4911bdba8` added
 //! `DecodeError::StreamXidMismatch` and errored on it.
 
 use compio_postgres::Client;
