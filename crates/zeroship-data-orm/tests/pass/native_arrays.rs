@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use zeroship_data_orm::{orm::*, Database};
 
 include!("../fixtures/native_arrays_schema.rs");

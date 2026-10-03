@@ -55,6 +55,7 @@ zeroship-testkit = { path = "../../tests/testkit" }
 [lints]
 workspace = true
 
+# One integration binary; tests/integration/mod.rs declares every suite.
 [[test]]
 name = "main"
 path = "tests/main.rs"

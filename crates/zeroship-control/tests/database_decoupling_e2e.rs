@@ -36,7 +36,7 @@
 //! without the permitted case it differs from in one variable. Each stage
 //! below names its own control.
 
-mod common;
+mod support;
 
 /// The tenant cluster fixture, reached where it already lives rather than
 /// copied.
@@ -47,10 +47,6 @@ mod common;
 /// `pg_authid` and `pg_auth_members` are cluster-shared. A second spelling in
 /// this crate would let the two drift and make a failure here unattributable.
 #[path = "../../zeroship-migrate-server/tests/support/fixture/tenant.rs"]
-#[allow(
-    dead_code,
-    reason = "the shared fixture also serves the version-floor arm, which this target does not have"
-)]
 mod tenant;
 
 use std::collections::HashMap;
@@ -151,7 +147,7 @@ async fn connect(url: &str) -> Client {
     let (client, connection) = compio_postgres::connect(url, NoTls)
         .await
         .unwrap_or_else(|error| panic!("connect to {url}: {error}"));
-    crate::common::live::spawn(async move {
+    crate::support::live::spawn(async move {
         let _ = connection.run().await;
     });
     client
@@ -198,10 +194,10 @@ struct World {
 
 impl World {
     async fn new(label: &str) -> Self {
-        let control_url = common::require_control_db();
+        let control_url = crate::support::require_control_db();
         let pg = connect(&control_url).await;
         let registry = Registry::new(&control_url).await.expect("control registry");
-        common::ensure_builtin_plans(&registry).await;
+        crate::support::ensure_builtin_plans(&registry).await;
 
         // THE ZONE IS PRIVATE TO THIS TEST. Placement filters on it, so the
         // cluster this test's reconciler registers is invisible to every other
@@ -720,7 +716,8 @@ fn server_error(error: &compio_postgres::Error) -> &compio_postgres::error::DbEr
 /// shape. A hand-written copy here would drift the day the ceiling changes and
 /// the drift would surface as an unexplained column error.
 fn generated_fields(authored: Json) -> Json {
-    const ORACLE: &str = include_str!("../../zeroship-data-orm/tests/fixtures/schema.runtime.json");
+    const ORACLE: &str =
+        include_str!("../../zeroship-data-orm/tests/fixtures/schema.runtime.json");
     let oracle: Json = serde_json::from_str(ORACLE).expect("the generated descriptor parses");
     let mut fields = serde_json::Map::new();
     for (name, definition) in oracle["collections"]["posts"]["fields"]
@@ -1050,7 +1047,7 @@ async fn pass(reconciler: &Reconciler) -> (String, PassReport) {
     (datastore.as_str().to_owned(), report)
 }
 
-#[compio::test(crate = "crate::common::live::system")]
+#[compio::test(crate = "crate::support::live::system")]
 async fn the_whole_decoupled_path_runs_in_one_exercise() {
     let cluster_fixture = tenant::Cluster::start();
     let mut cluster = connect(cluster_fixture.url()).await;
@@ -1330,12 +1327,12 @@ async fn the_whole_decoupled_path_runs_in_one_exercise() {
         (SHARED_LABEL, &shared_id, true),
         (PRIVATE_LABEL, &private_id, false),
     ]);
-    common::deployments::deploy(&world.registry, &app_a, &world.owner, manifest_a)
+    crate::support::deployments::deploy(&world.registry, &app_a, &world.owner, manifest_a)
         .await
         .expect("app A's deploy names two databases it holds live bindings to");
 
     let manifest_b = manifest(vec![(SHARED_LABEL, &shared_id, true)]);
-    common::deployments::deploy(&world.registry, &app_b, &world.owner, manifest_b)
+    crate::support::deployments::deploy(&world.registry, &app_b, &world.owner, manifest_b)
         .await
         .expect("app B's deploy names the one database it holds a live binding to");
 
@@ -1345,7 +1342,7 @@ async fn the_whole_decoupled_path_runs_in_one_exercise() {
         (SHARED_LABEL, &shared_id, true),
         (PRIVATE_LABEL, &private_id, false),
     ]);
-    let refused = common::deployments::deploy(&world.registry, &app_b, &world.owner, overreach)
+    let refused = crate::support::deployments::deploy(&world.registry, &app_b, &world.owner, overreach)
         .await
         .expect_err("app B must not deploy an artifact naming a database it does not bind");
     match &refused {
@@ -1989,7 +1986,7 @@ async fn a_migration_one_app_applies_to_a_shared_database_does_not_fail_the_othe
     // set came out empty would make every assertion below pass over a deploy
     // that verified nothing. `accept` reads exactly this slice, so this is the
     // one place the claim can be made rather than inferred from the manifest.
-    let deployment = common::deployments::verified(redeploy);
+    let deployment = crate::support::deployments::verified(redeploy);
     assert_eq!(
         deployment.databases(),
         std::slice::from_ref(shared),
@@ -1998,7 +1995,7 @@ async fn a_migration_one_app_applies_to_a_shared_database_does_not_fail_the_othe
     );
     let accepted = world
         .registry
-        .deploy(common::deployments::command(
+        .deploy(crate::support::deployments::command(
             deploying,
             &world.owner,
             deployment,

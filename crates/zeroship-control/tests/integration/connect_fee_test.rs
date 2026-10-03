@@ -1,0 +1,1306 @@
+//! Integration tests for billing G1 (Stream-2): Connect onboarding ownership
+//! verification + server-stamped application fee.
+//!
+//! FAITHFUL by construction: the tests drive the REAL ntex HTTP handlers
+//! (`onboard`/`callback`/`connect_checkout`/`set_fee_policy`) through a real
+//! `AuthzGuard` (a real platform OAuth bearer) against a live, migrated Postgres, and the REAL
+//! `cyper`-based `StripeClient` against a localhost **mock-Stripe-Connect** HTTP
+//! server that speaks the `/v1/accounts`, `/v1/account_links`,
+//! `/v1/payment_intents` shapes and RECORDS every request. No stubbed client on
+//! the wire path: form encoding, headers, round-trip, and JSON parse all run.
+//!
+//! Requires a configured test database
+//! (`crate::support::require_control_db`); an absent or unmigrated one REFUSES
+//! the run.
+//! The DB must have changeset 0044 applied.
+
+#![allow(clippy::future_not_send)]
+
+
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+
+use compio::io::{AsyncRead, AsyncWriteExt};
+use compio::net::{TcpListener, TcpStream};
+use ntex::http::StatusCode;
+use ntex::web::{self, test};
+use uuid::Uuid;
+use zeroship_core::UserId;
+
+use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
+use zeroship_control::{
+    stripe_handlers, AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
+};
+
+const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
+
+fn db_url() -> String {
+    crate::support::require_control_db()
+}
+
+fn tmpdir(label: &str) -> PathBuf {
+    let mut p = std::env::temp_dir();
+    p.push(format!("zs-connect-{label}-{}", Uuid::new_v4().simple()));
+    std::fs::create_dir_all(&p).expect("mk tmpdir");
+    p
+}
+
+// ===========================================================================
+// Mock-Stripe-Connect HTTP server.
+// ===========================================================================
+
+#[derive(Debug, Clone)]
+struct RecordedRequest {
+    method: String,
+    path: String,
+    idempotency_key: Option<String>,
+    body: String,
+}
+
+#[derive(Default)]
+struct MockState {
+    requests: Vec<RecordedRequest>,
+    /// acct_… → metadata.organization_id we stamped at create time. A `retrieve`
+    /// echoes this back so the callback can verify ownership.
+    accounts: HashMap<String, String>,
+    /// Force the next created account id (so a test can pin a known acct_…).
+    next_account_id: Option<String>,
+    /// Onboarding flags returned by `retrieve_account`.
+    charges_enabled: bool,
+    payouts_enabled: bool,
+    details_submitted: bool,
+}
+
+#[derive(Clone)]
+struct MockStripe {
+    state: Arc<Mutex<MockState>>,
+    base_url: String,
+}
+
+impl MockStripe {
+    fn requests(&self) -> Vec<RecordedRequest> {
+        self.state.lock().unwrap().requests.clone()
+    }
+
+    /// The form-encoded body of the first POST to `path`.
+    fn first_body(&self, method: &str, path: &str) -> Option<String> {
+        self.requests()
+            .into_iter()
+            .find(|r| r.method == method && r.path == path)
+            .map(|r| r.body)
+    }
+
+    fn set_flags(&self, charges: bool, payouts: bool, details: bool) {
+        let mut st = self.state.lock().unwrap();
+        st.charges_enabled = charges;
+        st.payouts_enabled = payouts;
+        st.details_submitted = details;
+    }
+}
+
+async fn start_mock_stripe() -> MockStripe {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind mock");
+    let addr = listener.local_addr().expect("local_addr");
+    crate::support::live::register_listener(addr);
+    let base_url = format!("http://{addr}");
+    let state = Arc::new(Mutex::new(MockState {
+        charges_enabled: true,
+        payouts_enabled: true,
+        details_submitted: true,
+        ..MockState::default()
+    }));
+    let accept_state = Arc::clone(&state);
+
+    crate::support::live::spawn(async move {
+        loop {
+            let Ok((stream, _peer)) = listener.accept().await else {
+                break;
+            };
+            let conn_state = Arc::clone(&accept_state);
+            crate::support::live::spawn(async move {
+                serve_conn(stream, conn_state).await;
+            });
+        }
+    });
+
+    MockStripe { state, base_url }
+}
+
+async fn serve_conn(mut stream: TcpStream, state: Arc<Mutex<MockState>>) {
+    let mut acc: Vec<u8> = Vec::new();
+    loop {
+        while let Some((req, consumed)) = try_parse_request(&acc) {
+            acc.drain(0..consumed);
+            let response = handle_mock_request(&req, &state);
+            if stream.write_all(response).await.0.is_err() {
+                return;
+            }
+        }
+        let buf = vec![0u8; 4096];
+        let compio::BufResult(n, buf) = stream.read(buf).await;
+        match n {
+            Ok(0) | Err(_) => return,
+            Ok(read) => acc.extend_from_slice(&buf[..read]),
+        }
+    }
+}
+
+fn try_parse_request(buf: &[u8]) -> Option<(RecordedRequest, usize)> {
+    let text = std::str::from_utf8(buf).ok()?;
+    let header_end = text.find("\r\n\r\n")?;
+    let head = &text[..header_end];
+    let mut lines = head.split("\r\n");
+    let request_line = lines.next()?;
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next()?.to_string();
+    let path = parts.next()?.to_string();
+
+    let mut content_length = 0usize;
+    let mut idempotency_key = None;
+    for line in lines {
+        if let Some((k, v)) = line.split_once(':') {
+            let key = k.trim().to_ascii_lowercase();
+            let val = v.trim().to_string();
+            match key.as_str() {
+                "content-length" => content_length = val.parse().unwrap_or(0),
+                "idempotency-key" => idempotency_key = Some(val),
+                _ => {}
+            }
+        }
+    }
+
+    let body_start = header_end + 4;
+    if buf.len() < body_start + content_length {
+        return None;
+    }
+    let body = String::from_utf8_lossy(&buf[body_start..body_start + content_length]).to_string();
+    Some((
+        RecordedRequest {
+            method,
+            path,
+            idempotency_key,
+            body,
+        },
+        body_start + content_length,
+    ))
+}
+
+fn handle_mock_request(req: &RecordedRequest, state: &Arc<Mutex<MockState>>) -> Vec<u8> {
+    // GET /v1/accounts/{id} — retrieve. Echo the stored metadata.organization_id +
+    // the configured onboarding flags.
+    if req.method == "GET" && req.path.starts_with("/v1/accounts/") {
+        let acct = req.path.trim_start_matches("/v1/accounts/").to_string();
+        let st = state.lock().unwrap();
+        let organization = st.accounts.get(&acct).cloned().unwrap_or_default();
+        let body = format!(
+            r#"{{"id":"{acct}","object":"account","charges_enabled":{c},"payouts_enabled":{p},"details_submitted":{d},"metadata":{{"organization_id":"{organization}"}}}}"#,
+            c = st.charges_enabled,
+            p = st.payouts_enabled,
+            d = st.details_submitted,
+        );
+        drop(st);
+        state.lock().unwrap().requests.push(req.clone());
+        return http_200_json(&body);
+    }
+
+    let json: String = if req.method == "POST" && req.path == "/v1/accounts" {
+        // Create an Express account. Record the metadata.organization_id so retrieve
+        // can echo it (ownership signal).
+        let organization = form_param(&req.body, "metadata[organization_id]").unwrap_or_default();
+        let mut st = state.lock().unwrap();
+        let acct = st
+            .next_account_id
+            .take()
+            .unwrap_or_else(|| format!("acct_{}", hexish()));
+        st.accounts.insert(acct.clone(), organization);
+        st.requests.push(req.clone());
+        return http_200_json(&format!(r#"{{"id":"{acct}","object":"account"}}"#));
+    } else if req.path == "/v1/account_links" {
+        let acct = form_param(&req.body, "account").unwrap_or_default();
+        format!(r#"{{"object":"account_link","url":"https://connect.stripe.test/setup/{acct}"}}"#)
+    } else if req.path == "/v1/payment_intents" {
+        format!(
+            r#"{{"id":"pi_mock_{0}","object":"payment_intent","client_secret":"pi_mock_{0}_secret"}}"#,
+            hexish()
+        )
+    } else {
+        r#"{"id":"obj_mock","object":"unknown"}"#.to_string()
+    };
+
+    state.lock().unwrap().requests.push(req.clone());
+    http_200_json(&json)
+}
+
+fn form_param(body: &str, name: &str) -> Option<String> {
+    for pair in body.split('&') {
+        if let Some((k, v)) = pair.split_once('=') {
+            if percent_decode(k) == name {
+                return Some(percent_decode(v));
+            }
+        }
+    }
+    None
+}
+
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' if i + 2 < bytes.len() => {
+                let hi = (bytes[i + 1] as char).to_digit(16);
+                let lo = (bytes[i + 2] as char).to_digit(16);
+                if let (Some(h), Some(l)) = (hi, lo) {
+                    out.push((h * 16 + l) as u8);
+                    i += 3;
+                } else {
+                    out.push(bytes[i]);
+                    i += 1;
+                }
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn http_200_json(json: &str) -> Vec<u8> {
+    let body = json.to_string().into_bytes();
+    let mut resp = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+        body.len()
+    )
+    .into_bytes();
+    resp.extend_from_slice(&body);
+    resp
+}
+
+/// 16 lowercase-alnum chars — a valid `acct_…` suffix shape (no underscore).
+fn hexish() -> String {
+    Uuid::new_v4().simple().to_string()[..16].to_string()
+}
+
+// ===========================================================================
+// Fixture.
+// ===========================================================================
+
+struct Fixture {
+    state: Arc<AppState>,
+    mock: MockStripe,
+    blob_root: PathBuf,
+    deploy_tmp_dir: PathBuf,
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.blob_root);
+        let _ = std::fs::remove_dir_all(&self.deploy_tmp_dir);
+    }
+}
+
+async fn build_fixture(db_url: &str, label: &str) -> Fixture {
+    let mock = start_mock_stripe().await;
+    let blob_root = tmpdir(&format!("blob-{label}"));
+    let deploy_tmp_dir = tmpdir(&format!("dtmp-{label}"));
+    let registry = Registry::new(db_url).await.expect("registry");
+    let env_store = EnvStore::new(registry.clone(), TEST_MASTER_KEY).expect("env store");
+    let stripe_store = StripeStore::new(registry.clone());
+    let blob_store: Arc<dyn BlobStore> =
+        Arc::new(LocalDiskBlobStore::new(blob_root.clone()).expect("blob store"));
+
+    let (control_pg_client, control_pg_conn) =
+        compio_postgres::connect(db_url, compio_postgres::NoTls)
+            .await
+            .expect("control-pg connect");
+    crate::support::live::spawn(async move {
+        let _ = control_pg_conn.run().await;
+    });
+
+    let state = Arc::new(AppState {
+        service_auth: std::sync::Arc::new(zeroship_core::service_peers::ServiceAuth::unconfigured()),
+        registry,
+        env_store,
+        stripe_store,
+        blob_store,
+        control_key: SecretString::new("test-control-key".to_string()),
+        master_key: SecretString::new(TEST_MASTER_KEY.to_string()),
+        stripe_webhook_secret: SecretString::new(String::new()),
+        stripe_secret_key: SecretString::new("sk_test_mock".to_string()),
+        stripe_base_url: mock.base_url.clone(),
+        worker_urls: Vec::new(),
+        admin_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
+        webhook_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
+        origin_scheme: zeroship_core::config::OriginScheme::Https,
+        trust_proxy: false,
+        worker_enrolment: zeroship_control::worker_join::EnrolmentEnvelope::closed(),
+        deploy_tmp_dir: deploy_tmp_dir.clone(),
+        control_pg: Arc::new(control_pg_client),
+        app_base_domain: "zeroship.localhost".to_string(),
+        trusted_oauth_clients: zeroship_control::default_trusted_oauth_clients(),
+        expected_oauth_audience: "control.zeroship.ai".to_string(),
+        static_policies: zeroship_authz::load_platform_policies()
+            .expect("bundled authz policies parse"),
+        auth_provider: zeroship_control::platform_auth_provider(
+            "https://auth.zeroship.test/oauth2",
+            Some(crate::support::platform_jwks_url()),
+        ),
+        // No platform deploy-token mint here: that is control's OUTBOUND
+        // destination for the device flow, and no fixture below drives one.
+        provider_registry: zeroship_control::metering::provider::builtin_registry(),
+        billing_stack: zeroship_control::metering::provider::BillingStack::for_tests(),
+        billing_stream: None,
+        tax_provider: zeroship_control::tax::build_tax_provider(
+            &zeroship_control::tax::TaxProviderConfig::native(),
+        )
+        .expect("native tax provider builds"),
+        notifier: std::sync::Arc::new(zeroship_control::notify::RecordingNotifier::new()),
+        mailer: std::sync::Arc::new(zeroship_mailer::RecordingMailer::new()),
+        pairwise_salt: [0u8; 32],
+        projected_charge_cache: std::sync::Arc::new(
+            zeroship_control::billing_read::ProjectedChargeCache::default(),
+        ),
+    });
+
+    Fixture {
+        state,
+        mock,
+        blob_root,
+        deploy_tmp_dir,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Bearer + principal helpers (faithful AuthzGuard).
+// ---------------------------------------------------------------------------
+
+struct Caller {
+    user_id: UserId,
+    token: String,
+}
+
+impl Caller {
+    fn bearer(&self) -> String {
+        format!("Bearer {}", self.token)
+    }
+}
+
+/// A fresh billing subject for this test file.
+///
+/// The billing subject is an ORGANIZATION, so a fixture that minted a user and
+/// used its uuid here would name a row `organizations` does not have. The
+/// foreign keys refuse that rather than mis-attributing it, but the refusal
+/// names the constraint and not the mistake, so the fixture is the place to be
+/// unambiguous.
+async fn make_organization(state: &AppState, label: &str) -> String {
+    let organization_id = zeroship_core::typed_id::generate("org");
+    let slug = format!("{label}-{}", Uuid::new_v4().simple());
+    state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.organizations (id, slug, name, billing_email) \
+             VALUES ($1, $2, $3, $4)",
+            &[
+                &organization_id,
+                &slug,
+                &label.to_string(),
+                &format!("{slug}@example.test"),
+            ],
+        )
+        .await
+        .expect("insert organization");
+    organization_id
+}
+
+async fn make_user(state: &AppState, label: &str) -> UserId {
+    let id = UserId::mint();
+    let email = format!("{label}-{}@zeroship.test", id.as_str());
+    state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.users (id, email, name, email_verified_at) \
+             VALUES ($1, $2, $3, NOW())",
+            &[&id.as_str(), &email, &label.to_string()],
+        )
+        .await
+        .expect("insert user");
+    id
+}
+
+/// Issue a platform OAuth bearer for `user_id` carrying `scope`.
+///
+/// Every principal this mints is an ordinary creator: there is no platform
+/// role to grant.
+async fn issue_bearer(state: &AppState, user_id: &UserId, scope: &str) -> Caller {
+    let _ = state;
+    Caller {
+        user_id: user_id.clone(),
+        token: crate::support::platform_token_for_client(user_id, scope, crate::support::CONSOLE_CLIENT_ID),
+    }
+}
+
+// The scope vocabulary is resource-blind: a scope always lowers to
+// `Resource::Any`, so per-app narrowing comes from Cedar app membership
+// rather than from a caller-supplied wrapper policy.
+// The organization-facing Stripe routes bind `:id` to the principal and consult no
+// grant beyond that, so the scope a bearer carries does not decide them - the
+// principal id does.
+
+async fn cleanup(state: &AppState, subjects: &[&str], callers: &[&Caller]) {
+    let pg = &state.control_pg;
+    for c in subjects {
+        let _ = pg
+            .execute(
+                "DELETE FROM zeroship.organization_fee_policy WHERE organization_id = $1",
+                &[c],
+            )
+            .await;
+        let _ = pg
+            .execute(
+                "DELETE FROM zeroship.payouts WHERE organization_id = $1",
+                &[c],
+            )
+            .await;
+        let _ = pg
+            .execute(
+                "DELETE FROM zeroship.organization_account_history WHERE organization_id = $1",
+                &[c],
+            )
+            .await;
+        let _ = pg
+            .execute(
+                "DELETE FROM zeroship.organization_accounts WHERE organization_id = $1",
+                &[c],
+            )
+            .await;
+    }
+    for caller in callers {
+        let _ = pg
+            .execute(
+                "DELETE FROM zeroship.authz_decisions WHERE actor_user_id = $1",
+                &[&caller.user_id.as_str()],
+            )
+            .await;
+    }
+    let user_ids: Vec<&str> = callers
+        .iter()
+        .map(|caller| caller.user_id.as_str())
+        .collect();
+    let _ = pg
+        .execute(
+            "DELETE FROM zeroship.users WHERE id = ANY($1)",
+            &[&user_ids],
+        )
+        .await;
+}
+
+// ===========================================================================
+// Tests.
+// ===========================================================================
+
+#[compio::test(crate = "crate::support::live")]
+async fn onboard_returns_real_account_link() {
+    let url = db_url();
+    let fx = build_fixture(&url, "onboard").await;
+    let organization = make_organization(&fx.state, "organization").await;
+    let organization = organization.as_str();
+    // The caller is a PRINCIPAL seated in the organization, not the subject
+    // itself: the route gates on money authority at `Resource::Organization`,
+    // which a token can only carry through a seat.
+    let owner = make_user(&fx.state, "owner").await;
+    crate::support::seat_organization_member(&fx.state.control_pg, organization, &owner, "owner").await;
+    let caller = issue_bearer(&fx.state, &owner, "billing:read billing:write").await;
+
+    let svc = test::init_service(
+        web::App::new().state(fx.state.clone()).service(
+            web::resource("/api/organizations/{id}/stripe/onboard")
+                .route(web::post().to(stripe_handlers::onboard)),
+        ),
+    )
+    .await;
+
+    let req = test::TestRequest::post()
+        .uri(&format!("/api/organizations/{organization}/stripe/onboard"))
+        .header("authorization", caller.bearer())
+        .to_request();
+    let resp = test::call_service(&svc, req).await;
+    assert_eq!(resp.status(), StatusCode::OK, "onboard should succeed");
+    let bytes = test::read_body(resp).await;
+    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("response is JSON");
+    let link = body["url"].as_str().expect("url present");
+    assert!(
+        link.starts_with("https://connect.stripe.test/setup/acct_"),
+        "must be a REAL account_links URL (not the old express_login placeholder), got: {link}"
+    );
+    // The account_links POST happened against the REAL Stripe wire.
+    assert!(
+        fx.mock.first_body("POST", "/v1/account_links").is_some(),
+        "onboard must POST /v1/account_links"
+    );
+    // The created account carries metadata.organization_id (the ownership signal).
+    let create_body = fx
+        .mock
+        .first_body("POST", "/v1/accounts")
+        .expect("account create");
+    assert!(
+        create_body.contains(&organization.to_string().replace('-', "%2D"))
+            || create_body.contains(&organization.to_string()),
+        "create account must stamp metadata[organization_id]"
+    );
+
+    cleanup(&fx.state, &[organization], &[&caller]).await;
+}
+
+#[compio::test(crate = "crate::support::live")]
+async fn callback_rejects_acct_not_owned_by_creator() {
+    let url = db_url();
+    let fx = build_fixture(&url, "callback-forge").await;
+    let organization = make_organization(&fx.state, "organization").await;
+    let organization = organization.as_str();
+    // The caller is a PRINCIPAL seated in the organization, not the subject
+    // itself: the route gates on money authority at `Resource::Organization`,
+    // which a token can only carry through a seat.
+    let owner = make_user(&fx.state, "owner").await;
+    crate::support::seat_organization_member(&fx.state.control_pg, organization, &owner, "owner").await;
+    let attacker = make_user(&fx.state, "attacker").await;
+    let caller = issue_bearer(&fx.state, &owner, "billing:read billing:write").await;
+
+    let svc = test::init_service(
+        web::App::new().state(fx.state.clone()).service(
+            web::scope("/api/organizations/{id}")
+                .service(
+                    web::resource("/stripe/onboard")
+                        .route(web::post().to(stripe_handlers::onboard)),
+                )
+                .service(
+                    web::resource("/stripe/callback")
+                        .route(web::post().to(stripe_handlers::callback)),
+                ),
+        ),
+    )
+    .await;
+
+    // Creator onboards → mints THEIR acct_… (stored server-side).
+    let onboard = test::TestRequest::post()
+        .uri(&format!("/api/organizations/{organization}/stripe/onboard"))
+        .header("authorization", caller.bearer())
+        .to_request();
+    // Status only: a shadowed `resp` binding would NOT drop the earlier
+    // `WebResponse` (Rust drops locals in reverse declaration order only once
+    // the scope ends), so both calls here keep the app state - and its
+    // Postgres client - alive past the teardown at the end of this test unless
+    // each is reduced to just its status.
+    let onboard_status = test::call_service(&svc, onboard).await.status();
+    assert_eq!(onboard_status, StatusCode::OK);
+
+    // Pre-seed a FOREIGN account in the mock that belongs to the ATTACKER, with
+    // a real acct_… shape. The organization forges a callback claiming this acct_….
+    let foreign_acct = format!("acct_{}", "f00dbabecafe1234");
+    fx.mock
+        .state
+        .lock()
+        .unwrap()
+        .accounts
+        .insert(foreign_acct.clone(), attacker.as_str().to_string());
+
+    let forge = test::TestRequest::post()
+        .uri(&format!(
+            "/api/organizations/{organization}/stripe/callback"
+        ))
+        .header("authorization", caller.bearer())
+        .set_json(&serde_json::json!({ "stripe_account_id": foreign_acct }))
+        .to_request();
+    let forge_status = test::call_service(&svc, forge).await.status();
+    assert_eq!(
+        forge_status,
+        StatusCode::FORBIDDEN,
+        "a forged/foreign acct_… that doesn't match the organization's onboarded account MUST be rejected (ISS-30)"
+    );
+
+    cleanup(&fx.state, &[organization], &[&caller]).await;
+}
+
+#[compio::test(crate = "crate::support::live")]
+async fn callback_accepts_owned_account_and_persists_flags() {
+    let url = db_url();
+    let fx = build_fixture(&url, "callback-ok").await;
+    let organization = make_organization(&fx.state, "organization").await;
+    let organization = organization.as_str();
+    // The caller is a PRINCIPAL seated in the organization, not the subject
+    // itself: the route gates on money authority at `Resource::Organization`,
+    // which a token can only carry through a seat.
+    let owner = make_user(&fx.state, "owner").await;
+    crate::support::seat_organization_member(&fx.state.control_pg, organization, &owner, "owner").await;
+    let caller = issue_bearer(&fx.state, &owner, "billing:read billing:write").await;
+    fx.mock.set_flags(true, true, true);
+
+    let svc = test::init_service(
+        web::App::new().state(fx.state.clone()).service(
+            web::scope("/api/organizations/{id}")
+                .service(
+                    web::resource("/stripe/onboard")
+                        .route(web::post().to(stripe_handlers::onboard)),
+                )
+                .service(
+                    web::resource("/stripe/callback")
+                        .route(web::post().to(stripe_handlers::callback)),
+                ),
+        ),
+    )
+    .await;
+
+    let onboard = test::TestRequest::post()
+        .uri(&format!("/api/organizations/{organization}/stripe/onboard"))
+        .header("authorization", caller.bearer())
+        .to_request();
+    assert_eq!(
+        test::call_service(&svc, onboard).await.status(),
+        StatusCode::OK
+    );
+
+    // Callback with NO body acct hint — server retrieves + verifies the stored acct.
+    let cb = test::TestRequest::post()
+        .uri(&format!(
+            "/api/organizations/{organization}/stripe/callback"
+        ))
+        .header("authorization", caller.bearer())
+        .set_json(&serde_json::json!({}))
+        .to_request();
+    let resp = test::call_service(&svc, cb).await;
+    assert_eq!(resp.status(), StatusCode::OK, "owned account verifies");
+    let bytes = test::read_body(resp).await;
+    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("response is JSON");
+    assert_eq!(body["charges_enabled"], serde_json::json!(true));
+
+    // The verified flags are persisted.
+    let row = fx
+        .state
+        .control_pg
+        .query_one(
+            "SELECT charges_enabled, payouts_enabled, details_submitted \
+             FROM zeroship.organization_accounts WHERE organization_id = $1",
+            &[&organization],
+        )
+        .await
+        .expect("account row");
+    assert!(row.get::<_, bool>("charges_enabled"));
+    assert!(row.get::<_, bool>("payouts_enabled"));
+    assert!(row.get::<_, bool>("details_submitted"));
+
+    cleanup(&fx.state, &[organization], &[&caller]).await;
+}
+
+#[compio::test(crate = "crate::support::live")]
+async fn checkout_stamps_server_fee_not_client_value() {
+    let url = db_url();
+    let fx = build_fixture(&url, "checkout-fee").await;
+    let organization = make_organization(&fx.state, "organization").await;
+    let organization = organization.as_str();
+    // The caller is a PRINCIPAL seated in the organization, not the subject
+    // itself: the route gates on money authority at `Resource::Organization`,
+    // which a token can only carry through a seat.
+    let owner = make_user(&fx.state, "owner").await;
+    crate::support::seat_organization_member(&fx.state.control_pg, organization, &owner, "owner").await;
+    let caller = issue_bearer(&fx.state, &owner, "billing:read billing:write").await;
+
+    let svc = test::init_service(
+        web::App::new().state(fx.state.clone()).service(
+            web::scope("/api/organizations/{id}")
+                .service(
+                    web::resource("/stripe/onboard")
+                        .route(web::post().to(stripe_handlers::onboard)),
+                )
+                .service(
+                    web::resource("/stripe/callback")
+                        .route(web::post().to(stripe_handlers::callback)),
+                )
+                .service(
+                    web::resource("/connect/checkout")
+                        .route(web::post().to(stripe_handlers::connect_checkout)),
+                ),
+        ),
+    )
+    .await;
+
+    // Onboard to mint a connected account, then complete onboarding (callback
+    // persists charges_enabled=true — the M1 gate requires a ready account).
+    let onboard = test::TestRequest::post()
+        .uri(&format!("/api/organizations/{organization}/stripe/onboard"))
+        .header("authorization", caller.bearer())
+        .to_request();
+    assert_eq!(
+        test::call_service(&svc, onboard).await.status(),
+        StatusCode::OK
+    );
+    let cb = test::TestRequest::post()
+        .uri(&format!(
+            "/api/organizations/{organization}/stripe/callback"
+        ))
+        .header("authorization", caller.bearer())
+        .set_json(&serde_json::json!({}))
+        .to_request();
+    assert_eq!(test::call_service(&svc, cb).await.status(), StatusCode::OK);
+
+    // No fee policy row → DEFAULT 15%. Charge $200.00 (20000 cents). A MALICIOUS
+    // client tries to set application_fee_amount=1 in the body — it has no wire
+    // path and MUST be ignored.
+    let checkout = test::TestRequest::post()
+        .uri(&format!(
+            "/api/organizations/{organization}/connect/checkout"
+        ))
+        .header("authorization", caller.bearer())
+        .set_json(&serde_json::json!({
+            "amount_cents": 20000,
+            "currency": "usd",
+            "cart_id": "cart-1",
+            // Attacker-supplied fields the server must NOT honor:
+            "application_fee_amount": 1,
+            "application_fee_percent": 0,
+            "applicationFeePercent": 0
+        }))
+        .to_request();
+    let resp = test::call_service(&svc, checkout).await;
+    assert_eq!(resp.status(), StatusCode::OK, "checkout should succeed");
+    let bytes = test::read_body(resp).await;
+    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("response is JSON");
+    // The SERVER-resolved fee is 15% of 20000 = 3000.
+    assert_eq!(body["application_fee_cents"], serde_json::json!(3000));
+
+    // FAITHFUL: assert the REAL Stripe wire carried application_fee_amount=3000,
+    // transfer_data[destination]=acct_…, and amount=20000 — NOT the client's 1.
+    let pi_body = fx
+        .mock
+        .first_body("POST", "/v1/payment_intents")
+        .expect("PI created");
+    assert!(
+        pi_body.contains("application_fee_amount=3000"),
+        "the Connect charge must carry the SERVER fee (3000), got: {pi_body}"
+    );
+    assert!(
+        !pi_body.contains("application_fee_amount=1"),
+        "the client-supplied fee (1) must be IGNORED, got: {pi_body}"
+    );
+    assert!(
+        pi_body.contains("amount=20000"),
+        "charge amount, got: {pi_body}"
+    );
+    assert!(
+        pi_body.contains("transfer_data%5Bdestination%5D=acct_")
+            || pi_body.contains("transfer_data[destination]=acct_"),
+        "must route to the connected account, got: {pi_body}"
+    );
+
+    cleanup(&fx.state, &[organization], &[&caller]).await;
+}
+
+#[compio::test(crate = "crate::support::live")]
+async fn checkout_stamps_the_stored_fee_policy_with_its_cap() {
+    let url = db_url();
+    let fx = build_fixture(&url, "checkout-policy").await;
+    let organization = make_organization(&fx.state, "organization").await;
+    let organization = organization.as_str();
+    // The caller is a PRINCIPAL seated in the organization, not the subject
+    // itself: the route gates on money authority at `Resource::Organization`,
+    // which a token can only carry through a seat.
+    let owner = make_user(&fx.state, "owner").await;
+    crate::support::seat_organization_member(&fx.state.control_pg, organization, &owner, "owner").await;
+    let op = make_user(&fx.state, "operator").await;
+    let creator_caller = issue_bearer(&fx.state, &owner, "billing:read billing:write").await;
+    let op_caller = issue_bearer(&fx.state, &op, "billing:write").await;
+
+    let svc = test::init_service(
+        web::App::new().state(fx.state.clone()).service(
+            web::scope("/api/organizations/{id}")
+                .service(
+                    web::resource("/stripe/onboard")
+                        .route(web::post().to(stripe_handlers::onboard)),
+                )
+                .service(
+                    web::resource("/stripe/callback")
+                        .route(web::post().to(stripe_handlers::callback)),
+                )
+                .service(
+                    web::resource("/connect/checkout")
+                        .route(web::post().to(stripe_handlers::connect_checkout)),
+                ),
+        ),
+    )
+    .await;
+
+    // Onboard the organization, then complete onboarding (charges_enabled=true).
+    let onboard = test::TestRequest::post()
+        .uri(&format!("/api/organizations/{organization}/stripe/onboard"))
+        .header("authorization", creator_caller.bearer())
+        .to_request();
+    assert_eq!(
+        test::call_service(&svc, onboard).await.status(),
+        StatusCode::OK
+    );
+    let cb = test::TestRequest::post()
+        .uri(&format!(
+            "/api/organizations/{organization}/stripe/callback"
+        ))
+        .header("authorization", creator_caller.bearer())
+        .set_json(&serde_json::json!({}))
+        .to_request();
+    assert_eq!(test::call_service(&svc, cb).await.status(), StatusCode::OK);
+
+    // A 25% policy capped at $40 (4000 cents), written straight to the store.
+    //
+    // Seeded directly rather than through a route: the behaviour under test is
+    // that CHECKOUT stamps the stored policy server-side, not that any particular
+    // route set it.
+    zeroship_control::fee_policy::FeePolicyStore::new(fx.state.registry.clone())
+        .set(
+            organization,
+            zeroship_control::fee_policy::FeePolicy::Percent {
+                bps: 2500,
+                cap_cents: Some(4000),
+                floor_cents: None,
+            },
+        )
+        .await
+        .expect("seed the fee policy");
+
+    // Charge $200 → 25% = 5000, capped to 4000.
+    let checkout = test::TestRequest::post()
+        .uri(&format!(
+            "/api/organizations/{organization}/connect/checkout"
+        ))
+        .header("authorization", creator_caller.bearer())
+        .set_json(&serde_json::json!({ "amount_cents": 20000, "currency": "usd", "cart_id": "c2" }))
+        .to_request();
+    let resp = test::call_service(&svc, checkout).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = test::read_body(resp).await;
+    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("response is JSON");
+    assert_eq!(
+        body["application_fee_cents"],
+        serde_json::json!(4000),
+        "25% capped at 4000"
+    );
+
+    cleanup(&fx.state, &[organization], &[&creator_caller, &op_caller]).await;
+}
+
+/// M1 (RED→GREEN): a organization who ran `onboard` but whose Stripe account is NOT
+/// yet `charges_enabled` MUST NOT reach the charge path. `connect_checkout`
+/// returns 400 and posts NO PaymentIntent.
+#[compio::test(crate = "crate::support::live")]
+async fn checkout_rejected_when_charges_not_enabled() {
+    let url = db_url();
+    let fx = build_fixture(&url, "checkout-not-ready").await;
+    let organization = make_organization(&fx.state, "organization").await;
+    let organization = organization.as_str();
+    // The caller is a PRINCIPAL seated in the organization, not the subject
+    // itself: the route gates on money authority at `Resource::Organization`,
+    // which a token can only carry through a seat.
+    let owner = make_user(&fx.state, "owner").await;
+    crate::support::seat_organization_member(&fx.state.control_pg, organization, &owner, "owner").await;
+    let caller = issue_bearer(&fx.state, &owner, "billing:read billing:write").await;
+    // The account exists but onboarding is incomplete: charges are NOT enabled.
+    fx.mock.set_flags(false, false, false);
+
+    let svc = test::init_service(
+        web::App::new().state(fx.state.clone()).service(
+            web::scope("/api/organizations/{id}")
+                .service(
+                    web::resource("/stripe/onboard")
+                        .route(web::post().to(stripe_handlers::onboard)),
+                )
+                .service(
+                    web::resource("/stripe/callback")
+                        .route(web::post().to(stripe_handlers::callback)),
+                )
+                .service(
+                    web::resource("/connect/checkout")
+                        .route(web::post().to(stripe_handlers::connect_checkout)),
+                ),
+        ),
+    )
+    .await;
+
+    // Onboard mints the acct_… (charges_enabled defaults to false on the row).
+    let onboard = test::TestRequest::post()
+        .uri(&format!("/api/organizations/{organization}/stripe/onboard"))
+        .header("authorization", caller.bearer())
+        .to_request();
+    assert_eq!(
+        test::call_service(&svc, onboard).await.status(),
+        StatusCode::OK
+    );
+
+    // Callback verifies + persists the (false) flags from Stripe's truth.
+    let cb = test::TestRequest::post()
+        .uri(&format!(
+            "/api/organizations/{organization}/stripe/callback"
+        ))
+        .header("authorization", caller.bearer())
+        .set_json(&serde_json::json!({}))
+        .to_request();
+    assert_eq!(test::call_service(&svc, cb).await.status(), StatusCode::OK);
+
+    let pis_before = fx
+        .mock
+        .requests()
+        .into_iter()
+        .filter(|r| r.path == "/v1/payment_intents")
+        .count();
+
+    // Checkout must be REJECTED with 400 before any PI POST.
+    let checkout = test::TestRequest::post()
+        .uri(&format!(
+            "/api/organizations/{organization}/connect/checkout"
+        ))
+        .header("authorization", caller.bearer())
+        .set_json(
+            &serde_json::json!({ "amount_cents": 20000, "currency": "usd", "cart_id": "cart-x" }),
+        )
+        .to_request();
+    // Status only: a retained `WebResponse` keeps the app state - and its
+    // Postgres client - alive past the teardown at the end of this test.
+    let status = test::call_service(&svc, checkout).await.status();
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "checkout must be rejected when the connected account is not charges_enabled (M1)"
+    );
+
+    let pis_after = fx
+        .mock
+        .requests()
+        .into_iter()
+        .filter(|r| r.path == "/v1/payment_intents")
+        .count();
+    assert_eq!(
+        pis_before, pis_after,
+        "no PaymentIntent may be POSTed when charges are not enabled (M1)"
+    );
+
+    cleanup(&fx.state, &[organization], &[&caller]).await;
+}
+
+/// An empty `cart_id` must be rejected: it would collapse every checkout for an
+/// organization onto ONE idempotency key, replaying a stale charge for a different
+/// amount. Two checkouts with an empty cart_id and different amounts must NOT
+/// return the same PaymentIntent, and the request is a 400 - no PI is created at
+/// all, so no stale replay.
+#[compio::test(crate = "crate::support::live")]
+async fn checkout_rejects_empty_cart_id_no_stale_replay() {
+    let url = db_url();
+    let fx = build_fixture(&url, "checkout-cartid").await;
+    let organization = make_organization(&fx.state, "organization").await;
+    let organization = organization.as_str();
+    // The caller is a PRINCIPAL seated in the organization, not the subject
+    // itself: the route gates on money authority at `Resource::Organization`,
+    // which a token can only carry through a seat.
+    let owner = make_user(&fx.state, "owner").await;
+    crate::support::seat_organization_member(&fx.state.control_pg, organization, &owner, "owner").await;
+    let caller = issue_bearer(&fx.state, &owner, "billing:read billing:write").await;
+    fx.mock.set_flags(true, true, true);
+
+    let svc = test::init_service(
+        web::App::new().state(fx.state.clone()).service(
+            web::scope("/api/organizations/{id}")
+                .service(
+                    web::resource("/stripe/onboard")
+                        .route(web::post().to(stripe_handlers::onboard)),
+                )
+                .service(
+                    web::resource("/stripe/callback")
+                        .route(web::post().to(stripe_handlers::callback)),
+                )
+                .service(
+                    web::resource("/connect/checkout")
+                        .route(web::post().to(stripe_handlers::connect_checkout)),
+                ),
+        ),
+    )
+    .await;
+
+    let onboard = test::TestRequest::post()
+        .uri(&format!("/api/organizations/{organization}/stripe/onboard"))
+        .header("authorization", caller.bearer())
+        .to_request();
+    assert_eq!(
+        test::call_service(&svc, onboard).await.status(),
+        StatusCode::OK
+    );
+    let cb = test::TestRequest::post()
+        .uri(&format!(
+            "/api/organizations/{organization}/stripe/callback"
+        ))
+        .header("authorization", caller.bearer())
+        .set_json(&serde_json::json!({}))
+        .to_request();
+    assert_eq!(test::call_service(&svc, cb).await.status(), StatusCode::OK);
+
+    // First checkout with NO cart_id, amount $200.
+    let c1 = test::TestRequest::post()
+        .uri(&format!(
+            "/api/organizations/{organization}/connect/checkout"
+        ))
+        .header("authorization", caller.bearer())
+        .set_json(&serde_json::json!({ "amount_cents": 20000, "currency": "usd" }))
+        .to_request();
+    // Status only: a retained `WebResponse` keeps the app state - and its
+    // Postgres client - alive past the teardown at the end of this test.
+    let status1 = test::call_service(&svc, c1).await.status();
+    assert_eq!(
+        status1,
+        StatusCode::BAD_REQUEST,
+        "an absent/empty cart_id must be rejected (M2 — would otherwise replay a stale charge)"
+    );
+
+    // Second checkout with NO cart_id, DIFFERENT amount $50.
+    let c2 = test::TestRequest::post()
+        .uri(&format!(
+            "/api/organizations/{organization}/connect/checkout"
+        ))
+        .header("authorization", caller.bearer())
+        .set_json(&serde_json::json!({ "amount_cents": 5000, "currency": "usd" }))
+        .to_request();
+    let status2 = test::call_service(&svc, c2).await.status();
+    assert_eq!(status2, StatusCode::BAD_REQUEST);
+
+    // Neither created a PaymentIntent → no stale replay is even possible.
+    let pis = fx
+        .mock
+        .requests()
+        .into_iter()
+        .filter(|r| r.path == "/v1/payment_intents")
+        .count();
+    assert_eq!(
+        pis, 0,
+        "rejected empty-cart_id checkouts must not POST any PaymentIntent (M2)"
+    );
+
+    // And an EXPLICIT cart_id still works AND folds amount into the idempotency
+    // key — two carts with different amounts get DISTINCT idempotency keys.
+    let c3 = test::TestRequest::post()
+        .uri(&format!(
+            "/api/organizations/{organization}/connect/checkout"
+        ))
+        .header("authorization", caller.bearer())
+        .set_json(
+            &serde_json::json!({ "amount_cents": 20000, "currency": "usd", "cart_id": "cart-A" }),
+        )
+        .to_request();
+    assert_eq!(test::call_service(&svc, c3).await.status(), StatusCode::OK);
+    let c4 = test::TestRequest::post()
+        .uri(&format!(
+            "/api/organizations/{organization}/connect/checkout"
+        ))
+        .header("authorization", caller.bearer())
+        .set_json(
+            &serde_json::json!({ "amount_cents": 5000, "currency": "usd", "cart_id": "cart-A" }),
+        )
+        .to_request();
+    assert_eq!(test::call_service(&svc, c4).await.status(), StatusCode::OK);
+
+    let keys: Vec<String> = fx
+        .mock
+        .requests()
+        .into_iter()
+        .filter(|r| r.path == "/v1/payment_intents")
+        .filter_map(|r| r.idempotency_key)
+        .collect();
+    assert_eq!(keys.len(), 2, "both explicit-cart checkouts POSTed a PI");
+    assert_ne!(
+        keys[0], keys[1],
+        "same cart_id but DIFFERENT amount must yield distinct idempotency keys (M2)"
+    );
+
+    cleanup(&fx.state, &[organization], &[&caller]).await;
+}
+
+/// m1 (RED→GREEN): a malformed currency is rejected with 400 before any Stripe
+/// call.
+#[compio::test(crate = "crate::support::live")]
+async fn checkout_rejects_bad_currency() {
+    let url = db_url();
+    let fx = build_fixture(&url, "checkout-currency").await;
+    let organization = make_organization(&fx.state, "organization").await;
+    let organization = organization.as_str();
+    // The caller is a PRINCIPAL seated in the organization, not the subject
+    // itself: the route gates on money authority at `Resource::Organization`,
+    // which a token can only carry through a seat.
+    let owner = make_user(&fx.state, "owner").await;
+    crate::support::seat_organization_member(&fx.state.control_pg, organization, &owner, "owner").await;
+    let caller = issue_bearer(&fx.state, &owner, "billing:read billing:write").await;
+    fx.mock.set_flags(true, true, true);
+
+    let svc = test::init_service(
+        web::App::new().state(fx.state.clone()).service(
+            web::scope("/api/organizations/{id}")
+                .service(
+                    web::resource("/stripe/onboard")
+                        .route(web::post().to(stripe_handlers::onboard)),
+                )
+                .service(
+                    web::resource("/stripe/callback")
+                        .route(web::post().to(stripe_handlers::callback)),
+                )
+                .service(
+                    web::resource("/connect/checkout")
+                        .route(web::post().to(stripe_handlers::connect_checkout)),
+                ),
+        ),
+    )
+    .await;
+
+    let onboard = test::TestRequest::post()
+        .uri(&format!("/api/organizations/{organization}/stripe/onboard"))
+        .header("authorization", caller.bearer())
+        .to_request();
+    assert_eq!(
+        test::call_service(&svc, onboard).await.status(),
+        StatusCode::OK
+    );
+    let cb = test::TestRequest::post()
+        .uri(&format!(
+            "/api/organizations/{organization}/stripe/callback"
+        ))
+        .header("authorization", caller.bearer())
+        .set_json(&serde_json::json!({}))
+        .to_request();
+    assert_eq!(test::call_service(&svc, cb).await.status(), StatusCode::OK);
+
+    let checkout = test::TestRequest::post()
+        .uri(&format!("/api/organizations/{organization}/connect/checkout"))
+        .header("authorization", caller.bearer())
+        .set_json(&serde_json::json!({ "amount_cents": 20000, "currency": "US Dollars", "cart_id": "cart-z" }))
+        .to_request();
+    // Status only: a retained `WebResponse` keeps the app state - and its
+    // Postgres client - alive past the teardown at the end of this test.
+    let status = test::call_service(&svc, checkout).await.status();
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a non ^[a-z]{{3}}$ currency must be rejected (m1)"
+    );
+
+    cleanup(&fx.state, &[organization], &[&caller]).await;
+}
+
+/// `earnings` and `unlink` are gated by a SEAT at the organization in the path.
+///
+/// Binding to the path organization is what makes them reachable at all: an
+/// operator grant on `Resource::Any` would leave the organization that owns the
+/// payout history unable to read it, and the one that linked the Stripe account
+/// unable to unlink it.
+///
+/// The assertions run in BOTH directions on the same request shape, so the pair
+/// distinguishes "bound to the principal" from "allows everyone" - a test that
+/// only checked the owner's 200 would pass just as happily with no gate at all.
+#[compio::test(crate = "crate::support::live")]
+async fn earnings_and_unlink_require_a_seat_at_the_path_organization() {
+    let url = db_url();
+    let fx = build_fixture(&url, "self-serve").await;
+    let organization = make_organization(&fx.state, "self-serve").await;
+    let organization = organization.as_str();
+    let owner = make_user(&fx.state, "owner").await;
+    let other = make_user(&fx.state, "other").await;
+    crate::support::seat_organization_member(&fx.state.control_pg, organization, &owner, "owner").await;
+    let owner_caller = issue_bearer(&fx.state, &owner, "billing:read billing:write").await;
+    let other_caller = issue_bearer(&fx.state, &other, "billing:read billing:write").await;
+
+    let svc = test::init_service(
+        web::App::new().state(fx.state.clone()).service(
+            web::scope("/api/organizations/{id}")
+                .service(
+                    web::resource("/stripe/onboard")
+                        .route(web::post().to(stripe_handlers::onboard)),
+                )
+                .service(web::resource("/earnings").route(web::get().to(stripe_handlers::earnings)))
+                .service(web::resource("/stripe").route(web::delete().to(stripe_handlers::unlink))),
+        ),
+    )
+    .await;
+
+    // Give the owner a real Connect account so `unlink` has something to remove
+    // and does not answer 404 for a reason unrelated to authorization.
+    let onboard = test::TestRequest::post()
+        .uri(&format!("/api/organizations/{organization}/stripe/onboard"))
+        .header("authorization", owner_caller.bearer())
+        .to_request();
+    assert_eq!(
+        test::call_service(&svc, onboard).await.status(),
+        StatusCode::OK
+    );
+
+    // The owner reads their OWN earnings.
+    let status = test::call_service(
+        &svc,
+        test::TestRequest::get()
+            .uri(&format!("/api/organizations/{organization}/earnings"))
+            .header("authorization", owner_caller.bearer())
+            .to_request(),
+    )
+    .await
+    .status();
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a organization reads their own earnings"
+    );
+
+    // A DIFFERENT organization, same request, is refused.
+    let status = test::call_service(
+        &svc,
+        test::TestRequest::get()
+            .uri(&format!("/api/organizations/{organization}/earnings"))
+            .header("authorization", other_caller.bearer())
+            .to_request(),
+    )
+    .await
+    .status();
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "nobody reads another organization's earnings"
+    );
+
+    // Unlink: the stranger first, so a wrongly-allowed call would be caught by
+    // the owner's own unlink answering 404 "not linked" afterwards.
+    let status = test::call_service(
+        &svc,
+        test::TestRequest::delete()
+            .uri(&format!("/api/organizations/{organization}/stripe"))
+            .header("authorization", other_caller.bearer())
+            .to_request(),
+    )
+    .await
+    .status();
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "nobody unlinks another organization's account"
+    );
+
+    let status = test::call_service(
+        &svc,
+        test::TestRequest::delete()
+            .uri(&format!("/api/organizations/{organization}/stripe"))
+            .header("authorization", owner_caller.bearer())
+            .to_request(),
+    )
+    .await
+    .status();
+    assert_eq!(
+        status,
+        StatusCode::NO_CONTENT,
+        "a organization unlinks their own account, and it was still linked - so the \
+         stranger's DELETE above really was refused rather than silently applied",
+    );
+
+    cleanup(&fx.state, &[organization], &[&owner_caller, &other_caller]).await;
+}

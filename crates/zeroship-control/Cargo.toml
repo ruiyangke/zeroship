@@ -3,13 +3,9 @@ name = "zeroship-control"
 version = "0.1.0"
 edition = "2021"
 description = "zeroship control plane — admin API, internal API, Postgres, VFS"
-# Integration targets are registered explicitly below. Workflow targets own
-# their Testcontainers fixtures; shared service suites remain grouped.
+# Integration targets are registered explicitly below. The workflow process
+# contracts and the app/database decoupling exercise own separate targets.
 autotests = false
-
-[[test]]
-name = "workflow_policy_catalog"
-path = "tests/workflow_policy_catalog.rs"
 
 [[package.metadata.zeroship-config.targets]]
 target = "zeroship-control"
@@ -159,17 +155,11 @@ zeroship-data-v8 = { workspace = true }
 # Database verification is mandatory in ordinary cargo test runs. Each test
 # binary owns and migrates its PostgreSQL instance.
 
-# Integration modules share executables to avoid repeatedly linking the service.
-# Workflow targets own their migrated template and disposable databases.
-# The source residue guard needs its own target because its filename would
-# match its scan.
+# One integration binary; tests/support, tests/integration and tests/e2e
+# declare every suite.
 [[test]]
 name = "main"
 path = "tests/main.rs"
-
-[[test]]
-name = "live_db"
-path = "tests/live_db.rs"
 
 # The controls here deliberately strand an io_uring ring and count every ring
 # the process holds, so they must run in a process no other test shares.
@@ -177,24 +167,18 @@ path = "tests/live_db.rs"
 name = "live_case_rings"
 path = "tests/live_case_rings.rs"
 
+# The workflow process contracts own a migrated template and clone disposable
+# databases from it; a sibling module holding a session on that template would
+# make the clone fail.
 [[test]]
 name = "workflow_e2e"
 path = "tests/workflow_e2e.rs"
 
-[lints]
-workspace = true
-
-[[test]]
-name = "deployment_holds"
-path = "tests/deployment_holds.rs"
-
-[[test]]
-name = "control_boot_test"
-path = "tests/control_boot_test.rs"
-
-# The one exercise that drives the whole app/database path in a single run. It
-# owns TWO servers - the control plane's and a tenant cluster - so it gets its
-# own binary rather than joining `live_db`, whose fixture is one shared server.
+# This exercise declares a second execution zone in the platform fixture, so it
+# cannot share a binary with the suites that resolve the default zone.
 [[test]]
 name = "database_decoupling_e2e"
 path = "tests/database_decoupling_e2e.rs"
+
+[lints]
+workspace = true

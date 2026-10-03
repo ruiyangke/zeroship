@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use zeroship_data_orm::{Database, orm::*};
 
 include!("../fixtures/posts_schema.rs");

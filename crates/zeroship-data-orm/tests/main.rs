@@ -1,8 +1,9 @@
-mod derive_contract;
-mod error_contract;
-mod native_schema;
-mod native_schema_allocation;
-mod postgres_binding_fence;
-mod postgres_database_encryption;
-mod postgres_tenant_fence;
-mod sql;
+//! The `zeroship-data-orm` test suites in one binary.
+//!
+//! `Cargo.toml` sets `autotests = false`, so a new `tests/integration/<name>.rs`
+//! is compiled by nothing until `tests/integration/mod.rs` declares it. Select
+//! a suite with a module-path filter:
+//!
+//! `cargo test -p zeroship-data-orm --test main -- integration::sql::`
+
+mod integration;

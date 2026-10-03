@@ -40,6 +40,8 @@ zeroship-migrate-postgres = { workspace = true }
 zeroship-data-testkit = { path = "../zeroship-data-testkit" }
 zeroship-testkit = { path = "../../tests/testkit" }
 
+# One integration binary; tests/integration/mod.rs and tests/e2e/mod.rs
+# declare every suite.
 [[test]]
 name = "main"
 path = "tests/main.rs"

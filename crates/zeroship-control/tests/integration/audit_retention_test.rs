@@ -1,0 +1,109 @@
+//! Test (review P12): `zeroship.app_audit` / `authz_decisions` are
+//! append-only — an un-flagged `DELETE` is rejected by the tamper trigger — but
+//! the sanctioned `control::cron::audit_retention` sweep (which sets
+//! `zeroship.audit_retention = 'on'`) deletes rows past the retention window.
+//!
+//! Configure a migrated test database
+//! (`zeroship_core::config::test_database_url_opt`; run
+//! `tests/provision_test_backends.sh` to provision one); skipped otherwise
+//! so this file doesn't gate CI without a DB.
+
+use compio_postgres::{connect, NoTls};
+use uuid::Uuid;
+use zeroship_control::cron::audit_retention;
+use zeroship_control::Registry;
+use zeroship_core::UserId;
+
+fn db_url() -> String {
+    crate::support::require_control_db()
+}
+
+async fn raw_conn(dsn: &str) -> compio_postgres::Client {
+    let (client, conn) = connect(dsn, NoTls).await.expect("connect");
+    crate::support::live::spawn(async move {
+        let _ = conn.run().await;
+    });
+    client
+}
+
+#[compio::test(crate = "crate::support::live")]
+async fn app_audit_is_append_only_but_retention_sweep_deletes_old() {
+    let url = db_url();
+    let registry = Registry::new(&url).await.expect("registry");
+    zeroship_control::plan_catalog::seed_plans(&registry)
+        .await
+        .expect("seed built-in plans");
+    // Unique app so parallel runs don't collide; the count assertion is
+    // app-scoped, and the global sweep only touches >retention rows.
+    let conn = raw_conn(&url).await;
+    // create_app binds an owner membership (FK → zeroship.users); seed one.
+    let owner_id = UserId::mint();
+    conn.execute(
+        "INSERT INTO zeroship.users (id, email, name) VALUES ($1, $2::citext, $3)",
+        &[
+            &owner_id.as_str(),
+            &format!("ret-owner-{}@zeroship.test", owner_id.as_str()),
+            &"ret-owner",
+        ],
+    )
+    .await
+    .expect("seed owner user");
+    let name = format!("ret-{}", &Uuid::new_v4().simple().to_string()[..12]);
+    let app = registry
+        .create_app(
+            &name,
+            &zeroship_control::plan_catalog::free_plan_id(),
+            &owner_id,
+            None,
+            None,
+        )
+        .await
+        .expect("create_app")
+        .id;
+
+    // One >12-month row and one fresh row for this app.
+    conn.execute(
+        "INSERT INTO zeroship.app_audit (app_id, action, resource, occurred_at) \
+         VALUES ($1, 'old', 'r', now() - interval '2 years')",
+        &[&app.as_str()],
+    )
+    .await
+    .expect("seed old");
+    conn.execute(
+        "INSERT INTO zeroship.app_audit (app_id, action, resource) VALUES ($1, 'new', 'r')",
+        &[&app.as_str()],
+    )
+    .await
+    .expect("seed new");
+
+    // Un-flagged DELETE is rejected by the append-only tamper trigger.
+    let blocked = conn
+        .execute(
+            "DELETE FROM zeroship.app_audit WHERE app_id = $1",
+            &[&app.as_str()],
+        )
+        .await;
+    assert!(
+        blocked.is_err(),
+        "un-flagged DELETE on app_audit must be rejected (append-only)"
+    );
+
+    // The sanctioned retention sweep (sets the GUC) removes the >12-month row
+    // and keeps the fresh one.
+    audit_retention::tick(&registry, 12)
+        .await
+        .expect("retention tick");
+
+    let remaining: i64 = conn
+        .query_one(
+            "SELECT count(*) FROM zeroship.app_audit WHERE app_id = $1",
+            &[&app.as_str()],
+        )
+        .await
+        .expect("count")
+        .get(0);
+    assert_eq!(
+        remaining, 1,
+        "retention sweep deletes the >12-month row, keeps the fresh one"
+    );
+}

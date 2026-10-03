@@ -31,7 +31,7 @@
 //! Native library availability proves none of this: every seam here is a
 //! process boundary, and the two zones are two servers.
 
-use crate::workflow_fleet::Fleet;
+use crate::support::workflow_fleet::Fleet;
 
 use std::time::{Duration, Instant};
 
@@ -89,7 +89,7 @@ async fn dispatch(fleet: &Fleet, plan: &str, path: &str) -> (u16, Value) {
         .expect("request id header")
         .header(
             "authorization",
-            crate::workflow_fleet::worker_dispatch_authorization(),
+            crate::support::workflow_fleet::worker_dispatch_authorization(),
         )
         .expect("peer credential")
         .body(frame)
@@ -172,7 +172,7 @@ async fn resolves(url: &str, role: Option<&str>, relation: &str) -> bool {
     found
 }
 
-#[compio::test(crate = "crate::common::live")]
+#[compio::test(crate = "crate::support::live")]
 async fn the_two_zones_run_a_workflow_without_reaching_each_other() {
     let mut fleet = Fleet::with_workflow_manager();
     // The two relations the zone arms probe: the journal the workflow service

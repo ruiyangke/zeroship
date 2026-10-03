@@ -6,13 +6,13 @@
 //! has drained, on the graceful path only - against the real Control, the real
 //! database and the join the worker performed at boot.
 
-use crate::workflow_fleet::Fleet;
+use crate::support::workflow_fleet::Fleet;
 
 async fn database(url: &str) -> compio_postgres::Client {
     let (client, connection) = compio_postgres::connect(url, compio_postgres::NoTls)
         .await
         .expect("fleet database connect");
-    crate::common::live::spawn(async move {
+    crate::support::live::spawn(async move {
         let _ = connection.run().await;
     });
     client
@@ -25,7 +25,7 @@ async fn database(url: &str) -> compio_postgres::Client {
 /// own exit, so the signer stays active and could admit the replacement a
 /// restart draws. A shutdown path that revoked its signer, or that wrote
 /// nothing at all, fails one of the two.
-#[compio::test(crate = "crate::common::live")]
+#[compio::test(crate = "crate::support::live")]
 async fn a_worker_stopped_gracefully_retires_its_own_instance() {
     let mut fleet = Fleet::start();
     let pg = database(&fleet.database.url()).await;

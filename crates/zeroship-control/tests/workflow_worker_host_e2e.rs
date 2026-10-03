@@ -12,7 +12,7 @@
 //! Native library availability proves none of that: every seam here is a
 //! process boundary.
 
-use crate::workflow_fleet::Fleet;
+use crate::support::workflow_fleet::Fleet;
 
 use std::time::{Duration, Instant};
 
@@ -71,7 +71,7 @@ thread_local! {
     };
 }
 
-#[compio::test(crate = "crate::common::live")]
+#[compio::test(crate = "crate::support::live")]
 async fn a_worker_host_runs_a_run_started_through_ordinary_app_ingress() {
     let mut fleet = Fleet::with_workflow_manager();
 

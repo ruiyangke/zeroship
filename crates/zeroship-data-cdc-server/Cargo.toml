@@ -21,6 +21,7 @@ reason = "Deployed long-running CDC relay in the server configuration scope, wit
 name = "zeroship-data-cdc-server"
 path = "src/main.rs"
 
+# One integration binary; tests/e2e/mod.rs declares every suite.
 [[test]]
 name = "main"
 path = "tests/main.rs"

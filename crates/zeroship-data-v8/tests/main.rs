@@ -1,17 +1,17 @@
 #![recursion_limit = "256"]
 
-//! Integration contracts independent of the shared database fixtures.
+//! The `zeroship-data-v8` test suites in one binary.
 //!
-//! Ordinary package tests run this target, the shared fixtures in
-//! `src/tests/`, and the process-isolated distributed CDC target.
-//! Database fixtures are private source modules; PostgreSQL is required.
+//! `Cargo.toml` sets `autotests = false`, so a new suite is compiled by nothing
+//! until its tier's `mod.rs` declares it. Ordinary package tests run this
+//! target, the shared fixtures in `src/tests/`, and the process-isolated
+//! distributed CDC target. Database fixtures are private source modules;
+//! PostgreSQL is required.
 //!
-//! With `autotests = false`, add each new test file to the appropriate entry
-//! file's module list. Select a subset using its module path, for example:
+//! Select a tier or a suite with a module-path filter:
 //!
-//! `cargo test -p zeroship-data-v8 --test main capability::`
+//! `cargo test -p zeroship-data-v8 --test main integration::capability::`
+//! `cargo test -p zeroship-data-v8 --test main e2e::distributed_live::`
 
-mod audit_table_parity;
-mod capability;
-mod distributed_live;
-mod subscription_finalizer;
+mod integration;
+mod e2e;

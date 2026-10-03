@@ -1,0 +1,3084 @@
+//! Integration tests for the billing-reconcile cron + Stripe client.
+//!
+//! FAITHFUL by construction: the tests drive the REAL `cyper`-based
+//! [`StripeClient`] against a localhost **mock-Stripe HTTP server** (a small
+//! HTTP/1.1 server stood up in-test on `compio::net::TcpListener` that speaks
+//! Stripe's form/JSON protocol and RECORDS every request). There is NO stubbed
+//! client object on the wire path: the reconciler builds a real `StripeClient`
+//! pointed at the mock via `AppState.stripe_base_url`, so the form encoding,
+//! the `Authorization: Bearer` + `Idempotency-Key` headers, the HTTP round-trip
+//! and the JSON parse are all exercised end to end.
+//!
+//! Real Postgres via a configured test database
+//! (`crate::support::require_control_db`); an absent or unmigrated one REFUSES
+//! the run.
+//! The DB must have changeset 0040 applied.
+
+
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+
+use ntex::http::StatusCode;
+use ntex::web::{self, test};
+
+use compio::io::{AsyncRead, AsyncWriteExt};
+use compio::net::{TcpListener, TcpStream};
+use uuid::Uuid;
+
+use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
+use zeroship_control::cron::billing_reconcile;
+use zeroship_control::pricing::{charge_cents, MetricWeights, PlanPrice};
+use zeroship_control::stripe_client::{Period, StripeApi, StripeClient, STRIPE_API_VERSION};
+use zeroship_control::{
+    AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
+};
+use zeroship_core::AppId;
+
+fn db_url() -> String {
+    crate::support::require_control_db()
+}
+
+const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
+
+/// The Stripe API version the client MUST pin. Sourced from the production
+/// constant so a drift between the code's pin and the mock's expectation fails
+/// the build, not silently at runtime.
+const PINNED_STRIPE_VERSION: &str = STRIPE_API_VERSION;
+
+fn tmpdir(label: &str) -> PathBuf {
+    let mut p = std::env::temp_dir();
+    p.push(format!("zs-bill-{label}-{}", Uuid::new_v4().simple()));
+    std::fs::create_dir_all(&p).expect("mk tmpdir");
+    p
+}
+
+// ===========================================================================
+// Mock-Stripe HTTP server — a real localhost server the REAL cyper client hits.
+// ===========================================================================
+
+/// One recorded inbound HTTP request to the mock-Stripe server.
+#[derive(Debug, Clone)]
+struct RecordedRequest {
+    method: String,
+    path: String,
+    idempotency_key: Option<String>,
+    authorization: Option<String>,
+    /// The `Stripe-Version` header the client pinned. A faithful mock
+    /// REQUIRES it on every Stripe call (a 400 otherwise) and serves the wire
+    /// shape of THAT version — so a regression test proves we send the pin.
+    stripe_version: Option<String>,
+    body: String,
+    /// True if the mock served this request from its Idempotency-Key replay
+    /// cache (i.e. Stripe would NOT have created a new object).
+    replayed: bool,
+}
+
+#[derive(Default)]
+struct MockState {
+    requests: Vec<RecordedRequest>,
+    /// Idempotency-Key → the exact JSON response previously returned for that
+    /// key. Real Stripe replays the ORIGINAL response on a repeated key (within
+    /// its 24h window); a faithful mock must do the same so the idempotency
+    /// tests actually exercise layer-2 (the deterministic Stripe key). See
+    /// `dedupe_by_key`.
+    idempotency_replies: HashMap<String, String>,
+    /// When false, the mock does NOT replay by Idempotency-Key — it treats every
+    /// request as fresh. This simulates Stripe's key window having EXPIRED
+    /// (>24h), proving the per-app LEDGER (not Stripe's key) is what guarantees
+    /// at-most-once posting.
+    dedupe_by_key: bool,
+    /// Pending invoice items, in creation order: (id, customer, zs_item_key, amount).
+    /// A faithful Stripe lists these on `GET /v1/invoiceitems?...&pending=true`
+    /// so the reconciler's `find_invoice_item_by_key` can adopt an
+    /// already-posted item on a >24h re-drive instead of double-posting. An item
+    /// swept onto a finalized invoice would drop off `pending=true`, but our
+    /// finalize never sweeps a SECOND copy, so leaving them is faithful enough
+    /// for the >24h adopt path under test. The `amount` lets the mock compute a
+    /// SWEPT invoice total — a sweep happens only on
+    /// `pending_invoice_items_behavior=include`.
+    invoice_items: Vec<MockInvoiceItem>,
+    /// Created invoices, keyed by the `in_…` id the mock minted: the swept total
+    /// plus the settlement ids the EXPANDED `GET /v1/invoices` returns.
+    invoices: HashMap<String, MockInvoice>,
+    fault: MockFault,
+}
+
+#[derive(Default)]
+enum MockFault {
+    #[default]
+    None,
+    FailAfterInvoiceItems {
+        fail_after: usize,
+        seen: usize,
+    },
+    PostThenCrashInvoiceItem,
+    CrashOnFinalize,
+    FinalizeAlreadyFinalized,
+    FinalizeReturnsFixedId(String),
+}
+
+/// A pending invoice item recorded by the mock.
+#[derive(Clone)]
+struct MockInvoiceItem {
+    id: String,
+    customer: String,
+    zs_item_key: Option<String>,
+    amount: i64,
+}
+
+/// A created invoice recorded by the mock — enough to faithfully model the
+/// swept total and the settlement ids surfaced only under the right expand.
+#[derive(Clone, Default)]
+struct MockInvoice {
+    customer: String,
+    /// Sum of the pending items swept onto this invoice at create time. ZERO
+    /// unless the create carried `pending_invoice_items_behavior=include` —
+    /// real Stripe defaults to `exclude`).
+    swept_total: i64,
+    /// The settling pi_/ch_ (set when the harness "pays" the invoice). Real
+    /// Stripe surfaces these ONLY via expand[]=payments.data.payment.payment_intent
+    /// — the mock mirrors that: they appear in GET only when expand is asked.
+    payment_intent: Option<String>,
+    charge: Option<String>,
+}
+
+#[derive(Clone)]
+struct MockStripe {
+    state: Arc<Mutex<MockState>>,
+    base_url: String,
+}
+
+impl MockStripe {
+    fn requests(&self) -> Vec<RecordedRequest> {
+        self.state.lock().unwrap().requests.clone()
+    }
+
+    fn count_path(&self, method: &str, path_prefix: &str) -> usize {
+        self.requests()
+            .iter()
+            .filter(|r| r.method == method && r.path.starts_with(path_prefix))
+            .count()
+    }
+
+    /// Count distinct POSTs to `path_prefix` that ACTUALLY created a new object
+    /// (i.e. were not replayed from a prior identical Idempotency-Key). This is
+    /// the count that matters for "double-bill": even if a request was sent
+    /// twice, a deduped reply means Stripe created the object once.
+    fn count_created(&self, method: &str, path_prefix: &str) -> usize {
+        let st = self.state.lock().unwrap();
+        st.requests
+            .iter()
+            .filter(|r| r.method == method && r.path.starts_with(path_prefix) && !r.replayed)
+            .count()
+    }
+
+    /// Count POSTs to the EXACT path that actually created a new object (not
+    /// replayed). Distinct from `count_created`, which matches by prefix — needed
+    /// to separate `POST /v1/invoices` (draft create) from
+    /// `POST /v1/invoices/{id}/finalize` (which shares the `/v1/invoices` prefix).
+    fn count_created_exact(&self, method: &str, path: &str) -> usize {
+        let st = self.state.lock().unwrap();
+        st.requests
+            .iter()
+            .filter(|r| r.method == method && r.path == path && !r.replayed)
+            .count()
+    }
+
+    /// Turn OFF Idempotency-Key replay to simulate Stripe's >24h key expiry.
+    fn disable_dedupe(&self) {
+        self.state.lock().unwrap().dedupe_by_key = false;
+    }
+
+    fn clear_fault(&self) {
+        self.state.lock().unwrap().fault = MockFault::None;
+    }
+
+    fn fail_after_invoice_items(&self, fail_after: usize) {
+        self.state.lock().unwrap().fault = MockFault::FailAfterInvoiceItems {
+            fail_after,
+            seen: 0,
+        };
+    }
+
+    fn post_then_crash_invoice_item(&self) {
+        self.state.lock().unwrap().fault = MockFault::PostThenCrashInvoiceItem;
+    }
+
+    fn crash_on_finalize(&self) {
+        self.state.lock().unwrap().fault = MockFault::CrashOnFinalize;
+    }
+
+    fn finalize_already_finalized(&self) {
+        self.state.lock().unwrap().fault = MockFault::FinalizeAlreadyFinalized;
+    }
+
+    fn finalize_returns_fixed_id(&self, fixed_id: String) {
+        self.state.lock().unwrap().fault = MockFault::FinalizeReturnsFixedId(fixed_id);
+    }
+
+    /// The swept total the mock attached to a created invoice. ZERO when the
+    /// create did NOT send `pending_invoice_items_behavior=include` (real Stripe's
+    /// default). `None` when no such invoice was created.
+    fn invoice_swept_total(&self, invoice_id: &str) -> Option<i64> {
+        self.state
+            .lock()
+            .unwrap()
+            .invoices
+            .get(invoice_id)
+            .map(|inv| inv.swept_total)
+    }
+
+    /// Simulate the harness PAYING an invoice: stamp the settling pi_/ch_ so a
+    /// later EXPANDED `GET /v1/invoices/{id}?expand[]=payments.data.payment.payment_intent`
+    /// returns them. On real Stripe these are surfaced ONLY under that expand.
+    /// `register_paid_invoice` lets a test stand up a paid invoice the handler can
+    /// then resolve through (for the invoice.paid linkage leg).
+    fn register_paid_invoice(&self, invoice_id: &str, customer: &str, pi: &str, ch: Option<&str>) {
+        let mut st = self.state.lock().unwrap();
+        let inv = st.invoices.entry(invoice_id.to_string()).or_default();
+        inv.customer = customer.to_string();
+        inv.payment_intent = Some(pi.to_string());
+        inv.charge = ch.map(str::to_string);
+    }
+}
+
+/// Stand up a localhost HTTP/1.1 server that answers Stripe's create endpoints
+/// with minimal Stripe-shaped JSON, recording every request. Each accepted
+/// connection is served in a task the live case owns, and every response closes
+/// its connection, so no client pool keeps one parked past the case. Returns a
+/// handle exposing the base URL + recorded calls.
+async fn start_mock_stripe() -> MockStripe {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind mock");
+    let addr = listener.local_addr().expect("local_addr");
+    crate::support::live::register_listener(addr);
+    let base_url = format!("http://{addr}");
+    let state = Arc::new(Mutex::new(MockState {
+        dedupe_by_key: true, // faithful default: replay by Idempotency-Key like real Stripe
+        ..MockState::default()
+    }));
+    let accept_state = Arc::clone(&state);
+
+    crate::support::live::spawn(async move {
+        loop {
+            let Ok((stream, _peer)) = listener.accept().await else {
+                break;
+            };
+            let conn_state = Arc::clone(&accept_state);
+            crate::support::live::spawn(async move {
+                serve_conn(stream, conn_state).await;
+            });
+        }
+    });
+
+    MockStripe { state, base_url }
+}
+
+/// Serve a single connection: read request(s), record them, respond.
+async fn serve_conn(mut stream: TcpStream, state: Arc<Mutex<MockState>>) {
+    let mut acc: Vec<u8> = Vec::new();
+    loop {
+        // Parse as many complete requests as `acc` holds, draining each.
+        while let Some((req, consumed)) = try_parse_request(&acc) {
+            acc.drain(0..consumed);
+            let response = handle_mock_request(&req, &state);
+            if stream.write_all(response).await.0.is_err() {
+                return;
+            }
+        }
+        // Need more bytes.
+        let buf = vec![0u8; 4096];
+        let compio::BufResult(n, buf) = stream.read(buf).await;
+        match n {
+            Ok(0) | Err(_) => return, // EOF or error → close
+            Ok(read) => acc.extend_from_slice(&buf[..read]),
+        }
+    }
+}
+
+/// Attempt to parse ONE complete HTTP request from `buf`. Returns the parsed
+/// request + the number of bytes consumed, or `None` if `buf` is incomplete.
+fn try_parse_request(buf: &[u8]) -> Option<(RecordedRequest, usize)> {
+    let text = std::str::from_utf8(buf).ok()?;
+    let header_end = text.find("\r\n\r\n")?;
+    let head = &text[..header_end];
+    let mut lines = head.split("\r\n");
+    let request_line = lines.next()?;
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next()?.to_string();
+    let path = parts.next()?.to_string();
+
+    let mut content_length = 0usize;
+    let mut idempotency_key = None;
+    let mut authorization = None;
+    let mut stripe_version = None;
+    for line in lines {
+        if let Some((k, v)) = line.split_once(':') {
+            let key = k.trim().to_ascii_lowercase();
+            let val = v.trim().to_string();
+            match key.as_str() {
+                "content-length" => content_length = val.parse().unwrap_or(0),
+                "idempotency-key" => idempotency_key = Some(val),
+                "authorization" => authorization = Some(val),
+                "stripe-version" => stripe_version = Some(val),
+                _ => {}
+            }
+        }
+    }
+
+    let body_start = header_end + 4;
+    if buf.len() < body_start + content_length {
+        return None; // body not fully arrived
+    }
+    let body = String::from_utf8_lossy(&buf[body_start..body_start + content_length]).to_string();
+
+    Some((
+        RecordedRequest {
+            method,
+            path,
+            idempotency_key,
+            authorization,
+            stripe_version,
+            body,
+            replayed: false,
+        },
+        body_start + content_length,
+    ))
+}
+
+/// Produce a Stripe-shaped JSON 200 response for a recorded request and record
+/// the request. The `id` returned is derived from the path so each endpoint
+/// yields a plausible object id.
+fn handle_mock_request(req: &RecordedRequest, state: &Arc<Mutex<MockState>>) -> Vec<u8> {
+    // A faithful Stripe REQUIRES the pinned `Stripe-Version` header on every
+    // API call. Reject (record then 400) when it is ABSENT — proving the client
+    // sends the pin on EVERY method. (Real Stripe would simply render against the
+    // account default; we make the absence loud so the regression is mechanical.)
+    {
+        let pinned = req.stripe_version.as_deref() == Some(PINNED_STRIPE_VERSION);
+        if !pinned {
+            state.lock().unwrap().requests.push(req.clone());
+            let err = r#"{"error":{"type":"invalid_request_error","code":"version_unpinned","message":"missing or wrong Stripe-Version"}}"#;
+            return http_json(400, err);
+        }
+    }
+
+    // Faithful Stripe idempotency: if dedupe is on and we've seen this
+    // Idempotency-Key before, replay the EXACT original response (Stripe does
+    // not create a second object). Mark the recorded request `replayed` so the
+    // test can distinguish "sent twice but deduped" from "created twice".
+    {
+        let mut st = state.lock().unwrap();
+        if st.dedupe_by_key {
+            if let Some(key) = req.idempotency_key.clone() {
+                if let Some(prev) = st.idempotency_replies.get(&key).cloned() {
+                    let mut rec = req.clone();
+                    rec.replayed = true;
+                    st.requests.push(rec);
+                    return http_200_json(&prev);
+                }
+            }
+        }
+    }
+
+    if req.method == "POST" && req.path.starts_with("/v1/invoiceitems") {
+        let mut st = state.lock().unwrap();
+        if let MockFault::FailAfterInvoiceItems { fail_after, seen } = &mut st.fault {
+            *seen += 1;
+            if *seen > *fail_after {
+                return http_json(
+                    500,
+                    r#"{"error":{"type":"api_error","code":"simulated_crash_after_invoice_item"}}"#,
+                );
+            }
+        }
+    }
+
+    // GET /v1/invoiceitems?...&pending=true — list the pending items for a
+    // customer (the reconciler's `find_invoice_item_by_key`). Faithful Stripe list shape:
+    // `{ "object":"list", "data":[ {id, metadata:{zs_item_key}}, … ] }`.
+    if req.method == "GET" && req.path.starts_with("/v1/invoiceitems") {
+        let customer = query_param(&req.path, "customer");
+        let st = state.lock().unwrap();
+        let data: Vec<String> = st
+            .invoice_items
+            .iter()
+            .filter(|it| customer.as_deref() == Some(it.customer.as_str()))
+            .map(|it| match &it.zs_item_key {
+                Some(k) => format!(
+                    r#"{{"id":"{}","object":"invoiceitem","metadata":{{"zs_item_key":"{k}"}}}}"#,
+                    it.id
+                ),
+                None => format!(
+                    r#"{{"id":"{}","object":"invoiceitem","metadata":{{}}}}"#,
+                    it.id
+                ),
+            })
+            .collect();
+        drop(st);
+        let body = format!(r#"{{"object":"list","data":[{}]}}"#, data.join(","));
+        state.lock().unwrap().requests.push(req.clone());
+        return http_200_json(&body);
+    }
+
+    // GET /v1/invoices/{in_…}[?expand[]=…] — retrieve an invoice. Faithful to Stripe:
+    // the settling pi_/ch_ are surfaced via `payments.data[].payment` ONLY when the
+    // caller EXPANDS `payments.data.payment.payment_intent`. Without the expand, the
+    // Basil invoice carries NEITHER a top-level payment_intent/charge NOR an inline
+    // payments list. The pi_ comes back as the EXPANDED
+    // PaymentIntent object (its `id`=pi_, `latest_charge`=ch_).
+    if req.method == "GET" && req.path.starts_with("/v1/invoices/") {
+        let id = req
+            .path
+            .trim_start_matches("/v1/invoices/")
+            .split('?')
+            .next()
+            .unwrap_or("")
+            .to_string();
+        let expands_pi = req.path.contains("payments.data.payment.payment_intent");
+        let st = state.lock().unwrap();
+        let inv = st.invoices.get(&id).cloned().unwrap_or_default();
+        drop(st);
+        // Basil: NO top-level payment_intent/charge (they were removed). The payments
+        // list is present only when we expand; absent otherwise.
+        let body = if expands_pi {
+            match (&inv.payment_intent, &inv.charge) {
+                (Some(pi), ch) => {
+                    let lc = ch
+                        .as_deref()
+                        .map_or("null".to_string(), |c| format!("\"{c}\""));
+                    format!(
+                        r#"{{"id":"{id}","object":"invoice","status":"paid","payments":{{"object":"list","data":[{{"object":"invoice_payment","payment":{{"type":"payment_intent","payment_intent":{{"id":"{pi}","object":"payment_intent","latest_charge":{lc}}}}}}}]}}}}"#
+                    )
+                }
+                // Paid with no recorded settlement (a $0/credit invoice): empty list.
+                _ => format!(
+                    r#"{{"id":"{id}","object":"invoice","status":"paid","payments":{{"object":"list","data":[]}}}}"#
+                ),
+            }
+        } else {
+            // No expand → Basil invoice WITHOUT the settlement ids (the masking shape).
+            format!(r#"{{"id":"{id}","object":"invoice","status":"paid"}}"#)
+        };
+        state.lock().unwrap().requests.push(req.clone());
+        return http_200_json(&body);
+    }
+
+    if req.method == "POST"
+        && req.path.starts_with("/v1/invoices/")
+        && req.path.contains("/finalize")
+    {
+        let draft_id = req
+            .path
+            .trim_start_matches("/v1/invoices/")
+            .split('/')
+            .next()
+            .unwrap_or("")
+            .to_string();
+        let mut st = state.lock().unwrap();
+        st.requests.push(req.clone());
+        match &st.fault {
+            MockFault::CrashOnFinalize => {
+                return http_json(
+                    500,
+                    r#"{"error":{"type":"api_error","code":"simulated_crash_before_finalize"}}"#,
+                );
+            }
+            MockFault::FinalizeAlreadyFinalized => {
+                return http_json(
+                    400,
+                    r#"{"error":{"type":"invalid_request_error","code":"invoice_already_finalized"}}"#,
+                );
+            }
+            MockFault::FinalizeReturnsFixedId(fixed_id) => {
+                let json = format!(r#"{{"id":"{fixed_id}","object":"invoice","status":"open"}}"#);
+                if let Some(key) = req.idempotency_key.clone() {
+                    st.idempotency_replies
+                        .entry(key)
+                        .or_insert_with(|| json.clone());
+                }
+                return http_200_json(&json);
+            }
+            _ => {}
+        }
+        let json = format!(r#"{{"id":"{draft_id}","object":"invoice","status":"open"}}"#);
+        if let Some(key) = req.idempotency_key.clone() {
+            st.idempotency_replies
+                .entry(key)
+                .or_insert_with(|| json.clone());
+        }
+        return http_200_json(&json);
+    }
+
+    // POST /v1/refunds. Faithful to real Stripe: `currency` is NOT an
+    // accepted parameter — a body that sends it gets a 400 `parameter_unknown`. The
+    // body MUST carry exactly one money target (`payment_intent` OR `charge`).
+    if req.method == "POST" && req.path.starts_with("/v1/refunds") {
+        state.lock().unwrap().requests.push(req.clone());
+        if form_param(&req.body, "currency").is_some() {
+            let err = r#"{"error":{"type":"invalid_request_error","code":"parameter_unknown","message":"Received unknown parameter: currency","param":"currency"}}"#;
+            return http_json(400, err);
+        }
+        let target =
+            form_param(&req.body, "payment_intent").or_else(|| form_param(&req.body, "charge"));
+        if target.is_none() {
+            let err = r#"{"error":{"type":"invalid_request_error","code":"parameter_missing","message":"Missing payment_intent or charge"}}"#;
+            return http_json(400, err);
+        }
+        return http_200_json(&format!(
+            r#"{{"id":"re_mock_{}","object":"refund","status":"succeeded"}}"#,
+            short()
+        ));
+    }
+
+    let new_item_id = format!("ii_mock_{}", short());
+    // For a draft-invoice CREATE we mint the id up front so we can register the
+    // swept MockInvoice. `is_invoice_create` = POST /v1/invoices that is NOT a
+    // /finalize sub-resource.
+    let is_invoice_create = req.method == "POST"
+        && req.path.starts_with("/v1/invoices")
+        && !req.path.contains("/finalize");
+    let new_invoice_id = format!("in_mock_{}", short());
+
+    let json: String = if req.path.starts_with("/v1/customers") {
+        format!(r#"{{"id":"cus_mock_{}","object":"customer"}}"#, short())
+    } else if req.path.starts_with("/v1/checkout/sessions") {
+        format!(
+            r#"{{"id":"cs_mock_{0}","object":"checkout.session","url":"https://checkout.stripe.test/cs_mock_{0}"}}"#,
+            short()
+        )
+    } else if req.path.starts_with("/v1/invoiceitems") {
+        format!(r#"{{"id":"{new_item_id}","object":"invoiceitem"}}"#)
+    } else if req.path.contains("/finalize") {
+        format!(
+            r#"{{"id":"in_mock_final_{}","object":"invoice","status":"open"}}"#,
+            short()
+        )
+    } else if is_invoice_create {
+        format!(r#"{{"id":"{new_invoice_id}","object":"invoice","status":"draft"}}"#)
+    } else if req.path.starts_with("/v1/invoices") {
+        format!(
+            r#"{{"id":"in_mock_{}","object":"invoice","status":"draft"}}"#,
+            short()
+        )
+    } else {
+        r#"{"id":"obj_mock","object":"unknown"}"#.to_string()
+    };
+
+    {
+        let mut st = state.lock().unwrap();
+        // Record a created invoice item so the GET-list (adopt) path can find it.
+        let post_then_crash = matches!(st.fault, MockFault::PostThenCrashInvoiceItem)
+            && req.method == "POST"
+            && req.path.starts_with("/v1/invoiceitems");
+        if req.method == "POST" && req.path.starts_with("/v1/invoiceitems") {
+            let customer = form_param(&req.body, "customer").unwrap_or_default();
+            let key = form_param(&req.body, "metadata[zs_item_key]");
+            let amount = form_param(&req.body, "amount")
+                .and_then(|a| a.parse::<i64>().ok())
+                .unwrap_or(0);
+            st.invoice_items.push(MockInvoiceItem {
+                id: new_item_id.clone(),
+                customer,
+                zs_item_key: key,
+                amount,
+            });
+        }
+        // On a draft create, SWEEP the customer's pending items onto the invoice
+        // ONLY when `pending_invoice_items_behavior=include` was sent (real Stripe
+        // defaults to `exclude` → an empty $0 draft). We model the sweep by totalling
+        // the customer's pending item amounts and clearing them off the pending list.
+        if is_invoice_create {
+            let customer = form_param(&req.body, "customer").unwrap_or_default();
+            let include = form_param(&req.body, "pending_invoice_items_behavior").as_deref()
+                == Some("include");
+            let swept_total = if include {
+                let total: i64 = st
+                    .invoice_items
+                    .iter()
+                    .filter(|it| it.customer == customer)
+                    .map(|it| it.amount)
+                    .sum();
+                // Swept items leave the pending list (Stripe attaches them to the invoice).
+                st.invoice_items.retain(|it| it.customer != customer);
+                total
+            } else {
+                0
+            };
+            st.invoices.insert(
+                new_invoice_id.clone(),
+                MockInvoice {
+                    customer,
+                    swept_total,
+                    payment_intent: None,
+                    charge: None,
+                },
+            );
+        }
+        st.requests.push(req.clone());
+        if let Some(key) = req.idempotency_key.clone() {
+            st.idempotency_replies
+                .entry(key)
+                .or_insert_with(|| json.clone());
+        }
+        if post_then_crash {
+            return http_json(
+                500,
+                r#"{"error":{"type":"api_error","code":"simulated_crash_after_invoice_item_post"}}"#,
+            );
+        }
+    }
+
+    http_200_json(&json)
+}
+
+/// Extract a query-string parameter from a request path (e.g. `customer`).
+fn query_param(path: &str, name: &str) -> Option<String> {
+    let q = path.split_once('?').map(|(_, q)| q)?;
+    for pair in q.split('&') {
+        if let Some((k, v)) = pair.split_once('=') {
+            if k == name {
+                return Some(percent_decode(v));
+            }
+        }
+    }
+    None
+}
+
+/// Extract a form field from an `application/x-www-form-urlencoded` body. Keys
+/// are matched after percent-decoding so `metadata[zs_item_key]` matches the
+/// wire's `metadata%5Bzs_item_key%5D`.
+fn form_param(body: &str, name: &str) -> Option<String> {
+    for pair in body.split('&') {
+        if let Some((k, v)) = pair.split_once('=') {
+            if percent_decode(k) == name {
+                return Some(percent_decode(v));
+            }
+        }
+    }
+    None
+}
+
+/// Minimal `application/x-www-form-urlencoded` / query decode: `+` → space,
+/// `%XX` → byte. Sufficient for the mock's keys/values under test.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' if i + 2 < bytes.len() => {
+                let hi = (bytes[i + 1] as char).to_digit(16);
+                let lo = (bytes[i + 2] as char).to_digit(16);
+                if let (Some(h), Some(l)) = (hi, lo) {
+                    out.push((h * 16 + l) as u8);
+                    i += 3;
+                } else {
+                    out.push(bytes[i]);
+                    i += 1;
+                }
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Build a `200 OK` HTTP/1.1 response with a JSON body.
+fn http_200_json(json: &str) -> Vec<u8> {
+    http_json(200, json)
+}
+
+/// Build an HTTP/1.1 response with the given status + JSON body.
+fn http_json(status: u16, json: &str) -> Vec<u8> {
+    let reason = match status {
+        200 => "OK",
+        400 => "Bad Request",
+        _ => "Error",
+    };
+    let body = json.to_string().into_bytes();
+    let mut resp = format!(
+        "HTTP/1.1 {status} {reason}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+        body.len()
+    )
+    .into_bytes();
+    resp.extend_from_slice(&body);
+    resp
+}
+
+fn short() -> String {
+    Uuid::new_v4().simple().to_string()[..8].to_string()
+}
+
+// ===========================================================================
+// Fixture (real PG + the mock-Stripe base URL wired into AppState).
+// ===========================================================================
+
+struct Fixture {
+    state: Arc<AppState>,
+    mock: MockStripe,
+    blob_root: PathBuf,
+    deploy_tmp_dir: PathBuf,
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.blob_root);
+        let _ = std::fs::remove_dir_all(&self.deploy_tmp_dir);
+    }
+}
+
+async fn build_fixture(db_url: &str, label: &str) -> Fixture {
+    let mock = start_mock_stripe().await;
+    let blob_root = tmpdir(&format!("blob-{label}"));
+    let deploy_tmp_dir = tmpdir(&format!("dtmp-{label}"));
+    let registry = Registry::new(db_url).await.expect("registry");
+    zeroship_control::plan_catalog::seed_plans(&registry)
+        .await
+        .expect("seed built-in plans");
+    let env_store = EnvStore::new(registry.clone(), TEST_MASTER_KEY).expect("env store");
+    let stripe_store = StripeStore::new(registry.clone());
+    let blob_store: Arc<dyn BlobStore> =
+        Arc::new(LocalDiskBlobStore::new(blob_root.clone()).expect("blob store"));
+    let tax_provider = zeroship_control::tax::build_tax_provider(
+        &zeroship_control::tax::TaxProviderConfig::native(),
+    )
+    .expect("native tax provider builds");
+    let billing_stack = crate::support::lite_billing_stack(
+        registry.clone(),
+        mock.base_url.clone(),
+        Arc::clone(&tax_provider),
+    );
+
+    let (control_pg_client, control_pg_conn) =
+        compio_postgres::connect(db_url, compio_postgres::NoTls)
+            .await
+            .expect("control-pg connect");
+    crate::support::live::spawn(async move {
+        let _ = control_pg_conn.run().await;
+    });
+    let control_pg = Arc::new(control_pg_client);
+
+    let state = Arc::new(AppState {
+        service_auth: std::sync::Arc::new(zeroship_core::service_peers::ServiceAuth::unconfigured()),
+        registry,
+        env_store,
+        stripe_store,
+        blob_store,
+        control_key: SecretString::new("test-control-key".to_string()),
+        master_key: SecretString::new(TEST_MASTER_KEY.to_string()),
+        stripe_webhook_secret: SecretString::new(String::new()),
+        stripe_secret_key: SecretString::new("sk_test_mock".to_string()),
+        stripe_base_url: mock.base_url.clone(),
+        worker_urls: Vec::new(),
+        admin_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
+        webhook_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
+        origin_scheme: zeroship_core::config::OriginScheme::Https,
+        trust_proxy: false,
+        worker_enrolment: zeroship_control::worker_join::EnrolmentEnvelope::closed(),
+        deploy_tmp_dir: deploy_tmp_dir.clone(),
+        control_pg,
+        app_base_domain: "zeroship.localhost".to_string(),
+        trusted_oauth_clients: zeroship_control::default_trusted_oauth_clients(),
+        expected_oauth_audience: "control.zeroship.ai".to_string(),
+        static_policies: zeroship_authz::load_platform_policies()
+            .expect("bundled authz policies parse"),
+        auth_provider: zeroship_control::platform_auth_provider(
+            "https://auth.zeroship.test/oauth2",
+            Some(crate::support::platform_jwks_url()),
+        ),
+        // No platform deploy-token mint here: that is control's OUTBOUND
+        // destination for the device flow, and no fixture below drives one.
+        provider_registry: zeroship_control::metering::provider::builtin_registry(),
+        billing_stack,
+        billing_stream: None,
+        tax_provider,
+        notifier: std::sync::Arc::new(zeroship_control::notify::RecordingNotifier::new()),
+        mailer: std::sync::Arc::new(zeroship_mailer::RecordingMailer::new()),
+        pairwise_salt: [0u8; 32],
+        projected_charge_cache: std::sync::Arc::new(
+            zeroship_control::billing_read::ProjectedChargeCache::default(),
+        ),
+    });
+
+    Fixture {
+        state,
+        mock,
+        blob_root,
+        deploy_tmp_dir,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DB seeding helpers.
+// ---------------------------------------------------------------------------
+
+/// Insert a user (the organization). Returns its id.
+/// A fresh billing subject for this test file.
+///
+/// The billing subject is an ORGANIZATION, so a fixture that minted a user and
+/// used its uuid here would name a row `organizations` does not have. The
+/// foreign keys refuse that rather than mis-attributing it, but the refusal
+/// names the constraint and not the mistake, so the fixture is the place to be
+/// unambiguous.
+async fn make_organization(state: &AppState, label: &str) -> String {
+    let organization_id = zeroship_core::typed_id::generate("org");
+    let slug = format!("{label}-{}", Uuid::new_v4().simple());
+    state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.organizations (id, slug, name, billing_email) \
+             VALUES ($1, $2, $3, $4)",
+            &[
+                &organization_id,
+                &slug,
+                &label.to_string(),
+                &format!("{slug}@example.test"),
+            ],
+        )
+        .await
+        .expect("insert organization");
+    organization_id
+}
+
+/// Seed a plan that charges 1 cent/request with no included CU. CU pricing:
+/// global weight `requests` = 1 CU/op × fx 10^12 pico-cents/CU (= 1 cent/CU).
+async fn make_plan(state: &AppState) -> String {
+    crate::support::seed_metric_catalog(&state.control_pg, "requests").await;
+    state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.metric_weights (metric, units_per_op, per_units) \
+             VALUES ('requests', 1, 1) \
+             ON CONFLICT (metric) DO UPDATE SET units_per_op = 1, per_units = 1",
+            &[],
+        )
+        .await
+        .expect("upsert requests weight");
+    let plan_id = format!("pln_bill_{}", Uuid::new_v4().simple());
+    let fx_one_cent: i64 = 1_000_000_000_000;
+    state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.plans \
+               (id, name, base_fee_cents, included_units, fx_pico_cents_per_unit, \
+                runtime_limits_json, spend_limit_default_cents) \
+             VALUES ($1, 'bill-test', 0, 0, $2, \
+                     '{\"cpu_limit_ms\":50,\"wall_timeout_ms\":5000,\"heap_limit_mb\":64}', 100000)",
+            &[&plan_id, &fx_one_cent],
+        )
+        .await
+        .expect("seed priced plan");
+    plan_id
+}
+
+/// Create an app on `plan_id` owned by `owner`. Returns the app id.
+/// An app the given ORGANIZATION bills.
+///
+/// The reconciler bills an app by its own row's `organization_id`, so an app
+/// seeded into one organization and asserted against another would never be
+/// billed - the test would go green on an empty sweep. Placing it in the caller's
+/// organization is what keeps the assertion attached to anything.
+async fn make_owned_app(state: &AppState, plan_id: &str, organization: &str) -> AppId {
+    let name = format!("bill-{}", Uuid::new_v4());
+    crate::support::seed_app_in_organization(&state.control_pg, &name, plan_id, organization).await
+}
+
+/// Seed usage directly at a given period_start (the CLOSED period the
+/// reconciler bills).
+async fn ingest_at(state: &AppState, app: &AppId, requests: u64, period_start: i64, seq: u64) {
+    let _ = seq;
+    crate::support::seed_usage_delta(
+        &state.control_pg,
+        app,
+        period_start,
+        "requests",
+        i64::try_from(requests).expect("test requests fit i64"),
+    )
+    .await;
+}
+
+/// Seed an available credit grant (1 ledger unit = 1 cent) for `organization`.
+async fn insert_credit_grant(state: &AppState, organization: &str, amount_cents: i64) {
+    state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.credit_ledger \
+               (id, organization_id, kind, amount_cents, currency, created_at) \
+             VALUES ($1, $2, 'grant', $3, 'usd', NOW())",
+            &[
+                &zeroship_core::typed_id::new_credit_id(),
+                &organization,
+                &amount_cents,
+            ],
+        )
+        .await
+        .expect("insert credit grant");
+}
+
+/// Ingest a set of CUSTOM metrics (name → raw) for `app` at `period_start`, after
+/// seeding a `1 CU / op` weight for each so they price through the real CU
+/// pipeline. Used by the description-cap / metadata-cap regression tests to drive
+/// a MANY-metric app through the REAL reconcile (not a stub).
+async fn ingest_custom_metrics(
+    state: &AppState,
+    app: &AppId,
+    metrics: &[(String, u64)],
+    period_start: i64,
+    seq: u64,
+) {
+    for (name, raw) in metrics {
+        state
+            .control_pg
+            .execute(
+                "INSERT INTO zeroship.billing_metrics (metric, kind, unit, owner_app, last_seen_at) \
+                 VALUES ($1, 'custom', 'unit', $2, NOW()) \
+                 ON CONFLICT (metric) DO UPDATE SET last_seen_at = NOW()",
+                &[name, &app.as_str()],
+            )
+            .await
+            .expect("seed custom metric");
+        crate::support::seed_usage_delta(
+            &state.control_pg,
+            app,
+            period_start,
+            name,
+            i64::try_from(*raw).expect("test metric value fits i64"),
+        )
+        .await;
+    }
+    let _ = seq;
+
+    // Now that each metric is cataloged, seed a 1 CU/op weight so it prices through
+    // the real CU pipeline at reconcile time.
+    for (name, _) in metrics {
+        state
+            .control_pg
+            .execute(
+                "INSERT INTO zeroship.metric_weights (metric, units_per_op, per_units) \
+                 VALUES ($1, 1, 1) ON CONFLICT (metric) DO UPDATE SET units_per_op = 1, per_units = 1",
+                &[name],
+            )
+            .await
+            .expect("seed custom weight");
+    }
+}
+
+/// `now` placed mid-current-month so the CLOSED period is the previous month.
+async fn now_for_closed_period() -> i64 {
+    crate::support::next_isolated_period().await
+}
+
+fn prev_period(now: i64) -> i64 {
+    billing_reconcile::previous_period_start_unix(now)
+}
+
+/// The first-of-month `billing_period` DATE for a unix-seconds period start —
+/// the key the redesigned `invoices`/`invoice_lines` tables use. Mirrors
+/// `metering::period_date` (re-derived here so the test owns its key shape).
+fn period_d(period_start: i64) -> chrono::NaiveDate {
+    use chrono::{Datelike, TimeZone};
+    let dt = chrono::Utc.timestamp_opt(period_start, 0).single().unwrap();
+    chrono::NaiveDate::from_ymd_opt(dt.year(), dt.month(), 1).unwrap()
+}
+
+/// Read the `(status, total_cents)` of the invoice for `(organization, period)`, or
+/// `None` if no invoice row exists.
+async fn read_invoice(
+    state: &AppState,
+    organization: &str,
+    period_start: i64,
+) -> Option<(String, i64)> {
+    state
+        .control_pg
+        .query(
+            "SELECT status, total_cents FROM zeroship.invoices \
+             WHERE organization_id = $1 AND period = $2::date",
+            &[&organization, &period_d(period_start)],
+        )
+        .await
+        .expect("read invoices")
+        .first()
+        .map(|r| (r.get::<_, String>("status"), r.get::<_, i64>("total_cents")))
+}
+
+/// The finalized provider invoice id (`in_…`) for `(organization, period)` via
+/// `invoices ⋈ billing_provider_refs(provider='stripe', ref_kind='invoice')`, or
+/// `None`.
+async fn finalized_invoice_id(
+    state: &AppState,
+    organization: &str,
+    period_start: i64,
+) -> Option<String> {
+    state
+        .control_pg
+        .query(
+            "SELECT r.external_id FROM zeroship.invoices i \
+             JOIN zeroship.billing_provider_refs r ON r.invoice_id = i.id \
+             WHERE i.organization_id = $1 AND i.period = $2::date \
+               AND i.status = 'finalized' AND r.provider = 'stripe' AND r.ref_kind = 'invoice'",
+            &[&organization, &period_d(period_start)],
+        )
+        .await
+        .expect("read finalized invoice id")
+        .first()
+        .map(|r| r.get::<_, String>("external_id"))
+}
+
+/// The persisted draft provider id (`in_…`) for `(organization, period)` via
+/// `billing_provider_refs(ref_kind='draft_invoice')`, or `None`. Replaces the old
+/// `billing_runs.draft_invoice_id` read.
+async fn draft_invoice_id(
+    state: &AppState,
+    organization: &str,
+    period_start: i64,
+) -> Option<String> {
+    state
+        .control_pg
+        .query(
+            "SELECT r.external_id FROM zeroship.invoices i \
+             JOIN zeroship.billing_provider_refs r ON r.invoice_id = i.id \
+             WHERE i.organization_id = $1 AND i.period = $2::date \
+               AND r.provider = 'stripe' AND r.ref_kind = 'draft_invoice'",
+            &[&organization, &period_d(period_start)],
+        )
+        .await
+        .expect("read draft invoice id")
+        .first()
+        .map(|r| r.get::<_, String>("external_id"))
+}
+
+/// Count the invoice LINES for a organization (across all their invoices).
+async fn lines_count(state: &AppState, organization: &str) -> i64 {
+    state
+        .control_pg
+        .query(
+            "SELECT COUNT(*)::bigint AS n FROM zeroship.invoice_lines l \
+             JOIN zeroship.invoices i ON i.id = l.invoice_id WHERE i.organization_id = $1",
+            &[&organization],
+        )
+        .await
+        .expect("count lines")[0]
+        .get::<_, i64>("n")
+}
+
+/// Count CONFIRMED line provider-refs for a organization. A line WITH a
+/// `billing_line_provider_refs` row is a
+/// confirmed post; a line without one is intent-only.
+async fn confirmed_lines_count(state: &AppState, organization: &str) -> i64 {
+    state
+        .control_pg
+        .query(
+            "SELECT COUNT(*)::bigint AS n FROM zeroship.billing_line_provider_refs r \
+             JOIN zeroship.invoices i ON i.id = r.invoice_id \
+             WHERE i.organization_id = $1 AND r.provider = 'stripe' AND r.ref_kind = 'invoice_item'",
+            &[&organization],
+        )
+        .await
+        .expect("count confirmed lines")[0]
+        .get::<_, i64>("n")
+}
+
+/// Read back ONE finalized invoice line's persisted snapshot columns for
+/// `(organization, app)` — exactly the bytes `bill_organization` wrote. Returns
+/// `(included_units, fx_pico_cents_per_unit, base_fee_cents, amount_cents,
+/// usage_snapshot, weights_snapshot)`.
+#[allow(clippy::type_complexity)]
+async fn read_line_snapshot(
+    state: &AppState,
+    organization: &str,
+    app: &AppId,
+) -> (i64, i64, i64, i64, serde_json::Value, serde_json::Value) {
+    let row = state
+        .control_pg
+        .query(
+            "SELECT l.included_units, l.fx_pico_cents_per_unit, l.base_fee_cents, \
+                    l.amount_cents, l.usage_snapshot, l.weights_snapshot \
+             FROM zeroship.invoice_lines l \
+             JOIN zeroship.invoices i ON i.id = l.invoice_id \
+             WHERE i.organization_id = $1 AND l.app_id = $2",
+            &[&organization, &app.as_str()],
+        )
+        .await
+        .expect("read line snapshot")
+        .into_iter()
+        .next()
+        .expect("one line for the (organization, app)");
+    (
+        row.get("included_units"),
+        row.get("fx_pico_cents_per_unit"),
+        row.get("base_fee_cents"),
+        row.get("amount_cents"),
+        row.get("usage_snapshot"),
+        row.get("weights_snapshot"),
+    )
+}
+
+// ===========================================================================
+// Tests.
+// ===========================================================================
+
+/// The reconciler builds Stripe invoice items per owned app from REAL
+/// aggregates, then creates + finalizes an invoice — all through the real cyper
+/// client hitting the mock server. Records on `billing_runs`.
+#[compio::test(crate = "crate::support::live")]
+async fn reconcile_creates_invoice_items_per_app_from_real_aggregates() {
+    let url = db_url();
+    let fx = build_fixture(&url, "items").await;
+    let now = now_for_closed_period().await;
+    let period = prev_period(now);
+
+    let organization = make_organization(&fx.state, "items").await;
+    let organization = organization.as_str();
+    let plan = make_plan(&fx.state).await;
+    let app1 = make_owned_app(&fx.state, &plan, organization).await;
+    let app2 = make_owned_app(&fx.state, &plan, organization).await;
+    // Customer must exist (set lazily by billing/setup in prod; here directly).
+    fx.state
+        .stripe_store
+        .set_customer(
+            organization,
+            &format!("cus_test_items_{}", Uuid::new_v4().simple()),
+        )
+        .await
+        .unwrap();
+
+    ingest_at(&fx.state, &app1, 500, period, 1).await; // 500c
+    ingest_at(&fx.state, &app2, 250, period, 2).await; // 250c
+
+    billing_reconcile::sweep(&fx.state, period)
+        .await
+        .expect("tick");
+
+    // Two invoice-item creates (one per app) + one invoice create + one finalize.
+    assert_eq!(
+        fx.mock.count_path("POST", "/v1/invoiceitems"),
+        2,
+        "one item per app"
+    );
+    assert_eq!(
+        fx.mock.count_path("POST", "/v1/invoices"),
+        2,
+        "create + finalize (both POST /v1/invoices…)"
+    );
+
+    // invoices records the finalized invoice + the summed total (750c).
+    let inv = read_invoice(&fx.state, organization, period).await;
+    assert_eq!(
+        inv,
+        Some(("finalized".to_string(), 750)),
+        "one finalized invoice totalling the summed charge across both apps",
+    );
+    assert!(
+        finalized_invoice_id(&fx.state, organization, period)
+            .await
+            .is_some(),
+        "provider invoice id recorded after finalize",
+    );
+}
+
+/// A single-segment invoice → the `create_invoice_item`
+/// description CONTAINS the CU count, the metadata carries the FULL derivation
+/// (`compute_units`/`billable_units`/`included_units`/`fx`/per-metric `usage`),
+/// and the authoritative `amount` is UNCHANGED (== the frozen `amount_cents`).
+///
+/// `make_plan` = 1 CU/request, FX 1c/CU, no included CU. 750 requests ⇒ 750 CU,
+/// 750 billable, amount 750c.
+#[compio::test(crate = "crate::support::live")]
+async fn single_segment_item_carries_cu_and_full_metadata_amount_unchanged() {
+    let url = db_url();
+    let fx = build_fixture(&url, "cu1seg").await;
+    let now = now_for_closed_period().await;
+    let period = prev_period(now);
+
+    let organization = make_organization(&fx.state, "cu1seg").await;
+    let organization = organization.as_str();
+    let plan = make_plan(&fx.state).await;
+    let app = make_owned_app(&fx.state, &plan, organization).await;
+    fx.state
+        .stripe_store
+        .set_customer(
+            organization,
+            &format!("cus_cu1_{}", Uuid::new_v4().simple()),
+        )
+        .await
+        .unwrap();
+
+    ingest_at(&fx.state, &app, 750, period, 1).await;
+
+    billing_reconcile::sweep(&fx.state, period)
+        .await
+        .expect("tick");
+
+    let reqs = fx.mock.requests();
+    let item = reqs
+        .iter()
+        .find(|r| r.method == "POST" && r.path.starts_with("/v1/invoiceitems"))
+        .expect("invoice-item POST recorded");
+
+    // (1) the description shows the CU prominently.
+    let desc = form_param(&item.body, "description").unwrap_or_default();
+    assert!(
+        desc.contains("750 compute units"),
+        "description must show the CU count; got: {desc}",
+    );
+    assert!(
+        desc.starts_with("Infra usage — app"),
+        "keeps the existing prefix; got: {desc}"
+    );
+
+    // (2) the metadata carries the FULL derivation.
+    assert_eq!(
+        form_param(&item.body, "metadata[compute_units]").as_deref(),
+        Some("750")
+    );
+    assert_eq!(
+        form_param(&item.body, "metadata[billable_units]").as_deref(),
+        Some("750")
+    );
+    assert_eq!(
+        form_param(&item.body, "metadata[included_units]").as_deref(),
+        Some("0")
+    );
+    assert_eq!(
+        form_param(&item.body, "metadata[fx_pico_cents_per_unit]").as_deref(),
+        Some("1000000000000"),
+        "FX frozen on the item metadata (1 cent/CU = 10^12 pico-cents)",
+    );
+    assert_eq!(
+        form_param(&item.body, "metadata[base_fee_cents]").as_deref(),
+        Some("0")
+    );
+    assert_eq!(
+        form_param(&item.body, "metadata[segment]").as_deref(),
+        Some("full")
+    );
+    assert_eq!(
+        form_param(&item.body, "metadata[usage]").as_deref(),
+        Some("requests=750:750"),
+        "per-metric raw:cu blob present",
+    );
+    // The zs_item_key adopt-path metadata is still there (not clobbered).
+    assert!(
+        form_param(&item.body, "metadata[zs_item_key]").is_some(),
+        "adopt-path key preserved"
+    );
+
+    // (3) the AUTHORITATIVE amount is UNCHANGED (== the frozen line amount_cents).
+    let amount: i64 = form_param(&item.body, "amount")
+        .and_then(|a| a.parse().ok())
+        .expect("amount");
+    let line_amount: i64 = fx
+        .state
+        .control_pg
+        .query(
+            "SELECT l.amount_cents FROM zeroship.invoice_lines l \
+             JOIN zeroship.invoices i ON i.id = l.invoice_id \
+             WHERE i.organization_id = $1 AND l.app_id = $2",
+            &[&organization, &app.as_str()],
+        )
+        .await
+        .expect("read line amount")[0]
+        .get::<_, i64>("amount_cents");
+    assert_eq!(
+        amount, line_amount,
+        "Stripe amount == frozen line amount_cents"
+    );
+    assert_eq!(
+        amount, 750,
+        "amount is the authoritative ChargeBreakdown.total_cents, untouched"
+    );
+}
+
+/// A MANY-metric app drives the REAL reconcile, and the
+/// emitted Stripe item respects BOTH Stripe limits — the description ≤ the
+/// line-item cap (Stripe caps line-item descriptions at 500 chars; we cap at 350),
+/// and EVERY metadata value ≤ 500 chars — packing the per-metric `usage` across
+/// `usage`/`usage_2`/… and setting `usage_truncated=true` when the set overflows
+/// the key budget.
+///
+/// 80 custom metrics with long names (each 1 CU/op) → the packed usage blob far
+/// exceeds one 500-char metadata value, forcing the split + the truncation flag.
+#[compio::test(crate = "crate::support::live")]
+async fn many_metric_item_respects_description_and_metadata_length_caps() {
+    let url = db_url();
+    let fx = build_fixture(&url, "cucap").await;
+    let now = now_for_closed_period().await;
+    let period = prev_period(now);
+
+    let organization = make_organization(&fx.state, "cucap").await;
+    let organization = organization.as_str();
+    let plan = make_plan(&fx.state).await;
+    let app = make_owned_app(&fx.state, &plan, organization).await;
+    fx.state
+        .stripe_store
+        .set_customer(
+            organization,
+            &format!("cus_cucap_{}", Uuid::new_v4().simple()),
+        )
+        .await
+        .unwrap();
+
+    // 80 long-named custom metrics, each a distinct non-trivial raw → distinct CU.
+    let metrics: Vec<(String, u64)> = (0..80)
+        .map(|i| {
+            (
+                format!("a_reasonably_long_custom_metric_name_index_{i:04}"),
+                1_000 + i as u64,
+            )
+        })
+        .collect();
+    ingest_custom_metrics(&fx.state, &app, &metrics, period, 1).await;
+
+    billing_reconcile::sweep(&fx.state, period)
+        .await
+        .expect("tick");
+
+    let reqs = fx.mock.requests();
+    let item = reqs
+        .iter()
+        .find(|r| r.method == "POST" && r.path.starts_with("/v1/invoiceitems"))
+        .expect("invoice-item POST recorded");
+
+    // (c) the description respects the cap (and still shows the gross CU).
+    let desc = form_param(&item.body, "description").unwrap_or_default();
+    assert!(
+        desc.chars().count() <= zeroship_control::pricing::INVOICE_ITEM_DESC_MAX,
+        "description ({} chars) exceeds the {}-char cap",
+        desc.chars().count(),
+        zeroship_control::pricing::INVOICE_ITEM_DESC_MAX,
+    );
+    assert!(
+        desc.chars().count() < 500,
+        "well under Stripe's 500-char line-item limit"
+    );
+    assert!(
+        desc.contains("compute units"),
+        "description still surfaces the CU; got: {desc}"
+    );
+
+    // (d) EVERY metadata value is ≤ 500 chars (Stripe's per-value cap).
+    let mut saw_usage = false;
+    for pair in item.body.split('&') {
+        if let Some((k, _)) = pair.split_once('=') {
+            let key = percent_decode(k);
+            if key.starts_with("metadata[usage") {
+                saw_usage = true;
+            }
+            if key.starts_with("metadata[") {
+                let val = form_param(&item.body, &key).unwrap_or_default();
+                assert!(
+                    val.chars().count() <= zeroship_control::pricing::METADATA_VALUE_MAX,
+                    "metadata value for {key} is {} chars (> 500 cap)",
+                    val.chars().count(),
+                );
+            }
+        }
+    }
+    assert!(saw_usage, "at least one packed usage blob present");
+    // 80 long metrics overflow the key budget → the truncation flag is set.
+    assert_eq!(
+        form_param(&item.body, "metadata[usage_truncated]").as_deref(),
+        Some("true"),
+        "a many-metric set that overflows the key budget sets usage_truncated=true",
+    );
+    // The gross CU metadata is still exact (sum of all 80 metric deltas).
+    let expected_cu: u64 = metrics.iter().map(|(_, r)| *r).sum();
+    assert_eq!(
+        form_param(&item.body, "metadata[compute_units]").and_then(|v| v.parse::<u64>().ok()),
+        Some(expected_cu),
+        "gross compute_units is exact even when the per-metric blob is truncated",
+    );
+}
+
+/// EVERY outbound Stripe call — POST, GET, DELETE — carries the pinned
+/// `Stripe-Version` header. The mock REQUIRES the pinned version on every API call
+/// (400 `version_unpinned` otherwise), so each REAL `StripeClient` method below only
+/// SUCCEEDS when the client sent the pin; we then assert the recorded header on
+/// every request.
+///
+/// Drives the client DIRECTLY (no reconcile tick) so it is light + deterministic
+/// under parallel load. Exercises a POST (`create_customer`), a GET
+/// (`find_invoice_item_by_key`), and a DELETE (`delete_invoice_item`) so all three
+/// request builders are covered.
+#[compio::test(crate = "crate::support::live")]
+async fn every_stripe_call_pins_the_api_version() {
+    let mock = start_mock_stripe().await;
+    let client = StripeClient::new(SecretString::new("sk_test_mock".to_string()))
+        .with_base_url(mock.base_url.clone());
+
+    // POST: succeeds only if the pinned version was sent.
+    let cus = client
+        .create_customer("pin@test.invalid", "organization-pin")
+        .await;
+    assert!(
+        cus.is_ok(),
+        "create_customer (POST) must succeed with the pinned version: {cus:?}"
+    );
+
+    // GET: list pending items by key (returns None against the empty mock).
+    let got = client
+        .find_invoice_item_by_key(&cus.unwrap(), "zs_key_pin")
+        .await;
+    assert!(
+        got.is_ok(),
+        "find_invoice_item_by_key (GET) must succeed with the pinned version: {got:?}"
+    );
+
+    // DELETE: a missing item converges to Ok (the mock returns a Stripe-shaped obj;
+    // the client treats resource_missing as success — here it's a 200 from the mock).
+    let del = client.delete_invoice_item("ii_pin_missing").await;
+    assert!(
+        del.is_ok(),
+        "delete_invoice_item (DELETE) must succeed with the pinned version: {del:?}"
+    );
+
+    // Every recorded request pinned the EXACT version on every method.
+    let reqs = mock.requests();
+    assert!(
+        reqs.len() >= 3,
+        "POST + GET + DELETE recorded, got {}",
+        reqs.len()
+    );
+    let mut saw = (false, false, false);
+    for r in &reqs {
+        assert_eq!(
+            r.stripe_version.as_deref(),
+            Some(PINNED_STRIPE_VERSION),
+            "{} {} must pin Stripe-Version={PINNED_STRIPE_VERSION}, got {:?}",
+            r.method,
+            r.path,
+            r.stripe_version,
+        );
+        match r.method.as_str() {
+            "POST" => saw.0 = true,
+            "GET" => saw.1 = true,
+            "DELETE" => saw.2 = true,
+            _ => {}
+        }
+    }
+    assert_eq!(
+        saw,
+        (true, true, true),
+        "all three HTTP methods exercised + pinned"
+    );
+}
+
+/// THE no-double-bill guarantee. Run the tick TWICE for the same (organization,
+/// period). The second run is a pure no-op via the `billing_runs` PK conflict —
+/// the mock server sees the invoice-item creates EXACTLY ONCE.
+#[compio::test(crate = "crate::support::live")]
+async fn reconcile_is_idempotent_per_period() {
+    let url = db_url();
+    let fx = build_fixture(&url, "idem").await;
+    let now = now_for_closed_period().await;
+    let period = prev_period(now);
+
+    let organization = make_organization(&fx.state, "idem").await;
+    let organization = organization.as_str();
+    let plan = make_plan(&fx.state).await;
+    let app = make_owned_app(&fx.state, &plan, organization).await;
+    fx.state
+        .stripe_store
+        .set_customer(
+            organization,
+            &format!("cus_test_idem_{}", Uuid::new_v4().simple()),
+        )
+        .await
+        .unwrap();
+    ingest_at(&fx.state, &app, 300, period, 1).await; // 300c
+
+    billing_reconcile::sweep(&fx.state, period)
+        .await
+        .expect("tick 1");
+
+    let items_after_first = fx.mock.count_path("POST", "/v1/invoiceitems");
+    assert_eq!(items_after_first, 1, "one invoice item on the first run");
+
+    // Second run for the SAME period — must be a no-op (already billed).
+    billing_reconcile::sweep(&fx.state, period)
+        .await
+        .expect("tick 2");
+
+    // The mock server saw the invoice-item create EXACTLY ONCE total.
+    assert_eq!(
+        fx.mock.count_path("POST", "/v1/invoiceitems"),
+        1,
+        "no double-bill: the invoice item was created exactly once across two runs",
+    );
+
+    // Still exactly one invoice row.
+    let rows = fx
+        .state
+        .control_pg
+        .query(
+            "SELECT COUNT(*)::bigint AS n FROM zeroship.invoices WHERE organization_id = $1",
+            &[&organization],
+        )
+        .await
+        .expect("count invoices");
+    assert_eq!(rows[0].get::<_, i64>("n"), 1, "exactly one invoice row");
+}
+
+/// The REAL cyper client sends a non-empty `Idempotency-Key` + the
+/// `Authorization: Bearer` header on every mutating call. Asserted on the mock
+/// server's recorded requests — proving the wire path, not a stubbed client.
+#[compio::test(crate = "crate::support::live")]
+async fn stripe_client_uses_cyper_and_sends_idempotency_key() {
+    let url = db_url();
+    let fx = build_fixture(&url, "hdr").await;
+
+    // Drive the REAL client directly against the mock.
+    let client = StripeClient::new(SecretString::new("sk_test_mock".to_string()))
+        .with_base_url(fx.mock.base_url.clone());
+    let period = Period {
+        start: 1_700_000_000,
+        end: 1_702_000_000,
+    };
+    let item = client
+        .create_invoice_item(
+            "cus_x",
+            1234,
+            "usd",
+            "infra",
+            period,
+            "billitem:k1",
+            "billitem:k1",
+            &[],
+        )
+        .await
+        .expect("create invoice item");
+    assert!(
+        item.starts_with("ii_mock_"),
+        "parsed the ii_ id from the mock JSON"
+    );
+    let draft = client
+        .create_invoice("cus_x", &Uuid::new_v4().to_string(), "billrun:k2")
+        .await
+        .expect("create draft");
+    assert!(draft.starts_with("in_mock_"), "parsed the draft invoice id");
+    let invoice = client.finalize_invoice(&draft).await.expect("finalize");
+    assert_eq!(invoice, draft, "finalize preserves the Stripe invoice id");
+
+    let reqs = fx.mock.requests();
+    let item_req = reqs
+        .iter()
+        .find(|r| r.method == "POST" && r.path.starts_with("/v1/invoiceitems"))
+        .expect("item req");
+    assert_eq!(
+        item_req.idempotency_key.as_deref(),
+        Some("billitem:k1"),
+        "item idempotency key sent"
+    );
+    assert_eq!(
+        item_req.authorization.as_deref(),
+        Some("Bearer sk_test_mock"),
+        "bearer auth sent"
+    );
+    // Form body carries the bracketed period params (proves form encoding).
+    assert!(
+        item_req.body.contains("period%5Bstart%5D=1700000000"),
+        "period[start] form-encoded; body={}",
+        item_req.body
+    );
+    assert!(item_req.body.contains("amount=1234"), "amount in form body");
+    // The deterministic lookup key is stamped into metadata for the >24h adopt path.
+    assert!(
+        item_req
+            .body
+            .contains("metadata%5Bzs_item_key%5D=billitem%3Ak1"),
+        "zs_item_key metadata sent; body={}",
+        item_req.body
+    );
+
+    let invoice_create = reqs
+        .iter()
+        .find(|r| r.path == "/v1/invoices")
+        .expect("invoice create");
+    assert_eq!(
+        invoice_create.idempotency_key.as_deref(),
+        Some("billrun:k2"),
+        "invoice idempotency key sent"
+    );
+    let finalize = reqs
+        .iter()
+        .find(|r| r.path.contains("/finalize"))
+        .expect("finalize");
+    assert_eq!(
+        finalize.idempotency_key.as_deref(),
+        Some(format!("finalize:{draft}").as_str()),
+        "finalize idempotency key keyed on draft id"
+    );
+}
+
+/// `create_invoice` MUST send
+/// `pending_invoice_items_behavior=include` so the period's pending invoice items
+/// are SWEPT onto the draft. On API 2025-09-30.clover the param defaults to
+/// `exclude`, so omitting it finalizes a $0 invoice and bills NO infra usage. The
+/// mock models the real default: it sweeps the customer's pending items onto a
+/// draft create ONLY when `include` is sent. We assert (a) the wire body carries
+/// the param AND (b) the swept invoice total equals the items' sum (not $0).
+#[compio::test(crate = "crate::support::live")]
+async fn create_invoice_sweeps_pending_items_via_include_behavior() {
+    let url = db_url();
+    let fx = build_fixture(&url, "d1-sweep").await;
+    let client = StripeClient::new(SecretString::new("sk_test_mock".to_string()))
+        .with_base_url(fx.mock.base_url.clone());
+    let cus = format!("cus_d1_{}", Uuid::new_v4().simple());
+    let period = Period {
+        start: 1_700_000_000,
+        end: 1_702_000_000,
+    };
+
+    // Two pending items on the customer (totalling 2000c).
+    client
+        .create_invoice_item(&cus, 1234, "usd", "infra a", period, "d1:k1", "d1:k1", &[])
+        .await
+        .expect("item 1");
+    client
+        .create_invoice_item(&cus, 766, "usd", "infra b", period, "d1:k2", "d1:k2", &[])
+        .await
+        .expect("item 2");
+
+    // Create the draft (the call under test).
+    let draft = client
+        .create_invoice(&cus, &Uuid::new_v4().to_string(), "d1:run")
+        .await
+        .expect("create draft");
+
+    // (a) the WIRE body carried the include behavior.
+    let reqs = fx.mock.requests();
+    let create = reqs
+        .iter()
+        .find(|r| r.method == "POST" && r.path == "/v1/invoices")
+        .expect("invoice create recorded");
+    assert!(
+        create
+            .body
+            .contains("pending_invoice_items_behavior=include"),
+        "create_invoice must send pending_invoice_items_behavior=include; body={}",
+        create.body
+    );
+
+    // (b) the mock swept the pending items onto the invoice → total = 2000c, NOT 0.
+    assert_eq!(
+        fx.mock.invoice_swept_total(&draft),
+        Some(2000),
+        "the pending items must be swept onto the draft (D1); a $0 sweep means the organization is not billed",
+    );
+}
+
+/// A paid infra invoice's settling pi_/ch_ live ONLY
+/// under `expand[]=payments.data.payment.payment_intent` on API 2025-09-30.clover
+/// (Basil removed the top-level fields). `invoice_settlement_ids` must do the
+/// EXPANDED fetch and read them from the expanded PaymentIntent object
+/// (`id`=pi_, `latest_charge`=ch_). The mock surfaces them ONLY under that expand:
+/// the un-expanded GET returns nothing, so the expand is load-bearing.
+#[compio::test(crate = "crate::support::live")]
+async fn invoice_settlement_ids_requires_expand_and_reads_pi_ch() {
+    let url = db_url();
+    let fx = build_fixture(&url, "d2-expand").await;
+    let client = StripeClient::new(SecretString::new("sk_test_mock".to_string()))
+        .with_base_url(fx.mock.base_url.clone());
+
+    // A paid invoice whose settlement objects the mock surfaces ONLY under expand.
+    let inv = format!("in_d2_{}", Uuid::new_v4().simple());
+    fx.mock
+        .register_paid_invoice(&inv, "cus_d2", "pi_d2real", Some("ch_d2real"));
+
+    // The real client does the EXPANDED fetch and reads both ids.
+    let (pi, ch) = client
+        .invoice_settlement_ids(&inv)
+        .await
+        .expect("settlement ids");
+    assert_eq!(
+        pi.as_deref(),
+        Some("pi_d2real"),
+        "pi_ resolved from expanded payment_intent.id"
+    );
+    assert_eq!(
+        ch.as_deref(),
+        Some("ch_d2real"),
+        "ch_ resolved from payment_intent.latest_charge"
+    );
+
+    // Prove the expand is load-bearing: the client's GET carried the expand path.
+    // The mock surfaces the ids ONLY under this expand — exactly mirroring real
+    // Stripe, whose bare invoice / webhook payload omits them.
+    let reqs = fx.mock.requests();
+    let get = reqs
+        .iter()
+        .find(|r| r.method == "GET" && r.path.starts_with(&format!("/v1/invoices/{inv}")))
+        .expect("expanded invoice GET recorded");
+    assert!(
+        get.path
+            .contains("expand%5B%5D=payments.data.payment.payment_intent")
+            || get
+                .path
+                .contains("expand[]=payments.data.payment.payment_intent"),
+        "the settlement fetch must EXPAND payments.data.payment.payment_intent; path={}",
+        get.path
+    );
+}
+
+/// `POST /v1/refunds` does NOT accept a
+/// `currency` parameter — sending it is a 400 `parameter_unknown`. `create_refund`
+/// must NOT send `currency`. It also refunds a `pi_…`/`ch_…` DIRECTLY and resolves an
+/// `in_…` via the expanded fetch. The mock 400s a refund body that carries `currency`.
+#[compio::test(crate = "crate::support::live")]
+async fn create_refund_omits_currency_and_targets_pi_directly() {
+    let url = db_url();
+    let fx = build_fixture(&url, "d2-refund").await;
+    let client = StripeClient::new(SecretString::new("sk_test_mock".to_string()))
+        .with_base_url(fx.mock.base_url.clone());
+
+    // (a) Refund a pi_ directly → succeeds (no `currency` sent), one POST /v1/refunds.
+    let re = client
+        .create_refund("pi_real123", 200, "usd", "idem-refund-pi")
+        .await
+        .expect("refund a pi_ directly");
+    assert!(re.starts_with("re_mock_"), "got a re_ id: {re}");
+
+    let refund_reqs: Vec<_> = fx
+        .mock
+        .requests()
+        .into_iter()
+        .filter(|r| r.method == "POST" && r.path.starts_with("/v1/refunds"))
+        .collect();
+    assert_eq!(refund_reqs.len(), 1, "exactly one refund POST");
+    let body = &refund_reqs[0].body;
+    assert!(
+        !body.contains("currency="),
+        "create_refund must NOT send `currency` (400 parameter_unknown); body={body}",
+    );
+    assert!(
+        body.contains("payment_intent=pi_real123"),
+        "refunds the pi_ directly; body={body}"
+    );
+    assert!(
+        !body.contains("expand"),
+        "no expand fetch needed when given a pi_ directly"
+    );
+
+    // (b) Refund an in_ → the expanded fetch resolves its settling pi_, then refunds.
+    let inv = format!("in_refund_{}", Uuid::new_v4().simple());
+    fx.mock
+        .register_paid_invoice(&inv, "cus_r", "pi_frominvoice", Some("ch_frominvoice"));
+    let re2 = client
+        .create_refund(&inv, 100, "usd", "idem-refund-in")
+        .await
+        .expect("refund via in_ → expanded fetch");
+    assert!(re2.starts_with("re_mock_"));
+    let last = fx
+        .mock
+        .requests()
+        .into_iter()
+        .rfind(|r| r.method == "POST" && r.path.starts_with("/v1/refunds"))
+        .expect("second refund POST");
+    assert!(
+        last.body.contains("payment_intent=pi_frominvoice"),
+        "an in_ resolves to its settling pi_ via the expanded fetch; body={}",
+        last.body
+    );
+    assert!(!last.body.contains("currency="), "still no currency param");
+}
+
+/// `billing/setup` ensures a Customer exists, and a SECOND setup reuses the same
+/// `cus_…` (only one `POST /v1/customers` ever fires). Drives the real client
+/// through the store + mock; asserts the store persisted one customer id.
+#[compio::test(crate = "crate::support::live")]
+async fn setup_session_creates_customer_once() {
+    let url = db_url();
+    let fx = build_fixture(&url, "setup").await;
+    let organization = make_organization(&fx.state, "setup").await;
+    let organization = organization.as_str();
+
+    // First setup: no customer yet → create one + a setup session.
+    let client = StripeClient::new(SecretString::new("sk_test_mock".to_string()))
+        .with_base_url(fx.mock.base_url.clone());
+    // Mirror the handler's ensure-then-session flow twice.
+    for _ in 0..2 {
+        let existing = fx
+            .state
+            .stripe_store
+            .get_customer(organization)
+            .await
+            .unwrap();
+        let customer = match existing {
+            Some(c) => c,
+            None => {
+                let cus = client
+                    .create_customer("c@example.test", organization)
+                    .await
+                    .unwrap();
+                fx.state
+                    .stripe_store
+                    .set_customer(organization, &cus)
+                    .await
+                    .unwrap();
+                cus
+            }
+        };
+        let _url = client
+            .create_checkout_setup_session(&customer, "https://ok", "https://cancel")
+            .await
+            .unwrap();
+    }
+
+    assert_eq!(
+        fx.mock.count_path("POST", "/v1/customers"),
+        1,
+        "the customer is created exactly once across two setups (reuse on the second)",
+    );
+    assert_eq!(
+        fx.mock.count_path("POST", "/v1/checkout/sessions"),
+        2,
+        "a session per setup"
+    );
+    let stored = fx
+        .state
+        .stripe_store
+        .get_customer(organization)
+        .await
+        .unwrap();
+    assert!(
+        stored.is_some(),
+        "customer id persisted to billing_customer_refs"
+    );
+}
+
+/// Two apps owned by the SAME user_id roll into ONE organization invoice spanning
+/// both apps (proves the owner-join grouping). Apps with no owner row are
+/// skipped (an unowned app gets no invoice).
+#[compio::test(crate = "crate::support::live")]
+async fn reconcile_groups_apps_by_owner_via_the_organization() {
+    let url = db_url();
+    let fx = build_fixture(&url, "owner").await;
+    let now = now_for_closed_period().await;
+    let period = prev_period(now);
+
+    let organization = make_organization(&fx.state, "owner").await;
+    let organization = organization.as_str();
+    let plan = make_plan(&fx.state).await;
+    let owned_a = make_owned_app(&fx.state, &plan, organization).await;
+    let owned_b = make_owned_app(&fx.state, &plan, organization).await;
+    fx.state
+        .stripe_store
+        .set_customer(
+            organization,
+            &format!("cus_test_owner_{}", Uuid::new_v4().simple()),
+        )
+        .await
+        .unwrap();
+
+    // An app in an organization with NO member rows — must be skipped (no
+    // billable organization). `seed_app` mints exactly that: a fresh organization
+    // nobody is seated in.
+    let unowned = crate::support::seed_app(
+        &fx.state.control_pg,
+        &format!("unowned-{}", Uuid::new_v4()),
+        &plan,
+    )
+    .await;
+
+    ingest_at(&fx.state, &owned_a, 100, period, 1).await; // 100c
+    ingest_at(&fx.state, &owned_b, 200, period, 2).await; // 200c
+    ingest_at(&fx.state, &unowned, 999, period, 3).await; // would be 999c — must NOT bill
+
+    billing_reconcile::sweep(&fx.state, period)
+        .await
+        .expect("tick");
+
+    // One invoice item per OWNED app (2), not 3.
+    assert_eq!(
+        fx.mock.count_path("POST", "/v1/invoiceitems"),
+        2,
+        "two owned apps → two items"
+    );
+
+    // The organization's invoice total spans both owned apps (300c), excluding unowned.
+    let inv = read_invoice(&fx.state, organization, period).await;
+    assert_eq!(
+        inv,
+        Some(("finalized".to_string(), 300)),
+        "owned apps summed; unowned excluded",
+    );
+}
+
+/// Commit-then-crash recovery: a `billing_runs` row pre-exists with
+/// `stripe_invoice_id IS NULL` (the run was claimed but the process died before
+/// Stripe responded). The next tick RE-DRIVES it — the Stripe call fires with
+/// the SAME deterministic idempotency key and the row is completed.
+#[compio::test(crate = "crate::support::live")]
+async fn crashed_run_with_null_invoice_id_is_redriven() {
+    let url = db_url();
+    let fx = build_fixture(&url, "crash").await;
+    let now = now_for_closed_period().await;
+    let period = prev_period(now);
+
+    let organization = make_organization(&fx.state, "crash").await;
+    let organization = organization.as_str();
+    let plan = make_plan(&fx.state).await;
+    let app = make_owned_app(&fx.state, &plan, organization).await;
+    fx.state
+        .stripe_store
+        .set_customer(
+            organization,
+            &format!("cus_test_crash_{}", Uuid::new_v4().simple()),
+        )
+        .await
+        .unwrap();
+    ingest_at(&fx.state, &app, 400, period, 1).await; // 400c
+
+    // Simulate the crash window: the invoice row exists (claimed, draft) but is
+    // not yet finalized.
+    fx.state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.invoices (id, organization_id, period, status) \
+             VALUES ($1, $2, $3::date, 'draft')",
+            &[
+                &zeroship_core::typed_id::new_invoice_id(),
+                &organization,
+                &period_d(period),
+            ],
+        )
+        .await
+        .expect("pre-insert draft invoice (crash-window claim)");
+
+    billing_reconcile::sweep(&fx.state, period)
+        .await
+        .expect("tick");
+
+    // The Stripe finalize used the deterministic invoice idempotency key.
+    let invoice_create = fx
+        .mock
+        .requests()
+        .into_iter()
+        .find(|r| r.path == "/v1/invoices")
+        .expect("invoice create fired");
+    let expected_key = billing_reconcile::invoice_idempotency_key(organization, period);
+    assert_eq!(
+        invoice_create.idempotency_key.as_deref(),
+        Some(expected_key.as_str()),
+        "re-drive replays the SAME deterministic invoice idempotency key",
+    );
+
+    // The invoice is now finalized + carries the provider invoice id.
+    assert_eq!(
+        read_invoice(&fx.state, organization, period)
+            .await
+            .map(|(s, _)| s)
+            .as_deref(),
+        Some("finalized"),
+        "the draft invoice is finalized after re-drive",
+    );
+    assert!(
+        finalized_invoice_id(&fx.state, organization, period)
+            .await
+            .is_some(),
+        "provider invoice id filled in",
+    );
+}
+
+/// Weights present, a plan that INHERITS the
+/// global FX (`fx_pico_cents_per_unit = NULL`), and the global `pricing_config`
+/// default row REMOVED ⇒ the platform cannot price ⇒ the sweep must ABORT
+/// (error out) and produce NO invoice and NO `billing_runs` row — never a silent
+/// base-only $0 invoice, which would leak revenue.
+///
+/// This case mutates the fleet-wide `pricing_config` singleton every case in this
+/// shared-database binary reads, so it runs alone in a child copy of the binary
+/// (see the spawner below) rather than racing a sibling's pricing.
+#[compio::test(crate = "crate::support::live")]
+#[ignore = "mutates the fleet-wide pricing_config singleton; its spawner runs it alone in a child"]
+async fn missing_default_fx_aborts_sweep_and_bills_no_one() {
+    let url = db_url();
+    let fx = build_fixture(&url, "nofx").await;
+    let now = now_for_closed_period().await;
+    let period = prev_period(now);
+
+    let organization = make_organization(&fx.state, "nofx").await;
+    let organization = organization.as_str();
+
+    // Weights present (so usage WOULD accrue CU), but the plan inherits the FX
+    // (NULL) and we delete the global default — leaving the FX unresolvable.
+    // Seed billing_metrics('requests') first so the metric_weights FK holds even
+    // when this test races a sibling under the suite's parallel runner (the FK
+    // target isn't guaranteed present otherwise).
+    crate::support::seed_metric_catalog(&fx.state.control_pg, "requests").await;
+    fx.state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.metric_weights (metric, units_per_op, per_units) \
+             VALUES ('requests', 1, 1) \
+             ON CONFLICT (metric) DO UPDATE SET units_per_op = 1, per_units = 1",
+            &[],
+        )
+        .await
+        .expect("seed weight");
+    let plan_id = format!("pln_nofx_{}", Uuid::new_v4().simple());
+    fx.state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.plans \
+               (id, name, base_fee_cents, included_units, fx_pico_cents_per_unit, \
+                runtime_limits_json, spend_limit_default_cents) \
+             VALUES ($1, 'nofx', 0, 0, NULL, \
+                     '{\"cpu_limit_ms\":50,\"wall_timeout_ms\":5000,\"heap_limit_mb\":64}', 100000)",
+            &[&plan_id],
+        )
+        .await
+        .expect("seed inheriting plan");
+    let app = make_owned_app(&fx.state, &plan_id, organization).await;
+    fx.state
+        .stripe_store
+        .set_customer(
+            organization,
+            &format!("cus_test_nofx_{}", Uuid::new_v4().simple()),
+        )
+        .await
+        .unwrap();
+    ingest_at(&fx.state, &app, 600, period, 1).await; // would be 600c IF priceable
+
+    // Capture the shared singleton so we can RESTORE it before any assertion —
+    // the pricing_config row is fleet-wide shared state across test binaries, so
+    // a mid-test panic must NOT leak the deletion into a sibling test's pricing.
+    let saved_fx: Option<i64> = fx
+        .state
+        .control_pg
+        .query(
+            "SELECT fx_pico_cents_per_unit FROM zeroship.pricing_config WHERE id = 'global'",
+            &[],
+        )
+        .await
+        .expect("read saved fx")
+        .first()
+        .map(|r| r.get("fx_pico_cents_per_unit"));
+
+    // Remove the global default FX so the inheriting plan cannot resolve it.
+    fx.state
+        .control_pg
+        .execute(
+            "DELETE FROM zeroship.pricing_config WHERE id = 'global'",
+            &[],
+        )
+        .await
+        .expect("delete global pricing_config");
+
+    // The sweep must FAIL CLOSED — abort with an error, not bill $0. Capture the
+    // observations FIRST, then restore the singleton, then assert (so a failing
+    // assert can never leak the deletion).
+    let res = billing_reconcile::sweep(&fx.state, period).await;
+    let items = fx.mock.count_path("POST", "/v1/invoiceitems");
+    let invoices = fx.mock.count_path("POST", "/v1/invoices");
+    let runs = fx
+        .state
+        .control_pg
+        .query(
+            "SELECT total_cents FROM zeroship.invoices \
+             WHERE organization_id = $1 AND period = $2::date",
+            &[&organization, &period_d(period)],
+        )
+        .await
+        .expect("read invoices");
+
+    // Restore the shared singleton BEFORE asserting.
+    let restore_fx = saved_fx.unwrap_or(30_000_000);
+    fx.state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.pricing_config (id, fx_pico_cents_per_unit) \
+             VALUES ('global', $1) \
+             ON CONFLICT (id) DO UPDATE SET fx_pico_cents_per_unit = EXCLUDED.fx_pico_cents_per_unit",
+            &[&restore_fx],
+        )
+        .await
+        .expect("restore global pricing_config");
+
+    assert!(
+        res.is_err(),
+        "missing global default FX must abort the sweep (fail closed), not bill base-only $0"
+    );
+    assert_eq!(items, 0, "no item posted");
+    assert_eq!(invoices, 0, "no invoice created");
+    assert!(
+        runs.is_empty(),
+        "no invoice row — bill no one when the platform can't price"
+    );
+}
+
+/// Run the fleet-wide-singleton case alone in a child (see [`crate::support::isolated_case`]).
+#[test]
+fn missing_default_fx_aborts_sweep_and_bills_no_one_in_an_isolated_process() {
+    crate::support::isolated_case::run_alone(
+        "integration::billing_reconcile_test::missing_default_fx_aborts_sweep_and_bills_no_one",
+    );
+}
+
+/// Two lock-free sweeps racing over the SAME organization and period must not
+/// double-process. One active invoice, one created charge per line as seen by the
+/// provider (it replays the deterministic Idempotency-Key), and credit drawn once.
+///
+/// The per-line provider-ref ledger is read before the POST and written after it,
+/// so it cannot arbitrate this race; the guarantees that hold are Stripe's
+/// deterministic item/invoice key and `credit::consume_at_finalize`'s
+/// per-organization advisory lock.
+#[compio::test(crate = "crate::support::live")]
+async fn concurrent_sweeps_over_one_organization_are_exactly_once() {
+    let url = db_url();
+    let fx = build_fixture(&url, "concurrent-sweep").await;
+    let now = now_for_closed_period().await;
+    let period = prev_period(now);
+
+    let organization = make_organization(&fx.state, "concurrent-sweep").await;
+    let organization = organization.as_str();
+    // `make_plan` sets the plan's own FX, so this case never touches the shared
+    // `pricing_config` singleton.
+    let plan = make_plan(&fx.state).await;
+    let app = make_owned_app(&fx.state, &plan, organization).await;
+    fx.state
+        .stripe_store
+        .set_customer(
+            organization,
+            &format!("cus_race_{}", Uuid::new_v4().simple()),
+        )
+        .await
+        .unwrap();
+    // 600 requests x 1 cent = 600c subtotal; the 100c grant is drawn once.
+    ingest_at(&fx.state, &app, 600, period, 1).await;
+    insert_credit_grant(&fx.state, organization, 100).await;
+
+    let (a, b) = futures::future::join(
+        billing_reconcile::sweep(&fx.state, period),
+        billing_reconcile::sweep(&fx.state, period),
+    )
+    .await;
+    a.expect("sweep a");
+    b.expect("sweep b");
+
+    // Exactly ONE active (non-void) invoice, finalized, for this organization+period.
+    let active: i64 = fx
+        .state
+        .control_pg
+        .query(
+            "SELECT COUNT(*)::bigint AS n FROM zeroship.invoices \
+              WHERE organization_id = $1 AND period = $2::date AND status <> 'void'",
+            &[&organization, &period_d(period)],
+        )
+        .await
+        .expect("count active invoices")[0]
+        .get("n");
+    assert_eq!(active, 1, "one active invoice for the organization+period");
+    let invoice = read_invoice(&fx.state, organization, period).await;
+    assert_eq!(
+        invoice.as_ref().map(|(status, _)| status.as_str()),
+        Some("finalized"),
+        "the single active invoice finalized"
+    );
+    assert!(
+        finalized_invoice_id(&fx.state, organization, period)
+            .await
+            .is_some(),
+        "the finalized invoice carries its provider id"
+    );
+
+    // One charge per line as seen by the provider: the racing duplicate POST carried
+    // the same deterministic Idempotency-Key, so the mock replayed it and created
+    // no second object.
+    assert_eq!(
+        fx.mock.count_created("POST", "/v1/invoiceitems"),
+        1,
+        "the provider deduped the racing invoice-item POST to one created charge"
+    );
+
+    // Credit consumed once: a double-consume would leave the balance below zero.
+    let balance = zeroship_control::credit::balance(&*fx.state.control_pg, organization, "usd")
+        .await
+        .expect("read credit balance");
+    assert_eq!(balance, 0, "the 100c grant was drawn exactly once");
+    let (_, total) = invoice.expect("invoice exists");
+    assert_eq!(
+        total, 500,
+        "subtotal 600 - credit 100 once, no double credit"
+    );
+}
+
+/// A partial post then crash, followed by a re-drive AFTER Stripe's
+/// Idempotency-Key window has expired (dedupe OFF). The per-app LEDGER — not
+/// Stripe's 24h key — must guarantee app A's invoice item is created EXACTLY
+/// ONCE; the re-drive posts ONLY app B.
+#[compio::test(crate = "crate::support::live")]
+async fn partial_post_then_crash_does_not_double_bill_app_a() {
+    let url = db_url();
+    let fx = build_fixture(&url, "partial").await;
+    let now = now_for_closed_period().await;
+    let period = prev_period(now);
+
+    let organization = make_organization(&fx.state, "partial").await;
+    let organization = organization.as_str();
+    let plan = make_plan(&fx.state).await;
+    let app_a = make_owned_app(&fx.state, &plan, organization).await;
+    let app_b = make_owned_app(&fx.state, &plan, organization).await;
+    fx.state
+        .stripe_store
+        .set_customer(
+            organization,
+            &format!("cus_test_partial_{}", Uuid::new_v4().simple()),
+        )
+        .await
+        .unwrap();
+    ingest_at(&fx.state, &app_a, 100, period, 1).await; // 100c
+    ingest_at(&fx.state, &app_b, 200, period, 2).await; // 200c
+
+    // First drive: crashes after the first invoice item posts.
+    fx.mock.fail_after_invoice_items(1);
+    billing_reconcile::sweep(&fx.state, period)
+        .await
+        .expect("sweep swallows the per-organization error");
+    fx.mock.clear_fault();
+    // Exactly ONE item must have posted + been ledgered before the crash.
+
+    let created_after_crash = fx.mock.count_created("POST", "/v1/invoiceitems");
+    assert_eq!(
+        created_after_crash, 1,
+        "exactly one item posted before the crash"
+    );
+    // Claim-then-call: the line (snapshot intent) is written BEFORE each
+    // Stripe POST, so after the crash app A is CONFIRMED (has a
+    // billing_line_provider_refs row) and app B is INTENT-only (a line with NO
+    // provider-ref — its POST failed). Exactly ONE confirmed post.
+    assert_eq!(
+        confirmed_lines_count(&fx.state, organization).await,
+        1,
+        "exactly one app CONFIRMED-posted after the crash (claim-then-call)",
+    );
+
+    // Simulate >24h: Stripe's Idempotency-Key no longer dedupes.
+    fx.mock.disable_dedupe();
+
+    // Re-drive with a healthy client — the ledger must skip the already-posted
+    // app and post ONLY the remaining one.
+    billing_reconcile::sweep(&fx.state, period)
+        .await
+        .expect("re-drive tick");
+
+    // THE guarantee: total CREATED items == 2 (A once + B once), NOT 3 — even
+    // though Stripe's key window expired. The ledger, not Stripe, enforced this.
+    assert_eq!(
+        fx.mock.count_created("POST", "/v1/invoiceitems"),
+        2,
+        "no double-bill: app A's item was created exactly once across both drives (ledger guard)",
+    );
+
+    // Both apps now have lines, and the invoice is finalized.
+    assert_eq!(
+        lines_count(&fx.state, organization).await,
+        2,
+        "both apps lined after the re-drive"
+    );
+    assert!(
+        finalized_invoice_id(&fx.state, organization, period)
+            .await
+            .is_some(),
+        "invoice finalized",
+    );
+}
+
+/// The item POSTS to Stripe, then the process
+/// crashes BEFORE the ledger records the post. A re-drive AFTER Stripe's 24h
+/// Idempotency-Key window has expired (dedupe OFF) must NOT post a second item —
+/// the claim-then-call intent row + the deterministic metadata LOOKUP adopt the
+/// already-posted item. The app's invoice item is created EXACTLY ONCE.
+#[compio::test(crate = "crate::support::live")]
+async fn post_then_crash_before_ledger_does_not_double_bill_after_24h() {
+    let url = db_url();
+    let fx = build_fixture(&url, "c1crash").await;
+    let now = now_for_closed_period().await;
+    let period = prev_period(now);
+
+    let organization = make_organization(&fx.state, "c1crash").await;
+    let organization = organization.as_str();
+    let plan = make_plan(&fx.state).await;
+    let app = make_owned_app(&fx.state, &plan, organization).await;
+    fx.state
+        .stripe_store
+        .set_customer(
+            organization,
+            &format!("cus_test_c1crash_{}", Uuid::new_v4().simple()),
+        )
+        .await
+        .unwrap();
+    ingest_at(&fx.state, &app, 500, period, 1).await; // 500c
+
+    // First drive: the item posts to Stripe, then we crash before the ledger
+    // confirms it.
+    fx.mock.post_then_crash_invoice_item();
+    billing_reconcile::sweep(&fx.state, period)
+        .await
+        .expect("sweep swallows the per-organization error");
+    fx.mock.clear_fault();
+
+    // The item DID post to Stripe exactly once on the crashed drive.
+    assert_eq!(
+        fx.mock.count_created("POST", "/v1/invoiceitems"),
+        1,
+        "item posted once before the crash"
+    );
+    // The line (snapshot intent) exists (claim-then-call) but has NO provider-ref
+    // yet (the post was unconfirmed at crash time).
+    assert_eq!(
+        lines_count(&fx.state, organization).await,
+        1,
+        "claim-then-call wrote one line before the POST"
+    );
+    assert_eq!(
+        confirmed_lines_count(&fx.state, organization).await,
+        0,
+        "the line has no billing_line_provider_refs row (post unconfirmed at crash time)",
+    );
+
+    // Simulate >24h: Stripe's Idempotency-Key no longer dedupes.
+    fx.mock.disable_dedupe();
+
+    // Re-drive with a healthy client. The NULL intent row + the metadata lookup
+    // must ADOPT the already-posted item rather than POST a duplicate.
+    billing_reconcile::sweep(&fx.state, period)
+        .await
+        .expect("re-drive tick");
+
+    // THE guarantee: the app's invoice item was CREATED exactly once across both
+    // drives — even though Stripe's key window expired. The ledger + metadata
+    // lookup, not Stripe's key, enforced this.
+    assert_eq!(
+        fx.mock.count_created("POST", "/v1/invoiceitems"),
+        1,
+        "no double-bill: the item was created exactly once (claim-then-call + metadata adopt)",
+    );
+
+    // The line is now confirmed and the invoice completed with the right total.
+    assert_eq!(
+        read_invoice(&fx.state, organization, period).await,
+        Some(("finalized".to_string(), 500)),
+        "invoice finalized with the real amount, not $0",
+    );
+    assert!(
+        finalized_invoice_id(&fx.state, organization, period)
+            .await
+            .is_some(),
+        "provider invoice id recorded",
+    );
+    assert_eq!(
+        lines_count(&fx.state, organization).await,
+        1,
+        "still exactly one line (no duplicate)"
+    );
+    assert_eq!(
+        confirmed_lines_count(&fx.state, organization).await,
+        1,
+        "the post is now confirmed (one line provider-ref)",
+    );
+}
+
+/// A normal (≤24h) re-drive of the same crash window is STILL idempotent: with
+/// dedupe ON, the re-driven POST replays Stripe's original object (no new item),
+/// so the deterministic Idempotency-Key path also yields exactly one created item.
+#[compio::test(crate = "crate::support::live")]
+async fn post_then_crash_redrive_within_24h_is_idempotent() {
+    let url = db_url();
+    let fx = build_fixture(&url, "c1within").await;
+    let now = now_for_closed_period().await;
+    let period = prev_period(now);
+
+    let organization = make_organization(&fx.state, "c1within").await;
+    let organization = organization.as_str();
+    let plan = make_plan(&fx.state).await;
+    let app = make_owned_app(&fx.state, &plan, organization).await;
+    fx.state
+        .stripe_store
+        .set_customer(
+            organization,
+            &format!("cus_test_c1within_{}", Uuid::new_v4().simple()),
+        )
+        .await
+        .unwrap();
+    ingest_at(&fx.state, &app, 320, period, 1).await; // 320c
+
+    fx.mock.post_then_crash_invoice_item();
+    let _ = billing_reconcile::sweep(&fx.state, period).await;
+    fx.mock.clear_fault();
+    assert_eq!(
+        fx.mock.count_created("POST", "/v1/invoiceitems"),
+        1,
+        "item posted once before crash"
+    );
+
+    // Re-drive WITHIN 24h: dedupe stays ON. Stripe replays the original item.
+    billing_reconcile::sweep(&fx.state, period)
+        .await
+        .expect("re-drive within 24h");
+    assert_eq!(
+        fx.mock.count_created("POST", "/v1/invoiceitems"),
+        1,
+        "no double-bill within 24h: the deterministic key replayed the original item",
+    );
+    assert_eq!(
+        read_invoice(&fx.state, organization, period).await,
+        Some(("finalized".to_string(), 320)),
+        "billed the real amount; invoice finalized",
+    );
+    assert!(
+        finalized_invoice_id(&fx.state, organization, period)
+            .await
+            .is_some(),
+        "provider invoice id recorded",
+    );
+}
+
+/// Create draft (sweeping the real items) → crash before
+/// finalize. A re-drive AFTER Stripe's 24h create-key window has expired (dedupe
+/// OFF) must FINALIZE the ORIGINAL draft (which carries the items) — NOT create a
+/// fresh empty draft and finalize a $0 invoice.
+///
+/// Persisting the draft id before finalize + re-finalizing
+/// THAT draft on re-drive makes the finalized invoice carry the real amount.
+#[compio::test(crate = "crate::support::live")]
+async fn archived_app_open_invoice_finalizes_original_draft_after_24h() {
+    let url = db_url();
+    let fx = build_fixture(&url, "c2crash").await;
+    let now = now_for_closed_period().await;
+    let period = prev_period(now);
+
+    let organization = make_organization(&fx.state, "c2crash").await;
+    let organization = organization.as_str();
+    let plan = make_plan(&fx.state).await;
+    let app = make_owned_app(&fx.state, &plan, organization).await;
+    fx.state
+        .stripe_store
+        .set_customer(
+            organization,
+            &format!("cus_test_c2crash_{}", Uuid::new_v4().simple()),
+        )
+        .await
+        .unwrap();
+    ingest_at(&fx.state, &app, 700, period, 1).await; // 700c
+
+    // First drive: items post, draft is created + persisted, then finalize crashes.
+    fx.mock.crash_on_finalize();
+    billing_reconcile::sweep(&fx.state, period)
+        .await
+        .expect("sweep swallows the per-organization error");
+    fx.mock.clear_fault();
+
+    // The item posted, the draft was created exactly once and PERSISTED.
+    assert_eq!(
+        fx.mock.count_created("POST", "/v1/invoiceitems"),
+        1,
+        "item posted once"
+    );
+    assert_eq!(
+        fx.mock.count_created_exact("POST", "/v1/invoices"),
+        1,
+        "exactly one draft created (no finalize yet)"
+    );
+    let persisted_draft = draft_invoice_id(&fx.state, organization, period).await;
+    assert!(
+        persisted_draft.is_some(),
+        "the draft invoice id was persisted BEFORE finalize (C2)"
+    );
+    assert_eq!(
+        read_invoice(&fx.state, organization, period)
+            .await
+            .map(|(s, _)| s)
+            .as_deref(),
+        Some("draft"),
+        "invoice still draft (not finalized yet)",
+    );
+    assert!(
+        finalized_invoice_id(&fx.state, organization, period)
+            .await
+            .is_none(),
+        "no finalized provider ref yet",
+    );
+
+    fx.state
+        .registry
+        .archive_app(&app)
+        .await
+        .expect("archive app with open invoice")
+        .expect("billed app exists");
+
+    // Simulate >24h: Stripe's create Idempotency-Key window has expired.
+    fx.mock.disable_dedupe();
+
+    // Re-drive with a healthy client after archive: billing retains the app's
+    // usage, ownership, line, and draft identity, so it must FINALIZE the
+    // EXISTING draft rather than create a new empty one.
+    billing_reconcile::sweep(&fx.state, period)
+        .await
+        .expect("re-drive tick");
+
+    // THE guarantee: still exactly ONE draft created across both drives (no new
+    // empty draft), and the finalize targeted the ORIGINAL draft id.
+    assert_eq!(
+        fx.mock.count_created_exact("POST", "/v1/invoices"),
+        1,
+        "no new draft on re-drive: the ORIGINAL draft (with the real items) was finalized",
+    );
+    let finalize_req = fx
+        .mock
+        .requests()
+        .into_iter()
+        .find(|r| r.path.contains("/finalize"))
+        .expect("finalize fired on re-drive");
+    let draft_id = persisted_draft.unwrap();
+    assert!(
+        finalize_req.path.contains(&draft_id),
+        "finalize targeted the persisted ORIGINAL draft id ({draft_id}); path={}",
+        finalize_req.path,
+    );
+
+    // The invoice is finalized with the REAL total (not $0).
+    assert_eq!(
+        read_invoice(&fx.state, organization, period).await,
+        Some(("finalized".to_string(), 700)),
+        "finalized the real amount, NOT a $0 empty invoice",
+    );
+    assert!(
+        finalized_invoice_id(&fx.state, organization, period)
+            .await
+            .is_some(),
+        "completed with the finalized provider invoice id",
+    );
+}
+
+// ===========================================================================
+// billing/setup self-service authz (own-id ok; cross-organization 403).
+// ===========================================================================
+
+/// Wire just the `billing/setup` route onto a test App (same path the prod
+/// router registers).
+fn billing_setup_route(cfg: &mut web::ServiceConfig) {
+    cfg.service(
+        web::resource("/api/organizations/{id}/billing/setup")
+            .route(web::post().to(zeroship_control::stripe_handlers::billing_setup)),
+    );
+}
+
+/// `billing/setup` is authorized by MONEY AUTHORITY AT THE ORGANIZATION named
+/// in the path, and by nothing else.
+///
+/// The invariant is BOTH directions of the seat: a principal seated at
+/// A may set up A's card, and the same principal, holding the same token, is
+/// refused at B - where it has no seat. B's customer must not exist afterwards,
+/// which is what makes the refusal a refusal rather than a slow success.
+#[compio::test(crate = "crate::support::live")]
+async fn billing_setup_requires_money_authority_at_the_named_organization() {
+    let url = db_url();
+    let fx = build_fixture(&url, "authz").await;
+
+    let principal = crate::support::authz_fixture::seeded_principal(&fx.state).await;
+    let organization_a = make_organization(&fx.state, "setup-a").await;
+    let organization_b = make_organization(&fx.state, "setup-b").await;
+    crate::support::seat_organization_member(
+        &fx.state.control_pg,
+        &organization_a,
+        &principal.user_id,
+        "owner",
+    )
+    .await;
+
+    let app = test::init_service(
+        web::App::new()
+            .state(fx.state.clone())
+            .configure(billing_setup_route),
+    )
+    .await;
+
+    // (1) Seated at A: allowed.
+    // Status only: a retained `WebResponse` keeps the app state - and its
+    // Postgres client - alive past the teardown below.
+    let req = test::TestRequest::post()
+        .uri(&format!(
+            "/api/organizations/{organization_a}/billing/setup"
+        ))
+        .header("authorization", principal.bearer())
+        .to_request();
+    let status = test::call_service(&app, req).await.status();
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a seated principal may set up its organization's card"
+    );
+
+    // (2) Not seated at B: refused, and B gains no customer.
+    let req = test::TestRequest::post()
+        .uri(&format!(
+            "/api/organizations/{organization_b}/billing/setup"
+        ))
+        .header("authorization", principal.bearer())
+        .to_request();
+    let status = test::call_service(&app, req).await.status();
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "no seat at B means no money authority at B",
+    );
+    let stored_b = fx
+        .state
+        .stripe_store
+        .get_customer(&organization_b)
+        .await
+        .unwrap();
+    assert!(
+        stored_b.is_none(),
+        "no customer created for the organization the caller cannot reach"
+    );
+
+    principal.cleanup(&fx.state).await;
+}
+
+// ===========================================================================
+// On-demand reconcile endpoint (POST /internal/billing/reconcile) — the
+// operator-gated trigger that reconciles a chosen CLOSED period without
+// waiting a month.
+// ===========================================================================
+
+/// Wire the `/internal/billing/reconcile` route onto a test App (same path +
+/// handler the prod router registers in `main.rs`).
+fn force_reconcile_route(cfg: &mut web::ServiceConfig) {
+    cfg.service(
+        web::resource("/internal/billing/reconcile")
+            .route(web::post().to(zeroship_control::internal::force_reconcile)),
+    );
+}
+
+/// The endpoint is GATED by the SAME `/internal/*` `check_auth` as every other
+/// internal route (control-key bearer). With the fixture's non-empty
+/// `control_key`:
+///   * no bearer ⇒ 401 (the gate), and
+///   * the correct control-key bearer ⇒ it drives the REAL reconcile for the
+///     caller-chosen period, hitting the mock-Stripe over the wire EXACTLY once.
+///
+/// The gate is load-bearing: without `check_auth`, the
+/// no-bearer request would 200 + bill — a privilege bypass.
+#[compio::test(crate = "crate::support::live")]
+async fn force_reconcile_endpoint_is_operator_gated_and_drives_a_chosen_period() {
+    let url = db_url();
+    let fx = build_fixture(&url, "force").await;
+    let now = now_for_closed_period().await;
+    let period = prev_period(now);
+
+    let organization = make_organization(&fx.state, "force").await;
+    let organization = organization.as_str();
+    let plan = make_plan(&fx.state).await;
+    let app = make_owned_app(&fx.state, &plan, organization).await;
+    fx.state
+        .stripe_store
+        .set_customer(
+            organization,
+            &format!("cus_test_force_{}", Uuid::new_v4().simple()),
+        )
+        .await
+        .unwrap();
+    ingest_at(&fx.state, &app, 600, period, 1).await; // 600c in the CLOSED period
+
+    let svc = test::init_service(
+        web::App::new()
+            .state(fx.state.clone())
+            .configure(force_reconcile_route),
+    )
+    .await;
+
+    // (1) No bearer → 401. The gate, not the reconcile, answers.
+    // Status only: a retained `WebResponse` keeps the app state - and its
+    // Postgres client - alive past the teardown below.
+    let req = test::TestRequest::post()
+        .uri(&format!("/internal/billing/reconcile?period={now}"))
+        .to_request();
+    let status = test::call_service(&svc, req).await.status();
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "force-reconcile without the control-key bearer must be rejected (gated, not a bypass)",
+    );
+    // Nothing was billed by the rejected call.
+    assert_eq!(
+        fx.mock.count_path("POST", "/v1/invoiceitems"),
+        0,
+        "the 401'd request must NOT have driven any Stripe call",
+    );
+
+    // (2) Correct control-key bearer → drives the real reconcile for `period`.
+    let req = test::TestRequest::post()
+        .uri(&format!("/internal/billing/reconcile?period={now}"))
+        .header("authorization", "Bearer test-control-key")
+        .to_request();
+    let status = test::call_service(&svc, req).await.status();
+    assert_eq!(status, StatusCode::OK, "the keyed request reconciles");
+
+    // The mock saw exactly one invoice-item create (the owned app) + the
+    // invoice create/finalize — the REAL cyper wire path, billing the chosen
+    // closed period.
+    assert_eq!(
+        fx.mock.count_path("POST", "/v1/invoiceitems"),
+        1,
+        "the keyed reconcile created exactly one invoice item for the closed period",
+    );
+
+    // And it recorded a finalized invoice for THAT period.
+    assert_eq!(
+        read_invoice(&fx.state, organization, period)
+            .await
+            .map(|(s, _)| s)
+            .as_deref(),
+        Some("finalized"),
+        "one finalized invoice for the reconciled period",
+    );
+    assert!(
+        finalized_invoice_id(&fx.state, organization, period)
+            .await
+            .is_some(),
+        "the reconciled invoice carries a finalized provider invoice id",
+    );
+}
+
+// ===========================================================================
+// Replay is FAITHFUL: drive bill_organization end-to-end, then read the
+// PERSISTED invoice_lines row BACK from the DB and assert charge_cents over the
+// FROZEN snapshot reproduces the stored amount_cents bit-for-bit. The test reads
+// what bill_organization WROTE, not what the test built. The snapshot must freeze the
+// FULL weights map that was actually passed to charge_cents (a superset), so a
+// weight for a metric the app did NOT use is still frozen — proving the snapshot
+// equals the real charge INPUT and does not silently depend on pricing.rs's loop
+// iterating usage keys.
+// ===========================================================================
+
+#[compio::test(crate = "crate::support::live")]
+async fn finalized_line_replays_persisted_amount_bit_for_bit_via_bill_organization() {
+    let url = db_url();
+    let fx = build_fixture(&url, "c1replay").await;
+    let now = now_for_closed_period().await;
+    let period = prev_period(now);
+
+    let organization = make_organization(&fx.state, "c1replay").await;
+    let organization = organization.as_str();
+    let plan = make_plan(&fx.state).await; // seeds `requests` = 1 CU/op, fx 1c/CU
+                                           // Seed a SECOND global weight for a metric the app will NOT use, so the frozen
+                                           // weights_snapshot is a strict SUPERSET of the app's usage keys. The snapshot
+                                           // freezes the FULL map (not just usage.keys()), so it equals the real charge
+                                           // INPUT. Either way the replay must equal amount_cents (an unused weight
+                                           // contributes 0).
+    fx.state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.billing_metrics (metric, kind, unit) \
+             VALUES ('cpu_us', 'platform', 'op') \
+             ON CONFLICT (metric) DO UPDATE SET unit = EXCLUDED.unit",
+            &[],
+        )
+        .await
+        .expect("seed cpu_us metric");
+    fx.state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.metric_weights (metric, units_per_op, per_units) \
+             VALUES ('cpu_us', 1, 1000) \
+             ON CONFLICT (metric) DO UPDATE SET units_per_op = 1, per_units = 1000",
+            &[],
+        )
+        .await
+        .expect("seed second weight");
+    let app = make_owned_app(&fx.state, &plan, organization).await;
+    fx.state
+        .stripe_store
+        .set_customer(
+            organization,
+            &format!("cus_c1replay_{}", Uuid::new_v4().simple()),
+        )
+        .await
+        .unwrap();
+    ingest_at(&fx.state, &app, 640, period, 1).await; // 640 requests → 640 CU → 640c
+
+    // Drive the REAL bill_organization path (via the sweep) against live PG + mock.
+    billing_reconcile::sweep(&fx.state, period)
+        .await
+        .expect("tick");
+    assert_eq!(
+        read_invoice(&fx.state, organization, period).await,
+        Some(("finalized".to_string(), 640)),
+        "the invoice is finalized at the real amount",
+    );
+
+    // Read the PERSISTED line snapshot back (what bill_organization wrote).
+    let (included, fx_pico, base, amount, usage_json, weights_json) =
+        read_line_snapshot(&fx.state, organization, &app).await;
+
+    // The frozen weights snapshot is the FULL global map — it includes the unused
+    // `cpu_us` weight (superset), not just the applied `requests`.
+    let frozen_weights: MetricWeights =
+        serde_json::from_value(weights_json).expect("parse frozen weights");
+    assert!(
+        frozen_weights.contains_key("requests") && frozen_weights.contains_key("cpu_us"),
+        "the snapshot freezes the FULL weights map passed to charge_cents (a superset), \
+         including the metric the app never used; got {:?}",
+        frozen_weights.keys().collect::<Vec<_>>(),
+    );
+
+    // REPLAY: re-run charge_cents over the frozen snapshot read back from the DB.
+    let replay_usage: HashMap<String, i64> =
+        serde_json::from_value(usage_json).expect("parse frozen usage");
+    let replay_price = PlanPrice {
+        base_fee_cents: u64::try_from(base).unwrap(),
+        included_units: u64::try_from(included).unwrap(),
+        fx_pico_cents_per_unit: Some(u64::try_from(fx_pico).unwrap()),
+        spend_limit_default_cents: 0,
+    };
+    let replayed = charge_cents(&replay_price, &replay_usage, &frozen_weights).expect("replay");
+    assert_eq!(
+        i64::try_from(replayed.total_cents).unwrap(),
+        amount,
+        "re-running charge_cents over the PERSISTED frozen snapshot reproduces the stored \
+         amount_cents bit-for-bit (the snapshot equals the real charge input)",
+    );
+}
+
+// ===========================================================================
+// Re-finalize converges: a re-drive of the crash window where Stripe
+// finalized but our DB stayed draft. Stripe's `finalize_invoice` returns
+// `invoice_already_finalized`; bill_organization must treat that as SUCCESS, read back
+// the finalized id (== the draft id), and converge the LOCAL finalize — never
+// error-loop forever leaving the DB stranded at 'draft'.
+// ===========================================================================
+
+#[compio::test(crate = "crate::support::live")]
+async fn refinalize_already_finalized_converges_locally() {
+    let url = db_url();
+    let fx = build_fixture(&url, "m2converge").await;
+    let now = now_for_closed_period().await;
+    let period = prev_period(now);
+
+    let organization = make_organization(&fx.state, "m2converge").await;
+    let organization = organization.as_str();
+    let plan = make_plan(&fx.state).await;
+    let app = make_owned_app(&fx.state, &plan, organization).await;
+    fx.state
+        .stripe_store
+        .set_customer(
+            organization,
+            &format!("cus_m2converge_{}", Uuid::new_v4().simple()),
+        )
+        .await
+        .unwrap();
+    ingest_at(&fx.state, &app, 450, period, 1).await; // 450c
+
+    // First drive: items + draft post for real, but finalize reports the invoice
+    // is ALREADY finalized on Stripe (the crash-after-finalize window). The drive
+    // must CONVERGE the local finalize, not error-loop.
+    fx.mock.finalize_already_finalized();
+    // The drive must NOT error-loop; assert on THIS organization's converged
+    // durable outcome below rather than any fleet-wide count.
+    billing_reconcile::sweep(&fx.state, period)
+        .await
+        .expect("tick converges on already-finalized (no error loop)");
+
+    // The DB is now finalized at the real amount — NOT stranded at 'draft'.
+    assert_eq!(
+        read_invoice(&fx.state, organization, period).await,
+        Some(("finalized".to_string(), 450)),
+        "local finalize converged to 'finalized' with the real amount",
+    );
+    // The invoice provider-ref was recorded (the atomic finalize pair), so lookup is
+    // auditable. The recorded id is the draft id (finalize does not change the id).
+    let persisted_draft = draft_invoice_id(&fx.state, organization, period)
+        .await
+        .expect("draft id persisted");
+    let finalized = finalized_invoice_id(&fx.state, organization, period)
+        .await
+        .expect("finalized ref recorded");
+    assert_eq!(
+        finalized, persisted_draft,
+        "the recorded finalized id is the draft id (Stripe finalize does not change the id)",
+    );
+}
+
+// ===========================================================================
+// Atomic finalize→provider-ref: the finalize UPDATE and the invoice
+// provider-ref INSERT commit in ONE transaction, so a failure of the ref INSERT
+// rolls BACK the finalize — the invoice can never be left 'finalized' with NO
+// 'invoice' ref (the un-auditable partial state where lookup_invoice_id returns
+// None forever).
+//
+// We force the ref INSERT to fail by pre-seeding a DIFFERENT invoice whose
+// `billing_provider_refs(provider='stripe', ref_kind='invoice', external_id=<fixed>)`
+// collides on the UNIQUE(provider, ref_kind, external_id) constraint with the id
+// the decorated finalize returns. The ref INSERT then errors INSIDE the txn, so the
+// transaction rolls back the finalize too: the invoice stays 'draft' (a clean
+// retry) and is NEVER finalized-without-ref.
+// ===========================================================================
+
+#[compio::test(crate = "crate::support::live")]
+async fn finalize_and_invoice_ref_commit_atomically() {
+    let url = db_url();
+    let fx = build_fixture(&url, "m1atomic").await;
+    // Use a DISTINCT closed period (~5 months back) so this test's PERMANENT
+    // draft-invoice leftover (the finalize is intentionally never allowed to
+    // commit) can never be swept by a sibling reconcile test billing the
+    // current-prev month — which would inflate that sibling's fleet-wide `billed`.
+    let now = now_for_closed_period().await - 150 * 86_400;
+    let period = prev_period(now);
+
+    let organization = make_organization(&fx.state, "m1atomic").await;
+    let organization = organization.as_str();
+    let plan = make_plan(&fx.state).await;
+    let app = make_owned_app(&fx.state, &plan, organization).await;
+    fx.state
+        .stripe_store
+        .set_customer(
+            organization,
+            &format!("cus_m1atomic_{}", Uuid::new_v4().simple()),
+        )
+        .await
+        .unwrap();
+    ingest_at(&fx.state, &app, 350, period, 1).await; // 350c
+
+    // Pre-seed a SEPARATE finalized invoice that already owns the fixed external_id
+    // under (provider='stripe', ref_kind='invoice') — so the decorated finalize's
+    // ref INSERT will violate UNIQUE(provider, ref_kind, external_id).
+    let fixed_id = format!("in_collide_{}", Uuid::new_v4().simple());
+    let other_organization = make_organization(&fx.state, "m1other").await;
+    fx.state
+        .stripe_store
+        .set_customer(
+            &other_organization,
+            &format!("cus_m1other_{}", Uuid::new_v4().simple()),
+        )
+        .await
+        .unwrap();
+    let other_inv = zeroship_core::typed_id::new_invoice_id();
+    // A finalized invoice for a DIFFERENT (organization, period) holding the fixed id.
+    let other_period = period_d(billing_reconcile::previous_period_start_unix(
+        billing_reconcile::previous_period_start_unix(now),
+    ));
+    fx.state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.invoices (id, organization_id, period, subtotal_cents, total_cents, \
+               status, finalized_at) VALUES ($1, $2, $3::date, 1, 1, 'finalized', NOW())",
+            &[&other_inv, &other_organization, &other_period],
+        )
+        .await
+        .expect("seed other finalized invoice");
+    fx.state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.billing_provider_refs (invoice_id, provider, ref_kind, external_id) \
+             VALUES ($1, 'stripe', 'invoice', $2)",
+            &[&other_inv, &fixed_id],
+        )
+        .await
+        .expect("seed colliding invoice ref");
+
+    // Drive the reconcile: finalize returns the fixed id → the ref INSERT collides
+    // → the txn must roll back the finalize.
+    fx.mock.finalize_returns_fixed_id(fixed_id.clone());
+    // The colliding finalize is a per-organization error the sweep swallows + continues
+    // past (so the tick still returns Ok). We assert on THIS organization's state below
+    // rather than the fleet-wide count (other tests' creators may also be swept).
+    let _ = billing_reconcile::sweep(&fx.state, period)
+        .await
+        .expect("sweep swallows the per-organization error and returns Ok");
+
+    // THE guarantee: the invoice is NOT left 'finalized' (the txn rolled the
+    // finalize UPDATE back when the ref INSERT failed). It stays 'draft' — a clean
+    // retry — and crucially is NEVER finalized-without-an-invoice-ref.
+    let inv = read_invoice(&fx.state, organization, period).await;
+    assert_eq!(
+        inv.map(|(s, _)| s).as_deref(),
+        Some("draft"),
+        "finalize+ref are atomic: a failed ref INSERT rolls back the finalize (no half-commit)",
+    );
+    assert!(
+        finalized_invoice_id(&fx.state, organization, period)
+            .await
+            .is_none(),
+        "no finalized invoice ref — and since the invoice is not finalized, the partial \
+         'finalized-without-ref' state never occurs (lookup_invoice_id can't strand at None)",
+    );
+}
+
+/// Customer and Connect-account creation must carry a DETERMINISTIC
+/// `Idempotency-Key`, so two concurrent creates for one organization collapse to a
+/// single Stripe object instead of two.
+///
+/// The caller's row check is a plain check-then-act -
+/// `get_customer` -> None -> `create_customer` -> `set_customer` - with no lock
+/// spanning it. Two concurrent requests both see None
+/// and both post, and `ON CONFLICT` then keeps one row while the second Stripe
+/// object is orphaned - an external side effect no local rollback can undo.
+///
+/// A deterministic key is the right instrument here rather than a DB advisory
+/// lock: it needs no lock held across an outbound HTTP call, and it survives
+/// process restarts and multiple replicas, which a per-process lock does not.
+///
+/// Bounded honestly: Stripe's Idempotency-Key window is 24h. Beyond that a
+/// replay can still create a second object; the local row check is what covers
+/// the sequential case. The two together, not either alone.
+#[compio::test(crate = "crate::support::live")]
+async fn customer_and_connect_account_creation_carry_a_deterministic_idempotency_key() {
+    let mock = start_mock_stripe().await;
+    let client = StripeClient::new(SecretString::new("sk_test_mock".to_string()))
+        .with_base_url(mock.base_url.clone());
+
+    let _ = client
+        .create_customer("idem@test.invalid", "organization-idem")
+        .await
+        .expect("create_customer must succeed against the mock");
+    let _ = client
+        .create_connect_account("idem@test.invalid", "organization-idem", "US")
+        .await;
+    // Same organization again: the key must be identical, which is what makes the
+    // race collapse rather than merely being retry-safe.
+    let _ = client
+        .create_customer("idem@test.invalid", "organization-idem")
+        .await
+        .expect("second create_customer must succeed against the mock");
+
+    let reqs = mock.requests();
+
+    let customers: Vec<_> = reqs
+        .iter()
+        .filter(|r| r.path.starts_with("/v1/customers"))
+        .collect();
+    assert_eq!(
+        customers.len(),
+        2,
+        "expected both customer POSTs recorded: {reqs:?}"
+    );
+    assert!(
+        customers[0].idempotency_key.is_some(),
+        "customer creation must send an Idempotency-Key; without it two concurrent \
+         billing_setup calls create two Stripe Customers and orphan one"
+    );
+    assert_eq!(
+        customers[0].idempotency_key, customers[1].idempotency_key,
+        "the key must be DETERMINISTIC per organization - a random key per call is \
+         retry-safe but does not collapse a race"
+    );
+
+    let account = reqs
+        .iter()
+        .find(|r| r.path.starts_with("/v1/accounts"))
+        .expect("connect account POST recorded");
+    assert!(
+        account.idempotency_key.is_some(),
+        "connect-account creation must send an Idempotency-Key for the same reason"
+    );
+}

@@ -6,7 +6,7 @@
 
 #![allow(clippy::future_not_send, reason = "the cases run on one compio thread")]
 
-mod common;
+mod support;
 
 use std::any::Any;
 use std::io::{Read, Write};
@@ -90,7 +90,7 @@ fn a_detached_connection_driver_strands_its_runtimes_ring() {
     let _serial = SERIAL
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let url = common::require_control_db();
+    let url = crate::support::require_control_db();
     let before = rings();
     compio::runtime::Runtime::new()
         .expect("runtime")
@@ -126,12 +126,12 @@ fn a_live_case_cancels_the_tasks_it_owns() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let before = rings();
     let (ready_tx, ready_rx) = oneshot::channel();
-    common::live::runtime::Runtime::new()
+    crate::support::live::runtime::Runtime::new()
         .expect("runtime")
         .block_on(async {
-            common::live::spawn(parked_accept(ready_tx));
+            crate::support::live::spawn(parked_accept(ready_tx));
             await_signal(ready_rx).await;
-            let stripe = common::stripe_mock::start_mock_stripe().await;
+            let stripe = crate::support::stripe_mock::start_mock_stripe().await;
             let address = stripe.base_url.trim_start_matches("http://").to_owned();
             let mut client = TcpStream::connect(address.as_str())
                 .await
@@ -159,9 +159,9 @@ fn a_live_case_closes_the_connections_it_opened() {
     let _serial = SERIAL
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let url = common::require_control_db();
+    let url = crate::support::require_control_db();
     let before = rings();
-    common::live::runtime::Runtime::new()
+    crate::support::live::runtime::Runtime::new()
         .expect("runtime")
         .block_on(detached_connection(url));
     assert_eq!(
@@ -179,9 +179,9 @@ fn a_connection_held_past_the_case_fails_naming_it() {
     let _serial = SERIAL
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let url = common::require_control_db();
+    let url = crate::support::require_control_db();
     let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
-        common::live::runtime::Runtime::new()
+        crate::support::live::runtime::Runtime::new()
             .expect("runtime")
             .block_on(async move {
                 let (client, connection) = compio_postgres::connect(&url, compio_postgres::NoTls)
@@ -211,10 +211,10 @@ fn a_live_case_that_panics_still_gives_back_its_ring() {
     let before = rings();
     let (ready_tx, ready_rx) = oneshot::channel();
     let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
-        common::live::runtime::Runtime::new()
+        crate::support::live::runtime::Runtime::new()
             .expect("runtime")
             .block_on(async {
-                common::live::spawn(parked_accept(ready_tx));
+                crate::support::live::spawn(parked_accept(ready_tx));
                 await_signal(ready_rx).await;
                 panic!("the case's own failure");
             });
@@ -236,10 +236,10 @@ fn a_live_case_in_an_ntex_system_gives_back_its_ring() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let before = rings();
     let (ready_tx, ready_rx) = oneshot::channel();
-    common::live::system::runtime::Runtime::new()
+    crate::support::live::system::runtime::Runtime::new()
         .expect("runtime")
         .block_on(async {
-            common::live::spawn(parked_accept(ready_tx));
+            crate::support::live::spawn(parked_accept(ready_tx));
             await_signal(ready_rx).await;
         });
     assert_eq!(
@@ -256,7 +256,7 @@ fn a_live_case_in_an_ntex_system_gives_back_its_ring() {
 fn keep_alive_server_on(bind: &str) -> (SocketAddr, String) {
     let listener = std::net::TcpListener::bind(bind).expect("bind the HTTP server");
     let address = listener.local_addr().expect("HTTP server address");
-    common::live::register_listener(address);
+    crate::support::live::register_listener(address);
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(mut stream) = stream else {
@@ -319,7 +319,7 @@ fn a_kept_http_connection_fails_the_case_that_left_it() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let url = keep_alive_server();
     let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
-        common::live::runtime::Runtime::new()
+        crate::support::live::runtime::Runtime::new()
             .expect("runtime")
             .block_on(fetch(&url));
     }));
@@ -342,7 +342,7 @@ fn a_wildcard_bound_servers_connection_is_named() {
     let (address, _) = keep_alive_server_on("0.0.0.0:0");
     let url = format!("http://127.0.0.1:{}/", address.port());
     let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
-        common::live::runtime::Runtime::new()
+        crate::support::live::runtime::Runtime::new()
             .expect("runtime")
             .block_on(fetch(&url));
     }));
@@ -364,7 +364,7 @@ fn a_ring_held_by_an_unowned_task_fails_the_case() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
-        common::live::runtime::Runtime::new()
+        crate::support::live::runtime::Runtime::new()
             .expect("runtime")
             .block_on(async {
                 let (ready_tx, ready_rx) = oneshot::channel();
@@ -388,9 +388,9 @@ fn a_closed_http_connection_leaves_nothing_parked() {
     let _serial = SERIAL
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let url = common::platform_jwks_url();
+    let url = crate::support::platform_jwks_url();
     let before = rings();
-    common::live::runtime::Runtime::new()
+    crate::support::live::runtime::Runtime::new()
         .expect("runtime")
         .block_on(fetch(&url));
     assert_eq!(rings(), before, "a closed HTTP connection left a ring open");
@@ -404,8 +404,8 @@ fn the_platform_jwks_server_closes_each_connection() {
     let _serial = SERIAL
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let url = common::platform_jwks_url();
-    common::live::runtime::Runtime::new()
+    let url = crate::support::platform_jwks_url();
+    crate::support::live::runtime::Runtime::new()
         .expect("runtime")
         .block_on(async move {
             let response = cyper::Client::new()
@@ -434,11 +434,11 @@ fn an_owned_tasks_panic_fails_the_case() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
-        common::live::runtime::Runtime::new()
+        crate::support::live::runtime::Runtime::new()
             .expect("runtime")
             .block_on(async {
                 let (ready_tx, ready_rx) = oneshot::channel();
-                common::live::spawn(async move {
+                crate::support::live::spawn(async move {
                     let _ = ready_tx.send(());
                     panic!("the owned task's own failure");
                 });
@@ -463,7 +463,7 @@ fn an_owned_task_outside_a_live_case_is_refused() {
     let refused = std::panic::catch_unwind(|| {
         compio::runtime::Runtime::new()
             .expect("runtime")
-            .block_on(async { common::live::spawn(async {}) });
+            .block_on(async { crate::support::live::spawn(async {}) });
     });
     let panic = refused.expect_err("an owned task outside a live case is refused");
     let message = panic_message(panic.as_ref());
@@ -489,7 +489,7 @@ fn a_case_waits_only_for_the_servers_it_registered() {
         let a = scope.spawn(move || {
             let url = keep_alive_server();
             std::panic::catch_unwind(AssertUnwindSafe(|| {
-                common::live::runtime::Runtime::new()
+                crate::support::live::runtime::Runtime::new()
                     .expect("runtime")
                     .block_on(async {
                         b_started_rx.recv().expect("wait until case B is running");
@@ -503,7 +503,7 @@ fn a_case_waits_only_for_the_servers_it_registered() {
         });
         let b = scope.spawn(move || {
             std::panic::catch_unwind(AssertUnwindSafe(|| {
-                common::live::runtime::Runtime::new()
+                crate::support::live::runtime::Runtime::new()
                     .expect("runtime")
                     .block_on(async {
                         b_started_tx.send(()).expect("report case B is running");

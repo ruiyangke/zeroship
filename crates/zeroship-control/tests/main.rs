@@ -1,17 +1,19 @@
 #![recursion_limit = "256"]
 
-//! Integration modules grouped to share a linked executable. Database modules
-//! live in tests/live_db.rs; both targets run in ordinary cargo test.
-//! Register new modules here or there because autotests is disabled.
+//! The `zeroship-control` test suites in one binary.
 //!
-//! Workflow engine tests keep a separate executable so database cloning cannot
-//! conflict with sibling modules holding sessions on its template.
-//! The source residue guard also needs its own target.
+//! `Cargo.toml` sets `autotests = false`, so a new suite is compiled by nothing
+//! until its tier's `mod.rs` declares it. Shared fixtures live under
+//! `tests/support/`; public-API suites under `tests/integration/`; the suites
+//! that drive real processes under `tests/e2e/`. `tests/live_case_rings.rs`,
+//! `tests/workflow_e2e.rs` and `tests/database_decoupling_e2e.rs` keep their
+//! own targets; `Cargo.toml` states why each cannot share this binary.
+//!
+//! Select a tier or a suite with a module-path filter:
+//!
+//! `cargo test -p zeroship-control --test main integration::spend::`
+//! `cargo test -p zeroship-control --test main e2e::control_boot_test::`
 
-mod common;
-
-mod billing_pipeline_redpanda_e2e;
-mod config_env_tier;
-mod provider_conformance;
-mod startup_refusal_test;
-mod trusted_clients_test;
+mod support;
+mod integration;
+mod e2e;
