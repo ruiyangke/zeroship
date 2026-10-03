@@ -126,6 +126,7 @@ mod restart_models;
 mod s3_fixture;
 mod schema_binding;
 mod schema_metadata;
+mod shared_server;
 mod signal_models;
 mod step_retries;
 mod task_models;
@@ -588,7 +589,7 @@ async fn journal_login_has_dml_without_ddl_and_other_platform_roles_have_no_acce
     ] {
         let url = fixture
             .admin_url
-            .replacen("postgres@", &format!("{role}@"), 1);
+            .replacen("postgres:fixture@", &format!("{role}:{role}@"), 1);
         let client = connect(&url).await;
         assert!(client
             .batch_execute("SELECT * FROM workflow_manager.__zeroship_workflow_runs")

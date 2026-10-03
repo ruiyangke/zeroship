@@ -29,12 +29,8 @@ use std::{
     rc::Rc,
     sync::Arc,
 };
-use testcontainers::{
-    core::{IntoContainerPort, WaitFor},
-    runners::SyncRunner,
-    Container, GenericImage, ImageExt,
-};
 use zeroship_core::{app_id::AppId, typed_id};
+use zeroship_testkit::postgres::server::Postgres;
 use zeroship_data_orm::connection::ConnectionFactory;
 use zeroship_workflow::service::{
     schema,
@@ -95,46 +91,84 @@ pub async fn orm_store(url: &str) -> OrmStore {
 }
 
 pub struct PostgresFixture {
-    _container: Container<GenericImage>,
+    /// The journal opened on the case's database as [`JOURNAL_LOGIN`].
     pub store: OrmStore,
     pub admin_url: String,
     /// The server `admin_url` names, authenticated as [`JOURNAL_LOGIN`].
     pub journal_url: String,
+    /// The shared bare server database this case owns. Declared after `store`
+    /// so the case's connections close before the clone is removed.
+    _database: Postgres,
 }
 impl PostgresFixture {
     pub async fn start() -> Self {
-        let container = GenericImage::new("postgres", "18")
-            .with_exposed_port(5432.tcp())
-            .with_wait_for(WaitFor::message_on_stderr(
-                "database system is ready to accept connections",
-            ))
-            .with_env_var("POSTGRES_HOST_AUTH_METHOD", "trust")
-            .start()
-            .expect("workflow PostgreSQL container");
-        let host = container.get_host().unwrap();
-        let port = container.get_host_port_ipv4(5432).unwrap();
-        let admin_url = format!("postgres://postgres@{host}:{port}/postgres");
+        let database = Postgres::start();
+        // A role's password is its name, as the platform migrations set it, and
+        // the URL carries it because the server authenticates the published
+        // port, not the container's loopback.
+        let admin_url = database.url();
         let admin = connect(&admin_url).await;
-        // The journal's owner and login, and the four platform roles the journal
-        // must stay closed to.
-        admin
-            .batch_execute(&format!(
-                "CREATE ROLE {JOURNAL_OWNER} NOLOGIN; CREATE ROLE {JOURNAL_LOGIN} LOGIN; \
-                 CREATE ROLE zeroship_worker LOGIN; CREATE ROLE zeroship_gateway LOGIN; \
-                 CREATE ROLE zeroship_app LOGIN; CREATE ROLE zeroship_control LOGIN;"
-            ))
-            .await
-            .unwrap();
+        ensure_roles(&admin).await;
         install_journal(&admin).await;
         grant_journal(&admin).await;
-        let journal_url = format!("postgres://{JOURNAL_LOGIN}@{host}:{port}/postgres");
+        let journal_url = admin_url.replacen(
+            "postgres:fixture@",
+            &format!("{JOURNAL_LOGIN}:{JOURNAL_LOGIN}@"),
+            1,
+        );
         Self {
-            _container: container,
             store: orm_store(&journal_url).await,
             admin_url,
             journal_url,
+            _database: database,
         }
     }
+
+    /// The Docker id of the shared server this case's database lives on.
+    #[must_use]
+    pub fn container_id(&self) -> &str {
+        self._database.container_id()
+    }
+}
+
+/// Create the journal's owner, login and the platform roles it must stay closed
+/// to, leaving a role that already exists.
+///
+/// The bare server outlives one case and every case of a run shares it, so the
+/// roles are cluster-global and created once. The DO block catches the duplicate
+/// two cases racing to create the same role raise, rather than serializing them.
+async fn ensure_roles(admin: &compio_postgres::Client) {
+    let mut roles = vec![
+        (JOURNAL_OWNER, "NOLOGIN".to_owned()),
+        (
+            JOURNAL_LOGIN,
+            format!("LOGIN PASSWORD '{JOURNAL_LOGIN}'"),
+        ),
+    ];
+    for role in [
+        "zeroship_worker",
+        "zeroship_gateway",
+        "zeroship_app",
+        "zeroship_control",
+    ] {
+        roles.push((role, format!("LOGIN PASSWORD '{role}'")));
+    }
+    let guarded = roles
+        .iter()
+        .map(|(name, attributes)| {
+            format!(
+                "IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{name}') THEN \
+                 BEGIN CREATE ROLE {name} {attributes}; \
+                 EXCEPTION WHEN unique_violation OR duplicate_object THEN NULL; END; \
+                 END IF;"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    admin
+        .batch_execute(&format!("DO $$\nBEGIN\n{guarded}\nEND $$;"))
+        .await
+        .unwrap();
 }
 
 /// Install the journal into `admin`'s database as the platform migration does:

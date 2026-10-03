@@ -606,11 +606,14 @@ async fn journal_is_scoped_to_its_database_and_independent_of_app_identity() {
     let fixture = PostgresFixture::start().await;
     let (first, app, _, deployments) = registered_service(Rc::new(fixture.store.clone())).await;
     let admin = connect(&fixture.admin_url).await;
+    // The shared server keeps the databases a previous run left, so this case
+    // mints the name of the second journal rather than naming a fixed one.
+    let other = typed_id::generate("dbf");
     admin
-        .batch_execute("CREATE DATABASE other_journal")
+        .batch_execute(&format!("CREATE DATABASE \"{other}\""))
         .await
         .unwrap();
-    let on_other = |url: &str| format!("{}/other_journal", url.rsplit_once('/').unwrap().0);
+    let on_other = |url: &str| format!("{}/{}", url.rsplit_once('/').unwrap().0, other);
     let other_admin = connect(&on_other(&fixture.admin_url)).await;
     let other_url = on_other(&fixture.journal_url);
     install_journal(&other_admin).await;
@@ -689,8 +692,17 @@ async fn journal_is_scoped_to_its_database_and_independent_of_app_identity() {
             );
         }
     }
+    // Close this case's connections to the second journal before removing it,
+    // so the shared server never has to force one off.
+    drop(second);
+    drop(other_admin);
+    admin
+        .batch_execute(&format!(
+            "DROP DATABASE IF EXISTS \"{other}\" WITH (FORCE)"
+        ))
+        .await
+        .unwrap();
 }
-
 
 #[derive(Clone, Copy, Debug)]
 enum IngressOperation {

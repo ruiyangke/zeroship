@@ -133,6 +133,10 @@ fn spec() -> Result<shared::Spec, String> {
     ];
     let postgres_args: Vec<String> = [
         "-c",
+        "max_connections=500",
+        "-c",
+        "fsync=off",
+        "-c",
         "wal_level=logical",
         "-c",
         "max_replication_slots=128",
