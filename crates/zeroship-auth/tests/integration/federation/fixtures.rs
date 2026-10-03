@@ -13,6 +13,9 @@ use crate::support::{self, auth_server::AuthServer, database::Database};
 pub(super) struct Fixture {
     pub server: AuthServer,
     pub provider: ProviderServer,
+    /// The case's own forwarded client IP, so its rate-limit buckets and audit
+    /// rows never collide with another case sharing this database.
+    ip: String,
 }
 
 impl Fixture {
@@ -65,7 +68,15 @@ impl Fixture {
         };
         let server = AuthServer::with_listener(database, listener, &extra).await;
         assert_eq!(server.auth_base, auth_base);
-        Self { server, provider }
+        Self {
+            server,
+            provider,
+            ip: fixture_ip(),
+        }
+    }
+
+    pub fn client_ip(&self) -> &str {
+        &self.ip
     }
 
     pub async fn begin(&self) -> Attempt {
@@ -82,6 +93,8 @@ impl Fixture {
                 self.server.auth_base,
                 kind.name()
             ))
+            .unwrap()
+            .header("x-forwarded-for", self.client_ip())
             .unwrap()
             .send()
             .await
@@ -142,8 +155,12 @@ impl Fixture {
             .pg
             .query(
                 "SELECT detail->>'reason' FROM zeroship.audit_events \
-             WHERE event_type = 'oauth_callback_failure' AND auth_method = $1 ORDER BY id",
-                &[&self.provider.kind().name()],
+             WHERE event_type = 'oauth_callback_failure' AND auth_method = $1 \
+               AND ip = $2 ORDER BY id",
+                &[
+                    &self.provider.kind().name(),
+                    &self.client_ip().parse::<std::net::IpAddr>().unwrap(),
+                ],
             )
             .await
             .expect("callback refusal records an audit event");
@@ -159,14 +176,19 @@ impl Fixture {
     }
 
     pub async fn assert_counts(&self, users: i64, identities: i64, sessions: i64) {
+        let profile = self.provider.user();
         let row = self
             .server
             .pg
             .query_one(
-                "SELECT (SELECT COUNT(*) FROM zeroship.users), \
-                    (SELECT COUNT(*) FROM zeroship.federated_identities), \
-                    (SELECT COUNT(*) FROM zeroship.idp_sessions)",
-                &[],
+                "SELECT \
+                    (SELECT COUNT(*) FROM zeroship.users WHERE email = $1::citext), \
+                    (SELECT COUNT(*) FROM zeroship.federated_identities \
+                        WHERE provider = $2 AND subject = $3), \
+                    (SELECT COUNT(*) FROM zeroship.idp_sessions s \
+                        JOIN zeroship.users u ON u.id = s.user_id \
+                        WHERE u.email = $1::citext)",
+                &[&profile.email, &self.provider.kind().name(), &profile.subject],
             )
             .await
             .unwrap();
@@ -177,7 +199,7 @@ impl Fixture {
                 row.get::<_, i64>(2)
             ),
             (users, identities, sessions),
-            "all persisted users, identities and sessions in this case"
+            "users, identities and sessions this case minted"
         );
     }
 
@@ -253,6 +275,9 @@ impl Attempt {
         stash: Option<&str>,
     ) -> cyper::Response {
         let mut request = fixture.server.http.get(callback.as_str()).unwrap();
+        request = request
+            .header("x-forwarded-for", fixture.client_ip())
+            .unwrap();
         if let Some(stash) = stash {
             request = request
                 .header(
@@ -273,6 +298,20 @@ fn param(url: &Url, key: &str) -> String {
         .into_owned()
 }
 
+/// A per-case email whose local part carries a fresh tag, so cases that share a
+/// database never act on one another's user, link or completion rows.
+pub(super) fn email(label: &str, domain: &str) -> String {
+    format!("{label}-{}@{domain}", uuid::Uuid::new_v4().simple())
+}
+
+/// A per-case forwarded client IP, keeping rate-limit buckets and audit rows
+/// scoped to the case that minted it.
+pub(super) fn fixture_ip() -> String {
+    let uuid = uuid::Uuid::new_v4();
+    let bytes = uuid.as_bytes();
+    format!("10.{}.{}.{}", bytes[0], bytes[1], bytes[2])
+}
+
 pub(super) async fn confirm_password(
     fixture: &Fixture,
     response: &cyper::Response,
@@ -291,6 +330,8 @@ pub(super) async fn confirm_password(
         .server
         .http
         .get(link.as_str())
+        .unwrap()
+        .header("x-forwarded-for", fixture.client_ip())
         .unwrap()
         .send()
         .await
@@ -313,6 +354,8 @@ pub(super) async fn confirm_password(
         .header("content-type", "application/x-www-form-urlencoded")
         .unwrap()
         .header("cookie", format!("__Host-zsidp_csrf={csrf}"))
+        .unwrap()
+        .header("x-forwarded-for", fixture.client_ip())
         .unwrap()
         .body(body)
         .send()

@@ -6,9 +6,9 @@ use zeroship_auth::{identity::password, store::users};
 
 #[ntex::test]
 async fn login_requires_a_second_factor_only_after_enrollment_is_confirmed() {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let server = AuthServer::start(database).await;
-        let user = account(&server, "creator@example.test").await;
+        let user = account(&server, &email("login")).await;
         let return_to = AuthServer::fresh_challenge();
         let response = password_login(&server, &user, PASSWORD, &return_to).await;
         assert_session(&server, &response, &user.id, &return_to, "pwd", &["pwd"]).await;
@@ -17,7 +17,7 @@ async fn login_requires_a_second_factor_only_after_enrollment_is_confirmed() {
         assert_session(&server, &response, &user.id, &return_to, "pwd", &["pwd"]).await;
         device.confirm(&server, &user.id).await;
         let mut challenge = Challenge::password(&server, &user, PASSWORD).await;
-        assert_counts(&server, 2, 0).await;
+        assert_counts(&server, &user.id, 2, 0).await;
         let response = challenge.submit(&server, &device.code()).await;
         assert_session(
             &server,
@@ -28,21 +28,21 @@ async fn login_requires_a_second_factor_only_after_enrollment_is_confirmed() {
             &["pwd", "otp"],
         )
         .await;
-        assert_counts(&server, 3, 0).await;
+        assert_counts(&server, &user.id, 3, 0).await;
     })
     .await;
 }
 
 #[ntex::test]
 async fn wrong_totp_preserves_the_challenge_for_a_valid_retry() {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let server = AuthServer::start(database).await;
-        let user = account(&server, "creator@example.test").await;
+        let user = account(&server, &email("login")).await;
         let device = Authenticator::confirmed(&server, &user.id).await;
         let mut challenge = Challenge::password(&server, &user, PASSWORD).await;
-        assert_counts(&server, 0, 0).await;
+        assert_counts(&server, &user.id, 0, 0).await;
         challenge.reject_wrong_code(&server, &device).await;
-        assert_counts(&server, 0, 0).await;
+        assert_counts(&server, &user.id, 0, 0).await;
         assert_eq!(
             unused_backups(&server, &user.id).await,
             device.backups.len()
@@ -57,7 +57,7 @@ async fn wrong_totp_preserves_the_challenge_for_a_valid_retry() {
             &["pwd", "otp"],
         )
         .await;
-        assert_counts(&server, 1, 0).await;
+        assert_counts(&server, &user.id, 1, 0).await;
     })
     .await;
 }
@@ -66,9 +66,9 @@ async fn wrong_totp_preserves_the_challenge_for_a_valid_retry() {
 /// verify each, and the server keeps answering other requests meanwhile.
 #[ntex::test]
 async fn a_rejected_code_leaves_the_server_answering_while_backup_codes_are_checked() {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let server = AuthServer::start(database).await;
-        let user = account(&server, "creator@example.test").await;
+        let user = account(&server, &email("login")).await;
         let device = Authenticator::confirmed(&server, &user.id).await;
         let mut challenge = Challenge::password(&server, &user, PASSWORD).await;
         let (code, deadline) = device.rejected_code();
@@ -94,9 +94,9 @@ async fn a_rejected_code_leaves_the_server_answering_while_backup_codes_are_chec
 
 #[ntex::test]
 async fn backup_code_is_consumed_by_the_route_and_a_replay_can_retry_with_an_unused_code() {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let server = AuthServer::start(database).await;
-        let user = account(&server, "creator@example.test").await;
+        let user = account(&server, &email("login")).await;
         let device = Authenticator::confirmed(&server, &user.id).await;
         let mut first = Challenge::password(&server, &user, PASSWORD).await;
         let response = first.submit(&server, &device.backups[0]).await;
@@ -119,7 +119,7 @@ async fn backup_code_is_consumed_by_the_route_and_a_replay_can_retry_with_an_unu
             "invalid code",
         )
         .await;
-        assert_counts(&server, 1, 0).await;
+        assert_counts(&server, &user.id, 1, 0).await;
         assert_eq!(
             unused_backups(&server, &user.id).await,
             device.backups.len() - 1
@@ -134,17 +134,17 @@ async fn backup_code_is_consumed_by_the_route_and_a_replay_can_retry_with_an_unu
             &["pwd", "otp"],
         )
         .await;
-        assert_counts(&server, 2, 0).await;
+        assert_counts(&server, &user.id, 2, 0).await;
     })
     .await;
 }
 
 #[ntex::test]
 async fn concurrent_challenges_cannot_spend_the_same_backup_code_twice() {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let server = AuthServer::start(database).await;
         let other_server = AuthServer::start(database).await;
-        let user = account(&server, "creator@example.test").await;
+        let user = account(&server, &email("login")).await;
         let device = Authenticator::confirmed(&server, &user.id).await;
         let mut first = Challenge::password(&server, &user, PASSWORD).await;
         let mut second = Challenge::password(&other_server, &user, PASSWORD).await;
@@ -198,7 +198,7 @@ async fn concurrent_challenges_cannot_spend_the_same_backup_code_twice() {
         };
         assert_session(&server, &winner, &user.id, &target, "pwd", &["pwd", "otp"]).await;
         assert_refused(loser, "invalid code").await;
-        assert_counts(&server, 1, 0).await;
+        assert_counts(&server, &user.id, 1, 0).await;
         assert_eq!(
             unused_backups(&server, &user.id).await,
             device.backups.len() - 1
@@ -209,9 +209,9 @@ async fn concurrent_challenges_cannot_spend_the_same_backup_code_twice() {
 
 #[ntex::test]
 async fn changed_password_invalidates_the_challenge_without_spending_its_backup_code() {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let server = AuthServer::start(database).await;
-        let user = account(&server, "creator@example.test").await;
+        let user = account(&server, &email("login")).await;
         let device = Authenticator::confirmed(&server, &user.id).await;
         let mut stale = Challenge::password(&server, &user, PASSWORD).await;
         let new_password = "new second factor fixture password phrase";
@@ -236,7 +236,7 @@ async fn changed_password_invalidates_the_challenge_without_spending_its_backup_
             "session expired, sign in again",
         )
         .await;
-        assert_counts(&server, 0, 0).await;
+        assert_counts(&server, &user.id, 0, 0).await;
         assert_eq!(
             unused_backups(&server, &user.id).await,
             device.backups.len()
@@ -252,16 +252,16 @@ async fn changed_password_invalidates_the_challenge_without_spending_its_backup_
             &["pwd", "otp"],
         )
         .await;
-        assert_counts(&server, 1, 0).await;
+        assert_counts(&server, &user.id, 1, 0).await;
     })
     .await;
 }
 
 #[ntex::test]
 async fn challenge_requires_its_signed_cookie_csrf_and_return_target() {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let server = AuthServer::start(database).await;
-        let user = account(&server, "creator@example.test").await;
+        let user = account(&server, &email("login")).await;
         let device = Authenticator::confirmed(&server, &user.id).await;
         let mut challenge = Challenge::password(&server, &user, PASSWORD).await;
         let valid_cookies = challenge.cookies.header();
@@ -294,6 +294,7 @@ async fn challenge_requires_its_signed_cookie_csrf_and_return_target() {
                 &server,
                 "/login/2fa",
                 cookies,
+                &challenge.ip,
                 &[
                     ("csrf", csrf),
                     ("return_to", target),
@@ -308,7 +309,7 @@ async fn challenge_requires_its_signed_cookie_csrf_and_return_target() {
                 .unwrap();
             assert_eq!(location.path(), "/login");
             assert!(support::read_set_cookie(&response, "__Host-zsidp_session").is_none());
-            assert_counts(&server, 0, 0).await;
+            assert_counts(&server, &user.id, 0, 0).await;
             assert_eq!(
                 unused_backups(&server, &user.id).await,
                 device.backups.len()
@@ -324,7 +325,7 @@ async fn challenge_requires_its_signed_cookie_csrf_and_return_target() {
             &["pwd", "otp"],
         )
         .await;
-        assert_counts(&server, 1, 0).await;
+        assert_counts(&server, &user.id, 1, 0).await;
     })
     .await;
 }

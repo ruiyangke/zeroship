@@ -1,17 +1,22 @@
-//! Password-reset storage behavior under the auth role in owned databases.
+//! Password-reset storage behavior under the auth role in the shared database.
 
 use crate::support::database::Database;
+use uuid::Uuid;
 use zeroship_auth::identity::{password, password_reset};
 use zeroship_auth::store::users;
 
+fn email() -> String {
+    format!("reset-{}@example.test", Uuid::new_v4().simple())
+}
+
 #[compio::test]
 async fn concurrent_issue_leaves_one_active_reset_token() {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let orm = database.orm().await;
         let client = database.connect_as_auth().await;
-        let email = "reset@example.test";
-        let user = users::create(&orm, email, "Reset", None).await.unwrap();
-        let original = password_reset::issue(&client, email).await.unwrap();
+        let email = email();
+        let user = users::create(&orm, &email, "Reset", None).await.unwrap();
+        let original = password_reset::issue(&client, &email).await.unwrap();
         let mut locker = database.connect().await;
         let transaction = locker.transaction().await.expect("begin token lock");
         transaction
@@ -35,11 +40,13 @@ async fn concurrent_issue_leaves_one_active_reset_token() {
             .await
             .unwrap()
             .get(0);
+        let issue_a_email = email.clone();
         let issue_a =
-            compio::runtime::spawn(async move { password_reset::issue(&client_a, email).await });
+            compio::runtime::spawn(async move { password_reset::issue(&client_a, &issue_a_email).await });
         let first_waiting = database.wait_until_blocked(&[pid_a]).await;
+        let issue_b_email = email.to_ascii_uppercase();
         let issue_b = compio::runtime::spawn(async move {
-            password_reset::issue(&client_b, &email.to_ascii_uppercase()).await
+            password_reset::issue(&client_b, &issue_b_email).await
         });
         let both_waiting = database.wait_until_blocked(&[pid_a, pid_b]).await;
         transaction.commit().await.expect("release waiting issuers");
@@ -81,12 +88,12 @@ async fn concurrent_issue_leaves_one_active_reset_token() {
 
 #[compio::test]
 async fn issue_then_redeem_roundtrip() {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let orm = database.orm().await;
         let client = database.connect_as_auth().await;
-        let email = "reset@example.test";
-        users::create(&orm, email, "Reset", None).await.unwrap();
-        let issued = password_reset::issue(&client, email).await.unwrap();
+        let email = email();
+        users::create(&orm, &email, "Reset", None).await.unwrap();
+        let issued = password_reset::issue(&client, &email).await.unwrap();
         assert!(!issued.raw.is_empty());
         let redeemed = password_reset::redeem(&client, &issued.raw)
             .await
@@ -103,12 +110,13 @@ async fn issue_then_redeem_roundtrip() {
 
 #[compio::test]
 async fn completion_obeys_transaction_rollback_and_commit() {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let orm = database.orm().await;
         let mut client = database.connect_as_auth().await;
         let old_hash = password::hash("old reset password phrase").await.unwrap();
         let new_hash = password::hash("new reset password phrase").await.unwrap();
-        let user = users::create(&orm, "reset@example.test", "Reset", Some(&old_hash))
+        let email = email();
+        let user = users::create(&orm, &email, "Reset", Some(&old_hash))
             .await
             .unwrap();
         let issued = password_reset::issue(&client, &user.email).await.unwrap();
@@ -178,20 +186,23 @@ async fn completion_obeys_transaction_rollback_and_commit() {
 
 #[compio::test]
 async fn completion_binds_the_user_at_issue_time_after_email_reassignment() {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let orm = database.orm().await;
         let client = database.connect_as_auth().await;
         let old_hash = password::hash("old reset password phrase").await.unwrap();
         let new_hash = password::hash("new reset password phrase").await.unwrap();
+        let original_email = format!("original-{}@example.test", Uuid::new_v4().simple());
+        let other_email = format!("other-{}@example.test", Uuid::new_v4().simple());
+        let moved_email = format!("moved-{}@example.test", Uuid::new_v4().simple());
         let original = users::create(
             &orm,
-            "original@example.test",
+            &original_email,
             "Original",
             Some(&old_hash),
         )
         .await
         .unwrap();
-        let other = users::create(&orm, "other@example.test", "Other", Some(&old_hash))
+        let other = users::create(&orm, &other_email, "Other", Some(&old_hash))
             .await
             .unwrap();
         let issued = password_reset::issue(&client, &original.email)
@@ -201,8 +212,8 @@ async fn completion_binds_the_user_at_issue_time_after_email_reassignment() {
         let admin = database.connect().await;
         admin
             .execute(
-                "UPDATE zeroship.users SET email = 'moved@example.test'::citext WHERE id = $1",
-                &[&original.id.as_str()],
+                "UPDATE zeroship.users SET email = $1::citext WHERE id = $2",
+                &[&moved_email, &original.id.as_str()],
             )
             .await
             .unwrap();
@@ -219,7 +230,7 @@ async fn completion_binds_the_user_at_issue_time_after_email_reassignment() {
             .unwrap()
             .expect("the issued token still resets its original user");
         assert_eq!(completed.user_id, original.id);
-        assert_eq!(completed.email, "moved@example.test");
+        assert_eq!(completed.email, moved_email);
         let original_hash: String = client
             .query_one(
                 "SELECT password_hash FROM zeroship.users WHERE id = $1",
@@ -248,13 +259,13 @@ async fn completion_binds_the_user_at_issue_time_after_email_reassignment() {
 
 #[compio::test]
 async fn new_issue_supersedes_previous_reset_token() {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let orm = database.orm().await;
         let client = database.connect_as_auth().await;
-        let email = "reset@example.test";
-        users::create(&orm, email, "Reset", None).await.unwrap();
-        let first = password_reset::issue(&client, email).await.unwrap();
-        let second = password_reset::issue(&client, email).await.unwrap();
+        let email = email();
+        users::create(&orm, &email, "Reset", None).await.unwrap();
+        let first = password_reset::issue(&client, &email).await.unwrap();
+        let second = password_reset::issue(&client, &email).await.unwrap();
         assert!(password_reset::redeem(&client, &first.raw)
             .await
             .unwrap()

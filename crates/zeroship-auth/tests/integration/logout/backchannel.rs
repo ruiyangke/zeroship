@@ -15,6 +15,7 @@ use zeroship_auth::oidc::{LOGOUT_TOKEN_TYP, LogoutTokenClaims, backchannel_logou
 
 #[ntex::test]
 async fn logout_posts_a_signed_token_for_the_submitting_session_and_its_rp() {
+    // Platform-global: the custom issuer key is published to the shared signing-key registry.
     Database::run_fresh(async |database| {
         let seed = database.connect().await;
         let issuer = issuer();

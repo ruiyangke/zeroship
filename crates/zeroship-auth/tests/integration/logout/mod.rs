@@ -10,6 +10,7 @@ use fixtures::{BrowserSession, account, assert_logged_out, issuer, post};
 
 #[ntex::test]
 async fn confirmation_preserves_sessions_and_logout_revokes_only_the_submitting_browser() {
+    // Platform-global: the custom issuer key is published to the shared signing-key registry.
     Database::run_fresh(async |database| {
         let server = AuthServer::with_issuer(database, issuer()).await;
         let creator = account(&server, "creator@example.test").await;
@@ -43,6 +44,7 @@ async fn confirmation_preserves_sessions_and_logout_revokes_only_the_submitting_
 
 #[ntex::test]
 async fn missing_or_mismatched_csrf_cannot_revoke_a_live_session() {
+    // Platform-global: the custom issuer key is published to the shared signing-key registry.
     Database::run_fresh(async |database| {
         let server = AuthServer::with_issuer(database, issuer()).await;
         let user = account(&server, "creator@example.test").await;

@@ -9,18 +9,19 @@ use zeroship_auth::{
 
 #[ntex::test]
 async fn password_confirmation_defers_identity_creation_until_the_second_factor_succeeds() {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let server = AuthServer::start(database).await;
-        let user = account(&server, "creator@example.test").await;
+        let ip = fixture_ip();
+        let user = account(&server, &email("link")).await;
         let device = Authenticator::confirmed(&server, &user.id).await;
         let return_to = AuthServer::fresh_challenge();
-        let subject = "123456789";
+        let subject = uuid::Uuid::new_v4().simple().to_string();
         let result = linker::resolve_or_link(
             &server.pg,
             &server.orm,
             &ResolvedProfile {
                 provider: "github",
-                subject,
+                subject: &subject,
                 email: &user.email,
                 name: None,
                 avatar_url: None,
@@ -56,6 +57,7 @@ async fn password_confirmation_defers_identity_creation_until_the_second_factor_
             &server,
             "/link",
             &format!("__Host-zsidp_csrf={csrf}"),
+            &ip,
             &[
                 ("csrf", &csrf),
                 ("token", &pending_token),
@@ -64,9 +66,9 @@ async fn password_confirmation_defers_identity_creation_until_the_second_factor_
         )
         .await;
         let mut challenge = Challenge::from_response(response, &return_to).await;
-        assert_counts(&server, 0, 0).await;
+        assert_counts(&server, &user.id, 0, 0).await;
         challenge.reject_wrong_code(&server, &device).await;
-        assert_counts(&server, 0, 0).await;
+        assert_counts(&server, &user.id, 0, 0).await;
         let response = challenge.submit(&server, &device.code()).await;
         assert_session(
             &server,
@@ -77,8 +79,8 @@ async fn password_confirmation_defers_identity_creation_until_the_second_factor_
             &["oauth", "pwd", "otp"],
         )
         .await;
-        assert_counts(&server, 1, 1).await;
-        let identity = identities::find_by_provider_subject(&server.pg, "github", subject)
+        assert_counts(&server, &user.id, 1, 1).await;
+        let identity = identities::find_by_provider_subject(&server.pg, "github", &subject)
             .await
             .unwrap()
             .unwrap();

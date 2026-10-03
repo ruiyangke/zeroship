@@ -1,26 +1,29 @@
 use super::fixtures::Alias;
 use crate::support::database::Database;
+use uuid::Uuid;
 use zeroship_auth::store::relay;
 
 #[compio::test]
 async fn probing_is_read_only_and_terminal_commit_is_idempotent() {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let pg = database.connect_as_auth().await;
-        let message_id = "incoming-message";
-        assert!(!relay::already_seen(&pg, message_id).await.unwrap());
-        assert!(!relay::already_seen(&pg, message_id).await.unwrap());
-        relay::commit_seen(&pg, message_id).await.unwrap();
-        assert!(relay::already_seen(&pg, message_id).await.unwrap());
-        relay::commit_seen(&pg, message_id).await.unwrap();
-        assert!(relay::already_seen(&pg, message_id).await.unwrap());
-        assert!(!relay::already_seen(&pg, "another-message").await.unwrap());
+        let tag = Uuid::new_v4().simple();
+        let message_id = format!("incoming-message-{tag}");
+        let other_id = format!("another-message-{tag}");
+        assert!(!relay::already_seen(&pg, &message_id).await.unwrap());
+        assert!(!relay::already_seen(&pg, &message_id).await.unwrap());
+        relay::commit_seen(&pg, &message_id).await.unwrap();
+        assert!(relay::already_seen(&pg, &message_id).await.unwrap());
+        relay::commit_seen(&pg, &message_id).await.unwrap();
+        assert!(relay::already_seen(&pg, &message_id).await.unwrap());
+        assert!(!relay::already_seen(&pg, &other_id).await.unwrap());
     })
     .await;
 }
 
 #[compio::test]
 async fn local_revocation_disables_the_alias_and_preserves_the_grant() {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let admin = database.connect().await;
         let alias = Alias::seed(&admin).await;
         let pg = database.connect_as_auth().await;

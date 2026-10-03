@@ -1,10 +1,12 @@
 use super::super::{load_client, refresh, Issuer, OAuthClient, SessionKind, ValidatedSession};
 use crate::{session_store::SessionSecretKeys, store::users, test_database::Database};
 use compio_postgres::Transaction;
+use uuid::Uuid;
 use zeroship_core::UserId;
 
 pub struct MintFixture {
     pub user_id: UserId,
+    pub email: String,
     pub client: OAuthClient,
     pub issuer: Issuer,
     pub keys: SessionSecretKeys,
@@ -16,7 +18,8 @@ impl MintFixture {
     pub async fn seed(database: &Database) -> Self {
         let setup = database.connect().await;
         let orm = database.orm().await;
-        let user = Box::pin(users::create(&orm, "recipient@example.test", "Mint subject", None))
+        let email = format!("mint-{}@example.test", Uuid::new_v4().simple());
+        let user = Box::pin(users::create(&orm, &email, "Mint subject", None))
             .await
             .unwrap();
         let client_id = zeroship_core::typed_id::generate("oac");
@@ -57,6 +60,7 @@ impl MintFixture {
         let keys = SessionSecretKeys::from_files(&hash_path, &idem_path).unwrap();
         Self {
             user_id: user.id,
+            email,
             client,
             issuer,
             keys,

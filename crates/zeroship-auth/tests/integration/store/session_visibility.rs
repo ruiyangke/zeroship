@@ -1,4 +1,4 @@
-//! Active-session visibility and revocation under the auth role in owned databases.
+//! Active-session visibility and revocation under the auth role in the shared database.
 
 #![allow(clippy::future_not_send)]
 
@@ -14,7 +14,7 @@ use zeroship_auth::store::users;
 async fn seed_app(database: &Database) -> zeroship_core::AppId {
     let client = database.connect().await;
     let app_id = zeroship_core::AppId::mint();
-    let plan_id = "session-visibility-test-plan";
+    let plan_id = format!("session-visibility-plan-{}", app_id.as_str());
     client
         .execute(
             "INSERT INTO zeroship.plans \
@@ -89,7 +89,7 @@ async fn seed_idp_session(client: &Client, user_id: &zeroship_core::UserId) -> s
 /// Sessions of both kinds are ordered together and retain their kind and app identity.
 #[compio::test]
 async fn list_returns_idp_and_gateway_sessions() {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let orm = database.orm().await;
         let client = database.connect_as_auth().await;
         let email = format!("iss10-list-{}@zeroship.test", Uuid::new_v4().simple());
@@ -143,7 +143,7 @@ async fn list_returns_idp_and_gateway_sessions() {
 /// Revoked and expired sessions are excluded from the active list.
 #[compio::test]
 async fn list_excludes_revoked_and_expired() {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let orm = database.orm().await;
         let client = database.connect_as_auth().await;
         let email = format!("iss10-excl-{}@zeroship.test", Uuid::new_v4().simple());
@@ -213,7 +213,7 @@ async fn list_excludes_revoked_and_expired() {
 /// Each user sees their own sessions while another user's sessions stay private.
 #[compio::test]
 async fn list_excludes_other_users_sessions() {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let orm = database.orm().await;
         let client = database.connect_as_auth().await;
         let email_a = format!("iss10-a-{}@zeroship.test", Uuid::new_v4().simple());
@@ -256,7 +256,7 @@ async fn list_excludes_other_users_sessions() {
 /// Revoking an IDP session leaves the user's other sessions active.
 #[compio::test]
 async fn revoke_one_idp_session_succeeds() {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let orm = database.orm().await;
         let client = database.connect_as_auth().await;
         let email = format!("iss10-revidp-{}@zeroship.test", Uuid::new_v4().simple());
@@ -288,7 +288,7 @@ async fn revoke_one_idp_session_succeeds() {
 /// Gateway revocation preserves other sessions and identifies the app for logout.
 #[compio::test]
 async fn revoke_one_gateway_session_succeeds() {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let orm = database.orm().await;
         let client = database.connect_as_auth().await;
         let email = format!("iss10-revgw-{}@zeroship.test", Uuid::new_v4().simple());
@@ -325,7 +325,7 @@ async fn revoke_one_gateway_session_succeeds() {
 /// A caller cannot revoke another user's session; its owner can revoke the same ID.
 #[compio::test]
 async fn revoke_other_users_session_is_noop_idor_guard() {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let orm = database.orm().await;
         let client = database.connect_as_auth().await;
         let email_a = format!("iss10-idor-a-{}@zeroship.test", Uuid::new_v4().simple());
@@ -397,7 +397,7 @@ async fn revoke_other_users_session_is_noop_idor_guard() {
 /// Revoking an already-revoked or nonexistent id returns no revoked session.
 #[compio::test]
 async fn revoke_already_revoked_or_missing_is_noop() {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let orm = database.orm().await;
         let client = database.connect_as_auth().await;
         let email = format!("iss10-noop-{}@zeroship.test", Uuid::new_v4().simple());

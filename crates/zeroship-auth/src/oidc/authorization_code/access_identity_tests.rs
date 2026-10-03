@@ -7,6 +7,7 @@ use crate::{advisory_lock, store::users, test_database::Database};
 use base64::Engine as _;
 use fixtures::MintFixture;
 use std::time::Duration;
+use uuid::Uuid;
 
 fn token_iat(token: &str) -> i64 {
     let payload = token.split('.').nth(1).unwrap();
@@ -20,8 +21,9 @@ fn token_iat(token: &str) -> i64 {
 
 #[compio::test]
 async fn identity_claim_projection_uses_the_mint_transaction_and_granted_scopes() {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let fixture = MintFixture::seed(database).await;
+        let pending_email = format!("pending-{}@example.test", Uuid::new_v4().simple());
         let observer = database.connect_as_auth().await;
         let mut mint = database.connect_as_auth().await;
         let tx = mint.transaction().await.unwrap();
@@ -31,7 +33,7 @@ async fn identity_claim_projection_uses_the_mint_transaction_and_granted_scopes(
              name = $3, avatar_url = $4 WHERE id = $1",
             &[
                 &fixture.user_id.as_str(),
-                &"pending@example.test",
+                &pending_email,
                 &"Pending profile",
                 &"https://example.test/pending.png",
             ],
@@ -45,20 +47,20 @@ async fn identity_claim_projection_uses_the_mint_transaction_and_granted_scopes(
             )
             .await
             .unwrap();
-        assert_eq!(observed.get::<_, String>("email"), "recipient@example.test");
+        assert_eq!(observed.get::<_, String>("email"), fixture.email);
         assert_eq!(observed.get::<_, String>("name"), "Mint subject");
 
         for (scopes, expected) in [
             (
                 vec!["openid".to_owned(), "email".to_owned(), "profile".to_owned()],
                 serde_json::json!({
-                    "email":"pending@example.test", "email_verified":true,
+                    "email":pending_email.clone(), "email_verified":true,
                     "name":"Pending profile", "picture":"https://example.test/pending.png"
                 }),
             ),
             (
                 vec!["openid".to_owned(), "email".to_owned()],
-                serde_json::json!({"email":"pending@example.test", "email_verified":true}),
+                serde_json::json!({"email":pending_email.clone(), "email_verified":true}),
             ),
             (
                 vec!["openid".to_owned(), "profile".to_owned()],
@@ -95,7 +97,7 @@ async fn identity_claim_projection_uses_the_mint_transaction_and_granted_scopes(
             )
             .await
             .unwrap();
-        assert_eq!(restored.get::<_, String>("email"), "recipient@example.test");
+        assert_eq!(restored.get::<_, String>("email"), fixture.email);
         assert_eq!(restored.get::<_, String>("name"), "Mint subject");
         assert!(restored.get::<_, Option<String>>("avatar_url").is_none());
         assert!(!restored.get::<_, bool>("verified"));
@@ -105,7 +107,7 @@ async fn identity_claim_projection_uses_the_mint_transaction_and_granted_scopes(
 
 #[compio::test]
 async fn access_token_mint_holds_the_user_lock_until_the_transaction_ends() {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let fixture = MintFixture::seed(database).await;
         let mut mint = database.connect_as_auth().await;
         let contender = database.connect_as_auth().await;
@@ -156,8 +158,9 @@ async fn access_token_mint_holds_the_user_lock_until_the_transaction_ends() {
         assert!(acquired);
         assert!(contender
             .query(
-                "SELECT app_client_id FROM zeroship.app_user_identities",
-                &[]
+                "SELECT app_client_id FROM zeroship.app_user_identities \
+                 WHERE global_user_id = $1",
+                &[&fixture.user_id.as_str()]
             )
             .await
             .unwrap()
@@ -168,7 +171,7 @@ async fn access_token_mint_holds_the_user_lock_until_the_transaction_ends() {
 
 #[compio::test]
 async fn mint_persists_the_pairwise_identity_reactivates_it_and_refuses_rebinding() {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let fixture = MintFixture::seed(database).await;
         let mut mint = database.connect_as_auth().await;
         let tx = mint.transaction().await.unwrap();
@@ -178,19 +181,30 @@ async fn mint_persists_the_pairwise_identity_reactivates_it_and_refuses_rebindin
             mint_access_token(&tx, &fixture.issuer, &fixture.client, &fixture.user_id, &["openid".to_owned()], &proof).await.unwrap();
             let row = tx.query_one(
                 "SELECT app_client_id, global_user_id, pairwise_sub, revoked_at IS NULL AS active \
-                 FROM zeroship.app_user_identities", &[],
+                 FROM zeroship.app_user_identities \
+                 WHERE app_client_id = $1 AND global_user_id = $2",
+                &[&fixture.client.client_id, &fixture.user_id.as_str()],
             ).await.unwrap();
             assert_eq!(row.get::<_, String>("app_client_id"), fixture.client.client_id);
             assert_eq!(row.get::<_, String>("global_user_id"), fixture.user_id.as_str());
             assert_eq!(row.get::<_, String>("pairwise_sub"), pairwise);
             assert!(row.get::<_, bool>("active"));
-            tx.execute("UPDATE zeroship.app_user_identities SET revoked_at = NOW()", &[]).await.unwrap();
+            tx.execute(
+                "UPDATE zeroship.app_user_identities SET revoked_at = NOW() \
+                 WHERE app_client_id = $1 AND global_user_id = $2",
+                &[&fixture.client.client_id, &fixture.user_id.as_str()],
+            ).await.unwrap();
         }
         let changed_issuer = MintFixture::issuer([63; 32]);
         assert_ne!(changed_issuer.pairwise_subject(&fixture.user_id, &fixture.client.sector_identifier), pairwise);
         let error = mint_access_token(&tx, &changed_issuer, &fixture.client, &fixture.user_id, &["openid".to_owned()], &proof).await.unwrap_err();
         assert_eq!(error.error, "server_error");
-        let row = tx.query_one("SELECT pairwise_sub, revoked_at IS NOT NULL AS revoked FROM zeroship.app_user_identities", &[]).await.unwrap();
+        let row = tx.query_one(
+            "SELECT pairwise_sub, revoked_at IS NOT NULL AS revoked \
+             FROM zeroship.app_user_identities \
+             WHERE app_client_id = $1 AND global_user_id = $2",
+            &[&fixture.client.client_id, &fixture.user_id.as_str()],
+        ).await.unwrap();
         assert_eq!(row.get::<_, String>("pairwise_sub"), pairwise);
         assert!(row.get::<_, bool>("revoked"));
         tx.commit().await.unwrap();
@@ -205,7 +219,7 @@ async fn inactive_principals_cannot_mint_with_a_previously_established_proof() {
         "UPDATE zeroship.users SET deletion_requested_at = NOW() WHERE id = $1",
         "UPDATE zeroship.users SET deletion_scheduled_for = NOW() WHERE id = $1",
     ] {
-        Database::run_fresh(async |database| {
+        Database::run(async |database| {
             let fixture = MintFixture::seed(database).await;
             let mut mint = database.connect_as_auth().await;
             let tx = mint.transaction().await.unwrap();
@@ -226,8 +240,9 @@ async fn inactive_principals_cannot_mint_with_a_previously_established_proof() {
             assert_eq!(error.error, "invalid_grant", "{transition}");
             assert!(tx
                 .query(
-                    "SELECT app_client_id FROM zeroship.app_user_identities",
-                    &[]
+                    "SELECT app_client_id FROM zeroship.app_user_identities \
+                     WHERE global_user_id = $1",
+                    &[&fixture.user_id.as_str()]
                 )
                 .await
                 .unwrap()
@@ -240,7 +255,7 @@ async fn inactive_principals_cannot_mint_with_a_previously_established_proof() {
 
 #[compio::test]
 async fn soft_password_lockout_does_not_invalidate_an_established_proof() {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let fixture = MintFixture::seed(database).await;
         let mut mint = database.connect_as_auth().await;
         let tx = mint.transaction().await.unwrap();
@@ -269,7 +284,7 @@ async fn soft_password_lockout_does_not_invalidate_an_established_proof() {
 
 #[compio::test]
 async fn a_deleted_principal_cannot_establish_a_session() {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let fixture = MintFixture::seed(database).await;
         let mut setup = database.connect_as_auth().await;
         users::request_deletion(
@@ -297,7 +312,10 @@ async fn a_deleted_principal_cannot_establish_a_session() {
         .await;
         assert!(result.is_err());
         assert!(tx
-            .query("SELECT id FROM zeroship.sessions", &[])
+            .query(
+                "SELECT id FROM zeroship.sessions WHERE person_id = $1",
+                &[&fixture.user_id.as_str()]
+            )
             .await
             .unwrap()
             .is_empty());
@@ -308,7 +326,7 @@ async fn a_deleted_principal_cannot_establish_a_session() {
 
 #[compio::test]
 async fn deletion_marker_uses_a_post_lock_timestamp() {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let fixture = MintFixture::seed(database).await;
         let observer = database.connect().await;
         let mut mint = database.connect_as_auth().await;

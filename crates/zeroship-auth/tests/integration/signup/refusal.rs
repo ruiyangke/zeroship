@@ -6,16 +6,20 @@ use std::sync::Arc;
 
 #[ntex::test]
 async fn duplicate_signup_preserves_the_account_and_matches_a_fresh_signup_response() {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let mailer = Arc::new(CapturingMailer::default());
         let server = AuthServer::with_mailer(database, mailer.clone()).await;
+        let ip = fixture_ip();
+        let creator = email("creator");
+        let fresh = email("fresh");
         let form = Form::get(&server, "/signup").await;
         let initial = assert_redirect(
-            form.submit(&server, "creator@example.test", NAME, IP).await,
+            form.submit(&server, &creator, NAME, &ip).await,
             "/me",
         )
         .await;
-        let original = created(&server, "creator@example.test").await;
+        let original = created(&server, &creator).await;
+        let duplicate_email = format!(" {} ", creator.to_uppercase());
         let form = Form::get(&server, "/signup").await;
         let duplicate = post(
             &server,
@@ -24,53 +28,56 @@ async fn duplicate_signup_preserves_the_account_and_matches_a_fresh_signup_respo
             &[
                 ("csrf", &form.csrf),
                 ("return_to", &form.return_to),
-                ("email", " CREATOR@EXAMPLE.TEST "),
+                ("email", &duplicate_email),
                 ("name", "Impostor"),
                 ("password", "different signup password phrase"),
             ],
-            IP,
+            &ip,
         )
         .await;
         let duplicate = assert_redirect(duplicate, "/me").await;
         let form = Form::get(&server, "/signup").await;
-        let fresh = assert_redirect(
-            form.submit(&server, "fresh@example.test", NAME, IP).await,
+        let fresh_response = assert_redirect(
+            form.submit(&server, &fresh, NAME, &ip).await,
             "/me",
         )
         .await;
         assert_eq!(duplicate, initial);
-        assert_eq!(duplicate, fresh);
-        let unchanged = created(&server, "creator@example.test").await;
+        assert_eq!(duplicate, fresh_response);
+        let unchanged = created(&server, &creator).await;
         assert_eq!(unchanged.id, original.id);
         assert_eq!(unchanged.password_hash, original.password_hash);
-        created(&server, "fresh@example.test").await;
-        assert_counts(&server, 2, 2).await;
+        created(&server, &fresh).await;
+        assert_counts(&server, &[creator.as_str(), fresh.as_str()], 2, 2).await;
         assert_eq!(mailer.sent().len(), 2);
-        verification_link(&server, &mailer, "creator@example.test");
-        verification_link(&server, &mailer, "fresh@example.test");
+        verification_link(&server, &mailer, &creator);
+        verification_link(&server, &mailer, &fresh);
     })
     .await;
 }
 
 #[ntex::test]
 async fn a_database_refusal_creates_no_account_or_mail_and_the_same_submission_can_recover() {
+    // Platform-global: adds a CHECK constraint to zeroship.users and reads the signup_failed audit trail across every row.
     Database::run_fresh(async |database| {
         let mailer = Arc::new(CapturingMailer::default());
         let server = AuthServer::with_mailer(database, mailer.clone()).await;
+        let ip = fixture_ip();
+        let creator = email("refusal");
         let admin = database.connect().await;
         admin
-            .batch_execute(
+            .batch_execute(&format!(
                 "ALTER TABLE zeroship.users ADD CONSTRAINT signup_refusal \
-             CHECK (email <> 'creator@example.test'::citext)",
-            )
+             CHECK (email <> '{creator}'::citext)",
+            ))
             .await
             .unwrap();
         let form = Form::get(&server, "/signup").await;
-        let response = form.submit(&server, "creator@example.test", NAME, IP).await;
+        let response = form.submit(&server, &creator, NAME, &ip).await;
         assert_eq!(response.status().as_u16(), 200);
         assert!(response.headers().get("location").is_none());
         assert!(response.text().await.unwrap().contains("contact support"));
-        assert_counts(&server, 0, 0).await;
+        assert_counts(&server, &[creator.as_str()], 0, 0).await;
         assert!(mailer.sent().is_empty());
         let row = server
             .pg
@@ -89,23 +96,21 @@ async fn a_database_refusal_creates_no_account_or_mail_and_the_same_submission_c
             .batch_execute("ALTER TABLE zeroship.users DROP CONSTRAINT signup_refusal")
             .await
             .unwrap();
-        assert_redirect(
-            form.submit(&server, "creator@example.test", NAME, IP).await,
-            "/me",
-        )
-        .await;
-        created(&server, "creator@example.test").await;
-        verification_link(&server, &mailer, "creator@example.test");
-        assert_counts(&server, 1, 1).await;
+        assert_redirect(form.submit(&server, &creator, NAME, &ip).await, "/me").await;
+        created(&server, &creator).await;
+        verification_link(&server, &mailer, &creator);
+        assert_counts(&server, &[creator.as_str()], 1, 1).await;
     })
     .await;
 }
 
 #[ntex::test]
 async fn signup_requires_a_matching_form_cookie_before_creating_an_account() {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let mailer = Arc::new(CapturingMailer::default());
         let server = AuthServer::with_mailer(database, mailer.clone()).await;
+        let ip = fixture_ip();
+        let creator = email("csrf");
         for cookies in ["", "__Host-zsidp_csrf=unrelated-token"] {
             let form = Form::get(&server, "/signup").await;
             let response = post(
@@ -115,28 +120,24 @@ async fn signup_requires_a_matching_form_cookie_before_creating_an_account() {
                 &[
                     ("csrf", &form.csrf),
                     ("return_to", &form.return_to),
-                    ("email", "creator@example.test"),
+                    ("email", &creator),
                     ("name", NAME),
                     ("password", PASSWORD),
                 ],
-                IP,
+                &ip,
             )
             .await;
             assert_eq!(response.status().as_u16(), 200);
             assert!(response.headers().get("location").is_none());
             assert!(response.text().await.unwrap().contains("invalid request"));
-            assert_counts(&server, 0, 0).await;
+            assert_counts(&server, &[creator.as_str()], 0, 0).await;
             assert!(mailer.sent().is_empty());
         }
         let form = Form::get(&server, "/signup").await;
-        assert_redirect(
-            form.submit(&server, "creator@example.test", NAME, IP).await,
-            "/me",
-        )
-        .await;
-        created(&server, "creator@example.test").await;
-        assert_counts(&server, 1, 1).await;
-        verification_link(&server, &mailer, "creator@example.test");
+        assert_redirect(form.submit(&server, &creator, NAME, &ip).await, "/me").await;
+        created(&server, &creator).await;
+        assert_counts(&server, &[creator.as_str()], 1, 1).await;
+        verification_link(&server, &mailer, &creator);
     })
     .await;
 }

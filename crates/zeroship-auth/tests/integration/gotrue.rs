@@ -9,10 +9,15 @@ use crate::support::{auth_server::AuthServer, database::Database, CapturingMaile
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde_json::json;
 use std::{io::Write as _, sync::Arc};
+use uuid::Uuid;
 use zeroship_mailer::suppressions;
 
 const KEY: [u8; 32] = [7; 32];
 const MESSAGE_ID: &str = "provider-email-request";
+
+fn unique_email(label: &str) -> String {
+    format!("{label}-{}@example.test", Uuid::new_v4().simple())
+}
 
 struct Hook {
     auth: AuthServer,
@@ -102,9 +107,10 @@ fn payload(email: &str) -> Vec<u8> {
 
 #[ntex::test]
 async fn signature_refusals_cannot_send_mail_and_the_authentic_request_succeeds() {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let hook = Hook::start(database, true).await;
-        let body = payload("recipient@example.test");
+        let email = unique_email("gotrue-signature");
+        let body = payload(&email);
         let timestamp = chrono::Utc::now().timestamp();
         let signature = sign(&body, timestamp);
         let mut tampered = body.clone();
@@ -132,7 +138,7 @@ async fn signature_refusals_cannot_send_mail_and_the_authentic_request_succeeds(
         assert_eq!(hook.signed_post(&body).await.status().as_u16(), 200);
         let sent = hook.mailer.sent();
         assert_eq!(sent.len(), 1);
-        assert_eq!(sent[0].to.email, "recipient@example.test");
+        assert_eq!(sent[0].to.email, email);
         assert!(sent[0].text.contains("verification-token-hash"));
         assert!(sent[0]
             .text
@@ -143,10 +149,11 @@ async fn signature_refusals_cannot_send_mail_and_the_authentic_request_succeeds(
 
 #[ntex::test]
 async fn an_unconfigured_hook_cannot_send_even_a_correctly_signed_request() {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let hook = Hook::start(database, false).await;
+        let email = unique_email("gotrue-unconfigured");
         assert_eq!(
-            hook.signed_post(&payload("recipient@example.test"))
+            hook.signed_post(&payload(&email))
                 .await
                 .status()
                 .as_u16(),
@@ -159,27 +166,32 @@ async fn an_unconfigured_hook_cannot_send_even_a_correctly_signed_request() {
 
 #[ntex::test]
 async fn suppression_acknowledges_without_delivery_and_leaves_other_recipients_usable() {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let hook = Hook::start(database, true).await;
-        suppressions::add(&hook.auth.pg, "recipient@example.test", "complaint", None)
+        let suppressed_email = unique_email("gotrue-suppressed");
+        let allowed_email = unique_email("gotrue-allowed");
+        suppressions::add(&hook.auth.pg, &suppressed_email, "complaint", None)
             .await
             .unwrap();
-        let suppressed = hook.signed_post(&payload("Recipient@Example.Test")).await;
+        let suppressed = hook
+            .signed_post(&payload(&suppressed_email.to_ascii_uppercase()))
+            .await;
         assert_eq!(suppressed.status().as_u16(), 200);
         let confirmation = suppressed.text().await.unwrap();
         assert!(hook.mailer.sent().is_empty());
-        let allowed = hook.signed_post(&payload("other@example.test")).await;
+        let allowed = hook.signed_post(&payload(&allowed_email)).await;
         assert_eq!(allowed.status().as_u16(), 200);
         assert_eq!(allowed.text().await.unwrap(), confirmation);
         let sent = hook.mailer.sent();
         assert_eq!(sent.len(), 1);
-        assert_eq!(sent[0].to.email, "other@example.test");
+        assert_eq!(sent[0].to.email, allowed_email);
     })
     .await;
 }
 
 #[ntex::test]
 async fn an_unavailable_suppression_lookup_refuses_delivery_and_a_retry_can_recover() {
+    // Platform-global: ALTER TABLE zeroship.email_suppressions RENAME.
     Database::run_fresh(async |database| {
         let hook = Hook::start(database, true).await;
         let admin = database.connect().await;

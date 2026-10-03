@@ -11,15 +11,16 @@ enum Device {
 }
 
 async fn magic_login_requires_second_factor(device: Device) {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let mailer = Arc::new(CapturingMailer::default());
         let server = AuthServer::with_mailer(database, mailer.clone()).await;
-        let user = users::create(&server.orm, "creator@example.test", "Magic account", None).await.unwrap();
+        let ip = fixture_ip();
+        let user = users::create(&server.orm, &email("magic"), "Magic account", None).await.unwrap();
         let authenticator = Authenticator::confirmed(&server, &user.id).await;
         let return_to = AuthServer::fresh_challenge();
         let form = server.http.get(format!("{}/login", server.auth_base)).unwrap().send().await.unwrap();
         let csrf = support::read_set_cookie(&form, "__Host-zsidp_csrf").unwrap();
-        let start = post(&server, "/magic/start", &format!("__Host-zsidp_csrf={csrf}"),
+        let start = post(&server, "/magic/start", &format!("__Host-zsidp_csrf={csrf}"), &ip,
             &[("csrf", &csrf), ("email", &user.email), ("return_to", &return_to)]).await;
         assert_eq!(start.status().as_u16(), 200);
         let nonce = support::read_set_cookie(&start, "__Host-zsidp_magic_csrf").unwrap();
@@ -40,22 +41,22 @@ async fn magic_login_requires_second_factor(device: Device) {
             Device::Same => nonce.clone(),
             Device::Other => support::read_set_cookie(&landing, "__Host-zsidp_magic_csrf").unwrap(),
         };
-        let response = post(&server, "/magic/verify/redeem", &format!("__Host-zsidp_magic_csrf={redeemer}"),
+        let response = post(&server, "/magic/verify/redeem", &format!("__Host-zsidp_magic_csrf={redeemer}"), &ip,
             &[("csrf", &redeemer), ("token", &token), ("return_to", &return_to)]).await;
         let response = match device {
             Device::Same => response,
             Device::Other => {
                 assert_eq!(response.status().as_u16(), 200);
                 assert!(support::read_set_cookie(&response, "__Host-zsidp_session").is_none());
-                assert_counts(&server, 0, 0).await;
+                assert_counts(&server, &user.id, 0, 0).await;
                 let code: String = server.pg.query_one("SELECT code FROM zeroship.magic_completions WHERE csrf_nonce = $1", &[&nonce]).await.unwrap().get(0);
                 assert!(response.text().await.unwrap().contains(&code));
-                post(&server, "/magic/complete", &format!("__Host-zsidp_csrf={requester_csrf}"),
+                post(&server, "/magic/complete", &format!("__Host-zsidp_csrf={requester_csrf}"), &ip,
                     &[("csrf", &requester_csrf), ("csrf_nonce", &nonce), ("code", &code), ("return_to", &return_to)]).await
             }
         };
         let mut challenge = Challenge::from_response(response, &return_to).await;
-        assert_counts(&server, 0, 0).await;
+        assert_counts(&server, &user.id, 0, 0).await;
         let consumed: bool = server.pg.query_one("SELECT consumed_at IS NOT NULL FROM zeroship.magic_links WHERE csrf_nonce = $1", &[&nonce]).await.unwrap().get(0);
         assert!(consumed, "the link is consumed before the challenge is issued");
         if matches!(device, Device::Other) {
@@ -63,10 +64,10 @@ async fn magic_login_requires_second_factor(device: Device) {
             assert!(consumed, "the completion is consumed before the challenge is issued");
         }
         challenge.reject_wrong_code(&server, &authenticator).await;
-        assert_counts(&server, 0, 0).await;
+        assert_counts(&server, &user.id, 0, 0).await;
         let response = challenge.submit(&server, &authenticator.code()).await;
         assert_session(&server, &response, &user.id, &return_to, "magic", &["magic", "otp"]).await;
-        assert_counts(&server, 1, 0).await;
+        assert_counts(&server, &user.id, 1, 0).await;
     }).await;
 }
 

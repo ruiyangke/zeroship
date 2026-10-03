@@ -3,6 +3,7 @@
 #![allow(clippy::future_not_send)]
 
 use crate::support::{self, CapturingMailer, auth_server::AuthServer, database::Database};
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use zeroship_auth::{identity::password_reset, store::users};
 use zeroship_authn::rate_limit::Quota;
@@ -98,15 +99,18 @@ fn latest_token(server: &AuthServer, mailer: &CapturingMailer, email: &str) -> S
 
 #[ntex::test]
 async fn reset_email_budget_is_shared_across_ips_without_changing_the_public_confirmation() {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let mailer = Arc::new(CapturingMailer::default());
         let server = AuthServer::with_mailer(database, mailer.clone()).await;
-        let email = "creator@example.test";
-        let other_email = "other@example.test";
-        for email in [email, other_email] {
-            users::create(&server.orm, email, "Reset request", None)
+        let email = super::fixtures::email("creator");
+        let other_email = super::fixtures::email("other");
+        let absent_email = super::fixtures::email("absent");
+        let mut user_ids = Vec::new();
+        for address in [&email, &other_email] {
+            let user = users::create(&server.orm, address, "Reset request", None)
                 .await
                 .unwrap();
+            user_ids.push(user.id);
         }
         let quota = Quota::FORGOT_EMAIL;
         assert!(
@@ -116,15 +120,26 @@ async fn reset_email_budget_is_shared_across_ips_without_changing_the_public_con
             Quota::FORGOT_IP.capacity > quota.capacity + 1.0,
             "this scenario must reach the email quota before the independent IP quota"
         );
-        let ip = "192.0.2.1";
-        let expected = request(&server, email, ip).await;
+        let ip = super::fixtures::fixture_ip();
+        let other_ip = super::fixtures::fixture_ip();
+        let absent_ip = super::fixtures::fixture_ip();
+        // The buckets the production handler keys for this case's email and IP.
+        let keys = vec![
+            format!(
+                "forgot_email:{}",
+                hex::encode(Sha256::digest(email.as_bytes()))
+            ),
+            format!("forgot_ip:{ip}"),
+        ];
+        let expected = request(&server, &email, &ip).await;
         let mut accepted: u32 = 1;
         loop {
             let mut balances: Vec<f64> = server
                 .pg
                 .query(
-                    "SELECT tokens::DOUBLE PRECISION FROM zeroship.rate_limits",
-                    &[],
+                    "SELECT tokens::DOUBLE PRECISION FROM zeroship.rate_limits \
+                     WHERE bucket_key = ANY($1)",
+                    &[&keys],
                 )
                 .await
                 .unwrap()
@@ -143,8 +158,9 @@ async fn reset_email_budget_is_shared_across_ips_without_changing_the_public_con
             let updated = server
                 .pg
                 .execute(
-                    "UPDATE zeroship.rate_limits SET updated_at = NOW() + INTERVAL '1 day'",
-                    &[],
+                    "UPDATE zeroship.rate_limits SET updated_at = NOW() + INTERVAL '1 day' \
+                     WHERE bucket_key = ANY($1)",
+                    &[&keys],
                 )
                 .await
                 .unwrap();
@@ -152,34 +168,35 @@ async fn reset_email_budget_is_shared_across_ips_without_changing_the_public_con
             if f64::from(accepted) >= quota.capacity {
                 break;
             }
-            assert_eq!(request(&server, email, ip).await, expected);
+            assert_eq!(request(&server, &email, &ip).await, expected);
             accepted += 1;
         }
         assert_eq!(mailer.sent().len(), usize::try_from(accepted).unwrap());
-        let last = latest_token(&server, &mailer, email);
+        let last = latest_token(&server, &mailer, &email);
         assert!(password_reset::is_live(&server.pg, &last).await.unwrap());
-        for ip in [ip, "192.0.2.2"] {
+        for address_ip in [&ip, &other_ip] {
             assert_eq!(
-                request(&server, " CREATOR@EXAMPLE.TEST ", ip).await,
+                request(&server, &format!(" {} ", email.to_ascii_uppercase()), address_ip).await,
                 expected
             );
             assert_eq!(mailer.sent().len(), usize::try_from(accepted).unwrap());
-            assert_eq!(latest_token(&server, &mailer, email), last);
+            assert_eq!(latest_token(&server, &mailer, &email), last);
             assert!(password_reset::is_live(&server.pg, &last).await.unwrap());
         }
-        assert_eq!(request(&server, other_email, ip).await, expected);
+        assert_eq!(request(&server, &other_email, &ip).await, expected);
         assert_eq!(mailer.sent().len(), usize::try_from(accepted).unwrap() + 1);
-        let other = latest_token(&server, &mailer, other_email);
+        let other = latest_token(&server, &mailer, &other_email);
         assert!(password_reset::is_live(&server.pg, &other).await.unwrap());
         assert!(password_reset::is_live(&server.pg, &last).await.unwrap());
-        assert_eq!(
-            request(&server, "absent@example.test", "192.0.2.3").await,
-            expected
-        );
+        assert_eq!(request(&server, &absent_email, &absent_ip).await, expected);
         assert_eq!(mailer.sent().len(), usize::try_from(accepted).unwrap() + 1);
+        let ids: Vec<&str> = user_ids.iter().map(zeroship_core::UserId::as_str).collect();
         let sessions: i64 = server
             .pg
-            .query_one("SELECT COUNT(*) FROM zeroship.idp_sessions", &[])
+            .query_one(
+                "SELECT COUNT(*) FROM zeroship.idp_sessions WHERE user_id = ANY($1)",
+                &[&ids],
+            )
             .await
             .unwrap()
             .get(0);

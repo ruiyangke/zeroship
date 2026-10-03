@@ -95,6 +95,7 @@ impl Fixture {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn offline_access_authorization_code_returns_refresh_token_bound_to_family() {
+    // Platform-global: the custom issuer key is published to the shared signing-key registry.
     Database::run_fresh(async |database| {
         let fx = Fixture::boot(database, &["openid", "profile", "email", "offline_access"]).await;
         let token = issue_refresh(&fx, FULL_SCOPE).await;
@@ -136,6 +137,7 @@ async fn offline_access_authorization_code_returns_refresh_token_bound_to_family
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn stale_credential_version_recheck_rejects_refresh_issuance() {
+    // Platform-global: the custom issuer key is published to the shared signing-key registry.
     Database::run_fresh(async |database| {
         let fx = Fixture::boot(database, &["openid", "profile", "email", "offline_access"]).await;
         let verifier = pkce_verifier();
@@ -162,6 +164,7 @@ async fn stale_credential_version_recheck_rejects_refresh_issuance() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn deletion_revokes_refresh_family_even_after_cancellation() {
+    // Platform-global: the custom issuer key is published to the shared signing-key registry.
     Database::run_fresh(async |database| {
         let fx = Fixture::boot(database, &["openid", "profile", "email", "offline_access"]).await;
         let root = issue_refresh(&fx, FULL_SCOPE).await;
@@ -222,6 +225,7 @@ async fn deletion_revokes_refresh_family_even_after_cancellation() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn authorization_code_replay_revokes_refresh_token_issued_by_first_exchange() {
+    // Platform-global: the custom issuer key is published to the shared signing-key registry.
     Database::run_fresh(async |database| {
         let fx = Fixture::boot(database, &["openid", "profile", "email", "offline_access"]).await;
         let verifier = pkce_verifier();
@@ -265,6 +269,7 @@ async fn authorization_code_replay_revokes_refresh_token_issued_by_first_exchang
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn refresh_rotation_returns_new_refresh_narrows_scope_and_no_id_token() {
+    // Platform-global: the custom issuer key is published to the shared signing-key registry.
     Database::run_fresh(async |database| {
         let fx = Fixture::boot(database, &["openid", "profile", "email", "offline_access"]).await;
         let root = issue_refresh(&fx, FULL_SCOPE).await;
@@ -311,6 +316,7 @@ async fn refresh_rotation_returns_new_refresh_narrows_scope_and_no_id_token() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn garbage_refresh_token_rejects_before_dedicated_pool_checkout() {
+    // Platform-global: the custom issuer key is published to the shared signing-key registry.
     Database::run_fresh(async |database| {
         let fx = Fixture::boot(database, &["openid", "profile", "email", "offline_access"]).await;
         let before = fx.server.refresh_pool.checkout_count();
@@ -332,6 +338,7 @@ async fn garbage_refresh_token_rejects_before_dedicated_pool_checkout() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn refresh_scope_cannot_widen_past_family_granted_scopes() {
+    // Platform-global: the custom issuer key is published to the shared signing-key registry.
     Database::run_fresh(async |database| {
         let fx = Fixture::boot(database, &["openid", "profile", "email", "offline_access"]).await;
         let root = issue_refresh(&fx, "openid profile offline_access").await;
@@ -360,6 +367,7 @@ async fn refresh_scope_cannot_widen_past_family_granted_scopes() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn replay_after_legitimate_rotation_kills_family() {
+    // Platform-global: the custom issuer key is published to the shared signing-key registry.
     Database::run_fresh(async |database| {
         replay_after_rotation_kills_family(database, "legitimate").await;
     })
@@ -369,6 +377,7 @@ async fn replay_after_legitimate_rotation_kills_family() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn replay_after_attacker_rotation_kills_family() {
+    // Platform-global: the custom issuer key is published to the shared signing-key registry.
     Database::run_fresh(async |database| {
         replay_after_rotation_kills_family(database, "attacker").await;
     })
@@ -402,6 +411,7 @@ async fn replay_after_rotation_kills_family(database: &Database, label: &str) {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn legit_lost_response_retry_recovers_without_family_kill() {
+    // Platform-global: the custom issuer key is published to the shared signing-key registry.
     Database::run_fresh(async |database| {
         let fx = Fixture::boot(database, &["openid", "profile", "email", "offline_access"]).await;
         let root = issue_refresh(&fx, FULL_SCOPE).await;
@@ -431,6 +441,7 @@ async fn legit_lost_response_retry_recovers_without_family_kill() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn second_replay_of_a_spent_predecessor_kills_family() {
+    // Platform-global: the custom issuer key is published to the shared signing-key registry.
     Database::run_fresh(async |database| {
         let fx = Fixture::boot(database, &["openid", "profile", "email", "offline_access"]).await;
         let root = issue_refresh(&fx, FULL_SCOPE).await;
@@ -490,6 +501,7 @@ async fn second_replay_of_a_spent_predecessor_kills_family() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn unreadable_idempotency_record_kills_family_instead_of_answering_invalid_grant() {
+    // Platform-global: the custom issuer key is published to the shared signing-key registry.
     Database::run_fresh(async |database| {
         let fx = Fixture::boot(database, &["openid", "profile", "email", "offline_access"]).await;
         let root = issue_refresh(&fx, FULL_SCOPE).await;
@@ -534,6 +546,7 @@ async fn unreadable_idempotency_record_kills_family_instead_of_answering_invalid
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn concurrent_refresh_same_token_serializes_to_one_successor_without_family_kill() {
+    // Platform-global: the custom issuer key is published to the shared signing-key registry.
     Database::run_fresh(async |database| {
         let fx = Fixture::boot(database, &["openid", "profile", "email", "offline_access"]).await;
         let root = issue_refresh(&fx, FULL_SCOPE).await;
@@ -574,6 +587,7 @@ async fn concurrent_refresh_same_token_serializes_to_one_successor_without_famil
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn refresh_rotation_does_not_commit_shared_request_socket_transaction() {
+    // Platform-global: the custom issuer key is published to the shared signing-key registry.
     Database::run_fresh(async |database| {
         let fx = Fixture::boot(database, &["openid", "profile", "email", "offline_access"]).await;
         let root = issue_refresh(&fx, FULL_SCOPE).await;
@@ -626,6 +640,7 @@ async fn refresh_rotation_does_not_commit_shared_request_socket_transaction() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn revoke_refresh_token_kills_family_and_is_uniform() {
+    // Platform-global: the custom issuer key is published to the shared signing-key registry.
     Database::run_fresh(async |database| {
         let fx = Fixture::boot(database, &["openid", "profile", "email", "offline_access"]).await;
         let root = issue_refresh(&fx, FULL_SCOPE).await;
@@ -653,6 +668,7 @@ async fn revoke_refresh_token_kills_family_and_is_uniform() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn revoked_access_token_family_is_inactive_for_introspection_and_userinfo() {
+    // Platform-global: the custom issuer key is published to the shared signing-key registry.
     Database::run_fresh(async |database| {
         let fx = Fixture::boot(database, &["openid", "profile", "email", "offline_access"]).await;
         let token = issue_refresh(&fx, FULL_SCOPE).await;
@@ -693,6 +709,7 @@ async fn revoked_access_token_family_is_inactive_for_introspection_and_userinfo(
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn revoke_access_token_writes_family_marker_for_introspection() {
+    // Platform-global: the custom issuer key is published to the shared signing-key registry.
     Database::run_fresh(async |database| {
         let fx = Fixture::boot(database, &["openid", "profile", "email", "offline_access"]).await;
         let token = issue_refresh(&fx, FULL_SCOPE).await;
@@ -726,6 +743,7 @@ async fn revoke_access_token_writes_family_marker_for_introspection() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn revoke_access_token_kills_sibling_refresh_family_durably() {
+    // Platform-global: the custom issuer key is published to the shared signing-key registry.
     Database::run_fresh(async |database| {
         let fx = Fixture::boot(database, &["openid", "profile", "email", "offline_access"]).await;
         let token = issue_refresh(&fx, FULL_SCOPE).await;
@@ -769,6 +787,7 @@ async fn revoke_access_token_kills_sibling_refresh_family_durably() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn introspect_active_access_token_returns_rfc7662_claims() {
+    // Platform-global: the custom issuer key is published to the shared signing-key registry.
     Database::run_fresh(async |database| {
         let fx = Fixture::boot(database, &["openid", "profile", "email", "offline_access"]).await;
         let token = issue_refresh(&fx, FULL_SCOPE).await;
@@ -805,6 +824,7 @@ async fn introspect_active_access_token_returns_rfc7662_claims() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn introspect_access_token_is_confined_to_authenticated_client() {
+    // Platform-global: the custom issuer key is published to the shared signing-key registry.
     Database::run_fresh(async |database| {
         let fx_a = Fixture::boot(database, &["openid", "profile", "email", "offline_access"]).await;
         let fx_b = Fixture::boot(database, &["openid", "profile", "email", "offline_access"]).await;
@@ -832,6 +852,7 @@ async fn introspect_access_token_is_confined_to_authenticated_client() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn introspect_expired_access_token_is_inactive() {
+    // Platform-global: the custom issuer key is published to the shared signing-key registry.
     Database::run_fresh(async |database| {
         let fx = Fixture::boot(database, &["openid", "profile", "email", "offline_access"]).await;
         let token = issue_refresh(&fx, FULL_SCOPE).await;
@@ -886,6 +907,7 @@ async fn introspect_expired_access_token_is_inactive() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn introspect_refresh_token_before_and_after_revoke() {
+    // Platform-global: the custom issuer key is published to the shared signing-key registry.
     Database::run_fresh(async |database| {
         let fx = Fixture::boot(database, &["openid", "profile", "email", "offline_access"]).await;
         let root = issue_refresh(&fx, FULL_SCOPE).await;
@@ -946,6 +968,7 @@ async fn introspect_refresh_token_before_and_after_revoke() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn introspect_refresh_token_is_confined_to_authenticated_client() {
+    // Platform-global: the custom issuer key is published to the shared signing-key registry.
     Database::run_fresh(async |database| {
         let fx_a = Fixture::boot(database, &["openid", "profile", "email", "offline_access"]).await;
         let fx_b = Fixture::boot(database, &["openid", "profile", "email", "offline_access"]).await;
@@ -974,6 +997,7 @@ async fn introspect_refresh_token_is_confined_to_authenticated_client() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn introspect_rotated_refresh_token_is_inactive() {
+    // Platform-global: the custom issuer key is published to the shared signing-key registry.
     Database::run_fresh(async |database| {
         let fx = Fixture::boot(database, &["openid", "profile", "email", "offline_access"]).await;
         let root = issue_refresh(&fx, FULL_SCOPE).await;
@@ -1012,6 +1036,7 @@ async fn introspect_rotated_refresh_token_is_inactive() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn introspect_reuse_detected_refresh_family_is_inactive() {
+    // Platform-global: the custom issuer key is published to the shared signing-key registry.
     Database::run_fresh(async |database| {
         let fx = Fixture::boot(database, &["openid", "profile", "email", "offline_access"]).await;
         let root = issue_refresh(&fx, FULL_SCOPE).await;
@@ -1058,6 +1083,7 @@ async fn introspect_reuse_detected_refresh_family_is_inactive() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn introspect_requires_valid_client_auth_before_token_status() {
+    // Platform-global: the custom issuer key is published to the shared signing-key registry.
     Database::run_fresh(async |database| {
         let fx = Fixture::boot(database, &["openid", "profile", "email", "offline_access"]).await;
         let token = issue_refresh(&fx, FULL_SCOPE).await;
@@ -1089,6 +1115,7 @@ async fn introspect_requires_valid_client_auth_before_token_status() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn introspect_authenticates_before_missing_token_validation() {
+    // Platform-global: the custom issuer key is published to the shared signing-key registry.
     Database::run_fresh(async |database| {
         let fx = Fixture::boot(database, &["openid", "profile", "email", "offline_access"]).await;
 
@@ -1111,6 +1138,7 @@ async fn introspect_authenticates_before_missing_token_validation() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn introspect_unknown_or_garbage_token_is_uniformly_inactive() {
+    // Platform-global: the custom issuer key is published to the shared signing-key registry.
     Database::run_fresh(async |database| {
         let fx = Fixture::boot(database, &["openid", "profile", "email", "offline_access"]).await;
 
@@ -1145,6 +1173,7 @@ fn discovery_metadata_advertises_token_introspection_endpoint() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn bulk_credential_bump_revoke_does_not_deadlock_concurrent_rotation() {
+    // Platform-global: the custom issuer key is published to the shared signing-key registry.
     Database::run_fresh(async |database| {
         let fx = Fixture::boot(database, &["openid", "profile", "email", "offline_access"]).await;
         let root = issue_refresh(&fx, FULL_SCOPE).await;

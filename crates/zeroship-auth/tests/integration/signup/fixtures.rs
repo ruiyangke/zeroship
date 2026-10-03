@@ -3,6 +3,7 @@
 #![allow(clippy::future_not_send)]
 
 use crate::support::{self, CapturingMailer, CookieJar, auth_server::AuthServer};
+use uuid::Uuid;
 use zeroship_auth::{
     identity::password,
     store::{sessions, users},
@@ -10,7 +11,20 @@ use zeroship_auth::{
 
 pub(super) const PASSWORD: &str = "signup fixture password phrase";
 pub(super) const NAME: &str = "Signup Creator";
-pub(super) const IP: &str = "192.0.2.1";
+
+/// A per-case email so cases sharing the database never act on one another's
+/// user or verification rows.
+pub(super) fn email(label: &str) -> String {
+    format!("{label}-{}@example.test", Uuid::new_v4().simple())
+}
+
+/// A per-case forwarded client IP, keeping signup rate-limit buckets scoped to
+/// the case that minted it.
+pub(super) fn fixture_ip() -> String {
+    let bytes = Uuid::new_v4();
+    let bytes = bytes.as_bytes();
+    format!("10.{}.{}.{}", bytes[0], bytes[1], bytes[2])
+}
 
 pub(super) struct Form {
     pub cookies: CookieJar,
@@ -209,14 +223,22 @@ pub(super) fn verification_link(
     link
 }
 
-pub(super) async fn assert_counts(server: &AuthServer, users: i64, verifications: i64) {
+pub(super) async fn assert_counts(
+    server: &AuthServer,
+    emails: &[&str],
+    users: i64,
+    verifications: i64,
+) {
+    let emails: Vec<String> = emails.iter().map(|email| (*email).to_owned()).collect();
     let row = server
         .pg
         .query_one(
-            "SELECT (SELECT COUNT(*) FROM zeroship.users), \
-         (SELECT COUNT(*) FROM zeroship.email_verifications), \
-         (SELECT COUNT(*) FROM zeroship.idp_sessions)",
-            &[],
+            "SELECT (SELECT COUNT(*) FROM zeroship.users WHERE email::text = ANY($1)), \
+         (SELECT COUNT(*) FROM zeroship.email_verifications WHERE email::text = ANY($1)), \
+         (SELECT COUNT(*) FROM zeroship.idp_sessions s \
+            JOIN zeroship.users u ON u.id = s.user_id \
+            WHERE u.email::text = ANY($1))",
+            &[&emails],
         )
         .await
         .unwrap();
@@ -237,7 +259,7 @@ pub(super) async fn assert_redirect(response: cyper::Response, target: &str) -> 
     response.bytes().await.unwrap().to_vec()
 }
 
-pub(super) async fn sign_in(server: &AuthServer, user: &users::UserRow, target: &str) {
+pub(super) async fn sign_in(server: &AuthServer, user: &users::UserRow, target: &str, ip: &str) {
     let form = Form::get(server, &query("/login", target)).await;
     assert_eq!(form.return_to, target);
     let response = post(
@@ -250,7 +272,7 @@ pub(super) async fn sign_in(server: &AuthServer, user: &users::UserRow, target: 
             ("email", &user.email),
             ("password", PASSWORD),
         ],
-        IP,
+        ip,
     )
     .await;
     assert_eq!(response.status().as_u16(), 303);

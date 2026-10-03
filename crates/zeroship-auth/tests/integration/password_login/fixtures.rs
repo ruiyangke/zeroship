@@ -3,6 +3,7 @@
 #![allow(clippy::future_not_send)]
 
 use crate::support::{self, auth_server::AuthServer};
+use uuid::Uuid;
 use zeroship_auth::{
     identity::password,
     store::{sessions, users},
@@ -11,6 +12,20 @@ use zeroship_core::UserId;
 
 pub(super) const PASSWORD: &str = "password login fixture phrase";
 pub(super) const WRONG_PASSWORD: &str = "incorrect password fixture phrase";
+
+/// A per-case email so cases sharing the database never act on one another's
+/// user, lock or session rows.
+pub(super) fn email(label: &str) -> String {
+    format!("{label}-{}@example.test", Uuid::new_v4().simple())
+}
+
+/// A per-case forwarded client IP, keeping login rate-limit buckets scoped to
+/// the case that minted it.
+pub(super) fn fixture_ip() -> String {
+    let bytes = Uuid::new_v4();
+    let bytes = bytes.as_bytes();
+    format!("10.{}.{}.{}", bytes[0], bytes[1], bytes[2])
+}
 
 pub(super) enum LockState {
     Clear,
@@ -46,14 +61,19 @@ pub(super) async fn login(
     .await
 }
 
-pub(super) async fn reset(server: &AuthServer, token: &str, password: &str) -> cyper::Response {
+pub(super) async fn reset(
+    server: &AuthServer,
+    token: &str,
+    password: &str,
+    ip: &str,
+) -> cyper::Response {
     let csrf = form_csrf(server, &format!("/reset?token={token}")).await;
     post(
         server,
         "/reset",
         &csrf,
         &[("token", token), ("password", password)],
-        "192.0.2.200",
+        ip,
     )
     .await
 }
@@ -148,7 +168,7 @@ pub(super) async fn lock_through_login(server: &AuthServer, user: &users::UserRo
     for failure in 1..=users::lockout::THRESHOLD {
         // Each request has its own IP so the account lock is exercised before
         // the independent per-IP limiter can reject it.
-        let ip = format!("198.51.100.{failure}");
+        let ip = fixture_ip();
         assert_rejected(login(server, &user.email, WRONG_PASSWORD, &ip).await).await;
         let lock = if failure >= users::lockout::THRESHOLD {
             LockState::Active
@@ -157,7 +177,7 @@ pub(super) async fn lock_through_login(server: &AuthServer, user: &users::UserRo
         };
         assert_state(server, &user.id, failure, lock).await;
     }
-    assert_rejected(login(server, &user.email, PASSWORD, "198.51.100.200").await).await;
+    assert_rejected(login(server, &user.email, PASSWORD, &fixture_ip()).await).await;
     assert_state(
         server,
         &user.id,
@@ -167,10 +187,15 @@ pub(super) async fn lock_through_login(server: &AuthServer, user: &users::UserRo
     .await;
 }
 
-pub(super) async fn session_count(server: &AuthServer) -> i64 {
+/// Sessions belonging to the users this case minted, never the whole table.
+pub(super) async fn session_count(server: &AuthServer, ids: &[&UserId]) -> i64 {
+    let ids: Vec<&str> = ids.iter().map(|id| id.as_str()).collect();
     server
         .pg
-        .query_one("SELECT COUNT(*) FROM zeroship.idp_sessions", &[])
+        .query_one(
+            "SELECT COUNT(*) FROM zeroship.idp_sessions WHERE user_id = ANY($1)",
+            &[&ids],
+        )
         .await
         .unwrap()
         .get(0)

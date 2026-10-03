@@ -10,7 +10,7 @@ use zeroship_data_orm::orm::{Entity, Insertable, UtcInstant};
 
 #[compio::test]
 async fn user_repository_uses_native_ids_and_case_insensitive_email() {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let orm = zeroship_auth::store::native::connect(database.auth_url().as_str())
             .await
             .unwrap();
@@ -18,14 +18,16 @@ async fn user_repository_uses_native_ids_and_case_insensitive_email() {
             .await
             .unwrap()
             .is_none());
-        assert!(users::find_by_email(&orm, "absent@example.test")
+        let absent_email = format!("absent-{}@example.test", uuid::Uuid::new_v4().simple());
+        assert!(users::find_by_email(&orm, &absent_email)
             .await
             .unwrap()
             .is_none());
-        let created = users::create(&orm, "Creator@Example.test", "Creator", Some("phc"))
+        let email = format!("creator-{}@example.test", uuid::Uuid::new_v4().simple());
+        let created = users::create(&orm, &email, "Creator", Some("phc"))
             .await
             .unwrap();
-        let by_email = users::find_by_email(&orm, "CREATOR@EXAMPLE.TEST")
+        let by_email = users::find_by_email(&orm, &email.to_ascii_uppercase())
             .await
             .unwrap()
             .unwrap();
@@ -55,18 +57,19 @@ fn native_user_insert_preserves_the_owned_id_buffer() {
 
 #[compio::test]
 async fn native_user_rows_apply_the_callers_identity_conversion() {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let native = zeroship_auth::store::native::connect(database.auth_url().as_str())
             .await
             .unwrap();
         use zeroship_auth::store::native::models::users as model;
         let id = UserId::mint();
+        let email = format!("native-{}@example.test", uuid::Uuid::new_v4().simple());
         let created: users::UserRow = native
             .entity::<model::Entity>()
             .unwrap()
             .insert(users::NewUser {
                 id: id.clone(),
-                email: "native@example.test",
+                email: &email,
                 name: "Native caller",
                 password_hash: None,
             })
@@ -116,11 +119,12 @@ async fn native_user_rows_apply_the_callers_identity_conversion() {
 /// millisecond would disagree with the oracle on every row here.
 #[compio::test]
 async fn native_user_rows_keep_the_microseconds_the_server_stored() {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let pg = database.connect_as_auth().await;
         let orm = database.orm().await;
         use zeroship_auth::store::native::models::users as model;
-        let created = users::create(&orm, "micros@example.test", "Micros", None)
+        let email = format!("micros-{}@example.test", uuid::Uuid::new_v4().simple());
+        let created = users::create(&orm, &email, "Micros", None)
             .await
             .unwrap();
         for fraction in ["000001", "999999", "500000"] {
@@ -147,6 +151,7 @@ async fn native_user_rows_keep_the_microseconds_the_server_stored() {
                 .entity::<model::Entity>()
                 .unwrap()
                 .query()
+                .filter(model::id.eq(created.id.as_str()).unwrap())
                 .filter(
                     model::locked_until
                         .eq(Some(
@@ -171,6 +176,7 @@ async fn native_user_rows_keep_the_microseconds_the_server_stored() {
             orm.entity::<model::Entity>()
                 .unwrap()
                 .query()
+                .filter(model::id.eq(created.id.as_str()).unwrap())
                 .filter(model::locked_until.eq(Some(skewed)).unwrap())
                 .count()
                 .await
@@ -183,31 +189,35 @@ async fn native_user_rows_keep_the_microseconds_the_server_stored() {
 
 #[compio::test]
 async fn duplicate_email_preserves_the_existing_user_and_reports_unique_violation() {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let pg = database.connect_as_auth().await;
         let orm = database.orm().await;
-        let first = users::create(&orm, "creator@example.test", "Original creator", None)
+        let email = format!("duplicate-{}@example.test", uuid::Uuid::new_v4().simple());
+        let first = users::create(&orm, &email, "Original creator", None)
             .await
             .unwrap();
-        let error = users::create(&orm, "CREATOR@EXAMPLE.TEST", "Duplicate creator", None)
+        let error = users::create(&orm, &email.to_ascii_uppercase(), "Duplicate creator", None)
             .await
             .unwrap_err();
         assert!(matches!(
             error,
             zeroship_data_orm::orm::DbError::UniqueViolation { .. }
         ));
-        let retained = users::find_by_email(&orm, "creator@example.test")
+        let retained = users::find_by_email(&orm, &email)
             .await
             .unwrap()
             .unwrap();
         assert_eq!(retained.id, first.id);
         assert_eq!(retained.name, first.name);
         let count: i64 = pg
-            .query_one("SELECT COUNT(*) FROM zeroship.users", &[])
+            .query_one(
+                "SELECT COUNT(*) FROM zeroship.users WHERE email = $1::citext",
+                &[&email],
+            )
             .await
             .unwrap()
             .get(0);
-        assert_eq!(count, 1);
+        assert_eq!(count, 1, "the duplicate must not create a second row");
     })
     .await;
 }
@@ -248,10 +258,11 @@ async fn database_now(pg: &compio_postgres::Client) -> chrono::DateTime<chrono::
 
 #[compio::test]
 async fn native_profile_initialization_preserves_existing_verification_and_avatar() {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let orm = database.orm().await;
         let pg = database.connect_as_auth().await;
-        let user = users::create(&orm, "profile@example.test", "Profile", None)
+        let email = format!("profile-{}@example.test", uuid::Uuid::new_v4().simple());
+        let user = users::create(&orm, &email, "Profile", None)
             .await
             .unwrap();
         let before = database_now(&pg).await;
@@ -296,10 +307,11 @@ async fn native_profile_initialization_preserves_existing_verification_and_avata
 
 #[compio::test]
 async fn native_login_failures_increment_apply_backoff_and_cap_the_lock() {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let orm = database.orm().await;
         let pg = database.connect_as_auth().await;
-        let user = users::create(&orm, "lockout@example.test", "Lockout", None)
+        let email = format!("lockout-{}@example.test", uuid::Uuid::new_v4().simple());
+        let user = users::create(&orm, &email, "Lockout", None)
             .await
             .unwrap();
         for expected in 1..users::lockout::THRESHOLD {
@@ -357,6 +369,7 @@ async fn native_login_failures_increment_apply_backoff_and_cap_the_lock() {
 
 #[compio::test]
 async fn native_login_failure_rolls_back_the_counter_when_the_deadline_write_fails() {
+    // Platform-global: adds a CHECK constraint to the deployment's zeroship.users table.
     Database::run_fresh(async |database| {
         let orm = database.orm().await;
         let admin = database.connect().await;
@@ -379,10 +392,11 @@ async fn native_login_failure_rolls_back_the_counter_when_the_deadline_write_fai
 
 #[compio::test]
 async fn native_login_reset_clears_dirty_state_and_clean_or_absent_accounts_are_untouched() {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let orm = database.orm().await;
         let pg = database.connect_as_auth().await;
-        let user = users::create(&orm, "reset-state@example.test", "Reset state", None)
+        let email = format!("reset-state-{}@example.test", uuid::Uuid::new_v4().simple());
+        let user = users::create(&orm, &email, "Reset state", None)
             .await
             .unwrap();
         let clean = login_state(&pg, &user.id).await;
@@ -421,10 +435,11 @@ async fn native_login_reset_clears_dirty_state_and_clean_or_absent_accounts_are_
 
 #[compio::test]
 async fn native_last_login_uses_the_database_clock_without_changing_lockout_state() {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let orm = database.orm().await;
         let pg = database.connect_as_auth().await;
-        let user = users::create(&orm, "last-login@example.test", "Last login", None)
+        let email = format!("last-login-{}@example.test", uuid::Uuid::new_v4().simple());
+        let user = users::create(&orm, &email, "Last login", None)
             .await
             .unwrap();
         pg.execute(
@@ -451,6 +466,7 @@ async fn native_last_login_uses_the_database_clock_without_changing_lockout_stat
 
 #[compio::test]
 async fn native_dummy_login_failure_issues_the_update_of_a_real_failure() {
+    // Platform-global: creates a trigger on zeroship.users that records every user update database-wide.
     Database::run_fresh(async |database| {
         let orm = database.orm().await;
         let admin = database.connect().await;
@@ -625,6 +641,7 @@ async fn deadline_pause(observer: &compio_postgres::Client) -> (bool, usize) {
 
 #[compio::test]
 async fn concurrent_native_login_failures_preserve_increments_and_the_longest_lock() {
+    // Platform-global: a trigger on zeroship.users fires database-wide and the probes read all backends.
     Database::run_fresh(async |database| {
         let orm = database.orm().await;
         let admin = database.connect().await;

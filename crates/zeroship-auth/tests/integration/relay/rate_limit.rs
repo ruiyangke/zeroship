@@ -14,12 +14,14 @@ async fn exhaust_budget(server: &RelayServer) -> (Value, Vec<String>) {
             .as_u16(),
         200
     );
-    let keys: Vec<String> = server
+    let keys = server.bucket_keys();
+    let observed: Vec<String> = server
         .auth
         .pg
         .query(
-            "SELECT bucket_key FROM zeroship.rate_limits WHERE tokens > 0",
-            &[],
+            "SELECT bucket_key FROM zeroship.rate_limits \
+             WHERE bucket_key = ANY($1) AND tokens > 0",
+            &[&keys],
         )
         .await
         .unwrap()
@@ -27,7 +29,7 @@ async fn exhaust_budget(server: &RelayServer) -> (Value, Vec<String>) {
         .map(|row| row.get(0))
         .collect();
     assert!(
-        !keys.is_empty(),
+        !observed.is_empty(),
         "successful forwarding must create rate-limit state"
     );
     for sequence in 0..256 {
@@ -69,7 +71,7 @@ async fn exhaust_budget(server: &RelayServer) -> (Value, Vec<String>) {
 
 #[ntex::test]
 async fn rate_limit_refusal_remains_retryable_after_refill() {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let server = RelayServer::start(database).await;
         let (message, keys) = exhaust_budget(&server).await;
         let id = message["MessageID"].as_str().unwrap();
@@ -99,7 +101,7 @@ async fn rate_limit_refusal_remains_retryable_after_refill() {
 
 #[ntex::test]
 async fn sustained_abuse_stops_forwarding_and_audits_only_local_revocation() {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let server = RelayServer::start(database).await;
         let grant = server.alias.granted_scopes(&server.auth.pg).await;
         let (message, _) = exhaust_budget(&server).await;
@@ -117,7 +119,9 @@ async fn sustained_abuse_stops_forwarding_and_audits_only_local_revocation() {
         assert!(relay::resolve_active_alias(&server.auth.pg, &server.alias.email).await.unwrap().is_none());
         assert_eq!(server.alias.granted_scopes(&server.auth.pg).await, grant);
         let audit = server.auth.pg.query_one(
-            "SELECT outcome, detail FROM zeroship.audit_events WHERE event_type = 'relay_auto_revoke'", &[],
+            "SELECT outcome, detail FROM zeroship.audit_events \
+             WHERE event_type = 'relay_auto_revoke' AND client_id = $1",
+            &[&server.alias.client_id],
         ).await.unwrap();
         assert_eq!(audit.get::<_, String>("outcome"), "local_revoked_cross_service_pending");
         assert_eq!(audit.get::<_, Value>("detail"), json!({

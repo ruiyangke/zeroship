@@ -16,6 +16,7 @@ use zeroship_auth::store::users;
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn reaper_erases_a_due_user_and_cascades() {
+    // Platform-global: the reaper erases every account past its deletion deadline.
     Database::run_fresh(async |database| {
         let orm = database.orm().await;
         let mut db = database.connect().await;
@@ -95,6 +96,7 @@ async fn reaper_erases_a_due_user_and_cascades() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn erasing_a_sole_owner_retains_the_organizations_invoice() {
+    // Platform-global: the reaper erases every account past its deletion deadline.
     Database::run_fresh(async |database| {
         let orm = database.orm().await;
         let mut db = database.connect().await;
@@ -211,6 +213,7 @@ async fn erasing_a_sole_owner_retains_the_organizations_invoice() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn reaper_erases_a_user_holding_every_previously_blocking_reference() {
+    // Platform-global: the reaper erases every account past its deletion deadline.
     Database::run_fresh(async |database| {
         let orm = database.orm().await;
         let mut db = database.connect().await;
@@ -346,6 +349,7 @@ async fn reaper_erases_a_user_holding_every_previously_blocking_reference() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn reaper_erases_as_the_real_auth_role() {
+    // Platform-global: the reaper erases every account past its deletion deadline.
     Database::run_fresh(async |database| {
         let orm = database.orm().await;
         let db = database.connect().await;
@@ -414,6 +418,7 @@ async fn reaper_erases_as_the_real_auth_role() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn reaper_refuses_and_records_when_the_preflight_names_a_blocker() {
+    // Platform-global: the reaper erases every account past its deletion deadline.
     Database::run_fresh(async |database| {
         let orm = database.orm().await;
         let mut db = database.connect().await;
@@ -497,6 +502,7 @@ async fn reaper_refuses_and_records_when_the_preflight_names_a_blocker() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn reaper_refuses_and_records_billing_when_the_organization_still_owes() {
+    // Platform-global: the reaper erases every account past its deletion deadline.
     Database::run_fresh(async |database| {
         let orm = database.orm().await;
         let mut db = database.connect().await;
@@ -593,6 +599,7 @@ async fn reaper_refuses_and_records_billing_when_the_organization_still_owes() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn reaper_refuses_when_the_preflight_cannot_be_answered() {
+    // Platform-global: the reaper erases every account past its deletion deadline.
     Database::run_fresh(async |database| {
         let orm = database.orm().await;
         let mut db = database.connect().await;
@@ -653,6 +660,7 @@ async fn reaper_refuses_when_the_preflight_cannot_be_answered() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn reaper_refuses_when_the_control_plane_rejects_its_credential() {
+    // Platform-global: the reaper erases every account past its deletion deadline.
     Database::run_fresh(async |database| {
         let orm = database.orm().await;
         let mut db = database.connect().await;
@@ -709,6 +717,7 @@ async fn reaper_refuses_when_the_control_plane_rejects_its_credential() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn a_new_blocking_reference_is_recorded_with_its_constraint() {
+    // Platform-global: the reaper erases every account past its deletion deadline.
     Database::run_fresh(async |database| {
         let orm = database.orm().await;
         let mut db = database.connect().await;
@@ -774,6 +783,7 @@ async fn a_new_blocking_reference_is_recorded_with_its_constraint() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn reaper_skips_cancelled_request() {
+    // Platform-global: the reaper erases every account past its deletion deadline.
     Database::run_fresh(async |database| {
         let orm = database.orm().await;
         let mut db = database.connect().await;
@@ -818,6 +828,7 @@ async fn reaper_skips_cancelled_request() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn reaper_ignores_a_schedule_without_a_deletion_request() {
+    // Platform-global: the reaper erases every account past its deletion deadline.
     Database::run_fresh(async |database| {
         let orm = database.orm().await;
         let mut db = database.connect().await;

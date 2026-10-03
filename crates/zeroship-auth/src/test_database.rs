@@ -3,9 +3,8 @@
 //! Unit tests exercise internals their own module does not export, so they
 //! cannot live in the integration target. They share the same reaper-owned
 //! server as every other test binary through [`zeroship_testkit::postgres`]:
-//! [`Database::run`] uses the shared migrated database, and
-//! [`Database::run_fresh`] clones the connection-free migrated template for a
-//! case whose subject is the platform-global signing-key registry.
+//! [`Database::run`] uses the shared migrated database, and a case scopes
+//! itself to the rows it mints.
 //!
 //! Connections the case opens are joined before its runtime ends, including
 //! when an assertion unwinds, and the case's own panic is re-raised after that.
@@ -41,12 +40,6 @@ impl Database {
     #[expect(clippy::future_not_send, reason = "fixtures belong to their compio runtime")]
     pub async fn run(test: impl AsyncFnOnce(&Self)) {
         zeroship_testkit::postgres::run::<Self>(test).await;
-    }
-
-    /// Run `test` against a database cloned from the migrated template.
-    #[expect(clippy::future_not_send, reason = "fixtures belong to their compio runtime")]
-    pub async fn run_fresh(test: impl AsyncFnOnce(&Self)) {
-        zeroship_testkit::postgres::run_fresh::<Self>(test).await;
     }
 
     pub fn auth_url(&self) -> url::Url {

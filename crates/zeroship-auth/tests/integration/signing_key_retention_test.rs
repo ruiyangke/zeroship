@@ -160,6 +160,7 @@ async fn jwks_contains(database: &Database, kid: &str) -> bool {
 #[allow(clippy::future_not_send)]
 #[compio::test]
 async fn retiring_key_inside_horizon_remains_published() {
+    // Platform-global: the signing-key registry is swept and enumerated across all issuers.
     Database::run_fresh(async |database| {
         let db = database.connect().await;
 
@@ -182,6 +183,7 @@ async fn retiring_key_inside_horizon_remains_published() {
 #[allow(clippy::future_not_send)]
 #[compio::test]
 async fn key_past_horizon_leaves_jwks_with_reason_and_idempotently_keeps_audit_row() {
+    // Platform-global: the signing-key registry is swept and enumerated across all issuers.
     Database::run_fresh(async |database| {
         let db = database.connect().await;
 
@@ -243,6 +245,7 @@ async fn key_past_horizon_leaves_jwks_with_reason_and_idempotently_keeps_audit_r
 #[allow(clippy::future_not_send)]
 #[compio::test]
 async fn active_and_next_keys_are_never_pruned_regardless_of_age() {
+    // Platform-global: the signing-key registry is swept and enumerated across all issuers.
     Database::run_fresh(async |database| {
         let db = database.connect().await;
 
@@ -277,6 +280,7 @@ async fn active_and_next_keys_are_never_pruned_regardless_of_age() {
 #[allow(clippy::future_not_send)]
 #[compio::test]
 async fn missing_watermark_uses_full_horizon_from_retiring_at() {
+    // Platform-global: the signing-key registry is swept and enumerated across all issuers.
     Database::run_fresh(async |database| {
         let db = database.connect().await;
 
@@ -317,6 +321,7 @@ async fn missing_watermark_uses_full_horizon_from_retiring_at() {
 #[allow(clippy::future_not_send)]
 #[compio::test]
 async fn issuance_and_prune_never_return_a_token_without_its_published_key() {
+    // Platform-global: the signing-key registry is swept and enumerated across all issuers.
     Database::run_fresh(async |database| {
         let db = database.connect().await;
         let issue_db = database.connect().await;
@@ -385,6 +390,7 @@ async fn issuance_and_prune_never_return_a_token_without_its_published_key() {
 #[allow(clippy::future_not_send)]
 #[compio::test]
 async fn every_production_token_kind_advances_the_key_watermark() {
+    // Platform-global: the signing-key registry is swept and enumerated across all issuers.
     Database::run_fresh(async |database| {
         let db = database.connect().await;
 
@@ -567,6 +573,7 @@ async fn every_production_token_kind_advances_the_key_watermark() {
 #[allow(clippy::future_not_send)]
 #[compio::test]
 async fn concurrent_retirement_cannot_be_undone_by_signer_startup() {
+    // Platform-global: the signing-key registry is swept and enumerated across all issuers.
     Database::run_fresh(async |database| {
         let db = database.connect().await;
         let publish_db = database.connect().await;

@@ -47,6 +47,7 @@ async fn cache_control(server: &AuthServer, path: &str) -> String {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn jwks_reaches_the_wire_cacheable() {
+    // Platform-global: the custom issuer key is published to the shared signing-key registry.
     Database::run_fresh(async |database| {
         let server = boot(database).await;
         let value = cache_control(&server, "/oauth2/.well-known/jwks.json").await;
@@ -71,6 +72,7 @@ async fn jwks_reaches_the_wire_cacheable() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn discovery_reaches_the_wire_cacheable_on_every_mounted_path() {
+    // Platform-global: the custom issuer key is published to the shared signing-key registry.
     Database::run_fresh(async |database| {
         let server = boot(database).await;
         for path in [
@@ -104,6 +106,7 @@ async fn discovery_reaches_the_wire_cacheable_on_every_mounted_path() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn routes_without_an_explicit_value_still_default_to_no_store() {
+    // Platform-global: the custom issuer key is published to the shared signing-key registry.
     Database::run_fresh(async |database| {
         let server = boot(database).await;
         let resp = server

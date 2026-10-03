@@ -1,8 +1,16 @@
 use compio_postgres::Client;
+use uuid::Uuid;
 use zeroship_auth::store::relay;
 use zeroship_core::UserId;
 
 pub const RELAY_DOMAIN: &str = "relay.example.test";
+
+/// A per-case real inbox. Each case seeds its own recipient so a shared
+/// database cannot collide on `users.email` or leak another case's
+/// suppression state into the delivery contract.
+pub fn recipient_email(label: &str) -> String {
+    format!("{label}-{}@example.test", Uuid::new_v4().simple())
+}
 
 pub struct Alias {
     pub user_id: UserId,
@@ -15,7 +23,7 @@ impl Alias {
     pub async fn seed(pg: &Client) -> Self {
         let user_id = UserId::mint();
         let client_id = zeroship_core::typed_id::generate("oac");
-        let inbox = "recipient@example.test".to_owned();
+        let inbox = recipient_email("relay-recipient");
         pg.execute(
             "INSERT INTO zeroship.users (id, email, name, email_verified_at) \
              VALUES ($1, $2::citext, 'Relay recipient', NOW())",

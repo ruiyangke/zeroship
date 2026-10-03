@@ -43,19 +43,19 @@ async fn refusal(response: cyper::Response) -> Refusal {
 
 #[ntex::test]
 async fn password_refusals_are_equivalent_even_when_the_padding_matches() {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let server = AuthServer::start(database).await;
-        let real = user(&server, "real@example.test").await;
-        let locked = user(&server, "locked@example.test").await;
-        let oauth = users::create(&server.orm, "oauth@example.test", "OAuth only", None)
+        let real = user(&server, &email("real")).await;
+        let locked = user(&server, &email("locked")).await;
+        let oauth = users::create(&server.orm, &email("oauth"), "OAuth only", None)
             .await
             .unwrap();
         lock_through_login(&server, &locked).await;
         let expected =
-            refusal(login(&server, &real.email, WRONG_PASSWORD, "192.0.2.1").await).await;
-        let missing = "absent@example.test";
+            refusal(login(&server, &real.email, WRONG_PASSWORD, &fixture_ip()).await).await;
+        let missing = email("absent");
         assert!(
-            users::find_by_email(&server.orm, missing)
+            users::find_by_email(&server.orm, &missing)
                 .await
                 .unwrap()
                 .is_none()
@@ -65,15 +65,16 @@ async fn password_refusals_are_equivalent_even_when_the_padding_matches() {
         // the padding itself: `crates/zeroship-auth/src/identity/password.rs`,
         // `padding_never_verifies_even_the_password_it_was_hashed_from`.
         let padding = "absent-user-padding";
+        let case_ids = [&real.id, &locked.id, &oauth.id];
         for (email, submitted) in [
-            (missing, WRONG_PASSWORD),
-            (missing, padding),
+            (missing.as_str(), WRONG_PASSWORD),
+            (missing.as_str(), padding),
             (oauth.email.as_str(), padding),
             (locked.email.as_str(), padding),
         ] {
-            let actual = refusal(login(&server, email, submitted, "192.0.2.2").await).await;
+            let actual = refusal(login(&server, email, submitted, &fixture_ip()).await).await;
             assert_eq!(actual, expected, "public refusal for {email}");
-            assert_eq!(session_count(&server).await, 0);
+            assert_eq!(session_count(&server, &case_ids).await, 0);
         }
         assert_state(&server, &real.id, 1, LockState::Clear).await;
         assert_state(&server, &oauth.id, 0, LockState::Clear).await;
@@ -85,15 +86,15 @@ async fn password_refusals_are_equivalent_even_when_the_padding_matches() {
         )
         .await;
         assert!(
-            users::find_by_email(&server.orm, missing)
+            users::find_by_email(&server.orm, &missing)
                 .await
                 .unwrap()
                 .is_none()
         );
-        let response = login(&server, &real.email, PASSWORD, "192.0.2.3").await;
+        let response = login(&server, &real.email, PASSWORD, &fixture_ip()).await;
         assert_session(&server, &response, &real.id).await;
         assert_state(&server, &real.id, 0, LockState::Clear).await;
-        assert_eq!(session_count(&server).await, 1);
+        assert_eq!(session_count(&server, &case_ids).await, 1);
     })
     .await;
 }

@@ -1,4 +1,4 @@
-//! HTTP password-reset effects in databases owned by each case.
+//! HTTP password-reset effects in the shared database.
 
 #![allow(
     clippy::future_not_send,
@@ -17,11 +17,11 @@ use zeroship_auth::store::sessions;
 
 #[ntex::test]
 async fn reset_revokes_the_users_sessions_and_audits_the_effects() {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let orm = database.orm().await;
         let pg = Arc::new(database.connect_as_auth().await);
-        let user = fixtures::user(&orm, "reset@example.test").await;
-        let other = fixtures::user(&orm, "other@example.test").await;
+        let user = fixtures::user(&orm, &fixtures::email("reset")).await;
+        let other = fixtures::user(&orm, &fixtures::email("other")).await;
         let app = fixtures::app(database).await;
         fixtures::idp_session(&pg, &user).await;
         fixtures::gateway_session(database, &user, &app).await;
@@ -87,11 +87,11 @@ async fn reset_revokes_the_users_sessions_and_audits_the_effects() {
 
 #[ntex::test]
 async fn reset_consumes_only_the_users_pending_magic_login_state() {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let orm = database.orm().await;
         let pg = Arc::new(database.connect_as_auth().await);
-        let user = fixtures::user(&orm, "reset@example.test").await;
-        let other = fixtures::user(&orm, "other@example.test").await;
+        let user = fixtures::user(&orm, &fixtures::email("reset")).await;
+        let other = fixtures::user(&orm, &fixtures::email("other")).await;
         let magic = magic_link::issue(&pg, &user.email, "login").await.unwrap();
         let other_magic = magic_link::issue(&pg, &other.email, "login").await.unwrap();
         let admin = database.connect().await;
@@ -112,8 +112,11 @@ async fn reset_consumes_only_the_users_pending_magic_login_state() {
 
         assert!(magic_link::redeem_pending(&pg, &magic.raw).await.unwrap().is_none());
         assert!(magic_link::redeem_pending(&pg, &other_magic.raw).await.unwrap().is_some());
-        let remaining = admin.query("SELECT email::text FROM zeroship.magic_completions", &[])
-            .await.unwrap();
+        let addresses = vec![user.email.as_str(), other.email.as_str()];
+        let remaining = admin.query(
+            "SELECT email::text FROM zeroship.magic_completions WHERE email::text = ANY($1)",
+            &[&addresses],
+        ).await.unwrap();
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].get::<_, String>(0), other.email);
         let detail: serde_json::Value = pg.query_one(
@@ -128,13 +131,14 @@ async fn reset_consumes_only_the_users_pending_magic_login_state() {
 
 #[ntex::test]
 async fn reset_revokes_app_anchors_and_marks_each_pairwise_family() {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let orm = database.orm().await;
         let pg = Arc::new(database.connect_as_auth().await);
-        let user = fixtures::user(&orm, "reset@example.test").await;
-        let other = fixtures::user(&orm, "other@example.test").await;
+        let user = fixtures::user(&orm, &fixtures::email("reset")).await;
+        let other = fixtures::user(&orm, &fixtures::email("other")).await;
         let app = fixtures::app(database).await;
         let second_app = fixtures::app(database).await;
+        let client_ids = vec![app.client_id.clone(), second_app.client_id.clone()];
         let subject = fixtures::identity(database, &user, &app).await;
         let second_subject = fixtures::identity(database, &user, &second_app).await;
         let other_subject = fixtures::identity(database, &other, &app).await;
@@ -168,7 +172,10 @@ async fn reset_revokes_app_anchors_and_marks_each_pairwise_family() {
         assert!(other_live, "another user's anchor survives");
 
         let mut markers: Vec<(String, String)> = admin
-            .query("SELECT client_id, sub FROM zeroship.token_revocations", &[])
+            .query(
+                "SELECT client_id, sub FROM zeroship.token_revocations WHERE client_id = ANY($1)",
+                &[&client_ids],
+            )
             .await
             .unwrap()
             .iter()
@@ -203,27 +210,27 @@ async fn reset_revokes_app_anchors_and_marks_each_pairwise_family() {
 /// Reset must complete when both sources contribute that family marker.
 #[ntex::test]
 async fn reset_completes_with_an_identity_and_refresh_grant_for_the_same_family() {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let orm = database.orm().await;
         let pg = Arc::new(database.connect_as_auth().await);
-        let user = fixtures::user(&orm, "reset@example.test").await;
-        let other = fixtures::user(&orm, "other@example.test").await;
+        let user = fixtures::user(&orm, &fixtures::email("reset")).await;
+        let other = fixtures::user(&orm, &fixtures::email("other")).await;
         let app = fixtures::app(database).await;
         let subject = fixtures::identity(database, &user, &app).await;
         let other_subject = fixtures::identity(database, &other, &app).await;
         let session = fixtures::refresh_session(&pg, &user, &app, &subject).await;
         let other_session = fixtures::refresh_session(&pg, &other, &app, &other_subject).await;
 
-        let ip = "192.0.2.2";
+        let ip = fixtures::fixture_ip();
         let req = test::TestRequest::default()
-            .header("x-forwarded-for", ip)
+            .header("x-forwarded-for", &ip)
             .to_http_request();
         let before = credentials::verify_password_credentials(
             &pg,
             &orm,
             &req,
             &app.client_id,
-            ip,
+            &ip,
             &user.email,
             fixtures::OLD_PASSWORD,
         )
@@ -239,7 +246,7 @@ async fn reset_completes_with_an_identity_and_refresh_grant_for_the_same_family(
             &orm,
             &req,
             &app.client_id,
-            ip,
+            &ip,
             &user.email,
             fixtures::OLD_PASSWORD,
         )
@@ -253,7 +260,7 @@ async fn reset_completes_with_an_identity_and_refresh_grant_for_the_same_family(
             &orm,
             &req,
             &app.client_id,
-            ip,
+            &ip,
             &user.email,
             fixtures::NEW_PASSWORD,
         )
@@ -282,7 +289,10 @@ async fn reset_completes_with_an_identity_and_refresh_grant_for_the_same_family(
         assert!(revoked);
         assert!(other_live, "another user's refresh session survives");
         let markers = pg
-            .query("SELECT client_id, sub FROM zeroship.token_revocations", &[])
+            .query(
+                "SELECT client_id, sub FROM zeroship.token_revocations WHERE client_id = $1",
+                &[&app.client_id],
+            )
             .await
             .unwrap();
         assert_eq!(markers.len(), 1);

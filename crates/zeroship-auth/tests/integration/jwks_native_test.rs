@@ -185,6 +185,7 @@ fn assert_snapshot(document: &[String], snapshot: &[String]) {
 
 #[compio::test]
 async fn native_jwks_keeps_a_key_promoted_while_the_reader_is_between_pages() {
+    // Platform-global: row-level security and grants on the shared signing-key registry.
     Database::run_fresh(async |database| {
         let admin = database.connect().await;
         let page = usize::try_from(MAX_ROW_LIMIT).unwrap();
@@ -242,6 +243,7 @@ async fn native_jwks_keeps_a_key_promoted_while_the_reader_is_between_pages() {
 
 #[compio::test]
 async fn native_jwks_does_not_repeat_keys_when_the_cursor_key_retires_between_pages() {
+    // Platform-global: row-level security and grants on the shared signing-key registry.
     Database::run_fresh(async |database| {
         let admin = database.connect().await;
         let page = usize::try_from(MAX_ROW_LIMIT).unwrap();
@@ -295,6 +297,7 @@ async fn native_jwks_does_not_repeat_keys_when_the_cursor_key_retires_between_pa
 
 #[compio::test]
 async fn native_jwks_preserves_complete_sql_order_and_public_fields() {
+    // Platform-global: row-level security and grants on the shared signing-key registry.
     Database::run_fresh(async |database| {
         let db = database.connect_as_auth().await;
         let orm = database.orm().await;
@@ -357,6 +360,7 @@ async fn native_jwks_preserves_complete_sql_order_and_public_fields() {
 
 #[compio::test]
 async fn native_jwks_rejects_malformed_published_keys() {
+    // Platform-global: row-level security and grants on the shared signing-key registry.
     Database::run_fresh(async |database| {
         let db = database.connect_as_auth().await;
         let orm = database.orm().await;
@@ -390,6 +394,7 @@ async fn native_jwks_rejects_malformed_published_keys() {
 
 #[ntex::test]
 async fn native_jwks_failure_is_uncacheable() {
+    // Platform-global: row-level security and grants on the shared signing-key registry.
     Database::run_fresh(async |database| {
         let server = AuthServer::start(database).await;
         server

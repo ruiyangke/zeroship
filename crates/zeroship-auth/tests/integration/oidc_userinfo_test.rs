@@ -102,6 +102,7 @@ impl Fixture {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn userinfo_returns_scope_gated_claims_for_valid_token() {
+    // Platform-global: the custom issuer key is published to the shared signing-key registry.
     Database::run_fresh(async |database| {
         let fx = Fixture::boot(database).await;
         let token = issue_token(&fx, "openid email profile").await;
@@ -151,6 +152,7 @@ async fn userinfo_returns_scope_gated_claims_for_valid_token() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn userinfo_omits_identity_claims_without_scopes() {
+    // Platform-global: the custom issuer key is published to the shared signing-key registry.
     Database::run_fresh(async |database| {
         let fx = Fixture::boot(database).await;
         let token = issue_token(&fx, "openid").await;
@@ -178,6 +180,7 @@ async fn userinfo_omits_identity_claims_without_scopes() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn userinfo_rejects_missing_and_bad_tokens() {
+    // Platform-global: the custom issuer key is published to the shared signing-key registry.
     Database::run_fresh(async |database| {
         let fx = Fixture::boot(database).await;
 
@@ -219,6 +222,7 @@ async fn userinfo_rejects_missing_and_bad_tokens() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn userinfo_rejects_id_token_used_as_access_token() {
+    // Platform-global: the custom issuer key is published to the shared signing-key registry.
     Database::run_fresh(async |database| {
         let fx = Fixture::boot(database).await;
         let token = issue_token(&fx, "openid email profile").await;
@@ -234,6 +238,7 @@ async fn userinfo_rejects_id_token_used_as_access_token() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn userinfo_rejects_token_without_openid_scope() {
+    // Platform-global: the custom issuer key is published to the shared signing-key registry.
     Database::run_fresh(async |database| {
         let fx = Fixture::boot(database).await;
         // A validly-signed OP access token minted for the app resource audience but
@@ -252,6 +257,7 @@ async fn userinfo_rejects_token_without_openid_scope() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn userinfo_rejects_disabled_user() {
+    // Platform-global: the custom issuer key is published to the shared signing-key registry.
     Database::run_fresh(async |database| {
         let fx = Fixture::boot(database).await;
         let token = issue_token(&fx, "openid email profile").await;

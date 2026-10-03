@@ -11,15 +11,24 @@ use zeroship_authn::rate_limit::Quota;
     reason = "refill is frozen and the declared burst balance is integral"
 )]
 async fn signup_exhausts_only_its_ip_budget_and_recovers_after_refill() {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let mailer = Arc::new(CapturingMailer::default());
         let server = AuthServer::with_mailer(database, mailer.clone()).await;
         let quota = Quota::SIGNUP_IP;
         assert!(quota.capacity.is_finite() && quota.capacity >= 1.0 && quota.capacity.fract() == 0.0);
+        let ip = fixture_ip();
+        let other_ip = fixture_ip();
+        let first = email("first");
         let form = Form::get(&server, "/signup").await;
-        let expected = assert_redirect(form.submit(&server, "first@example.test", NAME, IP).await, "/me").await;
-        let rows = server.pg.query("SELECT bucket_key FROM zeroship.rate_limits", &[]).await.unwrap();
-        let [row] = rows.as_slice() else { panic!("signup must create its IP budget: {rows:?}") };
+        let expected = assert_redirect(form.submit(&server, &first, NAME, &ip).await, "/me").await;
+        let mut emitted = vec![first];
+        let key = format!("signup_ip:{ip}");
+        let rows = server
+            .pg
+            .query("SELECT bucket_key FROM zeroship.rate_limits WHERE bucket_key = $1", &[&key])
+            .await
+            .unwrap();
+        let [row] = rows.as_slice() else { panic!("signup must create its own IP budget: {rows:?}") };
         let bucket: String = row.get(0);
         let mut accepted: u32 = 1;
         loop {
@@ -33,20 +42,24 @@ async fn signup_exhausts_only_its_ip_budget_and_recovers_after_refill() {
             assert_eq!(updated, 1);
             if f64::from(accepted) >= quota.capacity { break; }
             let form = Form::get(&server, "/signup").await;
-            let email = format!("creator-{accepted}@example.test");
-            assert_eq!(assert_redirect(form.submit(&server, &email, NAME, IP).await, "/me").await, expected);
+            let accepted_email = email(&format!("creator-{accepted}"));
+            assert_eq!(assert_redirect(form.submit(&server, &accepted_email, NAME, &ip).await, "/me").await, expected);
+            emitted.push(accepted_email);
             accepted += 1;
         }
-        assert_counts(&server, i64::from(accepted), i64::from(accepted)).await;
+        let seen: Vec<&str> = emitted.iter().map(String::as_str).collect();
+        assert_counts(&server, &seen, i64::from(accepted), i64::from(accepted)).await;
         assert_eq!(mailer.sent().len(), usize::try_from(accepted).unwrap());
+        let throttled = email("throttled");
         let form = Form::get(&server, "/signup").await;
-        assert_eq!(assert_redirect(form.submit(&server, "throttled@example.test", NAME, IP).await, "/me").await, expected);
-        assert_counts(&server, i64::from(accepted), i64::from(accepted)).await;
+        assert_eq!(assert_redirect(form.submit(&server, &throttled, NAME, &ip).await, "/me").await, expected);
+        assert_counts(&server, &seen, i64::from(accepted), i64::from(accepted)).await;
         assert_eq!(mailer.sent().len(), usize::try_from(accepted).unwrap());
 
+        let another = email("another-ip");
         let form = Form::get(&server, "/signup").await;
-        assert_redirect(form.submit(&server, "another-ip@example.test", NAME, "192.0.2.2").await, "/me").await;
-        created(&server, "another-ip@example.test").await;
+        assert_redirect(form.submit(&server, &another, NAME, &other_ip).await, "/me").await;
+        created(&server, &another).await;
         let refill_seconds = (quota.capacity + 1.0) / quota.refill_per_sec;
         assert!(refill_seconds.is_finite() && refill_seconds > 0.0);
         let updated = server.pg.execute(
@@ -56,10 +69,13 @@ async fn signup_exhausts_only_its_ip_budget_and_recovers_after_refill() {
         ).await.unwrap();
         assert_eq!(updated, 1);
         let form = Form::get(&server, "/signup").await;
-        assert_redirect(form.submit(&server, "throttled@example.test", NAME, IP).await, "/me").await;
-        created(&server, "throttled@example.test").await;
-        assert_counts(&server, i64::from(accepted) + 2, i64::from(accepted) + 2).await;
+        assert_redirect(form.submit(&server, &throttled, NAME, &ip).await, "/me").await;
+        created(&server, &throttled).await;
+        emitted.push(throttled.clone());
+        emitted.push(another.clone());
+        let seen: Vec<&str> = emitted.iter().map(String::as_str).collect();
+        assert_counts(&server, &seen, i64::from(accepted) + 2, i64::from(accepted) + 2).await;
         assert_eq!(mailer.sent().len(), usize::try_from(accepted).unwrap() + 2);
-        verification_link(&server, &mailer, "throttled@example.test");
+        verification_link(&server, &mailer, &throttled);
     }).await;
 }

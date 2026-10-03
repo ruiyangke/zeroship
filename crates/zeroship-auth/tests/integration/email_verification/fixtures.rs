@@ -10,6 +10,12 @@ use compio_postgres::Client;
 use zeroship_auth::{identity::verification, store::users};
 use zeroship_core::UserId;
 
+/// A per-case email so cases sharing the database never act on one another's
+/// user or verification rows.
+pub(super) fn email(label: &str) -> String {
+    format!("{label}-{}@example.test", uuid::Uuid::new_v4().simple())
+}
+
 pub(super) async fn issue(
     pg: &Client,
     orm: &zeroship_data_orm::Database,
@@ -91,7 +97,10 @@ pub(super) async fn assert_state(pg: &Client, user_id: &UserId, redeemed: bool) 
         "the token's consumption state"
     );
     let sessions: i64 = pg
-        .query_one("SELECT COUNT(*) FROM zeroship.idp_sessions", &[])
+        .query_one(
+            "SELECT COUNT(*) FROM zeroship.idp_sessions WHERE user_id = $1",
+            &[&user_id.as_str()],
+        )
         .await
         .unwrap()
         .get(0);

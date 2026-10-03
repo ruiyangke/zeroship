@@ -1,7 +1,7 @@
 #![allow(clippy::future_not_send)]
 
 use super::{
-    fixtures::Fixture,
+    fixtures::{Fixture, email},
     provider::{Provider, Request, User},
 };
 use crate::support::database::Database;
@@ -9,13 +9,13 @@ use zeroship_auth::store::users;
 
 fn user(provider: Provider) -> User {
     match provider {
-        Provider::Google => User::google("creator@gmail.com"),
-        Provider::GitHub => User::github("creator@example.test"),
+        Provider::Google => User::google(&email("creator", "gmail.com")),
+        Provider::GitHub => User::github(&email("creator", "example.test")),
     }
 }
 
 async fn rejected_state_preserves_the_original_flow(provider: Provider) {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let fixture = Fixture::new(database, provider, user(provider)).await;
         let attempt = fixture.begin().await;
         let missing = attempt.send(&fixture, &attempt.callback, None).await;
@@ -52,7 +52,7 @@ async fn rejected_state_preserves_the_original_flow(provider: Provider) {
 }
 
 async fn callback_recovers_soft_lock(provider: Provider) {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let fixture = Fixture::new(database, provider, user(provider)).await;
         let initial = fixture.begin().await;
         let id = fixture
@@ -99,7 +99,7 @@ async fn callback_recovers_soft_lock(provider: Provider) {
 }
 
 async fn callback_cannot_reenable_disabled_account(provider: Provider) {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let fixture = Fixture::new(database, provider, user(provider)).await;
         let initial = fixture.begin().await;
         let id = fixture

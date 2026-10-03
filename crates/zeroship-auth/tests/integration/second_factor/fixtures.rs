@@ -15,6 +15,7 @@ use std::{
     pin::pin,
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
+use uuid::Uuid;
 use zeroship_auth::{
     identity::{password, totp},
     sessions::totp_challenge,
@@ -23,6 +24,20 @@ use zeroship_auth::{
 use zeroship_core::UserId;
 
 pub(super) const PASSWORD: &str = "second factor fixture password phrase";
+
+/// A per-case email so cases sharing the database never act on one another's
+/// user, session or factor rows.
+pub(super) fn email(label: &str) -> String {
+    format!("{label}-{}@example.test", Uuid::new_v4().simple())
+}
+
+/// A per-case forwarded client IP, keeping login rate-limit buckets scoped to
+/// the case that minted it.
+pub(super) fn fixture_ip() -> String {
+    let bytes = Uuid::new_v4();
+    let bytes = bytes.as_bytes();
+    format!("10.{}.{}.{}", bytes[0], bytes[1], bytes[2])
+}
 
 pub(super) async fn account(server: &AuthServer, email: &str) -> users::UserRow {
     let hash = password::hash(PASSWORD).await.unwrap();
@@ -102,6 +117,7 @@ pub(super) async fn post(
     server: &AuthServer,
     path: &str,
     cookies: &str,
+    ip: &str,
     fields: &[(&str, &str)],
 ) -> cyper::Response {
     let body = url::form_urlencoded::Serializer::new(String::new())
@@ -114,6 +130,8 @@ pub(super) async fn post(
         .header("content-type", "application/x-www-form-urlencoded")
         .unwrap()
         .header("cookie", cookies)
+        .unwrap()
+        .header("x-forwarded-for", ip)
         .unwrap()
         .body(body)
         .send()
@@ -136,10 +154,12 @@ pub(super) async fn password_login(
         .unwrap();
     assert_eq!(form.status().as_u16(), 200);
     let csrf = support::read_set_cookie(&form, "__Host-zsidp_csrf").unwrap();
+    let ip = fixture_ip();
     post(
         server,
         "/login",
         &format!("__Host-zsidp_csrf={csrf}"),
+        &ip,
         &[
             ("csrf", &csrf),
             ("email", &user.email),
@@ -154,6 +174,7 @@ pub(super) struct Challenge {
     pub cookies: CookieJar,
     pub csrf: String,
     pub return_to: String,
+    pub ip: String,
 }
 
 impl Challenge {
@@ -173,6 +194,7 @@ impl Challenge {
             cookies,
             csrf,
             return_to: return_to.into(),
+            ip: fixture_ip(),
         }
     }
 
@@ -190,6 +212,7 @@ impl Challenge {
             server,
             "/login/2fa",
             &self.cookies.header(),
+            &self.ip,
             &[
                 ("csrf", &self.csrf),
                 ("code", code),
@@ -221,11 +244,26 @@ pub(super) async fn assert_refused(response: cyper::Response, message: &str) {
     assert!(response.text().await.unwrap().contains(message));
 }
 
-pub(super) async fn assert_counts(server: &AuthServer, sessions: i64, identities: i64) {
-    let row = server.pg.query_one("SELECT (SELECT COUNT(*) FROM zeroship.idp_sessions), (SELECT COUNT(*) FROM zeroship.federated_identities)", &[]).await.unwrap();
+pub(super) async fn assert_counts(
+    server: &AuthServer,
+    user: &UserId,
+    sessions: i64,
+    identities: i64,
+) {
+    let row = server
+        .pg
+        .query_one(
+            "SELECT \
+                (SELECT COUNT(*) FROM zeroship.idp_sessions WHERE user_id = $1), \
+                (SELECT COUNT(*) FROM zeroship.federated_identities WHERE user_id = $1)",
+            &[&user.as_str()],
+        )
+        .await
+        .unwrap();
     assert_eq!(
         (row.get::<_, i64>(0), row.get::<_, i64>(1)),
-        (sessions, identities)
+        (sessions, identities),
+        "sessions and identities this case minted"
     );
 }
 

@@ -1,16 +1,23 @@
-//! Completion reservations and retry ownership in databases owned by each case.
+//! Completion reservations and retry ownership in the shared database.
 
 use crate::support::database::Database;
 use compio_postgres::{Client, GenericClient};
+use uuid::Uuid;
 use zeroship_auth::store::magic_completions::{self, ConsumeError};
 
-const NONCE: &str = "completion-nonce";
 const CODE: &str = "123456";
-const EMAIL: &str = "magic@example.test";
 const TARGET: &str = "completion-handoff";
 
-async fn create(client: &Client) {
-    magic_completions::create(client, NONCE, CODE, EMAIL, TARGET, 300)
+fn nonce() -> String {
+    format!("completion-{}", Uuid::new_v4().simple())
+}
+
+fn email() -> String {
+    format!("completion-{}@example.test", Uuid::new_v4().simple())
+}
+
+async fn create(client: &Client, nonce: &str, email: &str) {
+    magic_completions::create(client, nonce, CODE, email, TARGET, 300)
         .await
         .expect("create completion through the production store");
 }
@@ -26,12 +33,12 @@ struct State {
     clippy::future_not_send,
     reason = "the fixture remains on its owning runtime"
 )]
-async fn state(client: &(impl GenericClient + ?Sized)) -> State {
+async fn state(client: &(impl GenericClient + ?Sized), nonce: &str) -> State {
     let row = client
         .query_one(
             "SELECT attempts, consumed_pending_at, consumed_at IS NOT NULL AS consumed \
          FROM zeroship.magic_completions WHERE csrf_nonce = $1",
-            &[&NONCE],
+            &[&nonce],
         )
         .await
         .unwrap();
@@ -44,16 +51,18 @@ async fn state(client: &(impl GenericClient + ?Sized)) -> State {
 
 #[compio::test]
 async fn wrong_code_does_not_mutate_a_concurrent_reservation() {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let mut winner = database.connect_as_auth().await;
-        create(&winner).await;
+        let nonce = nonce();
+        let email = email();
+        create(&winner, &nonce, &email).await;
         let transaction = winner.transaction().await.unwrap();
-        let reserved = magic_completions::consume_pending(&transaction, NONCE, CODE)
+        let reserved = magic_completions::consume_pending(&transaction, &nonce, CODE)
             .await
             .unwrap();
-        assert_eq!(reserved.email, EMAIL);
+        assert_eq!(reserved.email, email);
         assert_eq!(reserved.target, TARGET);
-        let before = state(&transaction).await;
+        let before = state(&transaction, &nonce).await;
         assert_eq!(before.attempts, 1);
         assert_eq!(before.pending, Some(reserved.reserved_at));
         assert!(!before.consumed);
@@ -66,8 +75,9 @@ async fn wrong_code_does_not_mutate_a_concurrent_reservation() {
             .await
             .unwrap()
             .get(0);
+        let wrong_nonce = nonce.clone();
         let wrong = compio::runtime::spawn(async move {
-            magic_completions::consume_pending(&wrong_client, NONCE, "000000").await
+            magic_completions::consume_pending(&wrong_client, &wrong_nonce, "000000").await
         });
         let waiting = database.wait_until_blocked(&[pid]).await;
         transaction.commit().await.unwrap();
@@ -77,12 +87,12 @@ async fn wrong_code_does_not_mutate_a_concurrent_reservation() {
             "{outcome:?}"
         );
         assert_eq!(
-            state(&winner).await,
+            state(&winner, &nonce).await,
             before,
             "wrong code must not mutate the winning reservation"
         );
         assert!(
-            magic_completions::finalize_consume(&winner, NONCE, &reserved.reserved_at)
+            magic_completions::finalize_consume(&winner, &nonce, &reserved.reserved_at)
                 .await
                 .unwrap()
         );
@@ -96,48 +106,53 @@ async fn wrong_code_does_not_mutate_a_concurrent_reservation() {
 
 #[compio::test]
 async fn wrong_codes_exhaust_the_completion() {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let client = database.connect_as_auth().await;
-        create(&client).await;
+        let nonce = nonce();
+        let email = email();
+        create(&client, &nonce, &email).await;
         for attempt in 1..=5 {
-            let outcome = magic_completions::consume_pending(&client, NONCE, "000000").await;
+            let outcome = magic_completions::consume_pending(&client, &nonce, "000000").await;
             assert!(
                 matches!(outcome, Err(ConsumeError::WrongCode)),
                 "{outcome:?}"
             );
-            let state = state(&client).await;
+            let state = state(&client, &nonce).await;
             assert_eq!(state.attempts, attempt);
             assert_eq!(state.consumed, attempt == 5);
             assert!(state.pending.is_none());
         }
-        let outcome = magic_completions::consume_pending(&client, NONCE, CODE).await;
+        let outcome = magic_completions::consume_pending(&client, &nonce, CODE).await;
         assert!(
             matches!(outcome, Err(ConsumeError::WrongCode)),
             "{outcome:?}"
         );
-        assert_eq!(state(&client).await.attempts, 5);
+        assert_eq!(state(&client, &nonce).await.attempts, 5);
 
-        magic_completions::create(&client, "another-nonce", CODE, EMAIL, TARGET, 300)
+        let fresh_nonce = format!("{nonce}-fresh");
+        magic_completions::create(&client, &fresh_nonce, CODE, &email, TARGET, 300)
             .await
             .unwrap();
-        let fresh = magic_completions::consume_pending(&client, "another-nonce", CODE)
+        let fresh = magic_completions::consume_pending(&client, &fresh_nonce, CODE)
             .await
             .expect("another completion remains usable");
-        assert_eq!(fresh.email, EMAIL);
+        assert_eq!(fresh.email, email);
     })
     .await;
 }
 
 #[compio::test]
 async fn concurrent_correct_codes_reserve_once_without_wrong_attempts() {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let client = database.connect_as_auth().await;
-        create(&client).await;
+        let nonce = nonce();
+        let email = email();
+        create(&client, &nonce, &email).await;
         let mut locker = database.connect().await;
         let transaction = locker.transaction().await.unwrap();
         transaction.query_one(
             "SELECT csrf_nonce FROM zeroship.magic_completions WHERE csrf_nonce = $1 FOR UPDATE",
-            &[&NONCE],
+            &[&nonce],
         ).await.unwrap();
         let mut pids = Vec::new();
         let mut handles = Vec::new();
@@ -150,8 +165,9 @@ async fn concurrent_correct_codes_reserve_once_without_wrong_attempts() {
                     .unwrap()
                     .get(0),
             );
+            let contender_nonce = nonce.clone();
             handles.push(compio::runtime::spawn(async move {
-                magic_completions::consume_pending(&contender, NONCE, CODE).await
+                magic_completions::consume_pending(&contender, &contender_nonce, CODE).await
             }));
         }
         let waiting = database.wait_until_blocked(&pids).await;
@@ -169,7 +185,7 @@ async fn concurrent_correct_codes_reserve_once_without_wrong_attempts() {
         assert_eq!(accepted.len(), 1);
         assert_eq!(in_flight, pids.len() - accepted.len());
         assert_eq!(
-            state(&client).await,
+            state(&client, &nonce).await,
             State {
                 attempts: 1,
                 pending: Some(accepted[0].reserved_at),
@@ -177,11 +193,11 @@ async fn concurrent_correct_codes_reserve_once_without_wrong_attempts() {
             }
         );
         assert!(
-            magic_completions::finalize_consume(&client, NONCE, &accepted[0].reserved_at)
+            magic_completions::finalize_consume(&client, &nonce, &accepted[0].reserved_at)
                 .await
                 .unwrap()
         );
-        let replay = magic_completions::consume_pending(&client, NONCE, CODE).await;
+        let replay = magic_completions::consume_pending(&client, &nonce, CODE).await;
         assert!(matches!(replay, Err(ConsumeError::WrongCode)), "{replay:?}");
         assert!(waiting, "all contenders must overlap on the completion row");
     })
@@ -190,48 +206,52 @@ async fn concurrent_correct_codes_reserve_once_without_wrong_attempts() {
 
 #[compio::test]
 async fn stale_completion_owner_cannot_finalize_or_clear_a_newer_reservation() {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let client = database.connect_as_auth().await;
-        create(&client).await;
-        let first = magic_completions::consume_pending(&client, NONCE, CODE).await.unwrap();
+        let nonce = nonce();
+        let email = email();
+        create(&client, &nonce, &email).await;
+        let first = magic_completions::consume_pending(&client, &nonce, CODE).await.unwrap();
         database.connect().await.execute(
             "UPDATE zeroship.magic_completions SET consumed_pending_at = NOW() - INTERVAL '61 seconds' \
-             WHERE csrf_nonce = $1", &[&NONCE],
+             WHERE csrf_nonce = $1", &[&nonce],
         ).await.unwrap();
-        let current = magic_completions::consume_pending(&client, NONCE, CODE).await.unwrap();
+        let current = magic_completions::consume_pending(&client, &nonce, CODE).await.unwrap();
         assert_ne!(first.reserved_at, current.reserved_at);
-        let before = state(&client).await;
-        assert!(!magic_completions::finalize_consume(&client, NONCE, &first.reserved_at)
+        let before = state(&client, &nonce).await;
+        assert!(!magic_completions::finalize_consume(&client, &nonce, &first.reserved_at)
             .await.unwrap());
-        assert!(!magic_completions::clear_consume_pending(&client, NONCE, Some(&first.reserved_at))
+        assert!(!magic_completions::clear_consume_pending(&client, &nonce, Some(&first.reserved_at))
             .await.unwrap());
-        assert_eq!(state(&client).await, before);
+        assert_eq!(state(&client, &nonce).await, before);
 
-        assert!(magic_completions::clear_consume_pending(&client, NONCE, Some(&current.reserved_at))
+        assert!(magic_completions::clear_consume_pending(&client, &nonce, Some(&current.reserved_at))
             .await.unwrap(), "the current owner can release its reservation");
-        let retried = magic_completions::consume_pending(&client, NONCE, CODE).await.unwrap();
+        let retried = magic_completions::consume_pending(&client, &nonce, CODE).await.unwrap();
         assert_ne!(current.reserved_at, retried.reserved_at);
-        assert!(!magic_completions::finalize_consume(&client, NONCE, &current.reserved_at)
+        assert!(!magic_completions::finalize_consume(&client, &nonce, &current.reserved_at)
             .await.unwrap());
-        assert!(magic_completions::finalize_consume(&client, NONCE, &retried.reserved_at)
+        assert!(magic_completions::finalize_consume(&client, &nonce, &retried.reserved_at)
             .await.unwrap(), "the retried owner can finalize");
     }).await;
 }
 
 #[compio::test]
 async fn expired_completion_cannot_be_reserved() {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let client = database.connect_as_auth().await;
-        magic_completions::create(&client, NONCE, CODE, EMAIL, TARGET, -1)
+        let nonce = nonce();
+        let email = email();
+        magic_completions::create(&client, &nonce, CODE, &email, TARGET, -1)
             .await
             .unwrap();
-        let before = state(&client).await;
-        let outcome = magic_completions::consume_pending(&client, NONCE, CODE).await;
+        let before = state(&client, &nonce).await;
+        let outcome = magic_completions::consume_pending(&client, &nonce, CODE).await;
         assert!(
             matches!(outcome, Err(ConsumeError::WrongCode)),
             "{outcome:?}"
         );
-        assert_eq!(state(&client).await, before);
+        assert_eq!(state(&client, &nonce).await, before);
     })
     .await;
 }

@@ -380,6 +380,7 @@ fn assert_platform_principal_token(fx: &Fixture, access_token: &str, scope: &str
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn the_cli_registration_permits_refresh_and_registers_offline_access() {
+    // Platform-global: reconciles the singleton first-party platform CLI registration.
     Database::run_fresh(async |database| {
         let fx = Fixture::boot(database).await;
         let row = fx
@@ -435,6 +436,7 @@ async fn the_cli_registration_permits_refresh_and_registers_offline_access() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn the_cli_can_log_in_with_its_whole_registration_and_nothing_wider() {
+    // Platform-global: reconciles the singleton first-party platform CLI registration.
     Database::run_fresh(async |database| {
         let fx = Fixture::boot(database).await;
         let registered: Vec<String> = fx
@@ -483,6 +485,7 @@ async fn the_cli_can_log_in_with_its_whole_registration_and_nothing_wider() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn the_cli_device_grant_returns_a_short_access_token_and_a_refresh_token() {
+    // Platform-global: reconciles the singleton first-party platform CLI registration.
     Database::run_fresh(async |database| {
         let fx = Fixture::boot(database).await;
         let (token, device_code) = fx.login().await;
@@ -527,6 +530,7 @@ async fn the_cli_device_grant_returns_a_short_access_token_and_a_refresh_token()
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn the_refresh_family_and_its_replay_window_are_bounded() {
+    // Platform-global: reconciles the singleton first-party platform CLI registration.
     Database::run_fresh(async |database| {
         let fx = Fixture::boot(database).await;
         let (token, _device_code) = fx.login().await;
@@ -598,6 +602,7 @@ async fn the_refresh_family_and_its_replay_window_are_bounded() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn the_cli_device_grant_caps_scope_to_the_client_registration_only() {
+    // Platform-global: reconciles the singleton first-party platform CLI registration.
     Database::run_fresh(async |database| {
         let fx = Fixture::boot(database).await;
         let rows = fx
@@ -627,6 +632,7 @@ async fn the_cli_device_grant_caps_scope_to_the_client_registration_only() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn a_cli_refresh_rotation_keeps_the_platform_principal_token_shape() {
+    // Platform-global: reconciles the singleton first-party platform CLI registration.
     Database::run_fresh(async |database| {
         let fx = Fixture::boot(database).await;
         let (token, _device_code) = fx.login().await;
@@ -660,6 +666,7 @@ async fn a_cli_refresh_rotation_keeps_the_platform_principal_token_shape() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn reusing_a_rotated_cli_refresh_token_kills_the_family_and_recalls_the_access_token() {
+    // Platform-global: reconciles the singleton first-party platform CLI registration.
     Database::run_fresh(async |database| {
         let fx = Fixture::boot(database).await;
         let (token, _device_code) = fx.login().await;

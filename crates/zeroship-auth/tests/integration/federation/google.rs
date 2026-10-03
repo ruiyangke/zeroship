@@ -1,7 +1,7 @@
 #![allow(clippy::future_not_send)]
 
 use super::{
-    fixtures::{Fixture, confirm_password},
+    fixtures::{Fixture, confirm_password, email},
     provider::{Provider, Request, TokenIssue, User},
 };
 use crate::support::database::Database;
@@ -9,11 +9,11 @@ use zeroship_auth::{identity::password, store::users};
 
 #[ntex::test]
 async fn existing_password_account_requires_confirmation_before_identity_and_session() {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let fixture = Fixture::new(
             database,
             Provider::Google,
-            User::google("creator@gmail.com"),
+            User::google(&email("creator", "gmail.com")),
         )
         .await;
         let password = "federation confirmation password phrase";
@@ -43,11 +43,11 @@ async fn existing_password_account_requires_confirmation_before_identity_and_ses
 
 #[ntex::test]
 async fn verified_gmail_creates_a_session_and_redeemed_code_cannot_replay() {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let fixture = Fixture::new(
             database,
             Provider::Google,
-            User::google("creator@gmail.com"),
+            User::google(&email("creator", "gmail.com")),
         )
         .await;
         let attempt = fixture.begin().await;
@@ -71,11 +71,11 @@ async fn verified_gmail_creates_a_session_and_redeemed_code_cannot_replay() {
 
 #[ntex::test]
 async fn external_email_requires_verified_workspace_authority() {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let fixture = Fixture::new(
             database,
             Provider::Google,
-            User::google("creator@example.test"),
+            User::google(&email("creator", "example.test")),
         )
         .await;
         let attempt = fixture.begin().await;
@@ -109,11 +109,11 @@ async fn external_email_requires_verified_workspace_authority() {
 }
 
 async fn invalid_token_cannot_persist_a_login(issue: TokenIssue) {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let fixture = Fixture::new(
             database,
             Provider::Google,
-            User::google("creator@gmail.com"),
+            User::google(&email("creator", "gmail.com")),
         )
         .await;
         fixture.provider.set_token_issue(issue);

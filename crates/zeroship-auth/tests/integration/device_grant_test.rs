@@ -226,6 +226,7 @@ async fn get_device_with_user_code_from_ip(
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn device_route_renders_and_rejects_bad_input() {
+    // Platform-global: the custom issuer key is published to the shared signing-key registry.
     Database::run_fresh(async |database| {
         let server = boot_native(database).await;
         let auth_base = server.auth_base.as_str();
@@ -313,6 +314,7 @@ async fn device_route_renders_and_rejects_bad_input() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn device_authorization_user_code_uses_high_entropy_format() {
+    // Platform-global: the custom issuer key is published to the shared signing-key registry.
     Database::run_fresh(async |database| {
         let server = boot_native(database).await;
         let auth_base = server.auth_base.as_str();
@@ -333,6 +335,7 @@ async fn device_authorization_user_code_uses_high_entropy_format() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn device_post_rate_limits_failed_user_code_guesses_but_allows_correct_code() {
+    // Platform-global: the custom issuer key is published to the shared signing-key registry.
     Database::run_fresh(async |database| {
         let server = boot_native(database).await;
         let auth_base = server.auth_base.as_str();
@@ -452,6 +455,7 @@ async fn device_post_rate_limits_failed_user_code_guesses_but_allows_correct_cod
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn device_get_rate_limits_failed_complete_uri_guesses_by_ip() {
+    // Platform-global: the custom issuer key is published to the shared signing-key registry.
     Database::run_fresh(async |database| {
         let server = boot_native(database).await;
         let auth_base = server.auth_base.as_str();
@@ -523,6 +527,7 @@ async fn device_get_rate_limits_failed_complete_uri_guesses_by_ip() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn device_post_anonymous_failed_user_code_guesses_drain_ip_backstop() {
+    // Platform-global: the custom issuer key is published to the shared signing-key registry.
     Database::run_fresh(async |database| {
         let server = boot_native(database).await;
         let auth_base = server.auth_base.as_str();
@@ -596,6 +601,7 @@ async fn device_post_anonymous_failed_user_code_guesses_drain_ip_backstop() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn device_authorization_omitted_scope_defaults_to_openid_only() {
+    // Platform-global: the custom issuer key is published to the shared signing-key registry.
     Database::run_fresh(async |database| {
         let server = boot_native(database).await;
         let auth_base = server.auth_base.as_str();
@@ -632,6 +638,7 @@ async fn device_authorization_omitted_scope_defaults_to_openid_only() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn native_device_confirmation_shows_client_scopes_and_requires_confirm() {
+    // Platform-global: the custom issuer key is published to the shared signing-key registry.
     Database::run_fresh(async |database| {
         let server = boot_native(database).await;
         let auth_base = server.auth_base.as_str();
@@ -750,6 +757,7 @@ async fn native_device_confirmation_shows_client_scopes_and_requires_confirm() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn native_device_grant_approves_via_auth_session_and_polls_op_token() {
+    // Platform-global: the custom issuer key is published to the shared signing-key registry.
     Database::run_fresh(async |database| {
         let server = boot_native(database).await;
         let auth_base = server.auth_base.as_str();
@@ -931,6 +939,7 @@ async fn native_device_grant_approves_via_auth_session_and_polls_op_token() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn credential_bump_rejects_approved_device_code_after_deletion_is_cancelled() {
+    // Platform-global: the custom issuer key is published to the shared signing-key registry.
     Database::run_fresh(async |database| {
         let server = boot_native(database).await;
         let auth_base = server.auth_base.as_str();
@@ -1016,6 +1025,7 @@ async fn credential_bump_rejects_approved_device_code_after_deletion_is_cancelle
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn device_user_code_redirects_anonymous_browser_to_login() {
+    // Platform-global: the custom issuer key is published to the shared signing-key registry.
     Database::run_fresh(async |database| {
         let server = boot_native(database).await;
         let auth_base = server.auth_base.as_str();
@@ -1142,6 +1152,7 @@ async fn device_user_code_redirects_anonymous_browser_to_login() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn device_post_requires_csrf_token() {
+    // Platform-global: the custom issuer key is published to the shared signing-key registry.
     Database::run_fresh(async |database| {
         let server = boot_native(database).await;
         let auth_base = server.auth_base.as_str();

@@ -124,6 +124,7 @@ impl Fixture {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn confidential_client_code_exchange_without_client_auth_is_rejected() {
+    // Platform-global: the custom issuer key is published to the shared signing-key registry.
     Database::run_fresh(async |database| {
         let fx = Fixture::boot(database, ClientKind::ConfidentialNonBrokered).await;
         let verifier = pkce_verifier();
@@ -150,6 +151,7 @@ async fn confidential_client_code_exchange_without_client_auth_is_rejected() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn confidential_client_code_exchange_with_basic_credentials_succeeds() {
+    // Platform-global: the custom issuer key is published to the shared signing-key registry.
     Database::run_fresh(async |database| {
         let fx = Fixture::boot(database, ClientKind::ConfidentialNonBrokered).await;
         let verifier = pkce_verifier();
@@ -182,6 +184,7 @@ async fn confidential_client_code_exchange_with_basic_credentials_succeeds() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn confidential_client_bad_secret_is_401_with_www_authenticate() {
+    // Platform-global: the custom issuer key is published to the shared signing-key registry.
     Database::run_fresh(async |database| {
         let fx = Fixture::boot(database, ClientKind::ConfidentialNonBrokered).await;
         let verifier = pkce_verifier();
@@ -212,6 +215,7 @@ async fn confidential_client_bad_secret_is_401_with_www_authenticate() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn public_client_code_exchange_without_client_auth_succeeds() {
+    // Platform-global: the custom issuer key is published to the shared signing-key registry.
     Database::run_fresh(async |database| {
         let fx = Fixture::boot(database, ClientKind::Public).await;
         let verifier = pkce_verifier();
@@ -237,6 +241,7 @@ async fn public_client_code_exchange_without_client_auth_succeeds() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn brokered_client_still_authenticates_by_broker_secret() {
+    // Platform-global: the custom issuer key is published to the shared signing-key registry.
     Database::run_fresh(async |database| {
         let fx = Fixture::boot(database, ClientKind::Brokered).await;
 

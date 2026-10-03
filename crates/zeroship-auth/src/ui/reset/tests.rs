@@ -9,7 +9,19 @@ use std::rc::Rc;
 
 const NEW_PASSWORD: &str = "brand new reset password phrase";
 const OLD_PASSWORD: &str = "old reset password phrase";
-const CLIENT_IP: &str = "192.0.2.1";
+
+/// A per-case email so cases sharing the database never share reset tokens.
+fn reset_email(label: &str) -> String {
+    format!("{label}-{}@example.test", uuid::Uuid::new_v4().simple())
+}
+
+/// A per-case forwarded client IP, keeping reset rate-limit buckets scoped to
+/// the case that minted it.
+fn reset_ip() -> String {
+    let bytes = uuid::Uuid::new_v4();
+    let bytes = bytes.as_bytes();
+    format!("10.{}.{}.{}", bytes[0], bytes[1], bytes[2])
+}
 
 #[allow(
     clippy::future_not_send,
@@ -88,15 +100,16 @@ async fn stored_password(pg: &compio_postgres::Client, id: &zeroship_core::UserI
 
 #[ntex::test]
 async fn dead_tokens_never_reach_hashing() {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let pg = Arc::new(database.connect_as_auth().await);
         let orm = database.orm().await;
         let calls = Rc::new(Cell::new(0_usize));
         let (app, csrf) = reset_service!(pg.clone(), calls.clone(), observed_post);
-        let email = "reset@example.test";
-        users::create(&orm, email, "Reset", None).await.unwrap();
+        let email = reset_email("reset-dead");
+        users::create(&orm, &email, "Reset", None).await.unwrap();
+        let client_ip = reset_ip();
         let mut tokens = vec!["never-issued-token".to_owned()];
-        let expired = password_reset::issue(&pg, email).await.unwrap();
+        let expired = password_reset::issue(&pg, &email).await.unwrap();
         pg.execute(
             "UPDATE zeroship.magic_links SET expires_at = NOW() - INTERVAL '1 hour' \
              WHERE email = $1::citext AND purpose = 'reset'",
@@ -110,20 +123,20 @@ async fn dead_tokens_never_reach_hashing() {
         // the expired row and hide whether expiry itself is enforced.
         for token in tokens {
             let response =
-                test::call_service(&app, request(&csrf, &token, CLIENT_IP).to_request()).await;
+                test::call_service(&app, request(&csrf, &token, &client_ip).to_request()).await;
             assert_eq!(response.status(), StatusCode::OK);
             let body = test::read_body(response).await;
             assert!(String::from_utf8_lossy(&body).contains("reset link invalid or expired"));
             assert_eq!(calls.get(), 0, "dead tokens must not reach hashing");
         }
 
-        let consumed = password_reset::issue(&pg, email).await.unwrap();
+        let consumed = password_reset::issue(&pg, &email).await.unwrap();
         assert!(password_reset::redeem(&pg, &consumed.raw)
             .await
             .unwrap()
             .is_some());
         let response =
-            test::call_service(&app, request(&csrf, &consumed.raw, CLIENT_IP).to_request()).await;
+            test::call_service(&app, request(&csrf, &consumed.raw, &client_ip).to_request()).await;
         assert_eq!(response.status(), StatusCode::OK);
         let body = test::read_body(response).await;
         assert!(String::from_utf8_lossy(&body).contains("reset link invalid or expired"));
@@ -134,17 +147,19 @@ async fn dead_tokens_never_reach_hashing() {
 
 #[ntex::test]
 async fn accepted_request_reaches_the_observed_hasher() {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let pg = Arc::new(database.connect_as_auth().await);
         let orm = database.orm().await;
-        let user = users::create(&orm, "reset@example.test", "Reset", None)
+        let email = reset_email("reset-accepted");
+        let user = users::create(&orm, &email, "Reset", None)
             .await
             .unwrap();
         let token = password_reset::issue(&pg, &user.email).await.unwrap();
         let calls = Rc::new(Cell::new(0_usize));
         let (app, csrf) = reset_service!(pg.clone(), calls.clone(), observed_post);
+        let client_ip = reset_ip();
         let response =
-            test::call_service(&app, request(&csrf, &token.raw, CLIENT_IP).to_request()).await;
+            test::call_service(&app, request(&csrf, &token.raw, &client_ip).to_request()).await;
         assert_eq!(response.status(), StatusCode::FOUND);
         assert_eq!(response.headers().get(LOCATION).unwrap(), "/login");
         assert_eq!(calls.get(), 1, "the observer must see accepted hashing");
@@ -160,17 +175,19 @@ async fn accepted_request_reaches_the_observed_hasher() {
 
 #[ntex::test]
 async fn production_route_updates_the_credential_and_consumes_the_token() {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let pg = Arc::new(database.connect_as_auth().await);
         let orm = database.orm().await;
         let old_hash = hash_password(OLD_PASSWORD.to_owned()).await.unwrap();
-        let user = users::create(&orm, "reset@example.test", "Reset", Some(&old_hash))
+        let email = reset_email("reset-prod");
+        let user = users::create(&orm, &email, "Reset", Some(&old_hash))
             .await
             .unwrap();
         let token = password_reset::issue(&pg, &user.email).await.unwrap();
         let (app, csrf) = reset_service!(pg.clone(), (), post);
+        let client_ip = reset_ip();
         let response =
-            test::call_service(&app, request(&csrf, &token.raw, CLIENT_IP).to_request()).await;
+            test::call_service(&app, request(&csrf, &token.raw, &client_ip).to_request()).await;
         assert_eq!(response.status(), StatusCode::FOUND);
         assert_eq!(response.headers().get(LOCATION).unwrap(), "/login");
         let stored = stored_password(&pg, &user.id).await;
@@ -183,13 +200,16 @@ async fn production_route_updates_the_credential_and_consumes_the_token() {
 
 #[ntex::test]
 async fn exhausted_ip_is_rejected_before_hashing_a_live_token() {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let pg = Arc::new(database.connect_as_auth().await);
         let orm = database.orm().await;
-        let user = users::create(&orm, "reset@example.test", "Reset", None)
+        let email = reset_email("reset-exhausted");
+        let user = users::create(&orm, &email, "Reset", None)
             .await
             .unwrap();
         let token = password_reset::issue(&pg, &user.email).await.unwrap();
+        let client_ip = reset_ip();
+        let other_ip = reset_ip();
         // A future refill timestamp makes exhaustion independent of how long
         // the test runner takes to dispatch the request.
         database
@@ -198,14 +218,14 @@ async fn exhausted_ip_is_rejected_before_hashing_a_live_token() {
             .execute(
                 "INSERT INTO zeroship.rate_limits (bucket_key, tokens, updated_at) \
              VALUES ($1, 0, NOW() + INTERVAL '1 day')",
-                &[&format!("reset_ip:{CLIENT_IP}")],
+                &[&format!("reset_ip:{client_ip}")],
             )
             .await
             .unwrap();
         let calls = Rc::new(Cell::new(0_usize));
         let (app, csrf) = reset_service!(pg.clone(), calls.clone(), observed_post);
         let response =
-            test::call_service(&app, request(&csrf, &token.raw, CLIENT_IP).to_request()).await;
+            test::call_service(&app, request(&csrf, &token.raw, &client_ip).to_request()).await;
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
         let body = test::read_body(response).await;
         assert!(String::from_utf8_lossy(&body).contains("too many attempts"));
@@ -213,7 +233,7 @@ async fn exhausted_ip_is_rejected_before_hashing_a_live_token() {
         assert!(password_reset::is_live(&pg, &token.raw).await.unwrap());
 
         let response =
-            test::call_service(&app, request(&csrf, &token.raw, "192.0.2.2").to_request()).await;
+            test::call_service(&app, request(&csrf, &token.raw, &other_ip).to_request()).await;
         assert_eq!(response.status(), StatusCode::FOUND);
         assert_eq!(calls.get(), 1, "a different IP has an independent budget");
         assert!(

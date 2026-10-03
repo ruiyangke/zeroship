@@ -58,11 +58,15 @@ pub(super) struct User {
 }
 
 impl User {
+    /// A Google profile whose subject is unique to the case that mints it, so
+    /// two cases never contend for the same `(provider, subject)` identity row.
     pub fn google(email: &str) -> Self {
-        Self::new("google-subject", email)
+        Self::new(&format!("google-{}", uuid::Uuid::new_v4().simple()), email)
     }
+    /// A GitHub profile with a unique numeric subject, as the provider API
+    /// requires, so two cases never contend for the same identity row.
     pub fn github(email: &str) -> Self {
-        Self::new("123456789", email)
+        Self::new(&github_subject(), email)
     }
     fn new(subject: &str, email: &str) -> Self {
         Self {
@@ -197,6 +201,14 @@ fn validate_user(kind: Provider, user: &User) {
             .parse::<i64>()
             .expect("GitHub fixtures require a numeric subject");
     }
+}
+
+/// A non-negative numeric GitHub subject mints from a fresh UUID, keeping the
+/// value inside `i64` while never repeating across cases.
+fn github_subject() -> String {
+    let uuid = uuid::Uuid::new_v4();
+    let bytes: [u8; 8] = uuid.as_bytes()[..8].try_into().unwrap();
+    (u64::from_be_bytes(bytes) >> 1).to_string()
 }
 
 fn signing_key(label: &str) -> SigningKey {

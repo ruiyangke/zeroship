@@ -1,17 +1,19 @@
-//! Email verification through the production router in an owned database.
+//! Email verification through the production router in the shared database.
 
 mod fixtures;
 
 use crate::support::{self, auth_server::AuthServer, database::Database};
-use fixtures::{assert_failure_audit, assert_state, assert_success, issue, landing, redeem};
+use fixtures::{
+    assert_failure_audit, assert_state, assert_success, email, issue, landing, redeem,
+};
 
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn landing_preserves_the_token_and_post_verifies_only_its_user_once() {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let server = AuthServer::start(database).await;
-        let (user_id, token) = issue(&server.pg, &server.orm, "verify@example.test").await;
-        let (other_id, other_token) = issue(&server.pg, &server.orm, "other@example.test").await;
+        let (user_id, token) = issue(&server.pg, &server.orm, &email("verify")).await;
+        let (other_id, other_token) = issue(&server.pg, &server.orm, &email("other")).await;
         let csrf = landing(&server, &token).await;
         let cookie = format!("__Host-zsidp_csrf={csrf}");
         assert_state(&server.pg, &user_id, false).await;
@@ -53,9 +55,9 @@ async fn landing_preserves_the_token_and_post_verifies_only_its_user_once() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn missing_or_mismatched_csrf_preserves_the_token_for_a_valid_submission() {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let server = AuthServer::start(database).await;
-        let (user_id, token) = issue(&server.pg, &server.orm, "csrf@example.test").await;
+        let (user_id, token) = issue(&server.pg, &server.orm, &email("csrf")).await;
         let csrf = landing(&server, &token).await;
         for cookie in [None, Some("__Host-zsidp_csrf=wrong")] {
             let response = redeem(&server, &token, &csrf, cookie, "bad-csrf").await;
@@ -73,9 +75,9 @@ async fn missing_or_mismatched_csrf_preserves_the_token_for_a_valid_submission()
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn an_unknown_token_is_audited_without_consuming_an_existing_verification() {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let server = AuthServer::start(database).await;
-        let (user_id, token) = issue(&server.pg, &server.orm, "unknown-token@example.test").await;
+        let (user_id, token) = issue(&server.pg, &server.orm, &email("unknown-token")).await;
         let csrf = landing(&server, "never-issued").await;
         let cookie = format!("__Host-zsidp_csrf={csrf}");
         let response = redeem(

@@ -58,6 +58,7 @@ async fn assert_tamper_protection(client: &Client, event_id: i64) {
 
 #[compio::test]
 async fn retention_applies_each_event_class_window() {
+    // Platform-global: the retention sweep deletes every expired audit row.
     Database::run_fresh(async |database| {
         let client = database.connect_as_auth().await;
         let mut expected = Vec::new();
@@ -87,6 +88,7 @@ async fn retention_applies_each_event_class_window() {
 
 #[compio::test]
 async fn retention_preserves_theft_alerts_and_unclassified_events() {
+    // Platform-global: the retention sweep deletes every expired audit row.
     Database::run_fresh(async |database| {
         let mut client = database.connect_as_auth().await;
         let theft_alert = seed_event(&client, "refresh_reuse_detected", 2_000).await;
@@ -104,6 +106,7 @@ async fn retention_preserves_theft_alerts_and_unclassified_events() {
 
 #[compio::test]
 async fn sweep_restores_tamper_protection_after_commit() {
+    // Platform-global: the retention sweep deletes every expired audit row.
     Database::run_fresh(async |database| {
         let mut client = database.connect_as_auth().await;
         seed_event(&client, "login_success", 366).await;
@@ -121,6 +124,7 @@ async fn sweep_restores_tamper_protection_after_commit() {
 
 #[compio::test]
 async fn failed_sweep_rolls_back_deletes_and_restores_tamper_protection() {
+    // Platform-global: the retention sweep deletes every expired audit row.
     Database::run_fresh(async |database| {
         let admin = database.connect().await;
         let mut client = database.connect_as_auth().await;

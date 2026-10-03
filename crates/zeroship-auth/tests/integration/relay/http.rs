@@ -10,12 +10,14 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
 };
+use uuid::Uuid;
 use zeroship_mailer::{Email, MailerError, MessageId};
 
 pub struct RelayServer {
     pub auth: AuthServer,
     pub alias: Alias,
     pub mailer: Arc<DeliveryMailbox>,
+    message_prefix: String,
     _credentials: tempfile::NamedTempFile,
 }
 
@@ -43,6 +45,7 @@ impl RelayServer {
             auth,
             alias,
             mailer,
+            message_prefix: format!("relay-{}", Uuid::new_v4().simple()),
             _credentials: credentials,
         }
     }
@@ -55,13 +58,22 @@ impl RelayServer {
             "Subject": "Your receipt",
             "TextBody": "Order received.",
             "HtmlBody": "<p>Order received.</p>",
-            "MessageID": message_id,
+            "MessageID": format!("{}-{message_id}", self.message_prefix),
             "Headers": [
                 { "Name": "Authentication-Results", "Value": "mx.example.test; dmarc=pass" },
                 { "Name": "X-Spam-Status", "Value": "No" },
                 { "Name": "X-Private-Sender-Header", "Value": "discard this" }
             ]
         })
+    }
+
+    /// This case's two inbound rate-limit buckets: the per-alias and per-app
+    /// keys the relay handler derives from the minted alias and client id.
+    pub fn bucket_keys(&self) -> Vec<String> {
+        vec![
+            format!("relay:alias:{}", self.alias.email),
+            format!("relay:app:{}", self.alias.client_id),
+        ]
     }
 
     pub async fn post(&self, message: &Value) -> cyper::Response {
@@ -99,8 +111,9 @@ impl RelayServer {
 
     pub async fn audit_outcomes(&self, event_type: &str) -> Vec<String> {
         self.auth.pg.query(
-            "SELECT outcome FROM zeroship.audit_events WHERE event_type = $1 ORDER BY occurred_at, id",
-            &[&event_type],
+            "SELECT outcome FROM zeroship.audit_events \
+             WHERE event_type = $1 AND client_id = $2 ORDER BY occurred_at, id",
+            &[&event_type, &self.alias.client_id],
         ).await.unwrap().iter().map(|row| row.get(0)).collect()
     }
 }

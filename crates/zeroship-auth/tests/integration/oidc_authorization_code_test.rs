@@ -115,6 +115,7 @@ impl Fixture {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn authorize_token_happy_path_mints_pairwise_access_and_nonce_at_hash_id_token() {
+    // Platform-global: the custom issuer key is published to the shared signing-key registry.
     Database::run_fresh(async |database| {
         let fx = Fixture::boot(database).await;
         let verifier = pkce_verifier();
@@ -183,6 +184,7 @@ async fn authorize_token_happy_path_mints_pairwise_access_and_nonce_at_hash_id_t
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn id_token_includes_email_and_profile_claims_when_scopes_granted() {
+    // Platform-global: the custom issuer key is published to the shared signing-key registry.
     Database::run_fresh(async |database| {
         let fx = Fixture::boot(database).await;
         let verifier = pkce_verifier();
@@ -233,6 +235,7 @@ async fn id_token_includes_email_and_profile_claims_when_scopes_granted() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn id_token_omits_identity_claims_without_email_and_profile_scopes() {
+    // Platform-global: the custom issuer key is published to the shared signing-key registry.
     Database::run_fresh(async |database| {
         let fx = Fixture::boot(database).await;
         let verifier = pkce_verifier();
@@ -266,6 +269,7 @@ async fn id_token_omits_identity_claims_without_email_and_profile_scopes() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn id_token_email_verified_false_for_unverified_user() {
+    // Platform-global: the custom issuer key is published to the shared signing-key registry.
     Database::run_fresh(async |database| {
         let fx = Fixture::boot_with_email_verified(database, false).await;
         let verifier = pkce_verifier();
@@ -304,6 +308,7 @@ async fn id_token_email_verified_false_for_unverified_user() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn pkce_negatives_missing_plain_and_wrong_verifier_are_rejected() {
+    // Platform-global: the custom issuer key is published to the shared signing-key registry.
     Database::run_fresh(async |database| {
         let fx = Fixture::boot(database).await;
         let verifier = pkce_verifier();
@@ -336,6 +341,7 @@ async fn pkce_negatives_missing_plain_and_wrong_verifier_are_rejected() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn interactive_authorize_errors_after_redirect_validation_redirect_to_rp_with_iss() {
+    // Platform-global: the custom issuer key is published to the shared signing-key registry.
     Database::run_fresh(async |database| {
         let fx = Fixture::boot(database).await;
         let verifier = pkce_verifier();
@@ -358,6 +364,7 @@ async fn interactive_authorize_errors_after_redirect_validation_redirect_to_rp_w
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn redirect_uri_must_exact_match_registered_value() {
+    // Platform-global: the custom issuer key is published to the shared signing-key registry.
     Database::run_fresh(async |database| {
         let fx = Fixture::boot(database).await;
         let verifier = pkce_verifier();
@@ -385,6 +392,7 @@ async fn redirect_uri_must_exact_match_registered_value() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn expired_authorization_code_is_rejected() {
+    // Platform-global: the custom issuer key is published to the shared signing-key registry.
     Database::run_fresh(async |database| {
         let fx = Fixture::boot(database).await;
         let verifier = pkce_verifier();
@@ -407,6 +415,7 @@ async fn expired_authorization_code_is_rejected() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn credential_bump_rejects_code_after_deletion_is_cancelled() {
+    // Platform-global: the custom issuer key is published to the shared signing-key registry.
     Database::run_fresh(async |database| {
         let fx = Fixture::boot(database).await;
         let verifier = pkce_verifier();

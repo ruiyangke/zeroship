@@ -9,10 +9,11 @@ use zeroship_core::UserId;
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn disabled_account_cannot_redeem_but_the_link_survives_for_an_eligible_retry() {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let mailer = Arc::new(CapturingMailer::default());
         let server = AuthServer::with_mailer(database, mailer.clone()).await;
-        let user = users::create(&server.orm, "disabled@example.test", "Disabled", None)
+        let email = email("disabled", "example.test");
+        let user = users::create(&server.orm, &email, "Disabled", None)
             .await
             .unwrap();
         let login = RequestedLogin::start(&server, &mailer, &user.email).await;
@@ -22,13 +23,17 @@ async fn disabled_account_cannot_redeem_but_the_link_survives_for_an_eligible_re
         assert_disabled_refusal(
             &server,
             &user.id,
+            &user.email,
             login.redeem(&server, &login.nonce, Some(&cookie)).await,
         )
         .await;
         assert_link_state(&server, &login.nonce, false).await;
         let completions: i64 = server
             .pg
-            .query_one("SELECT COUNT(*) FROM zeroship.magic_completions", &[])
+            .query_one(
+                "SELECT COUNT(*) FROM zeroship.magic_completions WHERE email = $1::citext",
+                &[&user.email],
+            )
             .await
             .unwrap()
             .get(0);
@@ -45,10 +50,11 @@ async fn disabled_account_cannot_redeem_but_the_link_survives_for_an_eligible_re
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn disabled_account_cannot_complete_but_the_code_survives_for_an_eligible_retry() {
-    Database::run_fresh(async |database| {
+    Database::run(async |database| {
         let mailer = Arc::new(CapturingMailer::default());
         let server = AuthServer::with_mailer(database, mailer.clone()).await;
-        let user = users::create(&server.orm, "disabled@example.test", "Disabled", None)
+        let email = email("disabled", "example.test");
+        let user = users::create(&server.orm, &email, "Disabled", None)
             .await
             .unwrap();
         let login = RequestedLogin::start(&server, &mailer, &user.email).await;
@@ -73,6 +79,7 @@ async fn disabled_account_cannot_complete_but_the_code_survives_for_an_eligible_
         assert_disabled_refusal(
             &server,
             &user.id,
+            &user.email,
             login.complete(&server, &code, &login.return_to).await,
         )
         .await;
@@ -95,7 +102,12 @@ async fn set_disabled(database: &Database, id: &UserId, disabled: bool) {
 }
 
 #[allow(clippy::future_not_send)]
-async fn assert_disabled_refusal(server: &AuthServer, id: &UserId, response: cyper::Response) {
+async fn assert_disabled_refusal(
+    server: &AuthServer,
+    id: &UserId,
+    email: &str,
+    response: cyper::Response,
+) {
     assert_eq!(response.status().as_u16(), 200);
     assert!(support::read_set_cookie(&response, "__Host-zsidp_session").is_none());
     assert!(
@@ -105,7 +117,7 @@ async fn assert_disabled_refusal(server: &AuthServer, id: &UserId, response: cyp
             .unwrap()
             .contains("account temporarily locked")
     );
-    assert_eq!(session_count(server).await, 0);
+    assert_eq!(session_count(server, email).await, 0);
     let disabled: bool = server
         .pg
         .query_one(

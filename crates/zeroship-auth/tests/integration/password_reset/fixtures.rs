@@ -14,6 +14,20 @@ use zeroship_core::AppId;
 pub(super) const OLD_PASSWORD: &str = "old reset password phrase";
 pub(super) const NEW_PASSWORD: &str = "new reset password phrase";
 
+/// A per-case email so cases sharing the database never act on one another's
+/// user, session or reset rows.
+pub(super) fn email(label: &str) -> String {
+    format!("{label}-{}@example.test", Uuid::new_v4().simple())
+}
+
+/// A per-case forwarded client IP, keeping reset rate-limit buckets scoped to
+/// the case that minted it.
+pub(super) fn fixture_ip() -> String {
+    let bytes = Uuid::new_v4();
+    let bytes = bytes.as_bytes();
+    format!("10.{}.{}.{}", bytes[0], bytes[1], bytes[2])
+}
+
 pub(super) struct App {
     pub id: AppId,
     pub client_id: String,
@@ -217,7 +231,7 @@ pub(super) async fn submit(pg: Arc<Client>, token: &str) {
         &app,
         test::TestRequest::post()
             .uri("/reset")
-            .header("x-forwarded-for", "192.0.2.1")
+            .header("x-forwarded-for", &fixture_ip())
             .header("content-type", "application/x-www-form-urlencoded")
             .header("cookie", format!("__Host-zsidp_csrf={csrf}"))
             .set_payload(body)
