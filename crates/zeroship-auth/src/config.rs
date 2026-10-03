@@ -214,7 +214,7 @@ pub struct AuthSettings {
     pub google_redirect_uri: Operational<String>,
 
     /// Google's authorize endpoint. Overridable so the e2e tests can point
-    /// at an in-process `tests/common/mock_provider` instead of the real
+    /// at an in-process `tests/support/mock_provider` instead of the real
     /// Google. Production deployments should leave the default in place.
     #[config(
         name = "auth.google_auth_url",

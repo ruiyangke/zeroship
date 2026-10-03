@@ -4,7 +4,6 @@
 )]
 
 use ntex::{client::Client, http::StatusCode};
-#[path = "queue_control.rs"]
 mod queue_control;
 use std::{
     net::TcpListener,
@@ -52,7 +51,7 @@ impl ServerProcess {
     /// this queue, so a running one competes with the claim the case makes for
     /// itself and there is no placement to expire that would stop it. The lane's
     /// own reach through the real cadence is bound by
-    /// `crates/zeroship-workflow-server/tests/maintenance_lane.rs`, which keeps
+    /// `crates/zeroship-workflow-server/tests/integration/maintenance_lane.rs`, which keeps
     /// it on.
     pub async fn without_maintenance_sweeps(
         database: &str,

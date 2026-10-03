@@ -343,13 +343,11 @@ fn wpt_fetch_redirect_method() {
 // Flexible server for redirect-mode + redirect-origin scenarios
 // ---------------------------------------------------------------------------
 
-/// A captured request seen by the flex server (method, headers, body).
+/// A captured request seen by the flex server (method, headers).
 #[derive(Debug, Clone)]
 struct CapturedReq {
     method: String,
     headers: Vec<(String, String)>,
-    #[allow(dead_code)]
-    body: Vec<u8>,
 }
 
 /// Recorded request capture by hop index. Used to assert outbound
@@ -461,24 +459,7 @@ fn read_full_req(stream: &mut TcpStream) -> Option<CapturedReq> {
             headers.push((k.trim().to_string(), v.trim().to_string()));
         }
     }
-    let cl = headers
-        .iter()
-        .find(|(k, _)| k.eq_ignore_ascii_case("content-length"))
-        .and_then(|(_, v)| v.parse::<usize>().ok())
-        .unwrap_or(0);
-    let mut body = buf[header_end..].to_vec();
-    while body.len() < cl {
-        let n = stream.read(&mut tmp).ok()?;
-        if n == 0 {
-            break;
-        }
-        body.extend_from_slice(&tmp[..n]);
-    }
-    Some(CapturedReq {
-        method,
-        headers,
-        body,
-    })
+    Some(CapturedReq { method, headers })
 }
 
 fn make_request(url: String, redirect_mode: RedirectMode) -> FetchRequest {

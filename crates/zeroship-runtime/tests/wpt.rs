@@ -2,7 +2,8 @@
 //!
 //! The 23 modules below were 23 separate integration executables, each
 //! statically linking V8. They are merged here for the same reason as
-//! `tests/main.rs` (see its header for the measurement), and kept OUT of
+//! `tests/integration/mod.rs` (see its header for the measurement), and kept
+//! OUT of
 //! `main.rs` for one reason:
 //!
 //! every module here `include_str!`s files under `tests/wpt/`, which the

@@ -1,0 +1,1593 @@
+//! P5b refresh-token family tests for the platform OP.
+
+use crate::support;
+use support::{auth_server::AuthServer, database::Database};
+use ed25519_dalek::{pkcs8::EncodePrivateKey, SigningKey};
+
+use std::sync::Arc;
+
+use base64::{engine::general_purpose::STANDARD, Engine as _};
+use compio_postgres::Client;
+use serde::Deserialize;
+use serde_json::Value;
+use uuid::Uuid;
+use zeroship_auth::identity::deletion_cancel;
+use zeroship_auth::oidc::Issuer;
+use zeroship_auth::sessions::login as session_cookie;
+use zeroship_auth::store::sessions as session_store;
+use zeroship_auth::store::users;
+use zeroship_authz::wrapper_revocation;
+use zeroship_core::auth::hash_client_secret;
+
+use support::{location, pkce_challenge_s256, pkce_verifier};
+
+const ISSUER: &str = "https://auth.zeroship.test/oauth2";
+const REDIRECT_URI: &str = "http://127.0.0.1:9998/cb";
+const SECTOR: &str = "https://app-refresh.zeroship.test";
+const REFRESH_CLIENT_SECRET: &str = "refresh-client-secret-32-bytes-minimum";
+const FULL_SCOPE: &str = "openid profile email offline_access";
+const NARROW_SCOPE: &str = "openid profile";
+
+#[derive(Debug, Deserialize)]
+struct TokenResponse {
+    access_token: String,
+    #[serde(default)]
+    id_token: Option<String>,
+    token_type: String,
+    expires_in: u64,
+    scope: String,
+    #[serde(default)]
+    refresh_token: Option<String>,
+}
+
+struct Fixture {
+    server: AuthServer,
+    db: Arc<Client>,
+    client_id: String,
+    app_id: zeroship_core::AppId,
+    user_id: zeroship_core::UserId,
+    session_cookie: String,
+}
+
+impl Fixture {
+    #[allow(clippy::future_not_send)]
+    async fn boot(database: &Database, scopes: &[&str]) -> Self {
+        let db = Arc::new(database.connect().await);
+        let issuer = Arc::new(test_issuer());
+
+        let user_id = zeroship_core::UserId::mint();
+        let app_id = zeroship_core::AppId::mint();
+        let client_id = format!("oac_p5b_{}", Uuid::new_v4().simple());
+        let app_name = format!("p5b-refresh-{}", Uuid::new_v4().simple());
+        seed_user_client(&db, &user_id, &app_id, &app_name, &client_id, scopes).await;
+        let session = session_store::create(
+            &db,
+            &session_store::CreateSession {
+                user_id: user_id.clone(),
+                auth_method: "pwd",
+                amr: vec!["pwd".to_string()],
+                acr: None,
+                expected_credential_version: None,
+                idle_minutes: zeroship_auth::sessions::login::IDLE_MINUTES,
+                absolute_hours: zeroship_auth::sessions::login::ABSOLUTE_HOURS,
+            },
+        )
+        .await
+        .expect("create idp session");
+        let session_cookie = session_cookie::set_cookie(&session.id)
+            .split(';')
+            .next()
+            .expect("cookie pair")
+            .to_string();
+
+        let server = AuthServer::with_issuer(database, issuer).await;
+        Self {
+            server,
+            db,
+            client_id,
+            app_id,
+            user_id: user_id.clone(),
+            session_cookie,
+        }
+    }
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn offline_access_authorization_code_returns_refresh_token_bound_to_family() {
+    Database::run(async |database| {
+        let fx = Fixture::boot(database, &["openid", "profile", "email", "offline_access"]).await;
+        let token = issue_refresh(&fx, FULL_SCOPE).await;
+        assert_eq!(token.token_type, "Bearer");
+        assert!(token.expires_in > 0);
+        assert!(token
+            .refresh_token
+            .as_deref()
+            .is_some_and(|t| t.starts_with("zrt_")));
+        assert!(
+            token.id_token.is_some(),
+            "auth-code response still includes id_token"
+        );
+
+        let row = fx
+            .db
+            .query_one(
+                "SELECT s.id, g.subject, g.scopes AS grant_scopes, \
+                        octet_length(s.secret_hash) AS hash_len \
+                 FROM zeroship.sessions s \
+                 JOIN zeroship.grants g ON g.id = s.grant_id \
+                 WHERE s.client_id = $1 AND s.person_id = $2",
+                &[&fx.client_id, &fx.user_id.as_str()],
+            )
+            .await
+            .expect("session row");
+        let family_id: String = row.get("id");
+        let sub: String = row.get("subject");
+        let family_scopes: Vec<String> = row.get("grant_scopes");
+        let hash_len: i32 = row.get("hash_len");
+        assert!(family_id.starts_with("ses_"));
+        assert_eq!(sub, test_issuer().pairwise_subject(&fx.user_id, SECTOR));
+        assert!(family_scopes.iter().any(|s| s == "offline_access"));
+        assert_eq!(hash_len, 32, "refresh token hash is HMAC-SHA256 bytes only");
+    })
+    .await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn stale_credential_version_recheck_rejects_refresh_issuance() {
+    Database::run(async |database| {
+        let fx = Fixture::boot(database, &["openid", "profile", "email", "offline_access"]).await;
+        let verifier = pkce_verifier();
+        let authorize = send_authorize(&fx, FULL_SCOPE, &verifier)
+            .await
+            .expect("authorize");
+        let code = query_param(&location(&authorize), "code").expect("code");
+        fx.db
+            .execute(
+                "UPDATE zeroship.users SET credential_version = credential_version + 1 WHERE id = $1",
+                &[&fx.user_id.as_str()],
+            )
+            .await
+            .expect("bump credential_version");
+
+        let resp = token_request(&fx, &code, REDIRECT_URI, &verifier)
+            .await
+            .expect("token response");
+        assert_eq!(resp.status().as_u16(), 400);
+        assert_error(resp, "invalid_grant").await;
+    }).await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn deletion_revokes_refresh_family_even_after_cancellation() {
+    Database::run(async |database| {
+        let fx = Fixture::boot(database, &["openid", "profile", "email", "offline_access"]).await;
+        let root = issue_refresh(&fx, FULL_SCOPE).await;
+        let root_refresh = root.refresh_token.expect("root refresh token");
+        let rotated = refresh_request(&fx, &root_refresh, Some(NARROW_SCOPE))
+            .await
+            .expect("rotate refresh token");
+        assert_eq!(rotated.status().as_u16(), 200);
+        let successor = rotated
+            .json::<TokenResponse>()
+            .await
+            .expect("rotated token json")
+            .refresh_token
+            .expect("successor refresh token");
+        let family_id = refresh_family_id(&fx).await;
+
+        let mut deletion = database.connect_as_auth().await;
+        let deletion_request = users::request_deletion(&mut deletion, &fx.user_id, 30)
+            .await
+            .expect("request account deletion")
+            .expect("refresh owner exists");
+        // The undo is the mailed single-use token, redeemed through the real
+        // primitive. There is no by-id cancel to call.
+        assert!(
+            deletion_cancel::redeem(fx.db.as_ref(), &deletion_request.cancel_token)
+                .await
+                .expect("cancel account deletion")
+                .is_some(),
+            "deletion request must be cancellable"
+        );
+
+        let rejected = refresh_request(&fx, &successor, None)
+            .await
+            .expect("refresh after deletion cancellation");
+        let status = rejected.status().as_u16();
+        let body = rejected
+            .json::<Value>()
+            .await
+            .expect("refresh rejection json");
+        let sub = test_issuer().pairwise_subject(&fx.user_id, SECTOR);
+        let marker = fx
+            .db
+            .query(
+                "SELECT 1 FROM zeroship.token_revocations WHERE client_id = $1 AND sub = $2",
+                &[&fx.client_id, &sub],
+            )
+            .await
+            .expect("query family revocation marker");
+        assert_family_revoked(&fx, &family_id).await;
+
+        assert_eq!(status, 400);
+        assert_eq!(body["error"], "invalid_grant");
+        assert_eq!(marker.len(), 1, "deletion must retain a family marker");
+    })
+    .await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn authorization_code_replay_revokes_refresh_token_issued_by_first_exchange() {
+    Database::run(async |database| {
+        let fx = Fixture::boot(database, &["openid", "profile", "email", "offline_access"]).await;
+        let verifier = pkce_verifier();
+        let authorize = send_authorize(&fx, FULL_SCOPE, &verifier)
+            .await
+            .expect("authorize response");
+        assert_eq!(authorize.status().as_u16(), 303);
+        let code = query_param(&location(&authorize), "code").expect("code in redirect");
+
+        let first = token_request(&fx, &code, REDIRECT_URI, &verifier)
+            .await
+            .expect("first token response");
+        assert_eq!(first.status().as_u16(), 200);
+        let first = first
+            .json::<TokenResponse>()
+            .await
+            .expect("first token json");
+        let refresh_token = first
+            .refresh_token
+            .expect("offline_access authorization-code exchange returns refresh token");
+
+        let replay = token_request(&fx, &code, REDIRECT_URI, &verifier)
+            .await
+            .expect("replay token response");
+        assert_eq!(replay.status().as_u16(), 400);
+        assert_error(replay, "invalid_grant").await;
+
+        let refresh_after_replay = refresh_request(&fx, &refresh_token, None)
+            .await
+            .expect("refresh after code replay response");
+        assert_eq!(
+            refresh_after_replay.status().as_u16(),
+            400,
+            "authorization-code replay must revoke refresh token issued by first exchange"
+        );
+        assert_error(refresh_after_replay, "invalid_grant").await;
+    })
+    .await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn refresh_rotation_returns_new_refresh_narrows_scope_and_no_id_token() {
+    Database::run(async |database| {
+        let fx = Fixture::boot(database, &["openid", "profile", "email", "offline_access"]).await;
+        let root = issue_refresh(&fx, FULL_SCOPE).await;
+        let root_refresh = root.refresh_token.expect("root refresh token");
+
+        let rotated = refresh_request(&fx, &root_refresh, Some(NARROW_SCOPE))
+            .await
+            .expect("refresh response");
+        assert_eq!(rotated.status().as_u16(), 200);
+        let rotated = rotated.json::<TokenResponse>().await.expect("refresh json");
+        assert_eq!(rotated.token_type, "Bearer");
+        assert!(rotated.access_token.contains('.'));
+        assert!(rotated
+            .refresh_token
+            .as_deref()
+            .is_some_and(|t| t.starts_with("zrt_")));
+        assert_ne!(rotated.refresh_token.as_ref(), Some(&root_refresh));
+        assert_eq!(
+            rotated.id_token, None,
+            "refresh grant must not mint id_token"
+        );
+        assert_eq!(rotated.scope, NARROW_SCOPE);
+
+        let row = fx
+            .db
+            .query_one(
+                // One row per family now, so the two counts are two facts about the
+                // SAME row rather than two rows: it has rotated, and it is still
+                // live. A chain would have made "rotated" and "live" disjoint; a
+                // rotating row makes them simultaneous.
+                "SELECT COUNT(*) FILTER (WHERE rotated_at IS NOT NULL)::BIGINT AS rotated, \
+                        COUNT(*) FILTER (WHERE revoked_at IS NULL)::BIGINT AS live \
+                 FROM zeroship.sessions WHERE client_id = $1 AND person_id = $2",
+                &[&fx.client_id, &fx.user_id.as_str()],
+            )
+            .await
+            .expect("session row counts");
+        assert_eq!(row.get::<_, i64>("rotated"), 1);
+        assert_eq!(row.get::<_, i64>("live"), 1);
+    })
+    .await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn garbage_refresh_token_rejects_before_dedicated_pool_checkout() {
+    Database::run(async |database| {
+        let fx = Fixture::boot(database, &["openid", "profile", "email", "offline_access"]).await;
+        let before = fx.server.refresh_pool.checkout_count();
+
+        let rejected = refresh_request(&fx, "zrt_garbage-token-material-that-will-not-match", None)
+            .await
+            .expect("garbage refresh response");
+        assert_eq!(rejected.status().as_u16(), 400);
+        assert_error(rejected, "invalid_grant").await;
+        assert_eq!(
+            fx.server.refresh_pool.checkout_count(),
+            before,
+            "garbage refresh tokens must fail lookup before any dedicated session checkout"
+        );
+    })
+    .await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn refresh_scope_cannot_widen_past_family_granted_scopes() {
+    Database::run(async |database| {
+        let fx = Fixture::boot(database, &["openid", "profile", "email", "offline_access"]).await;
+        let root = issue_refresh(&fx, "openid profile offline_access").await;
+        let root_refresh = root.refresh_token.expect("root refresh token");
+
+        let widened = refresh_request(&fx, &root_refresh, Some("openid profile email"))
+            .await
+            .expect("refresh response");
+        assert_eq!(widened.status().as_u16(), 400);
+        assert_error(widened, "invalid_scope").await;
+
+        let row = fx
+            .db
+            .query_one(
+                "SELECT COUNT(*) FILTER (WHERE rotated_at IS NOT NULL)::BIGINT AS consumed \
+                 FROM zeroship.sessions WHERE client_id = $1 AND person_id = $2",
+                &[&fx.client_id, &fx.user_id.as_str()],
+            )
+            .await
+            .expect("session rotation count");
+        assert_eq!(row.get::<_, i64>("consumed"), 0);
+    })
+    .await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn replay_after_legitimate_rotation_kills_family() {
+    Database::run(async |database| {
+        replay_after_rotation_kills_family(database, "legitimate").await;
+    })
+    .await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn replay_after_attacker_rotation_kills_family() {
+    Database::run(async |database| {
+        replay_after_rotation_kills_family(database, "attacker").await;
+    })
+    .await;
+}
+
+#[allow(clippy::future_not_send)]
+async fn replay_after_rotation_kills_family(database: &Database, label: &str) {
+    let fx = Fixture::boot(database, &["openid", "profile", "email", "offline_access"]).await;
+    let root = issue_refresh(&fx, FULL_SCOPE).await;
+    let root_refresh = root.refresh_token.expect("root refresh token");
+    let first_rotation = refresh_request(&fx, &root_refresh, Some(NARROW_SCOPE))
+        .await
+        .expect("first rotation");
+    assert_eq!(
+        first_rotation.status().as_u16(),
+        200,
+        "{label} first rotation"
+    );
+    let family_id = refresh_family_id(&fx).await;
+    expire_idempotency_window(&fx, &family_id).await;
+
+    let replay = refresh_request(&fx, &root_refresh, Some(NARROW_SCOPE))
+        .await
+        .expect("replay response");
+    assert_eq!(replay.status().as_u16(), 400, "{label} replay");
+    assert_error(replay, "invalid_grant").await;
+    assert_family_revoked(&fx, &family_id).await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn legit_lost_response_retry_recovers_without_family_kill() {
+    Database::run(async |database| {
+        let fx = Fixture::boot(database, &["openid", "profile", "email", "offline_access"]).await;
+        let root = issue_refresh(&fx, FULL_SCOPE).await;
+        let root_refresh = root.refresh_token.expect("root refresh token");
+        let first = refresh_request(&fx, &root_refresh, Some(NARROW_SCOPE))
+            .await
+            .expect("first refresh");
+        assert_eq!(first.status().as_u16(), 200);
+        let first = first.json::<TokenResponse>().await.expect("first json");
+        let child_refresh = first.refresh_token.clone().expect("child refresh");
+
+        let retry = refresh_request(&fx, &root_refresh, Some(NARROW_SCOPE))
+            .await
+            .expect("lost response retry");
+        assert_eq!(retry.status().as_u16(), 200);
+        let retry = retry.json::<TokenResponse>().await.expect("retry json");
+        assert_eq!(retry.refresh_token.as_deref(), Some(child_refresh.as_str()));
+        assert_ne!(
+            retry.access_token, first.access_token,
+            "idempotent replay returns cached refresh token with a fresh access token"
+        );
+        assert_family_not_revoked(&fx, &refresh_family_id(&fx).await).await;
+    })
+    .await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn second_replay_of_a_spent_predecessor_kills_family() {
+    Database::run(async |database| {
+        let fx = Fixture::boot(database, &["openid", "profile", "email", "offline_access"]).await;
+        let root = issue_refresh(&fx, FULL_SCOPE).await;
+        let root_refresh = root.refresh_token.expect("root refresh token");
+        let family_id = refresh_family_id(&fx).await;
+
+        let rotation = refresh_request(&fx, &root_refresh, Some(NARROW_SCOPE))
+            .await
+            .expect("first rotation");
+        assert_eq!(rotation.status().as_u16(), 200, "first rotation");
+        let rotation = rotation
+            .json::<TokenResponse>()
+            .await
+            .expect("rotation json");
+        let successor = rotation.refresh_token.expect("successor refresh token");
+
+        // One lost response is one retry, so the first replay still recovers. That
+        // is the whole reason the idempotency record exists and it stays intact.
+        let retry = refresh_request(&fx, &root_refresh, Some(NARROW_SCOPE))
+            .await
+            .expect("lost response retry");
+        assert_eq!(
+            retry.status().as_u16(),
+            200,
+            "lost-response retry must recover"
+        );
+
+        // No client retries the same lost response twice: the second retry already
+        // carried a successor back. A further presentation of the spent predecessor
+        // is reuse, and RFC 9700 4.14.2 requires the family to die for it.
+        let reuse = refresh_request(&fx, &root_refresh, Some(NARROW_SCOPE))
+            .await
+            .expect("second replay");
+        assert_eq!(
+            reuse.status().as_u16(),
+            400,
+            "second replay must not be served"
+        );
+        assert_error(reuse, "invalid_grant").await;
+        assert_family_revoked(&fx, &family_id).await;
+
+        // Revoking the family is the point; a 400 on the replay alone would leave
+        // the token an attacker actually wants still spendable.
+        let after = refresh_request(&fx, &successor, Some(NARROW_SCOPE))
+            .await
+            .expect("successor after reuse detection");
+        assert_eq!(
+            after.status().as_u16(),
+            400,
+            "successor must die with its family"
+        );
+        assert_error(after, "invalid_grant").await;
+    })
+    .await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn unreadable_idempotency_record_kills_family_instead_of_answering_invalid_grant() {
+    Database::run(async |database| {
+        let fx = Fixture::boot(database, &["openid", "profile", "email", "offline_access"]).await;
+        let root = issue_refresh(&fx, FULL_SCOPE).await;
+        let root_refresh = root.refresh_token.expect("root refresh token");
+        let family_id = refresh_family_id(&fx).await;
+
+        let rotation = refresh_request(&fx, &root_refresh, Some(NARROW_SCOPE))
+            .await
+            .expect("first rotation");
+        assert_eq!(rotation.status().as_u16(), 200, "first rotation");
+        let rotation = rotation
+            .json::<TokenResponse>()
+            .await
+            .expect("rotation json");
+        let successor = rotation.refresh_token.expect("successor refresh token");
+
+        // Stands in for a rotated REFRESH_IDEM_KEY_FILE, or a snapshot restored
+        // under a different key: the sealed successor no longer opens. Reuse
+        // detection must not be something an unreadable blob can switch off.
+        corrupt_idempotency_record(&fx, &family_id).await;
+
+        let replay = refresh_request(&fx, &root_refresh, Some(NARROW_SCOPE))
+            .await
+            .expect("replay over an unreadable idempotency record");
+        assert_eq!(replay.status().as_u16(), 400, "replay must not be served");
+        assert_error(replay, "invalid_grant").await;
+        assert_family_revoked(&fx, &family_id).await;
+
+        let after = refresh_request(&fx, &successor, Some(NARROW_SCOPE))
+            .await
+            .expect("successor after reuse detection");
+        assert_eq!(
+            after.status().as_u16(),
+            400,
+            "successor must die with its family"
+        );
+        assert_error(after, "invalid_grant").await;
+    })
+    .await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn concurrent_refresh_same_token_serializes_to_one_successor_without_family_kill() {
+    Database::run(async |database| {
+        let fx = Fixture::boot(database, &["openid", "profile", "email", "offline_access"]).await;
+        let root = issue_refresh(&fx, FULL_SCOPE).await;
+        let root_refresh = root.refresh_token.expect("root refresh token");
+
+        let first = refresh_request(&fx, &root_refresh, Some(NARROW_SCOPE));
+        let second = refresh_request(&fx, &root_refresh, Some(NARROW_SCOPE));
+        let (first, second) = futures::join!(first, second);
+        let first = first.expect("first concurrent refresh response");
+        let second = second.expect("second concurrent refresh response");
+        assert_eq!(first.status().as_u16(), 200, "first concurrent refresh");
+        assert_eq!(second.status().as_u16(), 200, "second concurrent refresh");
+        let first = first.json::<TokenResponse>().await.expect("first json");
+        let second = second.json::<TokenResponse>().await.expect("second json");
+        assert_eq!(
+            first.refresh_token, second.refresh_token,
+            "serialized same-token retry must replay the one existing successor"
+        );
+
+        let family_id = refresh_family_id(&fx).await;
+        assert_family_not_revoked(&fx, &family_id).await;
+        let row = fx
+            .db
+            .query_one(
+                "SELECT COUNT(*) FILTER (WHERE rotated_at IS NOT NULL)::BIGINT AS rotated, \
+                        COUNT(*) FILTER (WHERE revoked_at IS NULL)::BIGINT AS live \
+                 FROM zeroship.sessions WHERE id = $1",
+                &[&family_id],
+            )
+            .await
+            .expect("session counts");
+        assert_eq!(row.get::<_, i64>("rotated"), 1);
+        assert_eq!(row.get::<_, i64>("live"), 1);
+    })
+    .await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn refresh_rotation_does_not_commit_shared_request_socket_transaction() {
+    Database::run(async |database| {
+        let fx = Fixture::boot(database, &["openid", "profile", "email", "offline_access"]).await;
+        let root = issue_refresh(&fx, FULL_SCOPE).await;
+        let root_refresh = root.refresh_token.expect("root refresh token");
+        let marker = format!("p5b-shared-tx-{}", Uuid::new_v4().simple());
+
+        fx.server
+            .pg
+            .execute("BEGIN", &[])
+            .await
+            .expect("begin marker tx");
+        fx.server
+            .pg
+            .execute(
+                "INSERT INTO zeroship.rate_limits (bucket_key, tokens, updated_at) \
+                 VALUES ($1, 0::REAL, NOW())",
+                &[&marker],
+            )
+            .await
+            .expect("insert marker inside shared transaction");
+
+        let rotated = refresh_request(&fx, &root_refresh, Some(NARROW_SCOPE))
+            .await
+            .expect("refresh while shared transaction is open");
+        assert_eq!(rotated.status().as_u16(), 200);
+
+        fx.server
+            .pg
+            .execute("ROLLBACK", &[])
+            .await
+            .expect("rollback marker tx");
+        let persisted: i64 = fx
+            .server
+            .pg
+            .query_one(
+                "SELECT COUNT(*)::BIGINT AS count FROM zeroship.rate_limits WHERE bucket_key = $1",
+                &[&marker],
+            )
+            .await
+            .expect("count marker")
+            .get("count");
+        assert_eq!(
+            persisted, 0,
+            "refresh rotation must not COMMIT another logical flow on the shared request socket"
+        );
+    })
+    .await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn revoke_refresh_token_kills_family_and_is_uniform() {
+    Database::run(async |database| {
+        let fx = Fixture::boot(database, &["openid", "profile", "email", "offline_access"]).await;
+        let root = issue_refresh(&fx, FULL_SCOPE).await;
+        let root_refresh = root.refresh_token.expect("root refresh token");
+        let family_id = refresh_family_id(&fx).await;
+
+        let revoke = revoke_request(&fx, &root_refresh)
+            .await
+            .expect("revoke response");
+        assert_eq!(revoke.status().as_u16(), 200);
+        assert_family_revoked(&fx, &family_id).await;
+
+        let replay_revoke = revoke_request(&fx, &root_refresh)
+            .await
+            .expect("second revoke response");
+        assert_eq!(replay_revoke.status().as_u16(), 200);
+        let unknown = revoke_request(&fx, "zrt_unknown-token-material")
+            .await
+            .expect("unknown revoke response");
+        assert_eq!(unknown.status().as_u16(), 200);
+    })
+    .await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn revoked_access_token_family_is_inactive_for_introspection_and_userinfo() {
+    Database::run(async |database| {
+        let fx = Fixture::boot(database, &["openid", "profile", "email", "offline_access"]).await;
+        let token = issue_refresh(&fx, FULL_SCOPE).await;
+        let claims = test_issuer()
+            .verify_access_token(&token.access_token)
+            .expect("issued access token verifies");
+
+        wrapper_revocation::revoke_family(fx.db.as_ref(), &claims.client_id, &claims.sub)
+            .await
+            .expect("write access-token family revocation marker");
+
+        let introspection = introspect_request(
+            &fx,
+            &token.access_token,
+            Some("access_token"),
+            Some(basic_auth(&fx.client_id)),
+        )
+        .await
+        .expect("revoked access introspect response");
+        assert_eq!(introspection.status().as_u16(), 200);
+        assert_eq!(
+            introspection
+                .json::<Value>()
+                .await
+                .expect("revoked access introspection json"),
+            serde_json::json!({ "active": false }),
+            "pre-fix this was active:true because introspection ignored token_revocations"
+        );
+
+        let userinfo = userinfo_get(&fx, &token.access_token)
+            .await
+            .expect("revoked access userinfo response");
+        assert_invalid_userinfo_token(&userinfo);
+    })
+    .await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn revoke_access_token_writes_family_marker_for_introspection() {
+    Database::run(async |database| {
+        let fx = Fixture::boot(database, &["openid", "profile", "email", "offline_access"]).await;
+        let token = issue_refresh(&fx, FULL_SCOPE).await;
+
+        let revoke = revoke_access_request(&fx, &token.access_token)
+            .await
+            .expect("access-token revoke response");
+        assert_eq!(revoke.status().as_u16(), 200);
+
+        let introspection = introspect_request(
+            &fx,
+            &token.access_token,
+            Some("access_token"),
+            Some(basic_auth(&fx.client_id)),
+        )
+        .await
+        .expect("revoked access introspect response");
+        assert_eq!(introspection.status().as_u16(), 200);
+        assert_eq!(
+            introspection
+                .json::<Value>()
+                .await
+                .expect("revoked access introspection json"),
+            serde_json::json!({ "active": false }),
+            "pre-fix /revoke treated access tokens as unknown refresh tokens and left them active"
+        );
+    })
+    .await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn revoke_access_token_kills_sibling_refresh_family_durably() {
+    Database::run(async |database| {
+        let fx = Fixture::boot(database, &["openid", "profile", "email", "offline_access"]).await;
+        let token = issue_refresh(&fx, FULL_SCOPE).await;
+        let sibling_refresh = token.refresh_token.expect("sibling refresh token");
+
+        let revoke = revoke_access_request(&fx, &token.access_token)
+            .await
+            .expect("access-token revoke response");
+        assert_eq!(revoke.status().as_u16(), 200);
+
+        let introspection = introspect_request(
+            &fx,
+            &token.access_token,
+            Some("access_token"),
+            Some(basic_auth(&fx.client_id)),
+        )
+        .await
+        .expect("revoked access introspect response");
+        assert_eq!(introspection.status().as_u16(), 200);
+        assert_eq!(
+            introspection
+                .json::<Value>()
+                .await
+                .expect("revoked access introspection json"),
+            serde_json::json!({ "active": false })
+        );
+
+        let refresh = refresh_request(&fx, &sibling_refresh, None)
+            .await
+            .expect("refresh after access-token revoke response");
+        assert_eq!(
+            refresh.status().as_u16(),
+            400,
+            "access-token revoke must not be self-healing via sibling refresh token"
+        );
+        assert_error(refresh, "invalid_grant").await;
+    })
+    .await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn introspect_active_access_token_returns_rfc7662_claims() {
+    Database::run(async |database| {
+        let fx = Fixture::boot(database, &["openid", "profile", "email", "offline_access"]).await;
+        let token = issue_refresh(&fx, FULL_SCOPE).await;
+        let claims = test_issuer()
+            .verify_access_token(&token.access_token)
+            .expect("issued access token verifies");
+
+        let resp = introspect_request(
+            &fx,
+            &token.access_token,
+            Some("access_token"),
+            Some(basic_auth(&fx.client_id)),
+        )
+        .await
+        .expect("introspect response");
+        assert_eq!(resp.status().as_u16(), 200);
+        let body = resp.json::<Value>().await.expect("introspection json");
+        assert_eq!(body["active"], true);
+        assert_scope_set(
+            &body["scope"],
+            &["openid", "profile", "email", "offline_access"],
+        );
+        assert_eq!(body["client_id"].as_str(), Some(fx.client_id.as_str()));
+        assert_eq!(body["token_type"], "access_token");
+        assert_eq!(body["exp"], claims.exp);
+        assert_eq!(body["iat"], claims.iat);
+        assert_eq!(body["sub"].as_str(), Some(claims.sub.as_str()));
+        assert_eq!(body["aud"].as_str(), Some(claims.aud.as_str()));
+        assert_eq!(body["iss"], ISSUER);
+    })
+    .await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn introspect_access_token_is_confined_to_authenticated_client() {
+    Database::run(async |database| {
+        let fx_a = Fixture::boot(database, &["openid", "profile", "email", "offline_access"]).await;
+        let fx_b = Fixture::boot(database, &["openid", "profile", "email", "offline_access"]).await;
+        let token_b = issue_refresh(&fx_b, FULL_SCOPE).await;
+
+        let resp = introspect_request(
+            &fx_a,
+            &token_b.access_token,
+            Some("access_token"),
+            Some(basic_auth(&fx_a.client_id)),
+        )
+        .await
+        .expect("cross-client access introspect response");
+        assert_eq!(resp.status().as_u16(), 200);
+        assert_eq!(
+            resp.json::<Value>()
+                .await
+                .expect("cross-client introspection json"),
+            serde_json::json!({ "active": false })
+        );
+    })
+    .await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn introspect_expired_access_token_is_inactive() {
+    Database::run(async |database| {
+        let fx = Fixture::boot(database, &["openid", "profile", "email", "offline_access"]).await;
+        let token = issue_refresh(&fx, FULL_SCOPE).await;
+        let live = introspect_request(
+            &fx,
+            &token.access_token,
+            Some("access_token"),
+            Some(basic_auth(&fx.client_id)),
+        )
+        .await
+        .expect("live-token introspection");
+        assert_eq!(live.status().as_u16(), 200);
+        assert_eq!(
+            live.json::<Value>().await.expect("live introspection")["active"],
+            true
+        );
+
+        let issuer = test_issuer();
+        let mut claims = issuer
+            .verify_access_token(&token.access_token)
+            .expect("issued access token");
+        claims.iat -= 1_200;
+        claims.exp = claims.iat + 600;
+        let mut header =
+            jsonwebtoken::decode_header(&token.access_token).expect("issued token header");
+        header.kid = Some(issuer.kid().to_owned());
+        let key = signing_key().to_pkcs8_der().expect("fixture signing key");
+        let expired = jsonwebtoken::encode(
+            &header,
+            &claims,
+            &jsonwebtoken::EncodingKey::from_ed_der(key.as_bytes()),
+        )
+        .expect("sign the same claims with an elapsed lifetime");
+
+        let resp = introspect_request(
+            &fx,
+            &expired,
+            Some("access_token"),
+            Some(basic_auth(&fx.client_id)),
+        )
+        .await
+        .expect("introspect response");
+        assert_eq!(resp.status().as_u16(), 200);
+        assert_eq!(
+            resp.json::<Value>().await.expect("introspection json"),
+            serde_json::json!({ "active": false })
+        );
+    })
+    .await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn introspect_refresh_token_before_and_after_revoke() {
+    Database::run(async |database| {
+        let fx = Fixture::boot(database, &["openid", "profile", "email", "offline_access"]).await;
+        let root = issue_refresh(&fx, FULL_SCOPE).await;
+        let root_refresh = root.refresh_token.expect("root refresh token");
+
+        let active = introspect_request(
+            &fx,
+            &root_refresh,
+            Some("refresh_token"),
+            Some(basic_auth(&fx.client_id)),
+        )
+        .await
+        .expect("active introspect response");
+        assert_eq!(active.status().as_u16(), 200);
+        let body = active
+            .json::<Value>()
+            .await
+            .expect("active introspection json");
+        assert_eq!(body["active"], true);
+        assert_scope_set(
+            &body["scope"],
+            &["openid", "profile", "email", "offline_access"],
+        );
+        assert_eq!(body["client_id"].as_str(), Some(fx.client_id.as_str()));
+        assert_eq!(body["token_type"], "refresh_token");
+        assert!(body["exp"].as_i64().is_some_and(|exp| exp > 0));
+        assert!(body["iat"].as_i64().is_some_and(|iat| iat > 0));
+        let expected_sub = test_issuer().pairwise_subject(&fx.user_id, SECTOR);
+        assert_eq!(body["sub"].as_str(), Some(expected_sub.as_str()));
+        let expected_aud = format!("app:{}", fx.app_id.as_str());
+        assert_eq!(body["aud"].as_str(), Some(expected_aud.as_str()));
+        assert_eq!(body["iss"], ISSUER);
+
+        let revoke = revoke_request(&fx, &root_refresh)
+            .await
+            .expect("revoke response");
+        assert_eq!(revoke.status().as_u16(), 200);
+        let inactive = introspect_request(
+            &fx,
+            &root_refresh,
+            Some("refresh_token"),
+            Some(basic_auth(&fx.client_id)),
+        )
+        .await
+        .expect("inactive introspect response");
+        assert_eq!(inactive.status().as_u16(), 200);
+        assert_eq!(
+            inactive
+                .json::<Value>()
+                .await
+                .expect("inactive introspection json"),
+            serde_json::json!({ "active": false })
+        );
+    })
+    .await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn introspect_refresh_token_is_confined_to_authenticated_client() {
+    Database::run(async |database| {
+        let fx_a = Fixture::boot(database, &["openid", "profile", "email", "offline_access"]).await;
+        let fx_b = Fixture::boot(database, &["openid", "profile", "email", "offline_access"]).await;
+        let token_b = issue_refresh(&fx_b, FULL_SCOPE).await;
+        let refresh_b = token_b.refresh_token.expect("client B refresh token");
+
+        let resp = introspect_request(
+            &fx_a,
+            &refresh_b,
+            Some("refresh_token"),
+            Some(basic_auth(&fx_a.client_id)),
+        )
+        .await
+        .expect("cross-client refresh introspect response");
+        assert_eq!(resp.status().as_u16(), 200);
+        assert_eq!(
+            resp.json::<Value>()
+                .await
+                .expect("cross-client introspection json"),
+            serde_json::json!({ "active": false })
+        );
+    })
+    .await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn introspect_rotated_refresh_token_is_inactive() {
+    Database::run(async |database| {
+        let fx = Fixture::boot(database, &["openid", "profile", "email", "offline_access"]).await;
+        let root = issue_refresh(&fx, FULL_SCOPE).await;
+        let root_refresh = root.refresh_token.expect("root refresh token");
+
+        let rotated = refresh_request(&fx, &root_refresh, Some(NARROW_SCOPE))
+            .await
+            .expect("refresh rotation response");
+        assert_eq!(rotated.status().as_u16(), 200);
+        let rotated = rotated.json::<TokenResponse>().await.expect("refresh json");
+        assert_ne!(
+            rotated.refresh_token.as_deref(),
+            Some(root_refresh.as_str())
+        );
+
+        let inactive = introspect_request(
+            &fx,
+            &root_refresh,
+            Some("refresh_token"),
+            Some(basic_auth(&fx.client_id)),
+        )
+        .await
+        .expect("rotated refresh introspect response");
+        assert_eq!(inactive.status().as_u16(), 200);
+        assert_eq!(
+            inactive
+                .json::<Value>()
+                .await
+                .expect("inactive introspection json"),
+            serde_json::json!({ "active": false })
+        );
+    })
+    .await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn introspect_reuse_detected_refresh_family_is_inactive() {
+    Database::run(async |database| {
+        let fx = Fixture::boot(database, &["openid", "profile", "email", "offline_access"]).await;
+        let root = issue_refresh(&fx, FULL_SCOPE).await;
+        let root_refresh = root.refresh_token.expect("root refresh token");
+        let first = refresh_request(&fx, &root_refresh, Some(NARROW_SCOPE))
+            .await
+            .expect("first refresh rotation");
+        assert_eq!(first.status().as_u16(), 200);
+        let first = first
+            .json::<TokenResponse>()
+            .await
+            .expect("first refresh json");
+        let child_refresh = first.refresh_token.expect("child refresh token");
+        let family_id = refresh_family_id(&fx).await;
+        expire_idempotency_window(&fx, &family_id).await;
+
+        let replay = refresh_request(&fx, &root_refresh, Some(NARROW_SCOPE))
+            .await
+            .expect("refresh replay response");
+        assert_eq!(replay.status().as_u16(), 400);
+        assert_error(replay, "invalid_grant").await;
+        assert_family_revoked(&fx, &family_id).await;
+
+        let inactive = introspect_request(
+            &fx,
+            &child_refresh,
+            Some("refresh_token"),
+            Some(basic_auth(&fx.client_id)),
+        )
+        .await
+        .expect("reuse-detected family introspect response");
+        assert_eq!(inactive.status().as_u16(), 200);
+        assert_eq!(
+            inactive
+                .json::<Value>()
+                .await
+                .expect("inactive introspection json"),
+            serde_json::json!({ "active": false })
+        );
+    })
+    .await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn introspect_requires_valid_client_auth_before_token_status() {
+    Database::run(async |database| {
+        let fx = Fixture::boot(database, &["openid", "profile", "email", "offline_access"]).await;
+        let token = issue_refresh(&fx, FULL_SCOPE).await;
+        let refresh_token = token.refresh_token.expect("root refresh token");
+
+        let missing = introspect_request(&fx, &refresh_token, Some("refresh_token"), None)
+            .await
+            .expect("missing-auth introspect response");
+        assert_eq!(missing.status().as_u16(), 401);
+        assert_error(missing, "invalid_client").await;
+
+        let bad = introspect_request(
+            &fx,
+            &refresh_token,
+            Some("refresh_token"),
+            Some(basic_auth_with_secret(
+                &fx.client_id,
+                "wrong-refresh-client-secret",
+            )),
+        )
+        .await
+        .expect("bad-auth introspect response");
+        assert_eq!(bad.status().as_u16(), 401);
+        assert_error(bad, "invalid_client").await;
+    })
+    .await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn introspect_authenticates_before_missing_token_validation() {
+    Database::run(async |database| {
+        let fx = Fixture::boot(database, &["openid", "profile", "email", "offline_access"]).await;
+
+        let unauthenticated = introspect_form_request(&fx, None, None, None)
+            .await
+            .expect("unauthenticated no-token introspect response");
+        assert_eq!(unauthenticated.status().as_u16(), 401);
+        assert_error(unauthenticated, "invalid_client").await;
+
+        let authenticated =
+            introspect_form_request(&fx, None, None, Some(basic_auth(&fx.client_id)))
+                .await
+                .expect("authenticated no-token introspect response");
+        assert_eq!(authenticated.status().as_u16(), 400);
+        assert_error(authenticated, "invalid_request").await;
+    })
+    .await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn introspect_unknown_or_garbage_token_is_uniformly_inactive() {
+    Database::run(async |database| {
+        let fx = Fixture::boot(database, &["openid", "profile", "email", "offline_access"]).await;
+
+        let resp = introspect_request(
+            &fx,
+            "not-a-token",
+            Some("access_token"),
+            Some(basic_auth(&fx.client_id)),
+        )
+        .await
+        .expect("garbage introspect response");
+        assert_eq!(resp.status().as_u16(), 200);
+        assert_eq!(
+            resp.json::<Value>()
+                .await
+                .expect("garbage introspection json"),
+            serde_json::json!({ "active": false })
+        );
+    })
+    .await;
+}
+
+#[test]
+fn discovery_metadata_advertises_token_introspection_endpoint() {
+    let discovery = zeroship_auth::oidc::metadata::discovery_metadata(ISSUER);
+    assert_eq!(
+        discovery["introspection_endpoint"],
+        format!("{ISSUER}/introspect")
+    );
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn bulk_credential_bump_revoke_does_not_deadlock_concurrent_rotation() {
+    Database::run(async |database| {
+        let fx = Fixture::boot(database, &["openid", "profile", "email", "offline_access"]).await;
+        let root = issue_refresh(&fx, FULL_SCOPE).await;
+        let root_refresh = root.refresh_token.expect("root refresh token");
+        let rotate = refresh_request(&fx, &root_refresh, Some(NARROW_SCOPE));
+        let revoke = zeroship_auth::oidc::refresh::revoke_person_sessions(
+            &fx.server.refresh_pool,
+            &fx.user_id,
+            "credential_bump_test",
+        );
+        let (rotate, revoke) = futures::join!(rotate, revoke);
+        revoke.expect("credential-bump family revoke completes");
+        let rotate = rotate.expect("rotation response completes");
+        assert!(
+            matches!(rotate.status().as_u16(), 200 | 400),
+            "rotation races with credential revoke but must complete, got {}",
+            rotate.status()
+        );
+        assert_family_revoked(&fx, &refresh_family_id(&fx).await).await;
+    })
+    .await;
+}
+
+fn signing_key() -> SigningKey {
+    SigningKey::from_bytes(&[13; 32])
+}
+
+fn test_issuer() -> Issuer {
+    let signing = signing_key();
+    Issuer::from_signing_key(&signing, [11u8; 32], ISSUER.to_string()).expect("issuer")
+}
+
+async fn seed_user_client(
+    db: &Client,
+    user_id: &zeroship_core::UserId,
+    app_id: &zeroship_core::AppId,
+    app_name: &str,
+    client_id: &str,
+    scopes: &[&str],
+) {
+    let email = format!("p5b-{}@zeroship.test", Uuid::new_v4().simple());
+    db.execute(
+        "INSERT INTO zeroship.users (id, email, email_verified_at, name) \
+         VALUES ($1, $2::citext, NOW(), 'P5b User')",
+        &[&user_id.as_str(), &email],
+    )
+    .await
+    .expect("seed user");
+    db.execute(
+        "INSERT INTO zeroship.plans \
+            (id, name, runtime_limits_json, assignable_by_creator) \
+         VALUES ('free', 'Free', '{}'::jsonb, TRUE) \
+         ON CONFLICT (id) DO NOTHING",
+        &[],
+    )
+    .await
+    .expect("seed free plan");
+    // An app row needs a project, and a project needs an organization. Nothing
+    // here asserts on authority, so the organization is left member-less.
+    let project_id = support::unowned_project(db).await;
+    db.execute(
+        "INSERT INTO zeroship.apps (id, name, project_id, organization_id) \
+         SELECT $1, $2, p.id, p.organization_id FROM zeroship.projects p WHERE p.id = $3",
+        &[&app_id.as_str(), &app_name, &project_id],
+    )
+    .await
+    .expect("seed app");
+    let scope_vec = scopes
+        .iter()
+        .map(|scope| (*scope).to_string())
+        .collect::<Vec<_>>();
+    let secret_hash = hash_client_secret(REFRESH_CLIENT_SECRET);
+    db.execute(
+        "INSERT INTO zeroship.oauth_clients \
+            (client_id, client_name, redirect_uris, scopes, skip_consent, \
+             client_secret_hash, refresh_allowed, token_endpoint_auth_method) \
+         VALUES ($1, 'P5b OP refresh test', $2, $3, FALSE, $4, TRUE, 'client_secret_basic')",
+        &[
+            &client_id,
+            &vec![REDIRECT_URI.to_string()],
+            &scope_vec,
+            &secret_hash,
+        ],
+    )
+    .await
+    .expect("seed oauth client");
+    db.execute(
+        "INSERT INTO zeroship.app_oauth_clients (app_id, client_id, sector_identifier) \
+         VALUES ($1, $2, $3)",
+        &[&app_id.as_str(), &client_id, &SECTOR],
+    )
+    .await
+    .expect("seed app oauth client");
+    let pairwise_sub = test_issuer().pairwise_subject(user_id, SECTOR);
+    db.execute(
+        "INSERT INTO zeroship.app_user_identities \
+            (app_client_id, global_user_id, pairwise_sub) \
+         VALUES ($1, $2, $3)",
+        &[&client_id, &user_id.as_str(), &pairwise_sub],
+    )
+    .await
+    .expect("seed app user identity");
+    db.execute(
+        "INSERT INTO zeroship.oauth_grants \
+             (user_id, client_id, granted_scopes, granted_at, updated_at) \
+         VALUES ($1, $2, $3, NOW(), NOW())",
+        &[&user_id.as_str(), &client_id, &scope_vec],
+    )
+    .await
+    .expect("seed oauth grant");
+}
+
+#[allow(clippy::future_not_send)]
+async fn issue_refresh(fx: &Fixture, scope: &str) -> TokenResponse {
+    let verifier = pkce_verifier();
+    let authorize = send_authorize(fx, scope, &verifier)
+        .await
+        .expect("authorize response");
+    assert_eq!(authorize.status().as_u16(), 303);
+    let code = query_param(&location(&authorize), "code").expect("code in redirect");
+    let token = token_request(fx, &code, REDIRECT_URI, &verifier)
+        .await
+        .expect("token response");
+    assert_eq!(token.status().as_u16(), 200, "token response status");
+    token.json::<TokenResponse>().await.expect("token json")
+}
+
+#[allow(clippy::future_not_send)]
+async fn send_authorize(
+    fx: &Fixture,
+    scope: &str,
+    verifier: &str,
+) -> Result<cyper::Response, cyper::Error> {
+    let url = format!(
+        "{}/oauth2/authorize?{}",
+        fx.server.auth_base,
+        url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("client_id", &fx.client_id)
+            .append_pair("response_type", "code")
+            .append_pair("scope", scope)
+            .append_pair("redirect_uri", REDIRECT_URI)
+            .append_pair("state", "state-123")
+            .append_pair("nonce", "nonce-123")
+            .append_pair("code_challenge", &pkce_challenge_s256(verifier))
+            .append_pair("code_challenge_method", "S256")
+            .finish()
+    );
+    cyper::Client::new()
+        .request(http::Method::GET, url)
+        .expect("build GET /authorize")
+        .header("cookie", fx.session_cookie.clone())
+        .expect("cookie")
+        .send()
+        .await
+}
+
+#[allow(clippy::future_not_send)]
+async fn token_request(
+    fx: &Fixture,
+    code: &str,
+    redirect_uri: &str,
+    verifier: &str,
+) -> Result<cyper::Response, cyper::Error> {
+    let body = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("grant_type", "authorization_code")
+        .append_pair("client_id", &fx.client_id)
+        .append_pair("code", code)
+        .append_pair("redirect_uri", redirect_uri)
+        .append_pair("code_verifier", verifier)
+        .finish();
+    // This fixture's client is registered `client_secret_basic` with a stored
+    // hash, so it authenticates on the authorization_code grant exactly as it
+    // does on refresh and introspect.
+    cyper::Client::new()
+        .request(
+            http::Method::POST,
+            format!("{}/oauth2/token", fx.server.auth_base),
+        )
+        .expect("build POST /token")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .expect("content-type")
+        .header("authorization", basic_auth(&fx.client_id))
+        .expect("authorization")
+        .body(body)
+        .send()
+        .await
+}
+
+#[allow(clippy::future_not_send)]
+async fn refresh_request(
+    fx: &Fixture,
+    refresh_token: &str,
+    scope: Option<&str>,
+) -> Result<cyper::Response, cyper::Error> {
+    let mut form = url::form_urlencoded::Serializer::new(String::new());
+    form.append_pair("grant_type", "refresh_token")
+        .append_pair("refresh_token", refresh_token);
+    if let Some(scope) = scope {
+        form.append_pair("scope", scope);
+    }
+    cyper::Client::new()
+        .request(
+            http::Method::POST,
+            format!("{}/oauth2/token", fx.server.auth_base),
+        )
+        .expect("build POST /token")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .expect("content-type")
+        .header("authorization", basic_auth(&fx.client_id))
+        .expect("authorization")
+        .body(form.finish())
+        .send()
+        .await
+}
+
+#[allow(clippy::future_not_send)]
+async fn revoke_request(
+    fx: &Fixture,
+    refresh_token: &str,
+) -> Result<cyper::Response, cyper::Error> {
+    let body = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("token", refresh_token)
+        .append_pair("token_type_hint", "refresh_token")
+        .finish();
+    cyper::Client::new()
+        .request(
+            http::Method::POST,
+            format!("{}/oauth2/revoke", fx.server.auth_base),
+        )
+        .expect("build POST /revoke")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .expect("content-type")
+        .header("authorization", basic_auth(&fx.client_id))
+        .expect("authorization")
+        .body(body)
+        .send()
+        .await
+}
+
+#[allow(clippy::future_not_send)]
+async fn revoke_access_request(
+    fx: &Fixture,
+    access_token: &str,
+) -> Result<cyper::Response, cyper::Error> {
+    let body = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("token", access_token)
+        .append_pair("token_type_hint", "access_token")
+        .finish();
+    cyper::Client::new()
+        .request(
+            http::Method::POST,
+            format!("{}/oauth2/revoke", fx.server.auth_base),
+        )
+        .expect("build POST /revoke access")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .expect("content-type")
+        .header("authorization", basic_auth(&fx.client_id))
+        .expect("authorization")
+        .body(body)
+        .send()
+        .await
+}
+
+#[allow(clippy::future_not_send)]
+async fn userinfo_get(fx: &Fixture, token: &str) -> Result<cyper::Response, cyper::Error> {
+    cyper::Client::new()
+        .request(
+            http::Method::GET,
+            format!("{}/oauth2/userinfo", fx.server.auth_base),
+        )
+        .expect("build GET /userinfo")
+        .header("authorization", format!("Bearer {token}"))
+        .expect("authorization")
+        .send()
+        .await
+}
+
+#[allow(clippy::future_not_send)]
+async fn introspect_request(
+    fx: &Fixture,
+    token: &str,
+    token_type_hint: Option<&str>,
+    authorization: Option<String>,
+) -> Result<cyper::Response, cyper::Error> {
+    introspect_form_request(fx, Some(token), token_type_hint, authorization).await
+}
+
+#[allow(clippy::future_not_send)]
+async fn introspect_form_request(
+    fx: &Fixture,
+    token: Option<&str>,
+    token_type_hint: Option<&str>,
+    authorization: Option<String>,
+) -> Result<cyper::Response, cyper::Error> {
+    let mut form = url::form_urlencoded::Serializer::new(String::new());
+    if let Some(token) = token {
+        form.append_pair("token", token);
+    }
+    if let Some(hint) = token_type_hint {
+        form.append_pair("token_type_hint", hint);
+    }
+    let mut request = cyper::Client::new()
+        .request(
+            http::Method::POST,
+            format!("{}/oauth2/introspect", fx.server.auth_base),
+        )
+        .expect("build POST /introspect")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .expect("content-type");
+    if let Some(authorization) = authorization {
+        request = request
+            .header("authorization", authorization)
+            .expect("authorization");
+    }
+    request.body(form.finish()).send().await
+}
+
+fn basic_auth(client_id: &str) -> String {
+    basic_auth_with_secret(client_id, REFRESH_CLIENT_SECRET)
+}
+
+fn basic_auth_with_secret(client_id: &str, secret: &str) -> String {
+    format!("Basic {}", STANDARD.encode(format!("{client_id}:{secret}")))
+}
+
+/// The session the family became. There is one row per family now, so "the
+/// family id" and "the session id" are the same value read from one place.
+async fn refresh_family_id(fx: &Fixture) -> String {
+    fx.db
+        .query_one(
+            "SELECT id \
+             FROM zeroship.sessions \
+             WHERE client_id = $1 AND person_id = $2 \
+             LIMIT 1",
+            &[&fx.client_id, &fx.user_id.as_str()],
+        )
+        .await
+        .expect("refresh session id")
+        .get("id")
+}
+
+async fn expire_idempotency_window(fx: &Fixture, family_id: &str) {
+    fx.db
+        .execute(
+            "UPDATE zeroship.sessions \
+             SET idem_expires_at = NOW() - INTERVAL '1 second' \
+             WHERE id = $1 AND idem_response_enc IS NOT NULL",
+            &[&family_id],
+        )
+        .await
+        .expect("expire idempotency cache");
+}
+
+/// Flip the last byte of the sealed successor. It lands in the AES-GCM tag, so
+/// the blob authenticates under no key at all - the same observable state a
+/// re-keyed deployment or a snapshot restored under a different key produces,
+/// without this test needing to own key custody.
+async fn corrupt_idempotency_record(fx: &Fixture, family_id: &str) {
+    let corrupted = fx
+        .db
+        .execute(
+            "UPDATE zeroship.sessions \
+             SET idem_response_enc = set_byte( \
+                     idem_response_enc, \
+                     length(idem_response_enc) - 1, \
+                     get_byte(idem_response_enc, length(idem_response_enc) - 1) # 255) \
+             WHERE id = $1 AND idem_response_enc IS NOT NULL",
+            &[&family_id],
+        )
+        .await
+        .expect("corrupt sealed idempotency response");
+    assert_eq!(
+        corrupted, 1,
+        "exactly one sealed idempotency record to corrupt"
+    );
+}
+
+async fn assert_family_revoked(fx: &Fixture, family_id: &str) {
+    let row = fx
+        .db
+        .query_one(
+            "SELECT COUNT(*) FILTER (WHERE revoked_at IS NOT NULL)::BIGINT AS revoked, \
+                    COUNT(*)::BIGINT AS total \
+             FROM zeroship.sessions WHERE id = $1",
+            &[&family_id],
+        )
+        .await
+        .expect("session revoke count");
+    let revoked: i64 = row.get("revoked");
+    let total: i64 = row.get("total");
+    assert!(total > 0);
+    assert_eq!(revoked, total, "the session must be revoked");
+}
+
+async fn assert_family_not_revoked(fx: &Fixture, family_id: &str) {
+    let row = fx
+        .db
+        .query_one(
+            "SELECT COUNT(*) FILTER (WHERE revoked_at IS NOT NULL)::BIGINT AS revoked \
+             FROM zeroship.sessions WHERE id = $1",
+            &[&family_id],
+        )
+        .await
+        .expect("session revoke count");
+    assert_eq!(row.get::<_, i64>("revoked"), 0);
+}
+
+fn query_param(raw_url: &str, name: &str) -> Option<String> {
+    url::Url::parse(raw_url)
+        .ok()?
+        .query_pairs()
+        .find_map(|(key, value)| {
+            if key == name {
+                Some(value.into_owned())
+            } else {
+                None
+            }
+        })
+}
+
+async fn assert_error(resp: cyper::Response, expected: &str) {
+    let body = resp.json::<Value>().await.expect("oauth error json");
+    assert_eq!(body["error"], expected);
+}
+
+fn assert_invalid_userinfo_token(resp: &cyper::Response) {
+    assert_eq!(resp.status().as_u16(), 401);
+    assert_eq!(
+        resp.headers()
+            .get("www-authenticate")
+            .and_then(|value| value.to_str().ok()),
+        Some(r#"Bearer error="invalid_token""#)
+    );
+}
+
+fn assert_scope_set(actual: &Value, expected: &[&str]) {
+    let mut actual = actual
+        .as_str()
+        .expect("scope string")
+        .split_ascii_whitespace()
+        .collect::<Vec<_>>();
+    let mut expected = expected.to_vec();
+    actual.sort_unstable();
+    expected.sort_unstable();
+    assert_eq!(actual, expected);
+}

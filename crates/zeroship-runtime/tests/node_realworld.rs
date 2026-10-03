@@ -2,9 +2,11 @@
 //!
 //! These six modules drive unmodified npm clients (`pg`, `mysql2`, `ioredis`,
 //! `memjs`, node `http`, and the reconnect suite) against live servers. They are
-//! merged here rather than into `tests/main.rs` because of the helper they share.
+//! merged here rather than into `tests/integration/mod.rs` because of the
+//! helper they share.
 //!
-//! `support/node_realworld.rs` owns `lock_env()`, a `static ENV_LOCK` that
+//! `tests/node_realworld_harness.rs` owns `lock_env()`, a `static
+//! ENV_LOCK` that
 //! serialises the runtime's process-wide dev-mode and global-socket-cap cells
 //! and restores the previous values on `SettingsGuard::drop`. The entry below
 //! declares the helper exactly once and the six modules `use
@@ -43,8 +45,7 @@
 //! `Cargo.toml` sets `autotests = false`: a new file is compiled by nothing
 //! until it is listed below.
 
-#[path = "support/node_realworld.rs"]
-mod node_realworld;
+mod node_realworld_harness;
 
 mod node_http_e2e;
 mod node_ioredis_e2e;

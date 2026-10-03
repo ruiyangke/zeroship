@@ -88,6 +88,47 @@ The `backend_message` target drives the backend frame decoder and `pgoutput`
 the logical-replication payload decoder. A panic or hang is a decoder bug; a
 decoding error on arbitrary bytes is not.
 
+### Test tiers
+
+A crate links one test target, `main`, declared by `tests/main.rs`. It sets
+`autotests = false`, so a `tests/<name>.rs` file is compiled by nothing until a
+module declares it. `tests/main.rs` declares the tier modules and the shared
+fixtures:
+
+```rust
+mod support;
+mod integration;
+mod e2e;
+```
+
+The tiers are:
+
+- **Unit tests** sit beside the code under `src/**` behind `#[cfg(test)]`. They
+  exercise one module's internals and own no server:
+  `cargo test -p <crate> --lib`.
+- **Integration tests** live under `tests/integration/` and drive the crate's
+  public API in-process; they may own testkit fixtures and in-process servers or
+  databases. `tests/integration/mod.rs` declares one `mod <suite>;` per suite
+  file: `cargo test -p <crate> --test main integration::`.
+- **End-to-end tests** live under `tests/e2e/`, spawn the crate's real binaries
+  or other processes, and observe them from outside, or drive a browser.
+  `tests/e2e/mod.rs` declares one `mod <suite>;` per suite file:
+  `cargo test -p <crate> --test main e2e::`. A crate with no such suite declares
+  no `e2e` module.
+
+Fixtures shared by both tiers live under `tests/support/` and are reached as
+`crate::support::...`; the module is declared once by `tests/main.rs` and
+compiled once. Register a new suite in its tier's `mod.rs` in the same change as
+its file, or its tests never run and nothing reports it. A suite's submodules
+live in a directory named after the suite, so module resolution needs no
+`#[path]`. Omit a tier module or `mod support;` when the crate has none.
+
+A suite that must run alone in its own process keeps its own `[[test]]` target,
+with a comment on the stanza stating why. That covers a suite that installs a
+process-global default, counts process-wide resources, mutates process
+environment, or reads an input a checkout does not carry. Its entry file lives
+at `tests/<name>.rs`, outside the `main` target.
+
 JavaScript:
 
 ```

@@ -1,7 +1,9 @@
-//! The gateway's integration suites, linked into a single test executable.
+//! The gateway's single test target.
+//!
+//! In-process public-API suites live under `tests/integration/`; suites that
+//! spawn the shipped `zeroship-gate` binary live under `tests/e2e/`. Run a tier
+//! with `cargo test -p zeroship-gateway --test main integration::` or
+//! `... --test main e2e::`.
 
-mod config_env_tier;
-mod credential_boot;
-mod op_breaker_test;
-mod op_pool_idle_test;
-mod peer_boot;
+mod integration;
+mod e2e;

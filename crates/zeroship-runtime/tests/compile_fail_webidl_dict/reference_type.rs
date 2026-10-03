@@ -9,7 +9,6 @@
 //! Now the derive rejects reference-typed fields at parse time with
 //! a clear message naming the supported owned-type alternatives
 //! (closes H16).
-#![allow(dead_code, unused_imports)]
 
 use zeroship_runtime_macros::WebIdlDict;
 

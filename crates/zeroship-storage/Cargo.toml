@@ -30,6 +30,7 @@ zeroship-testkit = { path = "../../tests/testkit" }
 [lints]
 workspace = true
 
+# All suites are modules of the one test binary `tests/main.rs`.
 [[test]]
 name = "main"
 path = "tests/main.rs"

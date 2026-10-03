@@ -5,6 +5,7 @@ edition = "2021"
 autotests = false
 description = "zeroship shared mailer — provider-neutral Mailer trait + drivers (stdout/SMTP/Resend), suppression-list gate, relay forward/bounce, webhook payloads. Consumed by auth (transactional + relay) and control (billing notifier)."
 
+# All suites are modules of the one test binary `tests/main.rs`.
 [[test]]
 name = "main"
 path = "tests/main.rs"

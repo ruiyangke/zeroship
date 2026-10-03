@@ -3,8 +3,7 @@ name = "zeroship-gateway"
 version = "0.1.0"
 edition = "2021"
 description = "zeroship gateway — auth, rate limit, proxy to workers"
-# Integration suites are modules of one `tests/main.rs` target, so the crate
-# links one test executable instead of one per file.
+# All suites are modules of the one test binary `tests/main.rs`.
 autotests = false
 
 [[package.metadata.zeroship-config.targets]]

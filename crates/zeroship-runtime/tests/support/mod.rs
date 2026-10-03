@@ -1,0 +1,408 @@
+use std::collections::HashMap;
+use std::time::Duration;
+
+use zeroship_runtime::{init_v8, EnvSnapshot, FetchOutcome, ModuleEntry, RequestCtx, RequestResult, SettledFetch};
+use zeroship_runtime::channel::CancelFlag;
+use zeroship_runtime::runtime::Runtime;
+
+pub fn body_to_string(body: &[u8]) -> String {
+    String::from_utf8_lossy(body).into_owned()
+}
+
+/// Create a module list from a single JS source string.
+///
+/// The caller writes `export function foo() {...}` style, and `m()` returns a
+/// single-entry `index.js` module. The runtime kernel only invokes
+/// `default.{fetch, rpc, fetchFast}` — bare named exports aren't auto-
+/// reachable on the wire. Tests using [`dispatch`] synthesize a tiny
+/// `default.{fetch, rpc}` shim around the user code (see `dispatch` for
+/// the wrapping logic).
+pub fn m(source: &str) -> Vec<ModuleEntry> {
+    vec![ModuleEntry {
+        specifier: "index.js".into(),
+        source: source.into(),
+    }]
+}
+
+/// Expose the explicitly supplied procedure dictionary through native RPC.
+/// `procs_block` is an expression referencing the creator's named exports.
+pub fn wrap_with_synthetic_entry(user_source: &str, procs_block: &str) -> Vec<ModuleEntry> {
+    vec![ModuleEntry {
+        specifier: "index.js".into(),
+        source: format!("{user_source}\nexport default {{ rpc: {procs_block} }};"),
+    }]
+}
+
+/// Extract `{status, body, logs}` from a `FetchOutcome`. Caller must be
+/// inside a compio runtime (e.g. inside `block_on`) for Pending / Stream
+/// variants to drive the pump.
+async fn drive_fetch_outcome(outcome: FetchOutcome) -> (u16, String, Vec<String>) {
+    match outcome {
+        FetchOutcome::Response { status, body, logs, .. } => (status, body_to_string(&body), logs),
+        FetchOutcome::Stream { status, body_reader, logs, .. } => {
+            // Most dispatch calls return Response.json(...) which collapses to
+            // the Response arm; SSE (async-generator) tests intentionally
+            // return a stream. Drain once synchronously — good enough for the
+            // fully-buffered-at-send-time case.
+            let mut body = Vec::new();
+            for chunk in body_reader.drain() {
+                body.extend_from_slice(&chunk);
+            }
+            (status, String::from_utf8_lossy(&body).into_owned(), logs)
+        }
+        FetchOutcome::Pending { rx, cancel: _ } => {
+            let settled = compio::time::timeout(Duration::from_secs(5), rx.recv())
+                .await
+                .expect("fetch pending timed out")
+                .expect("fetch pending delivered DispatchError");
+            match settled {
+                SettledFetch::Response { status, body, logs, .. } => (status, body_to_string(&body), logs),
+                SettledFetch::Stream { status, body_reader, logs, .. } => {
+                    let mut body = Vec::new();
+                    for chunk in body_reader.drain() {
+                        body.extend_from_slice(&chunk);
+                    }
+                    (status, String::from_utf8_lossy(&body).into_owned(), logs)
+                }
+                SettledFetch::WebSocketUpgrade { .. } => {
+                    panic!("unexpected WebSocketUpgrade in dispatch helper")
+                }
+            }
+        }
+        FetchOutcome::WebSocketUpgrade { .. } => {
+            panic!("unexpected WebSocketUpgrade in dispatch helper")
+        }
+    }
+}
+
+/// Dispatch a single RPC-style call and block on its result.
+///
+/// Handles both sync handlers (no compio runtime needed) and async ones
+/// (spins up a compio runtime just for the await). Mirrors the
+/// `dispatch_rpc` contract: JSON string body on 2xx, Err(message) on 4xx/5xx.
+fn run_dispatch_on_runtime(runtime: &Runtime, method: &str, args_json: &str) -> Result<RequestResult, String> {
+    let env = EnvSnapshot::empty();
+    let ctx = RequestCtx::new(CancelFlag::new());
+    // Spec wire: POST /__zeroship/v1/<id> with body { json: <input> }. The
+    // legacy `dispatch` contract takes args as a JSON array (e.g.
+    // `[3, 4]`); we wrap that as the `input` value (the synthetic-entry
+    // shim spreads it over the handler's arguments at call time).
+    let body = if args_json.is_empty() {
+        "".to_string()
+    } else {
+        format!(r#"{{"json":{}}}"#, args_json)
+    };
+    let url = format!("http://localhost/__zeroship/v1/{}", url_path_encode(method));
+    let outcome = runtime.call_fetch_handler(
+        "POST",
+        &url,
+        &[("content-type".into(), "application/json".into())],
+        &body,
+        &env,
+        ctx,
+    );
+
+    // Sync path: Response variant returns immediately — no compio needed.
+    if let FetchOutcome::Response { status, body: json_body, logs, .. } = &outcome {
+        let (status, json_body, logs) = (*status, body_to_string(json_body), logs.clone());
+        if !(200..300).contains(&status) {
+            return Err(parse_error_message(&json_body));
+        }
+        return Ok(RequestResult {
+            json: unwrap_json_envelope(&json_body),
+            cpu_time: Duration::ZERO,
+            wall_time: Duration::ZERO,
+            logs,
+        });
+    }
+
+    // Non-Response outcomes (Stream / Pending / WebSocketUpgrade) need the
+    // compio runtime. Spin one up just for this call — cheap because we
+    // immediately block_on it.
+    let (status, json_body, logs) = compio::runtime::Runtime::new().unwrap().block_on(async {
+        runtime.start_pump();
+        drive_fetch_outcome(outcome).await
+    });
+    if !(200..300).contains(&status) {
+        return Err(parse_error_message(&json_body));
+    }
+    Ok(RequestResult {
+        json: unwrap_json_envelope(&json_body),
+        cpu_time: Duration::ZERO,
+        wall_time: Duration::ZERO,
+        logs,
+    })
+}
+
+/// Strip the `{ "json": ... }` envelope from a 200-OK body. Streaming
+/// (`text/event-stream`) bodies are returned verbatim — the SSE wire is
+/// already its own framing. Falls back to the raw body if it's not a
+/// JSON object with a `json` key.
+fn unwrap_json_envelope(body: &str) -> String {
+    if let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(body)
+        && let Some(inner) = map.get("json")
+    {
+        if let Some(s) = inner.as_str() {
+            // Re-stringify so callers see a JSON string.
+            return format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""));
+        }
+        return serde_json::to_string(inner).unwrap_or_else(|_| body.to_string());
+    }
+    body.to_string()
+}
+
+/// Invoke `method(args)` on the user's module through the synthetic
+/// entry over the spec wire. Returns a JSON string + the status→Err
+/// mapping for 4xx/5xx errors.
+///
+/// User code uses `export function NAME(...)` declarations; this helper
+/// auto-detects exports via a regex over the source and wraps them in a
+/// synthetic-entry shim that exposes `default.{fetch, rpc}`.
+///
+/// Calling convention: `args_json` is a JSON array (`[a, b, ...]`). The
+/// shim spreads the array over the handler's args, matching the legacy
+/// dispatch contract: `dispatch(m, "add", "[3,4]")` → `add(3, 4)`.
+pub fn dispatch(modules: Vec<ModuleEntry>, method: &str, args_json: &str) -> Result<RequestResult, String> {
+    init_v8();
+    let wrapped = wrap_positional_exports(modules);
+    let runtime = Runtime::builder().modules(wrapped).build();
+    run_dispatch_on_runtime(&runtime, method, args_json)
+}
+
+/// Adapt positional fixture functions to the native procedure dictionary.
+/// Each entry spreads its input array over the original handler arguments.
+fn wrap_positional_exports(modules: Vec<ModuleEntry>) -> Vec<ModuleEntry> {
+    if modules.is_empty() { return modules; }
+    let entry = &modules[0];
+    let names = extract_exported_names(&entry.source);
+    let procs_block = if names.is_empty() {
+        "{}".to_string()
+    } else {
+        format!("{{ {} }}", names.join(", "))
+    };
+    let shim = format!(
+        r#"
+{user}
+const procedures = {procs};
+const rpc = Object.fromEntries(Object.entries(procedures).map(([name, handler]) => [
+    name, (input) => Reflect.apply(handler, null, Array.isArray(input) ? input : []),
+]));
+export default {{ rpc }};
+"#,
+        user = entry.source,
+        procs = procs_block,
+    );
+    let mut out = vec![ModuleEntry {
+        specifier: entry.specifier.clone(),
+        source: shim,
+    }];
+    out.extend(modules.into_iter().skip(1));
+    out
+}
+
+/// Walk the source for `export function NAME`, `export async function NAME`,
+/// `export async function* NAME`, and `export const NAME = ...`. Returns
+/// the discovered names in source order.
+///
+/// This is a coarse string scan that handles the test patterns; it
+/// doesn't try to handle every ES grammar shape. Tests that don't fit
+/// (re-exports, namespace exports) should use `wrap_with_synthetic_entry`
+/// directly.
+fn extract_exported_names(src: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let bytes = src.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        // Find next "export"
+        let Some(rel) = src[i..].find("export") else { break; };
+        let abs = i + rel;
+        // Word boundary on the left: byte before must be non-identifier.
+        let left_ok = abs == 0 || {
+            let c = bytes[abs - 1];
+            !is_ident_char(c)
+        };
+        i = abs + "export".len();
+        if !left_ok { continue; }
+        // Skip whitespace.
+        let mut j = i;
+        while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t' || bytes[j] == b'\n' || bytes[j] == b'\r') { j += 1; }
+        // Optional "async ".
+        if src[j..].starts_with("async") {
+            let k = j + "async".len();
+            if k < bytes.len() && (bytes[k] == b' ' || bytes[k] == b'\t' || bytes[k] == b'\n' || bytes[k] == b'\r') {
+                j = k;
+                while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t' || bytes[j] == b'\n' || bytes[j] == b'\r') { j += 1; }
+            }
+        }
+        // Now must be "function", "const", "let", "var".
+        let kind = if src[j..].starts_with("function") { "function" }
+                   else if src[j..].starts_with("const") { "const" }
+                   else if src[j..].starts_with("let") { "let" }
+                   else if src[j..].starts_with("var") { "var" }
+                   else { continue; };
+        j += kind.len();
+        // For "function", optional "*" then whitespace.
+        if kind == "function" {
+            while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t' || bytes[j] == b'\n' || bytes[j] == b'\r' || bytes[j] == b'*') { j += 1; }
+        } else {
+            while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t' || bytes[j] == b'\n' || bytes[j] == b'\r') { j += 1; }
+        }
+        // Read identifier.
+        let id_start = j;
+        if id_start < bytes.len() && (bytes[id_start].is_ascii_alphabetic() || bytes[id_start] == b'_' || bytes[id_start] == b'$') {
+            let mut k = id_start + 1;
+            while k < bytes.len() && is_ident_char(bytes[k]) { k += 1; }
+            let name = src[id_start..k].to_string();
+            if seen.insert(name.clone()) {
+                names.push(name);
+            }
+            i = k;
+        } else {
+            i = j;
+        }
+    }
+    names
+}
+
+fn is_ident_char(c: u8) -> bool {
+    c.is_ascii_alphanumeric() || c == b'_' || c == b'$'
+}
+
+/// URL-encode a single path segment for native RPC lookup.
+fn url_path_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for &b in s.as_bytes() {
+        let c = b as char;
+        // Alphanumeric + unreserved path chars per RFC 3986.
+        if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~' | '/') {
+            out.push(c);
+        } else {
+            out.push_str(&format!("%{:02X}", b));
+        }
+    }
+    out
+}
+
+/// Extract a usable "message" string from a JSON error body. Falls back to
+/// the raw body if it's not parseable.
+fn parse_error_message(body: &str) -> String {
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(body)
+        && let Some(msg) = v.get("message").and_then(|m| m.as_str())
+    {
+        return msg.to_string();
+    }
+    body.to_string()
+}
+
+/// Like [`dispatch`] but with caller-supplied env vars surfaced as the
+/// user-facing `vars` half of the EnvSnapshot. Routes through the same
+/// path as production: snapshot → `set_env_snapshot` → `env_app_vars`,
+/// reachable via `env.get(name)` and the `zeroship` module's `env`.
+pub fn dispatch_with_env(
+    modules: Vec<ModuleEntry>,
+    env_vars: HashMap<String, String>,
+    method: &str,
+    args_json: &str,
+) -> Result<RequestResult, String> {
+    init_v8();
+    let wrapped = wrap_positional_exports(modules);
+    let runtime = Runtime::builder().modules(wrapped).build();
+    let vars: std::collections::BTreeMap<String, String> = env_vars.into_iter().collect();
+    let env = EnvSnapshot::new(vars, std::collections::BTreeMap::new(), Vec::new());
+    let ctx = RequestCtx::new(CancelFlag::new());
+    let body = if args_json.is_empty() {
+        "".to_string()
+    } else {
+        format!(r#"{{"json":{}}}"#, args_json)
+    };
+    let url = format!("http://localhost/__zeroship/v1/{}", url_path_encode(method));
+    let outcome = runtime.call_fetch_handler(
+        "POST",
+        &url,
+        &[("content-type".into(), "application/json".into())],
+        &body,
+        &env,
+        ctx,
+    );
+
+    if let FetchOutcome::Response { status, body: json_body, logs, .. } = &outcome {
+        let (status, json_body, logs) = (*status, body_to_string(json_body), logs.clone());
+        if !(200..300).contains(&status) {
+            return Err(parse_error_message(&json_body));
+        }
+        return Ok(RequestResult {
+            json: unwrap_json_envelope(&json_body),
+            cpu_time: Duration::ZERO,
+            wall_time: Duration::ZERO,
+            logs,
+        });
+    }
+
+    let (status, json_body, logs) = compio::runtime::Runtime::new().unwrap().block_on(async {
+        runtime.start_pump();
+        drive_fetch_outcome(outcome).await
+    });
+    if !(200..300).contains(&status) {
+        return Err(parse_error_message(&json_body));
+    }
+    Ok(RequestResult {
+        json: unwrap_json_envelope(&json_body),
+        cpu_time: Duration::ZERO,
+        wall_time: Duration::ZERO,
+        logs,
+    })
+}
+
+/// HTTP request to feed `call_fetch_handler` — the new kernel primitive.
+pub struct TestRequest {
+    pub method: &'static str,
+    pub url: &'static str,
+    pub headers: Vec<(String, String)>,
+    pub body: String,
+}
+
+impl TestRequest {
+    pub fn get(url: &'static str) -> Self {
+        Self { method: "GET", url, headers: vec![], body: String::new() }
+    }
+}
+
+/// Build a Runtime + call `call_fetch_handler` once synchronously.
+/// Returns the outcome as-is; tests destructure.
+pub fn dispatch_fetch(modules: Vec<ModuleEntry>, req: TestRequest) -> FetchOutcome {
+    init_v8();
+    let runtime = Runtime::builder().modules(modules).build();
+    let env = EnvSnapshot::empty();
+    let ctx = RequestCtx::new(CancelFlag::new());
+    runtime.call_fetch_handler(
+        req.method,
+        req.url,
+        &req.headers,
+        &req.body,
+        &env,
+        ctx,
+    )
+}
+
+/// Build a Runtime + call `call_fetch_handler` with a caller-supplied
+/// EnvSnapshot. Used by Part B tests that want to assert visibility of
+/// vars vs. secrets vs. the per-app `expose` opt-in across `process.env`,
+/// the `zeroship` module's `env` import, and `env.get()`.
+pub fn dispatch_fetch_with_env(
+    modules: Vec<ModuleEntry>,
+    req: TestRequest,
+    env: EnvSnapshot,
+) -> FetchOutcome {
+    init_v8();
+    let runtime = Runtime::builder().modules(modules).build();
+    let ctx = RequestCtx::new(CancelFlag::new());
+    runtime.call_fetch_handler(
+        req.method,
+        req.url,
+        &req.headers,
+        &req.body,
+        &env,
+        ctx,
+    )
+}

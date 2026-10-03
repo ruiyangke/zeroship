@@ -4,10 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Workflow worker registry, placement and management coordinator"
-# The integration suites share one migrated server fixture, so they compile into
-# one test binary instead of one per `tests/*.rs`. `tests/main.rs` registers
-# each suite module; a new `tests/<name>.rs` is compiled by nothing until it is
-# declared there.
+# All suites are modules of the one test binary `tests/main.rs`.
 autotests = false
 
 [[test]]

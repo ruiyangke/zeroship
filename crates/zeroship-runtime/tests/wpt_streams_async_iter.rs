@@ -243,7 +243,6 @@ const TESTHARNESS_SHIM: &str = r#"
 "#;
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 enum Outcome {
     Pass,
     Fail(String),

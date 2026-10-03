@@ -3,9 +3,7 @@ name = "zeroship-auth"
 version = "0.1.0"
 edition = "2021"
 description = "zeroship auth service — login/consent UI, identity flows, native OIDC OP"
-# Integration cases are modules of tests/main.rs. Disable auto-discovery to
-# avoid linking a separate executable for each module; register new modules
-# in that entry point so ordinary cargo test includes them.
+# All suites are modules of the one test binary `tests/main.rs`.
 autotests = false
 
 [[package.metadata.zeroship-config.targets]]

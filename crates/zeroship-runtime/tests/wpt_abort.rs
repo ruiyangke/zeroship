@@ -9,7 +9,7 @@
 //! cases in event.any.js) are reported as `skip` by the test harness
 //! shim — they need the runtime event loop, not a bare V8 isolate.
 //! The full timer-fired path is exercised in
-//! `tests/abort_runtime.rs` against the live Runtime.
+//! `tests/integration/abort_runtime.rs` against the live Runtime.
 
 #![allow(unsafe_code)]
 
@@ -133,7 +133,7 @@ const TESTHARNESS_SHIM: &str = r#"
 
   // async_test stubs out — we don't pump the event loop in this
   // bare-isolate runner. The timeout-firing path is covered in
-  // tests/abort_runtime.rs against the full Runtime.
+  // tests/integration/abort_runtime.rs against the full Runtime.
   globalThis.async_test = function (_fn, name) {
     __wpt_results.push({
       name: name || "<async_test>",
@@ -205,7 +205,6 @@ const TESTHARNESS_SHIM: &str = r#"
 "#;
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 enum Outcome {
     Pass,
     Fail(String),
@@ -392,7 +391,10 @@ fn wpt_abort_compliance() {
         for r in results {
             match &r.outcome {
                 Outcome::Pass => t.pass += 1,
-                Outcome::Skip(_) => t.skip += 1,
+                Outcome::Skip(reason) => {
+                    t.skip += 1;
+                    eprintln!("  SKIP  {}: {reason}", r.name);
+                }
                 Outcome::Fail(_) => {
                     t.fail += 1;
                     failures.push((name, r));

@@ -1,0 +1,369 @@
+//! Dynamic imports compile artifact-resident graphs lazily and share V8 evaluation.
+
+use crate::support;
+use support::{dispatch, m};
+use zeroship_runtime::ModuleEntry;
+
+fn me(specifier: &str, source: &str) -> ModuleEntry {
+    ModuleEntry {
+        specifier: specifier.into(),
+        source: source.into(),
+    }
+}
+
+#[test]
+fn dynamic_only_modules_load_dependencies_and_await_evaluation() {
+    let modules = vec![
+        me(
+            "app/entry.js",
+            r#"
+            export async function test() {
+                const [a, b] = await Promise.all([import('./chunks/lazy.js'), import('./chunks/lazy.js')]);
+                return { same: a === b, value: a.value, evaluations: globalThis.evaluations };
+            }
+        "#,
+        ),
+        me(
+            "app/chunks/lazy.js",
+            r#"
+            import valueFromDependency from '../shared/value.js';
+            globalThis.evaluations = (globalThis.evaluations ?? 0) + 1;
+            await Promise.resolve();
+            export const value = valueFromDependency;
+        "#,
+        ),
+        me("app/shared/value.js", "export default 'retained';"),
+        me(
+            "unused.js",
+            "this source is deliberately invalid JavaScript",
+        ),
+    ];
+    let result = dispatch(modules, "test", "[]").unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&result.json).unwrap(),
+        serde_json::json!({"same":true,"value":"retained","evaluations":1})
+    );
+}
+
+#[test]
+fn failed_dynamic_evaluation_keeps_the_original_rejection() {
+    let modules = vec![
+        me(
+            "app/entry.js",
+            r#"
+            export async function test() {
+                let first;
+                try { await import('./failed.js'); } catch (error) { first = error; }
+                try { await import('./failed.js'); } catch (error) {
+                    return { same: first === error, message: error.message };
+                }
+                throw new Error('failed import was accepted');
+            }
+        "#,
+        ),
+        me(
+            "app/failed.js",
+            "await Promise.resolve(); throw new Error('module failed');",
+        ),
+    ];
+    let result = dispatch(modules, "test", "[]").unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&result.json).unwrap(),
+        serde_json::json!({"same":true,"message":"module failed"})
+    );
+}
+
+#[test]
+fn missing_relative_and_invalid_dynamic_modules_leave_imports_usable() {
+    let modules = vec![
+        me(
+            "app/entry.js",
+            r#"
+            export async function test() {
+                const failures = [];
+                for (const path of ['./missing.js', './syntax.js', './dependency.js']) {
+                    try { await import(path); } catch (error) { failures.push(error.name); }
+                }
+                const { value } = await import('./valid.js');
+                return { failures, value };
+            }
+        "#,
+        ),
+        me(
+            "missing.js",
+            "throw new Error('root fallback must never execute');",
+        ),
+        me("app/syntax.js", "export const = broken;"),
+        me(
+            "app/dependency.js",
+            "import './missing.js'; export const value = 'bad';",
+        ),
+        me("app/valid.js", "export const value = 'healthy';"),
+    ];
+    let result = dispatch(modules, "test", "[]").unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&result.json).unwrap(),
+        serde_json::json!({"failures":["TypeError","SyntaxError","TypeError"],"value":"healthy"})
+    );
+}
+
+#[test]
+fn static_and_dynamic_share_namespace() {
+    // The user statically imports `./shared.js`, then dynamically
+    // imports the same specifier. The two namespace objects must be
+    // `===`: same module record, same exports, no double evaluation.
+    let modules = vec![
+        me(
+            "index.js",
+            r#"
+            import * as staticNs from "./shared.js";
+            export async function test() {
+                const dynNs = await import("./shared.js");
+                return {
+                    sameNs: staticNs === dynNs,
+                    sameValue: staticNs.value === dynNs.value,
+                    value: dynNs.value,
+                };
+            }
+            "#,
+        ),
+        me("shared.js", "export const value = 42;"),
+    ];
+
+    let r = dispatch(modules, "test", "[]").unwrap();
+    assert!(r.json.contains(r#""sameNs":true"#), "got: {}", r.json);
+    assert!(r.json.contains(r#""sameValue":true"#), "got: {}", r.json);
+    assert!(r.json.contains(r#""value":42"#), "got: {}", r.json);
+}
+
+#[test]
+fn dynamic_only_import_via_registry_path() {
+    // User code never spells `import "./tools.js"` statically, but a
+    // sibling module does — so the BFS in `load_modules` does compile
+    // tools.js into the registry. The dynamic import then hits the
+    // registry path.
+    let modules = vec![
+        me(
+            "index.js",
+            r#"
+            import "./bridge.js"; // forces bridge.js → tools.js into registry
+            export async function test() {
+                const tools = await import("./tools.js");
+                return { kind: typeof tools.add, sum: tools.add(2, 3) };
+            }
+            "#,
+        ),
+        me("bridge.js", r#"import "./tools.js";"#),
+        me("tools.js", "export function add(a, b) { return a + b; }"),
+    ];
+
+    let r = dispatch(modules, "test", "[]").unwrap();
+    assert!(r.json.contains(r#""kind":"function""#), "got: {}", r.json);
+    assert!(r.json.contains(r#""sum":5"#), "got: {}", r.json);
+}
+
+#[test]
+fn dynamic_import_caches_module_instance() {
+    // Two `await import()` calls in the same RPC return the same
+    // module record — the exported counter increments once because
+    // the side-effecting initializer ran once.
+    let modules = vec![
+        me(
+            "index.js",
+            r#"
+            import "./counter.js"; // pull into registry
+            export async function test() {
+                const a = await import("./counter.js");
+                const b = await import("./counter.js");
+                a.bump();
+                b.bump();
+                return { sameNs: a === b, count: a.count() };
+            }
+            "#,
+        ),
+        me(
+            "counter.js",
+            r#"
+            let n = 0;
+            export function bump() { n += 1; }
+            export function count() { return n; }
+            "#,
+        ),
+    ];
+
+    let r = dispatch(modules, "test", "[]").unwrap();
+    assert!(r.json.contains(r#""sameNs":true"#), "got: {}", r.json);
+    assert!(r.json.contains(r#""count":2"#), "got: {}", r.json);
+}
+
+#[test]
+fn unknown_specifier_rejects_with_typeerror() {
+    // No `does-not-exist.js` in the bundle → the dynamic-import
+    // callback rejects with TypeError naming the bad specifier.
+    let r = dispatch(
+        m(r#"
+        export async function test() {
+            try {
+                await import("./does-not-exist.js");
+                return { ok: true };
+            } catch (e) {
+                return { name: e?.constructor?.name, msg: e?.message };
+            }
+        }
+        "#),
+        "test",
+        "[]",
+    )
+    .unwrap();
+    assert!(r.json.contains(r#""name":"TypeError""#), "got: {}", r.json);
+    assert!(r.json.contains("does-not-exist"), "got: {}", r.json);
+    assert!(r.json.contains("Cannot find module"), "got: {}", r.json);
+}
+
+#[test]
+fn dynamic_node_async_hooks_resolves_via_native_path() {
+    // No static import of `node:async_hooks` — the dynamic import
+    // mints the synthetic module on first call and caches it.
+    let r = dispatch(
+        m(r#"
+        export async function test() {
+            const ah = await import("node:async_hooks");
+            const als = new ah.AsyncLocalStorage();
+            return als.run({ key: "v" }, () => ({
+                hasAls: typeof ah.AsyncLocalStorage === "function",
+                store: als.getStore(),
+            }));
+        }
+        "#),
+        "test",
+        "[]",
+    )
+    .unwrap();
+    assert!(r.json.contains(r#""hasAls":true"#), "got: {}", r.json);
+    assert!(r.json.contains(r#""store":{"key":"v"}"#), "got: {}", r.json);
+}
+
+#[test]
+fn dynamic_node_crypto_resolves_via_native_path() {
+    // `createHash` + `randomUUID` come back from a dynamic-only
+    // import — verifies the second native specifier flows through
+    // the same callback.
+    let r = dispatch(
+        m(r#"
+        export async function test() {
+            const c = await import("node:crypto");
+            const h = c.createHash("sha256");
+            h.update("abc");
+            const id = c.randomUUID();
+            return {
+                digest: h.digest("hex"),
+                idLen: id.length,
+                dashes: (id.match(/-/g) || []).length,
+            };
+        }
+        "#),
+        "test",
+        "[]",
+    )
+    .unwrap();
+    assert!(
+        r.json
+            .contains("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"),
+        "got: {}",
+        r.json,
+    );
+    assert!(r.json.contains(r#""idLen":36"#), "got: {}", r.json);
+    assert!(r.json.contains(r#""dashes":4"#), "got: {}", r.json);
+}
+
+#[test]
+fn dynamic_native_import_caches_for_subsequent_calls() {
+    // After a dynamic import of `node:crypto`, a *second* dynamic
+    // import returns the same module namespace. The cache_into_registry
+    // step in the callback ensures we don't mint two different
+    // SyntheticModules for one specifier.
+    let r = dispatch(
+        m(r#"
+        export async function test() {
+            const a = await import("node:crypto");
+            const b = await import("node:crypto");
+            return { same: a === b };
+        }
+        "#),
+        "test",
+        "[]",
+    )
+    .unwrap();
+    assert!(r.json.contains(r#""same":true"#), "got: {}", r.json);
+}
+
+#[test]
+fn dynamic_import_compiles_a_deferred_graph_and_preserves_rejection_identity() {
+    let modules = vec![
+        me(
+            "index.js",
+            r#"
+            globalThis.evaluations = [];
+            globalThis.originalFailure = Object.assign(new Error('lazy fixture failed'), {code: 'LAZY_FIXTURE'});
+            export async function test() {
+                const before = [...evaluations];
+                const [left, right] = await Promise.all([import('./lazy.js'), import('./lazy.js')]);
+                const failures = [];
+                for (const name of ['./bad.js', './bad.js']) {
+                    try { await import(name); failures.push(false); }
+                    catch (error) { failures.push(error === originalFailure && error.code === 'LAZY_FIXTURE'); }
+                }
+                return {before, same: left === right, value: left.value, evaluations, failures};
+            }
+        "#,
+        ),
+        me(
+            "lazy.js",
+            r#"
+            import {value as dependency} from './dependency.js';
+            await Promise.resolve();
+            evaluations.push('lazy');
+            export const value = dependency;
+        "#,
+        ),
+        me(
+            "dependency.js",
+            "evaluations.push('dependency'); export const value = 'loaded';",
+        ),
+        me("bad.js", "throw originalFailure;"),
+        me("unused.js", "not valid javascript ! ! !"),
+    ];
+    let result = dispatch(modules, "test", "[]").unwrap();
+    let value: serde_json::Value = serde_json::from_str(&result.json).unwrap();
+    assert_eq!(
+        value,
+        serde_json::json!({"before": [], "same": true, "value": "loaded",
+        "evaluations": ["dependency", "lazy"], "failures": [true, true]})
+    );
+}
+
+#[test]
+fn dynamic_import_rejects_invalid_source_and_missing_dependencies() {
+    let modules = vec![
+        me(
+            "index.js",
+            r#"
+            export async function test() {
+                const failures = [];
+                for (const name of ['./syntax.js', './missing-dependency.js']) {
+                    try { await import(name); failures.push('accepted'); }
+                    catch (error) { failures.push(error.name); }
+                }
+                return failures;
+            }
+        "#,
+        ),
+        me("syntax.js", "not valid javascript ! ! !"),
+        me("missing-dependency.js", "import './absent.js';"),
+    ];
+    let result = dispatch(modules, "test", "[]").unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&result.json).unwrap(),
+        serde_json::json!(["SyntaxError", "TypeError"])
+    );
+}

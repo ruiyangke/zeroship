@@ -5,15 +5,17 @@
 //! stands in for it: the endpoint itself is exercised against the real handler
 //! in `zeroship-control`. What they supply here is the seam, so a test can
 //! drive the policy ledger and the closing lane against real Control rows
-//! ([`DatabaseAppFacts`]) or against an answer it dictates outright
-//! ([`ScriptedAppFacts`]).
+//! ([`DatabaseAppFacts`]).
+//!
+//! A case that dictates the answer outright builds a
+//! `crate::support::scripted_app_facts::ScriptedAppFacts`.
 
 #![allow(
     clippy::future_not_send,
     reason = "fixture clients stay on their compio runtime"
 )]
 
-use std::{cell::RefCell, rc::Rc};
+use std::rc::Rc;
 use zeroship_core::{
     AppId,
     workflow_app_facts::{AppFactsResponse, AppSourceFacts, PlanSourceFacts, SourceWatermark},
@@ -101,41 +103,6 @@ impl AppFactsSource for DatabaseAppFacts {
                 watermark: SourceWatermark::new(watermark).ok_or(Error::Unavailable)?,
                 apps: facts,
             })
-        })
-    }
-}
-
-/// An answer a test dictates, including its watermark.
-///
-/// This is what lets a case put a STALE answer in front of the publication
-/// fence. A lagging replica or a cache in front of the route is what would do
-/// that in production; neither can be arranged in a fixture, and the fence is
-/// what the deployment relies on when one appears.
-#[derive(Debug, Default)]
-pub struct ScriptedAppFacts {
-    answer: RefCell<Option<AppFactsResponse>>,
-}
-
-impl ScriptedAppFacts {
-    pub fn new() -> Rc<Self> {
-        Rc::new(Self::default())
-    }
-
-    /// The answer the next observation returns. An unset answer is unavailable
-    /// rather than empty, so a case that forgets to script one fails loudly.
-    pub fn set(&self, response: AppFactsResponse) {
-        *self.answer.borrow_mut() = Some(response);
-    }
-}
-
-impl AppFactsSource for ScriptedAppFacts {
-    fn observe<'a>(&'a self, apps: &'a [AppId]) -> AppFactsFuture<'a> {
-        let scripted = self.answer.borrow().clone();
-        Box::pin(async move {
-            if apps.is_empty() {
-                return Err(Error::Invalid);
-            }
-            scripted.ok_or(Error::Unavailable)
         })
     }
 }

@@ -1,50 +1,14 @@
 // The async integration cases need this limit on their own crate root.
 #![recursion_limit = "256"]
 
-//! Auth integration tests share an executable and keep fixtures private.
+//! The auth single test target.
 //!
-//! Cargo auto-discovery is disabled for this crate. Register new modules here
-//! or beneath an existing module so ordinary cargo test includes their cases.
-//! Store tests live under `store`; HTTP and protocol modules exercise the
-//! production routes. Database cases manage their own servers and connection
-//! tasks through `common::database`.
-//!
-//! Select a group with `cargo test -p zeroship-auth --test main -- store::`.
-//! Each case must own mutable resources even though the executable is shared.
+//! Shared fixtures live under `tests/support/`; in-process public-API suites
+//! live under `tests/integration/`; browser and `--check-config` suites live
+//! under `tests/e2e/`. Run a tier with
+//! `cargo test -p zeroship-auth --test main integration::` or
+//! `cargo test -p zeroship-auth --test main e2e::`.
 
-mod common;
-
-mod account_deletion_test;
-mod account_linking;
-mod audit_retention_test;
-mod auth_ui;
-mod check_config_smtp_test;
-mod cli_device_refresh_test;
-mod config_env_tier;
-mod device_grant_test;
-mod federation;
-mod gotrue;
-mod jwks_native_test;
-mod logout;
-mod email_verification;
-mod magic_login;
-mod metadata_cache_headers_test;
-mod oauth_start_intake_test;
-mod oidc_authorization_code_test;
-mod oidc_brokered_login_test;
-mod oidc_foundation_test;
-mod oidc_login_consent_test;
-mod oidc_refresh_token_test;
-mod oidc_token_client_auth_test;
-mod oidc_userinfo_test;
-mod password_login;
-mod password_reset;
-mod postmark;
-mod relay;
-mod security_headers_test;
-mod second_factor;
-mod signing_key_retention_test;
-mod signup;
-mod store;
-mod threat_model;
-mod token_sweep_test;
+mod support;
+mod integration;
+mod e2e;

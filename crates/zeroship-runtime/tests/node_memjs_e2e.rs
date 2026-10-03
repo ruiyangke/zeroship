@@ -1,4 +1,4 @@
-use crate::node_realworld;
+use crate::node_realworld_harness as node_realworld;
 
 use std::time::Duration;
 

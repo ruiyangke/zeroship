@@ -35,7 +35,7 @@ the day this was written are both invisible to a response-body assertion:
 ## How to run
 
 ```bash
-nix develop --command cargo test -p zeroship-auth --test main -- --ignored auth_ui
+nix develop --command cargo test -p zeroship-auth --test main e2e:: -- --ignored auth_ui
 ```
 
 The case is `#[ignore]`d so a browser never becomes a prerequisite of

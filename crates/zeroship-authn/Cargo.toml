@@ -3,8 +3,7 @@ name = "zeroship-authn"
 version = "0.1.0"
 edition = "2021"
 description = "Shared control-plane bearer authentication primitives"
-# Register integration modules in tests/main.rs so database cases share one
-# migrated server while keeping their mutable resources private.
+# All suites are modules of the one test binary `tests/main.rs`.
 autotests = false
 
 [[test]]

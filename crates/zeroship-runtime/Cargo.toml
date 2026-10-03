@@ -17,10 +17,10 @@ autobenches = false
 # links this crate, V8 and the whole dependency graph. There were 137 such
 # files and they cost 18.97 GiB of target/ (measured 2026-08-20 at
 # `[profile.dev] debug = "line-tables-only"`). The `[[test]]` entries below are
-# now the ONLY integration-test targets, so a new `tests/<name>.rs` is compiled
-# by NOTHING until it is either listed here or declared as `mod <name>;` in one
-# of the three consolidated entries. `tests/main.rs` carries the measurement
-# and the per-target reasoning; read it before adding an entry here.
+# now the ONLY test targets, so a new `tests/<name>.rs` is compiled by NOTHING
+# until it is either listed here or declared as a tier module of
+# `tests/main.rs`. That entry point carries the measurement and the per-target
+# reasoning; read it before adding an entry here.
 autotests = false
 
 [[package.metadata.zeroship-config.targets]]
@@ -33,12 +33,12 @@ target = "zeroship-bench-server"
 class = "test-dev-tool"
 reason = "Feature-gated V8 server used only by runtime benchmarks."
 
-# Shared runtime integration tests.
+# All in-process suites are modules of the one test binary `tests/main.rs`.
 [[test]]
 name = "main"
 path = "tests/main.rs"
 
-# The `wpt_*.rs` modules. NOT in `main` because every one of them
+# The `wpt_*.rs` modules. NOT in `integration` because every one of them
 # `include_str!`s `tests/wpt/`, which the development shell links from its
 # pinned `wpt` flake input and does not track in git. A checkout outside the
 # shell cannot compile them at all, and this keeps that true of one target
@@ -47,8 +47,8 @@ path = "tests/main.rs"
 name = "wpt"
 path = "tests/wpt.rs"
 
-# The six `node_*_e2e.rs` modules. NOT in `main` because they mutate process
-# environment behind `support/node_realworld.rs::lock_env()`, and that lock
+# The six `node_*_e2e.rs` modules. NOT in `integration` because they mutate process
+# environment behind `tests/node_realworld_harness.rs::lock_env()`, and that lock
 # only excludes if there is exactly one copy of its `static` in the process.
 [[test]]
 name = "node_realworld"
@@ -60,10 +60,6 @@ path = "tests/node_realworld.rs"
 # `ZEROSHIP_DEV` to unset while the other is mid-request under it and
 # `transport/ssrf.rs` starts blocking loopback. Sharing one lock would mean
 # editing their bodies, so they stay apart.
-[[test]]
-name = "dev_auth"
-path = "tests/dev_auth.rs"
-
 [[test]]
 name = "node_net"
 path = "tests/node_net.rs"

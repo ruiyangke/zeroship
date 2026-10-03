@@ -14,7 +14,7 @@
 //!
 //! The full WPT abort/general.any.js (572 lines) tests AbortError
 //! rejection shape, signal.reason propagation, etc. — those run via
-//! the V8 path in tests/abort_runtime.rs. This file concentrates on
+//! the V8 path in tests/integration/abort_runtime.rs. This file concentrates on
 //! the algorithm-level cancel semantics that are language-agnostic.
 //!
 //! Pass criterion: ≥75% per the brief.
@@ -38,10 +38,7 @@ enum Outcome {
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
-struct CapturedReq {
-    method: String,
-}
+struct CapturedReq;
 
 struct Server {
     addr: SocketAddr,
@@ -87,13 +84,11 @@ fn start_server(delay_ms: u64) -> Server {
             }
         }
 
-        // Capture method.
+        // Count parseable request lines.
         if let Ok(s) = std::str::from_utf8(&buf)
-            && let Some(m) = s.split_whitespace().next()
+            && s.split_whitespace().next().is_some()
         {
-            req_clone.lock().unwrap().push(CapturedReq {
-                method: m.to_string(),
-            });
+            req_clone.lock().unwrap().push(CapturedReq);
         }
 
         let _ = counter.fetch_add(1, Ordering::Relaxed);

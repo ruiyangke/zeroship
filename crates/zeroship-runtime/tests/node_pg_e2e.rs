@@ -320,7 +320,7 @@ export default {{
     // The fixture queues both from `main()`'s synchronous prefix, which runs
     // inside the host's direct call to `default.fetch`. That is not a promise
     // job, so the tick queue drains first, as it does in a Node `http` request
-    // listener. `tests/next_tick_ordering.rs` checks this arrangement and the
+    // listener. `tests/integration/next_tick_ordering.rs` checks this arrangement and the
     // in-microtask one against a real Node run; this assertion guards the pg
     // fixture against losing either call.
     assert_eq!(

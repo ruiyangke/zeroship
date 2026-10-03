@@ -1,0 +1,44 @@
+//! The auth in-process integration suites.
+//!
+//! Cargo auto-discovery is disabled for this crate. Register new modules here
+//! or beneath an existing module so ordinary cargo test includes their cases.
+//! Store tests live under `store`; HTTP and protocol modules exercise the
+//! production routes. Database cases manage their own servers and connection
+//! tasks through `crate::support::database`.
+//!
+//! Select a group with
+//! `cargo test -p zeroship-auth --test main integration:: -- store::`.
+//! Each case must own mutable resources even though the executable is shared.
+
+mod account_deletion;
+mod account_linking;
+mod audit_retention_test;
+mod cli_device_refresh_test;
+mod database_lifetime;
+mod device_grant_test;
+mod federation;
+mod gotrue;
+mod jwks_native_test;
+mod logout;
+mod email_verification;
+mod magic_login;
+mod metadata_cache_headers_test;
+mod oauth_start_intake_test;
+mod oidc_authorization_code_test;
+mod oidc_brokered_login_test;
+mod oidc_foundation_test;
+mod oidc_login_consent_test;
+mod oidc_refresh_token_test;
+mod oidc_token_client_auth_test;
+mod oidc_userinfo_test;
+mod password_login;
+mod password_reset;
+mod postmark;
+mod relay;
+mod security_headers_test;
+mod second_factor;
+mod signing_key_retention_test;
+mod signup;
+mod store;
+mod threat_model;
+mod token_sweep_test;

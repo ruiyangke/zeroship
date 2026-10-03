@@ -6,6 +6,8 @@
 
 #[path = "../../zeroship-workflow-server/tests/support/platform.rs"]
 mod platform;
+#[path = "../../zeroship-workflow-server/tests/support/placement.rs"]
+mod placement;
 
 mod common;
 
