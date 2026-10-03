@@ -8,19 +8,19 @@ use futures_util::{SinkExt, StreamExt};
 use std::time::Duration;
 
 #[allow(unused_imports)]
-use crate::common;
+use crate::support;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(20);
 const REFUSAL_TIMEOUT: Duration = Duration::from_secs(1);
 
 async fn connect_client() -> Client {
-    let url = common::test_url();
-    let (client, connection) = compio_postgres::connect(&url, common::suite_tls())
+    let url = support::test_url();
+    let (client, connection) = compio_postgres::connect(&url, support::suite_tls())
         .await
-        .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+        .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
     compio::runtime::spawn(async move {
         if let Err(error) = connection.run().await {
-            eprintln!("connection error: {}", common::error_chain(&error));
+            eprintln!("connection error: {}", support::error_chain(&error));
         }
     })
     .detach();
@@ -39,7 +39,7 @@ fn assert_mode_refusal(error: Error, direction: &str) {
 async fn copy_in_refuses_queries_until_the_sink_finishes() {
     compio::time::timeout(TEST_TIMEOUT, async {
         let client = connect_client().await;
-        let table = common::test_object_name("copy_in_interleaving");
+        let table = support::test_object_name("copy_in_interleaving");
         client
             .batch_execute(&format!("CREATE TEMPORARY TABLE {table} (v int4)"))
             .await
@@ -129,13 +129,13 @@ async fn returning_a_lease_with_a_live_copy_handle_evicts_the_connection() {
     compio::time::timeout(TEST_TIMEOUT, async {
         let mut config = PoolConfig::new();
         config.max_size(1).min_idle(0);
-        let pool = Pool::connect_with_pool_config(&common::test_url(), config)
+        let pool = Pool::connect_with_pool_config(&support::test_url(), config)
             .await
             .expect("create one-connection pool");
 
         let client = pool.acquire().await.expect("borrow the first connection");
         let first_pid = client.process_id();
-        let table = common::test_object_name("copy_mode_pool_probe");
+        let table = support::test_object_name("copy_mode_pool_probe");
         client
             .batch_execute(&format!("CREATE TEMPORARY TABLE {table} (v int4)"))
             .await

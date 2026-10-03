@@ -15,8 +15,8 @@
 //! sides so the documentation cannot drift away from the behaviour.
 
 #[allow(unused_imports)]
-use crate::common;
-use common::test_url;
+use crate::support;
+use support::test_url;
 use compio_postgres::{Config, Pool, PoolConfig, PoolConnection};
 use std::time::Duration;
 

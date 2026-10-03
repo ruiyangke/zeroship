@@ -8,7 +8,7 @@ use std::task::{Context, Waker};
 use std::time::{Duration, Instant};
 
 #[allow(unused_imports)]
-use crate::common;
+use crate::support;
 
 const CLEAN_CONNECTION_ITERATIONS: usize = 50;
 const POOL_ITERATIONS: usize = 10;
@@ -34,9 +34,9 @@ async fn open_client(config: &Config, url: &str) -> Client {
     // halves and a dedicated spawned reader inside the detached connection
     // driver, so plaintext churn alone would not exercise that ownership path.
     let (client, connection) = config
-        .connect(common::suite_tls())
+        .connect(support::suite_tls())
         .await
-        .unwrap_or_else(|error| common::postgres_unreachable(url, &error));
+        .unwrap_or_else(|error| support::postgres_unreachable(url, &error));
     compio::runtime::spawn(async move {
         let _ = connection.run().await;
     })
@@ -124,8 +124,8 @@ fn sample_peak(peak_live: &mut usize) {
 
 async fn run_churn() {
     let started = Instant::now();
-    let url = common::test_url();
-    let application_name = common::test_object_name("cpg_connection_churn");
+    let url = support::test_url();
+    let application_name = support::test_object_name("cpg_connection_churn");
 
     let initial_live = compio_postgres::live_connections();
     assert_eq!(
@@ -178,7 +178,7 @@ async fn run_churn() {
         pool_config.max_size(POOL_WIDTH).min_idle(POOL_WIDTH);
         let pool = Pool::connect_with_config(config.clone(), pool_config)
             .await
-            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+            .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
         let pool_opened = pool.metrics().connections_created.get() as usize;
         assert_eq!(
             pool_opened, POOL_WIDTH,

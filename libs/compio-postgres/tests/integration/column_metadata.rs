@@ -24,14 +24,14 @@ use compio_postgres::types::Type;
 use std::num::NonZeroUsize;
 
 #[allow(unused_imports)]
-use crate::common;
+use crate::support;
 
 fn test_url() -> String {
-    common::test_url()
+    support::test_url()
 }
 
 async fn connect_client(url: &str) -> Client {
-    let (client, connection) = compio_postgres::connect(url, common::suite_tls())
+    let (client, connection) = compio_postgres::connect(url, support::suite_tls())
         .await
         .expect("connect to PostgreSQL");
     compio::runtime::spawn(async move {
@@ -50,7 +50,7 @@ async fn connect_client_with_probationary_statements(url: &str) -> Client {
         NonZeroUsize::new(2).expect("the test threshold is nonzero"),
     );
     let (client, connection) = config
-        .connect(common::suite_tls())
+        .connect(support::suite_tls())
         .await
         .expect("connect to PostgreSQL");
     compio::runtime::spawn(async move {
@@ -63,7 +63,7 @@ async fn connect_client_with_probationary_statements(url: &str) -> Client {
 }
 
 async fn create_probe_table(client: &Client, prefix: &str) -> (String, u32) {
-    let table = common::test_object_name(prefix);
+    let table = support::test_object_name(prefix);
     client
         .batch_execute(&format!(
             "CREATE TEMPORARY TABLE {table} (id int4); \
@@ -90,7 +90,7 @@ async fn create_probe_table(client: &Client, prefix: &str) -> (String, u32) {
 async fn a_table_column_reports_its_catalog_identity() {
     let url = test_url();
     let client = connect_client(&url).await;
-    let table = common::test_object_name("cpg_colmeta");
+    let table = support::test_object_name("cpg_colmeta");
 
     // `varchar(10)` on purpose: its atttypmod is a real value (length + 4)
     // rather than the -1 an unconstrained type carries, so the assertion below
@@ -197,8 +197,8 @@ async fn a_computed_column_has_no_table_or_attribute_number() {
 /// whole point.
 #[compio::test]
 async fn a_system_column_reports_a_negative_attribute_number() {
-    let client = connect_client(&common::test_url()).await;
-    let table = common::test_object_name("cpg_colmeta_sys");
+    let client = connect_client(&support::test_url()).await;
+    let table = support::test_object_name("cpg_colmeta_sys");
     client
         .batch_execute(&format!("CREATE TEMPORARY TABLE {table} (id int4)"))
         .await
@@ -317,7 +317,7 @@ async fn query_typed_row_description_preserves_table_oid() {
 async fn a_row_with_no_columns_reports_itself_empty() {
     let url = test_url();
     let client = connect_client(&url).await;
-    let table = common::test_object_name("cpg_zero_column");
+    let table = support::test_object_name("cpg_zero_column");
     client
         .batch_execute(&format!(
             "CREATE TEMPORARY TABLE {table}(); INSERT INTO {table} DEFAULT VALUES"

@@ -3,23 +3,23 @@ use compio_postgres::types::Type;
 use std::time::Duration;
 
 #[allow(unused_imports)]
-use crate::common;
+use crate::support;
 
 const QUERY_START_TIMEOUT: Duration = Duration::from_secs(5);
 const RECOVERY_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn test_url() -> String {
-    common::test_url()
+    support::test_url()
 }
 
 async fn connect() -> Client {
     let url = test_url();
-    let (client, connection) = compio_postgres::connect(&url, common::suite_tls())
+    let (client, connection) = compio_postgres::connect(&url, support::suite_tls())
         .await
-        .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+        .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
     compio::runtime::spawn(async move {
         if let Err(error) = connection.run().await {
-            eprintln!("connection error: {}", common::error_chain(&error));
+            eprintln!("connection error: {}", support::error_chain(&error));
         }
     })
     .detach();
@@ -43,7 +43,7 @@ async fn assert_same_client_recovers(client: &Client, process_id: i32) {
 async fn text_params_resolves_custom_types_without_response_backpressure_deadlock() {
     let client = connect().await;
     let process_id = client.process_id();
-    let type_name = common::test_object_name("cpg_query_text_enum");
+    let type_name = support::test_object_name("cpg_query_text_enum");
     client
         .batch_execute(&format!(
             "CREATE TYPE pg_temp.{type_name} AS ENUM ('value')"
@@ -77,7 +77,7 @@ async fn text_params_resolves_custom_types_without_response_backpressure_deadloc
 async fn query_typed_resolves_custom_types_without_response_backpressure_deadlock() {
     let client = connect().await;
     let process_id = client.process_id();
-    let type_name = common::test_object_name("cpg_query_typed_enum");
+    let type_name = support::test_object_name("cpg_query_typed_enum");
     client
         .batch_execute(&format!(
             "CREATE TYPE pg_temp.{type_name} AS ENUM ('value')"

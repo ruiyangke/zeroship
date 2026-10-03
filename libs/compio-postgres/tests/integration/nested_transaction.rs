@@ -12,8 +12,8 @@
 //! replication stream, which is a different question entirely.
 
 #[allow(unused_imports)]
-use crate::common;
-use common::{suite_tls, test_object_name, test_url};
+use crate::support;
+use support::{suite_tls, test_object_name, test_url};
 use compio_postgres::Client;
 
 async fn connected() -> Client {

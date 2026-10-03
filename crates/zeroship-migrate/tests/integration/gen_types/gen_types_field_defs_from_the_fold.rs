@@ -751,13 +751,13 @@ fn the_corpus_golden_records_both_refusals_and_renders() {
 }
 
 /// Regenerates the corpus golden. Run explicitly:
-///   cargo test -p zeroship-migrate --test integration -- --ignored update_field_defs_goldens
+///   cargo test -p zeroship-migrate --test main -- --ignored update_field_defs_goldens
 /// The leading '#' comment block is preserved verbatim, and data lines keep the
 /// golden's existing order (new keys append, removed keys drop), so running this
 /// on an unchanged tree rewrites byte-identically.
 #[test]
 #[ignore = "regenerates tests/goldens/field_defs_artifacts.txt; run explicitly with \
-            `cargo test -p zeroship-migrate --test integration -- --ignored \
+            `cargo test -p zeroship-migrate --test main -- --ignored \
             update_field_defs_goldens`, then commit the file"]
 fn update_field_defs_goldens() {
     let path = manifest_path(CORPUS_GOLDEN);

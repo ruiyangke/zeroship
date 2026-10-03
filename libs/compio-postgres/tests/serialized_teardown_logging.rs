@@ -7,8 +7,11 @@ use std::io::ErrorKind;
 use std::sync::{Mutex, Once};
 use std::time::Duration;
 
-#[allow(dead_code)]
-mod common;
+#[expect(
+    dead_code,
+    reason = "the shared support module carries helpers this process-isolated target does not use"
+)]
+mod support;
 
 static LOGGER: ShutdownLogger = ShutdownLogger;
 static LOGGER_INIT: Once = Once::new();
@@ -96,7 +99,7 @@ fn configured_endpoint(config: &Config) -> (String, u16) {
 async fn run_serialized_teardown(kind: ErrorKind) {
     // The plaintext DSN: this test hands the driver a raw TCP stream of its
     // own and speaks no TLS on it.
-    let url = common::plaintext_url();
+    let url = support::plaintext_url();
     let mut config = url
         .parse::<Config>()
         .unwrap_or_else(|error| panic!("parse the test DSN: {error}"));
@@ -104,7 +107,7 @@ async fn run_serialized_teardown(kind: ErrorKind) {
     let (host, port) = configured_endpoint(&config);
     let stream = compio::net::TcpStream::connect((host.as_str(), port))
         .await
-        .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+        .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
     let (client, connection) = config
         .connect_raw(
             ShutdownErrorStream {
@@ -114,7 +117,7 @@ async fn run_serialized_teardown(kind: ErrorKind) {
             NoTls,
         )
         .await
-        .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+        .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
 
     drop(client);
     connection

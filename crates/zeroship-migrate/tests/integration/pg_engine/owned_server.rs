@@ -19,7 +19,8 @@ use crate::support::server;
 
 /// The test the lifetime measurements run in a child process, by its full path in
 /// this binary.
-const CHILD_TEST: &str = "pg_engine::owned_server::the_owned_postgres_server_is_the_one_the_suites_target";
+const CHILD_TEST: &str =
+    "integration::pg_engine::owned_server::the_owned_postgres_server_is_the_one_the_suites_target";
 
 /// This process's own server reads as running: the instrument's positive control,
 /// without which an absence measured by [`container_status`] proves nothing.

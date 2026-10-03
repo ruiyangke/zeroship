@@ -1,24 +1,11 @@
-//! The crate's integration suites, linked into one test executable.
+//! The crate's integration suites.
 //!
-//! `Cargo.toml` sets `autotests = false` and registers this file as the
-//! `integration` target, so a suite is compiled only once it is declared below;
-//! add `mod <name>;` with the file, or its tests never run. Helper names collide
+//! `Cargo.toml` sets `autotests = false` and registers `tests/main.rs` as the
+//! `main` target, so a suite is compiled only once it is declared below; add
+//! `mod <name>;` with the file, or its tests never run. Helper names collide
 //! freely across the modules because each file is its own module namespace.
 //!
-//! A crate-level inner attribute belongs here rather than in a module:
-//! `#![recursion_limit]` inside a module is ignored. A test that re-executes
-//! itself by name must name its full module path.
-//!
-//! `tls_live` and `unix_socket_live` stay separate because `required-features`
-//! has to be able to not build them at all. `serialized_loop`, `socket_release`,
-//! `query_debug_logging` and `serialized_teardown_logging` stay separate because
-//! each installs a process-global `log::set_logger` (as does
-//! `transaction_claims` in here), and only the first install in a process takes
-//! effect.
-#![recursion_limit = "256"]
-
-#[path = "../common/mod.rs"]
-pub mod common;
+//! A test that re-executes itself by name must name its full module path.
 
 mod backend_termination;
 mod batch_atomicity;
@@ -50,7 +37,7 @@ mod frontend_sequence;
 mod generic_client;
 mod hostile_peer;
 mod hostile_session_gucs;
-mod integration;
+mod api;
 mod keyword_quoting;
 mod keyword_whitespace;
 mod libpq_parameter_parity;

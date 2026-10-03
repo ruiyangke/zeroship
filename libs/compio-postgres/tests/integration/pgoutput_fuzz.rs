@@ -42,7 +42,7 @@
 use compio_postgres::replication::pgoutput::{self, PgOutputMessage};
 
 #[allow(unused_imports)]
-use crate::common;
+use crate::support;
 
 /// Enough to cover every tag's mutated shapes many times over while keeping
 /// the file inside a normal `cargo test` run. Raise it locally to hunt.

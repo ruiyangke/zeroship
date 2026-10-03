@@ -27,14 +27,14 @@
 use compio_postgres::Client;
 
 #[allow(unused_imports)]
-use crate::common;
+use crate::support;
 
 fn test_url() -> String {
-    common::test_url()
+    support::test_url()
 }
 
 async fn connect_client(url: &str) -> Client {
-    let (client, connection) = compio_postgres::connect(url, common::suite_tls())
+    let (client, connection) = compio_postgres::connect(url, support::suite_tls())
         .await
         .expect("connect to PostgreSQL");
     compio::runtime::spawn(async move {
@@ -48,8 +48,8 @@ async fn connect_client(url: &str) -> Client {
 
 /// Create a domain over `int4` and a temp table using it. Returns both names.
 async fn domain_fixture(client: &Client, suffix: &str) -> (String, String) {
-    let domain = common::test_object_name(&format!("cpg_domain_{suffix}"));
-    let table = common::test_object_name(&format!("cpg_domtbl_{suffix}"));
+    let domain = support::test_object_name(&format!("cpg_domain_{suffix}"));
+    let table = support::test_object_name(&format!("cpg_domtbl_{suffix}"));
     client
         .batch_execute(&format!("CREATE DOMAIN {domain} AS int4 CHECK (VALUE > 0)"))
         .await
@@ -227,8 +227,8 @@ async fn a_binary_copy_into_a_domain_column_accepts_its_base_type() {
 async fn a_domain_array_binds_and_reads_with_its_base_element() {
     let url = test_url();
     let client = connect_client(&url).await;
-    let domain = common::test_object_name("cpg_domarr_d");
-    let table = common::test_object_name("cpg_domarr_t");
+    let domain = support::test_object_name("cpg_domarr_d");
+    let table = support::test_object_name("cpg_domarr_t");
     client
         .batch_execute(&format!("CREATE DOMAIN {domain} AS int4 CHECK (VALUE > 0)"))
         .await
@@ -286,8 +286,8 @@ async fn a_domain_array_binds_and_reads_with_its_base_element() {
 async fn a_domain_array_still_enforces_the_element_check() {
     let url = test_url();
     let client = connect_client(&url).await;
-    let domain = common::test_object_name("cpg_domarr_cd");
-    let table = common::test_object_name("cpg_domarr_ct");
+    let domain = support::test_object_name("cpg_domarr_cd");
+    let table = support::test_object_name("cpg_domarr_ct");
     client
         .batch_execute(&format!("CREATE DOMAIN {domain} AS int4 CHECK (VALUE > 0)"))
         .await

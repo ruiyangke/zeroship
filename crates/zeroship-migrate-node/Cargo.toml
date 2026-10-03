@@ -16,9 +16,8 @@ edition.workspace = true
 license.workspace = true
 description = "Node/Bun N-API addon for zeroship-migrate: host-driven (pg/mysql2) apply over the dialect-neutral driver::SqlSession seam, zero tokio, zero io_uring, cross-platform .node"
 publish = false
-# The integration suites are modules of one `tests/integration/main.rs` target and
-# the process-spawning suites of one `tests/e2e/main.rs`, so the crate links two
-# test executables instead of one per file.
+# Integration and end-to-end suites are modules of one `tests/main.rs` target, so
+# the crate links one test executable instead of one per file.
 autotests = false
 
 # A `cdylib` is terminal (no Rust crate can depend on it) → this is necessarily a
@@ -31,17 +30,9 @@ autotests = false
 [lib]
 crate-type = ["cdylib", "rlib"]
 
-# The integration suites are modules of one `tests/integration/main.rs` target and
-# the process-spawning suites of one `tests/e2e/main.rs`, so the crate links two
-# test executables instead of one per file.
-
 [[test]]
-name = "integration"
-path = "tests/integration/main.rs"
-
-[[test]]
-name = "e2e"
-path = "tests/e2e/main.rs"
+name = "main"
+path = "tests/main.rs"
 
 [features]
 # The napi entrypoints are ONLY reachable when compiled by `napi build` (which

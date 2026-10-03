@@ -16,7 +16,7 @@
 //! Nothing is weakened by living here. Everything it needs from the engine
 //! (`render::lower`, `conn::ExecutorConfig`, `model::*`) is already `pub`; the only
 //! genuinely crate-private dependency is the `#[cfg(test)] pub(crate) test_fixtures`
-//! module, whose four charter builders are mirrored in `tests/integration/support/mod.rs` - they
+//! module, whose four charter builders are mirrored in `tests/support/mod.rs` - they
 //! are built from the PUBLIC `effective_policy_from_charter_toml`, so the mirror is a
 //! second CALLER of the public API rather than a second copy of engine logic.
 //!

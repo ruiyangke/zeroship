@@ -23,7 +23,7 @@
 //! `corpus_checksums_are_byte_stable` below prints the full per-row listing to
 //! stdout, which is what a before/after comparison across a refactor diffs: capture
 //! it with `--nocapture` and shell redirection —
-//! `cargo test -p zeroship-migrate --test integration \
+//! `cargo test -p zeroship-migrate --test main \
 //! corpus_checksums_are_byte_stable -- --nocapture > before.txt` — rather than an
 //! operator-chosen path read from the process environment (this crate's tests take
 //! no input from their own environment; `clippy.toml`'s `disallowed-methods` on
@@ -53,7 +53,7 @@ fn frozen_flags() -> MigrationFlags {
 /// `(kind, variant, checksum-hex)` for every corpus row, in corpus order.
 fn corpus_checksums() -> Vec<(&'static str, &'static str, String)> {
     let flags = frozen_flags();
-    crate::dialect_corpus::corpus()
+    crate::integration::dialect_corpus::corpus()
         .into_iter()
         .map(|(kind, variant, op)| {
             let ops = vec![op];

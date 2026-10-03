@@ -11,16 +11,16 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use compio_postgres::Client;
 
 #[allow(unused_imports)]
-use crate::common;
+use crate::support;
 
 const POSTGRES_EPOCH_FROM_UNIX_SECS: u64 = 946_684_800;
 
 #[allow(clippy::future_not_send)]
 async fn connect_client() -> Client {
-    let url = common::test_url();
-    let (client, connection) = compio_postgres::connect(&url, common::suite_tls())
+    let url = support::test_url();
+    let (client, connection) = compio_postgres::connect(&url, support::suite_tls())
         .await
-        .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+        .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
     compio::runtime::spawn(async move {
         let _ = connection.run().await;
     })
@@ -49,7 +49,7 @@ async fn chrono_does_not_alias_postgres_end_of_day_to_midnight() {
     let error = row
         .try_get::<_, chrono::NaiveTime>("end_of_day")
         .expect_err("24:00 must not silently decode as chrono midnight");
-    let rendered = common::error_chain(&error);
+    let rendered = support::error_chain(&error);
     assert!(
         rendered.contains("column 0")
             && rendered.contains("24:00")
@@ -110,7 +110,7 @@ async fn time_crate_does_not_alias_postgres_end_of_day_to_midnight() {
     let error = row
         .try_get::<_, time::Time>("end_of_day")
         .expect_err("24:00 must not silently decode as time::Time midnight");
-    let rendered = common::error_chain(&error);
+    let rendered = support::error_chain(&error);
     assert!(
         rendered.contains("column 0")
             && rendered.contains("24:00")
@@ -138,9 +138,9 @@ async fn system_time_larger_than_the_timestamp_wire_cannot_wrap() {
         .await
         .expect_err("an unrepresentable SystemTime must fail before it can wrap");
     assert!(
-        common::error_chain(&error).contains("too large"),
+        support::error_chain(&error).contains("too large"),
         "the serialization error must explain the range failure: {}",
-        common::error_chain(&error)
+        support::error_chain(&error)
     );
 
     let recovered: i32 = client
@@ -172,9 +172,9 @@ async fn system_time_beyond_the_microsecond_multiply_cannot_wrap() {
         .await
         .expect_err("a SystemTime whose microsecond count overflows u64 must be refused");
     assert!(
-        common::error_chain(&error).contains("too large"),
+        support::error_chain(&error).contains("too large"),
         "the serialization error must explain the range failure: {}",
-        common::error_chain(&error)
+        support::error_chain(&error)
     );
 
     let recovered: i32 = client
@@ -199,9 +199,9 @@ async fn system_time_at_the_negative_wire_endpoint_cannot_panic() {
         .await
         .expect_err("a finite SystemTime must not alias -infinity or panic");
     assert!(
-        common::error_chain(&error).contains("too large"),
+        support::error_chain(&error).contains("too large"),
         "the serialization error must explain the range failure: {}",
-        common::error_chain(&error)
+        support::error_chain(&error)
     );
 }
 

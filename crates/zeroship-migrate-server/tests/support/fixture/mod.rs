@@ -13,15 +13,12 @@ use testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers::{GenericImage, ImageExt};
 
 mod migrations;
+pub mod tenant;
 pub mod world;
 
 use zeroship_testkit::docker::{start_owned, DockerCli, OwnedContainer, Ownership};
 
 pub struct Postgres {
-    #[allow(
-        dead_code,
-        reason = "held for its Drop; read only by the binary that measures its lifetime"
-    )]
     owned: OwnedContainer,
     url: String,
 }
@@ -54,10 +51,6 @@ impl Postgres {
     }
 
     /// The Docker id of this server's container.
-    #[allow(
-        dead_code,
-        reason = "only the binary that measures the server's lifetime reads it"
-    )]
     pub fn container_id(&self) -> &str {
         self.owned.container().id()
     }
@@ -76,10 +69,6 @@ pub fn migrated_url() -> String {
 }
 
 /// The binary's shared migrated server, started and migrated on first use.
-#[allow(
-    dead_code,
-    reason = "binaries that only start servers of their own never reach it"
-)]
 pub fn migrated() -> &'static Postgres {
     MIGRATED.get_or_init(Postgres::migrated)
 }

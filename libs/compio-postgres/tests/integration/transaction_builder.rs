@@ -4,19 +4,19 @@ use compio_postgres::{Client, Error, IsolationLevel, Transaction};
 use std::time::Duration;
 
 #[allow(unused_imports)]
-use crate::common;
+use crate::support;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(20);
 
 fn test_url() -> String {
-    common::test_url()
+    support::test_url()
 }
 
 async fn connect(url: &str) -> Result<Client, Error> {
-    let (client, connection) = compio_postgres::connect(url, common::suite_tls()).await?;
+    let (client, connection) = compio_postgres::connect(url, support::suite_tls()).await?;
     compio::runtime::spawn(async move {
         if let Err(error) = connection.run().await {
-            eprintln!("connection error: {}", common::error_chain(&error));
+            eprintln!("connection error: {}", support::error_chain(&error));
         }
     })
     .detach();
@@ -28,7 +28,7 @@ fn expect_ok<T>(result: Result<T, Error>, context: &str) -> T {
         let sqlstate = error.code().map_or("none", |code| code.code());
         panic!(
             "{context} failed with SQLSTATE {sqlstate}: {}",
-            common::error_chain(&error)
+            support::error_chain(&error)
         )
     })
 }
@@ -70,8 +70,8 @@ async fn no_options_start_a_usable_transaction_with_server_defaults() {
         let url = test_url();
         let mut client = connect(&url)
             .await
-            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
-        let table = common::test_object_name("cpg_transaction_builder_default");
+            .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
+        let table = support::test_object_name("cpg_transaction_builder_default");
         expect_ok(
             client
                 .batch_execute(&format!("CREATE TEMP TABLE {table} (value int4 NOT NULL)"))
@@ -128,7 +128,7 @@ async fn every_isolation_level_reaches_the_server() {
         let url = test_url();
         let mut client = connect(&url)
             .await
-            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+            .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
 
         // PostgreSQL reports the nominal `read uncommitted` label even though
         // it implements that level with READ COMMITTED semantics. Keep the
@@ -181,7 +181,7 @@ async fn read_only_and_deferrable_apply_both_boolean_values() {
         let url = test_url();
         let mut client = connect(&url)
             .await
-            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+            .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
 
         for requested in [false, true] {
             set_defaults(&client, "read committed", !requested, false).await;
@@ -241,7 +241,7 @@ async fn every_multiple_option_shape_reaches_the_server() {
         let url = test_url();
         let mut client = connect(&url)
             .await
-            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+            .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
 
         set_defaults(&client, "serializable", false, false).await;
         let transaction = expect_ok(

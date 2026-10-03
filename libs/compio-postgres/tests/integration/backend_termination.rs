@@ -33,7 +33,7 @@ use futures_util::{SinkExt, TryStreamExt};
 use std::time::{Duration, Instant};
 
 #[allow(unused_imports)]
-use crate::common;
+use crate::support;
 
 /// Long enough that a loaded machine cannot trip it, short enough that a real
 /// hang fails this test rather than the whole run. Deliberately generous: see
@@ -47,7 +47,7 @@ const SETTLE_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(5);
 
 fn test_url() -> String {
-    common::test_url()
+    support::test_url()
 }
 
 /// Kill `pid` from a second session, because the first one is busy.
@@ -191,7 +191,7 @@ async fn assert_replacement_uses_a_new_backend(pool: &Pool, killed_pid: i32) -> 
         .unwrap_or_else(|error| {
             panic!(
                 "the next checkout did not receive a working connection: {}",
-                common::error_chain(&error)
+                support::error_chain(&error)
             )
         });
     assert_ne!(
@@ -217,15 +217,15 @@ async fn a_backend_killed_mid_copy_fails_the_copy_and_releases_the_connection() 
     let baseline = compio_postgres::live_connections();
 
     let (victim, victim_connection) =
-        match compio_postgres::connect(&url, common::suite_tls()).await {
+        match compio_postgres::connect(&url, support::suite_tls()).await {
             Ok(pair) => pair,
-            Err(error) => common::postgres_unreachable(&url, &error),
+            Err(error) => support::postgres_unreachable(&url, &error),
         };
     let victim_driver = compio::runtime::spawn(async move { victim_connection.run().await });
     let (killer, killer_connection) =
-        match compio_postgres::connect(&url, common::suite_tls()).await {
+        match compio_postgres::connect(&url, support::suite_tls()).await {
             Ok(pair) => pair,
-            Err(error) => common::postgres_unreachable(&url, &error),
+            Err(error) => support::postgres_unreachable(&url, &error),
         };
     let killer_driver = compio::runtime::spawn(async move { killer_connection.run().await });
 
@@ -234,7 +234,7 @@ async fn a_backend_killed_mid_copy_fails_the_copy_and_releases_the_connection() 
         .await
         .expect("read the victim's backend pid")
         .get(0);
-    let table = common::test_object_name("cpg_kill_copy");
+    let table = support::test_object_name("cpg_kill_copy");
 
     victim
         .batch_execute(&format!("CREATE TEMPORARY TABLE {table} (n int)"))
@@ -291,15 +291,15 @@ async fn copy_finish_preserves_a_queued_fatal_response() {
         let baseline = compio_postgres::live_connections();
 
         let (victim, victim_connection) =
-            match compio_postgres::connect(&url, common::suite_tls()).await {
+            match compio_postgres::connect(&url, support::suite_tls()).await {
                 Ok(pair) => pair,
-                Err(error) => common::postgres_unreachable(&url, &error),
+                Err(error) => support::postgres_unreachable(&url, &error),
             };
         let victim_driver = compio::runtime::spawn(async move { victim_connection.run().await });
         let (killer, killer_connection) =
-            match compio_postgres::connect(&url, common::suite_tls()).await {
+            match compio_postgres::connect(&url, support::suite_tls()).await {
                 Ok(pair) => pair,
-                Err(error) => common::postgres_unreachable(&url, &error),
+                Err(error) => support::postgres_unreachable(&url, &error),
             };
         let killer_driver = compio::runtime::spawn(async move { killer_connection.run().await });
 
@@ -307,7 +307,7 @@ async fn copy_finish_preserves_a_queued_fatal_response() {
             .query_one_scalar("SELECT pg_backend_pid()::int4", &[])
             .await
             .expect("read the victim's backend pid");
-        let table = common::test_object_name("cpg_copy_fatal");
+        let table = support::test_object_name("cpg_copy_fatal");
         victim
             .batch_execute(&format!("CREATE TEMPORARY TABLE {table} (n int)"))
             .await
@@ -340,7 +340,7 @@ async fn copy_finish_preserves_a_queued_fatal_response() {
         if error.code() != Some(&SqlState::ADMIN_SHUTDOWN) {
             panic!(
                 "COPY IN lost SQLSTATE 57P01 after backend termination: {}",
-                common::error_chain(&error)
+                support::error_chain(&error)
             );
         }
 
@@ -366,15 +366,15 @@ async fn a_backend_killed_mid_row_stream_fails_the_stream_and_releases_the_conne
     let baseline = compio_postgres::live_connections();
 
     let (victim, victim_connection) =
-        match compio_postgres::connect(&url, common::suite_tls()).await {
+        match compio_postgres::connect(&url, support::suite_tls()).await {
             Ok(pair) => pair,
-            Err(error) => common::postgres_unreachable(&url, &error),
+            Err(error) => support::postgres_unreachable(&url, &error),
         };
     let victim_driver = compio::runtime::spawn(async move { victim_connection.run().await });
     let (killer, killer_connection) =
-        match compio_postgres::connect(&url, common::suite_tls()).await {
+        match compio_postgres::connect(&url, support::suite_tls()).await {
             Ok(pair) => pair,
-            Err(error) => common::postgres_unreachable(&url, &error),
+            Err(error) => support::postgres_unreachable(&url, &error),
         };
     let killer_driver = compio::runtime::spawn(async move { killer_connection.run().await });
 
@@ -474,8 +474,8 @@ async fn all_idle_pool_backends_are_replaced_after_mass_termination() {
     compio::time::timeout(WATCHDOG, async {
         let url = test_url();
         let baseline = compio_postgres::live_connections();
-        let application_name = common::test_object_name("cpg_pool_mass_recovery");
-        let killer_application_name = common::test_object_name("cpg_pool_mass_recovery_killer");
+        let application_name = support::test_object_name("cpg_pool_mass_recovery");
+        let killer_application_name = support::test_object_name("cpg_pool_mass_recovery_killer");
 
         let mut connection_config: Config = url.parse().expect("the test DSN did not parse");
         connection_config.application_name(&application_name);
@@ -486,7 +486,7 @@ async fn all_idle_pool_backends_are_replaced_after_mass_termination() {
             .acquire_timeout(SETTLE_TIMEOUT);
         let pool = Pool::connect_with_config(connection_config, pool_config)
             .await
-            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+            .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
 
         let mut pooled_clients = Vec::with_capacity(POOL_WIDTH);
         let mut pooled_pids = Vec::with_capacity(POOL_WIDTH);
@@ -522,9 +522,9 @@ async fn all_idle_pool_backends_are_replaced_after_mass_termination() {
         let mut killer_config: Config = url.parse().expect("the test DSN did not parse");
         killer_config.application_name(&killer_application_name);
         let (killer, killer_connection) = killer_config
-            .connect(common::suite_tls())
+            .connect(support::suite_tls())
             .await
-            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+            .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
         let killer_driver = compio::runtime::spawn(async move { killer_connection.run().await });
 
         let tagged_before = tagged_backend_pids(&killer, &application_name).await;
@@ -593,7 +593,7 @@ async fn all_idle_pool_backends_are_replaced_after_mass_termination() {
             .unwrap_or_else(|error| {
                 panic!(
                     "the first post-kill query received a dead pool entry: {}",
-                    common::error_chain(&error)
+                    support::error_chain(&error)
                 )
             });
         assert!(
@@ -657,7 +657,7 @@ async fn all_idle_pool_backends_are_replaced_after_mass_termination() {
                     .unwrap_or_else(|error| {
                         panic!(
                             "recovery round {round} query failed: {}",
-                            common::error_chain(&error)
+                            support::error_chain(&error)
                         )
                     });
                 round_pids.push(pid);
@@ -725,8 +725,8 @@ async fn a_checked_out_idle_pool_backend_is_discarded_after_termination() {
     compio::time::timeout(WATCHDOG, async {
         let url = test_url();
         let baseline = compio_postgres::live_connections();
-        let application_name = common::test_object_name("cpg_checked_out_idle_kill");
-        let killer_application_name = common::test_object_name("cpg_checked_out_idle_killer");
+        let application_name = support::test_object_name("cpg_checked_out_idle_kill");
+        let killer_application_name = support::test_object_name("cpg_checked_out_idle_killer");
 
         let mut connection_config: Config = url.parse().expect("the test DSN did not parse");
         connection_config.application_name(&application_name);
@@ -737,7 +737,7 @@ async fn a_checked_out_idle_pool_backend_is_discarded_after_termination() {
             .acquire_timeout(SETTLE_TIMEOUT);
         let pool = Pool::connect_with_config(connection_config, pool_config)
             .await
-            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+            .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
 
         let borrower = pool.acquire().await.expect("check out the only pool entry");
         let killed_pid: i32 = borrower
@@ -751,9 +751,9 @@ async fn a_checked_out_idle_pool_backend_is_discarded_after_termination() {
         let mut killer_config: Config = url.parse().expect("the test DSN did not parse");
         killer_config.application_name(&killer_application_name);
         let (killer, killer_connection) = killer_config
-            .connect(common::suite_tls())
+            .connect(support::suite_tls())
             .await
-            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+            .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
         let killer_driver = compio::runtime::spawn(async move { killer_connection.run().await });
 
         assert_eq!(
@@ -776,7 +776,7 @@ async fn a_checked_out_idle_pool_backend_is_discarded_after_termination() {
             .await
             .expect_err("a query on the terminated checked-out backend reported success");
         let failure_kind = format!("{failure:?}");
-        let failure_chain = common::error_chain(&failure);
+        let failure_chain = support::error_chain(&failure);
         let failure_sqlstate = failure.code().map(|code| code.code().to_owned());
         assert_eq!(
             failure_sqlstate,
@@ -835,9 +835,9 @@ async fn a_checked_out_pool_backend_killed_mid_query_is_discarded() {
     compio::time::timeout(WATCHDOG, async {
         let url = test_url();
         let baseline = compio_postgres::live_connections();
-        let application_name = common::test_object_name("cpg_checked_out_mid_query_kill");
-        let killer_application_name = common::test_object_name("cpg_checked_out_mid_query_killer");
-        let query_marker = common::test_object_name("cpg_checked_out_mid_query_marker");
+        let application_name = support::test_object_name("cpg_checked_out_mid_query_kill");
+        let killer_application_name = support::test_object_name("cpg_checked_out_mid_query_killer");
+        let query_marker = support::test_object_name("cpg_checked_out_mid_query_marker");
 
         let mut connection_config: Config = url.parse().expect("the test DSN did not parse");
         connection_config.application_name(&application_name);
@@ -848,7 +848,7 @@ async fn a_checked_out_pool_backend_killed_mid_query_is_discarded() {
             .acquire_timeout(SETTLE_TIMEOUT);
         let pool = Pool::connect_with_config(connection_config, pool_config)
             .await
-            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+            .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
 
         let borrower = pool.acquire().await.expect("check out the only pool entry");
         let killed_pid: i32 = borrower
@@ -862,9 +862,9 @@ async fn a_checked_out_pool_backend_killed_mid_query_is_discarded() {
         let mut killer_config: Config = url.parse().expect("the test DSN did not parse");
         killer_config.application_name(&killer_application_name);
         let (killer, killer_connection) = killer_config
-            .connect(common::suite_tls())
+            .connect(support::suite_tls())
             .await
-            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+            .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
         let killer_driver = compio::runtime::spawn(async move { killer_connection.run().await });
 
         assert_eq!(
@@ -885,7 +885,7 @@ async fn a_checked_out_pool_backend_killed_mid_query_is_discarded() {
         let failure = query_result
             .expect_err("the query completed after its checked-out pooled backend was killed");
         let failure_kind = format!("{failure:?}");
-        let failure_chain = common::error_chain(&failure);
+        let failure_chain = support::error_chain(&failure);
         let failure_sqlstate = failure.code().map(|code| code.code().to_owned());
         // Drop immediately after the FATAL reaches the caller. Waiting for the
         // backend to disappear first would give the reader task time to see

@@ -31,7 +31,7 @@ use futures_util::FutureExt;
 use tokio_postgres::types as tokio_types;
 
 #[allow(unused_imports)]
-use crate::common;
+use crate::support;
 
 const POSTGRES_EPOCH_FROM_UNIX_SECS: u64 = 946_684_800;
 const RANGE_EMPTY: u8 = 0x01;
@@ -188,7 +188,7 @@ where
         runtime.block_on(async move {
             let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
                 .await
-                .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+                .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
             let driver = tokio::spawn(async move {
                 let _ = connection.await;
             });
@@ -202,10 +202,10 @@ where
 }
 
 async fn compio_client() -> compio_postgres::Client {
-    let url = common::test_url();
-    let (client, connection) = compio_postgres::connect(&url, common::suite_tls())
+    let url = support::test_url();
+    let (client, connection) = compio_postgres::connect(&url, support::suite_tls())
         .await
-        .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+        .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
     compio::runtime::spawn(async move {
         let _ = connection.run().await;
     })
@@ -320,7 +320,7 @@ fn tokio_format_observations(url: String, cases: Vec<RawCase>) -> Vec<FormatObse
                     panic!(
                         "{}: tokio binary decode: {}",
                         case.name,
-                        common::error_chain(&error)
+                        support::error_chain(&error)
                     )
                 });
             let binary_decoded: Wire = row.get("value");
@@ -333,7 +333,7 @@ fn tokio_format_observations(url: String, cases: Vec<RawCase>) -> Vec<FormatObse
                     panic!(
                         "{}: tokio text decode: {}",
                         case.name,
-                        common::error_chain(&error)
+                        support::error_chain(&error)
                     )
                 });
             let text_decoded = tokio_simple_value(messages, &case.name);
@@ -351,7 +351,7 @@ fn tokio_format_observations(url: String, cases: Vec<RawCase>) -> Vec<FormatObse
                     panic!(
                         "{}: tokio binary encode: {}",
                         case.name,
-                        common::error_chain(&error)
+                        support::error_chain(&error)
                     )
                 });
             let binary_encoded = row.get("value");
@@ -371,7 +371,7 @@ fn tokio_format_observations(url: String, cases: Vec<RawCase>) -> Vec<FormatObse
                     panic!(
                         "{}: tokio text encode: {}",
                         case.name,
-                        common::error_chain(&error)
+                        support::error_chain(&error)
                     )
                 });
             observations.push(FormatObservation {
@@ -412,7 +412,7 @@ async fn compio_format_observations(cases: &[RawCase]) -> Vec<FormatObservation>
                 panic!(
                     "{}: compio binary decode: {}",
                     case.name,
-                    common::error_chain(&error)
+                    support::error_chain(&error)
                 )
             });
         let binary_decoded: Wire = row.get("value");
@@ -425,7 +425,7 @@ async fn compio_format_observations(cases: &[RawCase]) -> Vec<FormatObservation>
                 panic!(
                     "{}: compio text decode: {}",
                     case.name,
-                    common::error_chain(&error)
+                    support::error_chain(&error)
                 )
             });
         let text_decoded = compio_simple_value(messages, &case.name);
@@ -443,7 +443,7 @@ async fn compio_format_observations(cases: &[RawCase]) -> Vec<FormatObservation>
                 panic!(
                     "{}: compio binary encode: {}",
                     case.name,
-                    common::error_chain(&error)
+                    support::error_chain(&error)
                 )
             });
         let binary_encoded = row.get("value");
@@ -463,7 +463,7 @@ async fn compio_format_observations(cases: &[RawCase]) -> Vec<FormatObservation>
                 panic!(
                     "{}: compio text encode: {}",
                     case.name,
-                    common::error_chain(&error)
+                    support::error_chain(&error)
                 )
             });
         observations.push(FormatObservation {
@@ -565,7 +565,7 @@ fn tokio_raw_round_trips(url: String, cases: Vec<RawCase>) -> Vec<RawObservation
                     panic!(
                         "{}: tokio decode query: {}",
                         case.name,
-                        common::error_chain(&error)
+                        support::error_chain(&error)
                     )
                 });
             let decoded: Wire = row.get("value");
@@ -584,7 +584,7 @@ fn tokio_raw_round_trips(url: String, cases: Vec<RawCase>) -> Vec<RawObservation
                     panic!(
                         "{}: tokio rebound query: {}",
                         case.name,
-                        common::error_chain(&error)
+                        support::error_chain(&error)
                     )
                 });
             observations.push(RawObservation {
@@ -625,7 +625,7 @@ async fn compio_raw_round_trips(cases: &[RawCase]) -> Vec<RawObservation> {
                 panic!(
                     "{}: compio decode query: {}",
                     case.name,
-                    common::error_chain(&error)
+                    support::error_chain(&error)
                 )
             });
         let decoded: Wire = row.get("value");
@@ -644,7 +644,7 @@ async fn compio_raw_round_trips(cases: &[RawCase]) -> Vec<RawObservation> {
                 panic!(
                     "{}: compio rebound query: {}",
                     case.name,
-                    common::error_chain(&error)
+                    support::error_chain(&error)
                 )
             });
         observations.push(RawObservation {
@@ -659,7 +659,7 @@ async fn compio_raw_round_trips(cases: &[RawCase]) -> Vec<RawObservation> {
 }
 
 async fn raw_differential(cases: Vec<RawCase>) -> Vec<RawObservation> {
-    let theirs = tokio_raw_round_trips(common::plaintext_url(), cases.clone());
+    let theirs = tokio_raw_round_trips(support::plaintext_url(), cases.clone());
     let ours = compio_raw_round_trips(&cases).await;
 
     assert_eq!(
@@ -696,7 +696,7 @@ fn tokio_seeded_round_trips(url: String, ty: String, values: Vec<Wire>) -> Vec<W
                     .query_one(&format!("SELECT $1::{ty}"), &[&value])
                     .await
                     .unwrap_or_else(|error| {
-                        panic!("tokio seeded {ty}: {}", common::error_chain(&error))
+                        panic!("tokio seeded {ty}: {}", support::error_chain(&error))
                     })
                     .get(0),
             );
@@ -714,7 +714,7 @@ async fn compio_seeded_round_trips(ty: &str, values: &[Wire]) -> Vec<Wire> {
                 .query_one(&format!("SELECT $1::{ty}"), &[value])
                 .await
                 .unwrap_or_else(|error| {
-                    panic!("compio seeded {ty}: {}", common::error_chain(&error))
+                    panic!("compio seeded {ty}: {}", support::error_chain(&error))
                 })
                 .get(0),
         );
@@ -723,7 +723,7 @@ async fn compio_seeded_round_trips(ty: &str, values: &[Wire]) -> Vec<Wire> {
 }
 
 async fn seeded_differential(ty: &str, values: Vec<Wire>) -> Vec<Wire> {
-    let theirs = tokio_seeded_round_trips(common::plaintext_url(), ty.to_owned(), values.clone());
+    let theirs = tokio_seeded_round_trips(support::plaintext_url(), ty.to_owned(), values.clone());
     let ours = compio_seeded_round_trips(ty, &values).await;
     assert_eq!(ours, theirs, "the drivers disagreed on seeded {ty} values");
     assert_eq!(ours, values, "PostgreSQL changed seeded {ty} wire values");
@@ -1004,7 +1004,7 @@ async fn compio_float_format_observations(cases: &[RawCase]) -> Vec<FormatObserv
 #[compio::test]
 async fn both_drivers_agree_on_float_text_and_binary_codecs() {
     let cases = float_format_cases();
-    let theirs = tokio_float_format_observations(common::plaintext_url(), cases.clone());
+    let theirs = tokio_float_format_observations(support::plaintext_url(), cases.clone());
     let ours = compio_float_format_observations(&cases).await;
     assert_format_differential(&cases, &ours, &theirs);
 
@@ -1259,7 +1259,7 @@ async fn compio_native_observation() -> NativeObservation {
 /// Native scalar codecs must agree at every boundary PostgreSQL preserves.
 #[compio::test]
 async fn native_scalar_codecs_round_trip_identically() {
-    let theirs = tokio_native_observation(common::plaintext_url());
+    let theirs = tokio_native_observation(support::plaintext_url());
     let ours = compio_native_observation().await;
     assert_eq!(ours, theirs);
 
@@ -1432,7 +1432,7 @@ async fn compio_native_array_shape_observation() -> NativeArrayShapeObservation 
 #[compio::test]
 async fn both_drivers_agree_on_array_text_and_binary_codecs() {
     let cases = array_format_cases();
-    let theirs = tokio_array_format_observations(common::plaintext_url(), cases.clone());
+    let theirs = tokio_array_format_observations(support::plaintext_url(), cases.clone());
     let ours = compio_array_format_observations(&cases).await;
     assert_format_differential(&cases, &ours, &theirs);
 
@@ -1458,7 +1458,7 @@ async fn both_drivers_agree_on_array_text_and_binary_codecs() {
     // The wire carrier above proves both drivers preserve the server's shape.
     // Their shared Vec codec cannot represent it: it refuses two dimensions
     // but silently discards a non-1 lower bound and writes 1 on rebound.
-    let theirs = tokio_native_array_shape_observation(common::plaintext_url());
+    let theirs = tokio_native_array_shape_observation(support::plaintext_url());
     let ours = compio_native_array_shape_observation().await;
     assert_eq!(ours, theirs);
     assert_eq!(ours.multidimensional, ValueOutcome::LocalFailure);
@@ -1473,7 +1473,7 @@ async fn both_drivers_agree_on_array_text_and_binary_codecs() {
 #[ignore = "both postgres-types Vec codecs normalize [3:5] to [1:3]"]
 #[compio::test]
 async fn native_array_codecs_must_not_discard_lower_bounds() {
-    let theirs = tokio_native_array_shape_observation(common::plaintext_url());
+    let theirs = tokio_native_array_shape_observation(support::plaintext_url());
     let ours = compio_native_array_shape_observation().await;
     assert_eq!(ours.server_dimensions, ours.rebound_dimensions);
     assert_eq!(theirs.server_dimensions, theirs.rebound_dimensions);
@@ -1760,7 +1760,7 @@ async fn compio_native_fixed_array_observation() -> NativeFixedArrayObservation 
 #[cfg(feature = "array-impls")]
 #[compio::test]
 async fn native_fixed_array_codecs_match_values_and_pin_shared_wire_defects() {
-    let theirs = tokio_native_fixed_array_observation(common::plaintext_url());
+    let theirs = tokio_native_fixed_array_observation(support::plaintext_url());
     let ours = compio_native_fixed_array_observation().await;
 
     // `outbound_wires` is the ONE field where the local codec deliberately
@@ -1876,7 +1876,7 @@ async fn native_fixed_array_codecs_match_values_and_pin_shared_wire_defects() {
 #[ignore = "upstream postgres-types fixed-array codec still emits noncanonical empty-array wire"]
 #[compio::test]
 async fn native_fixed_array_codecs_must_emit_canonical_empty_wire() {
-    let theirs = tokio_native_fixed_array_observation(common::plaintext_url());
+    let theirs = tokio_native_fixed_array_observation(support::plaintext_url());
     let ours = compio_native_fixed_array_observation().await;
     assert_eq!(ours.outbound_wires[2], ours.server_wires[2].0);
     assert_eq!(theirs.outbound_wires[2], theirs.server_wires[2].0);
@@ -1888,7 +1888,7 @@ async fn native_fixed_array_codecs_must_emit_canonical_empty_wire() {
 #[ignore = "both postgres-types fixed-array codecs normalize [3:5] to [1:3]"]
 #[compio::test]
 async fn native_fixed_array_codecs_must_preserve_lower_bounds() {
-    let theirs = tokio_native_fixed_array_observation(common::plaintext_url());
+    let theirs = tokio_native_fixed_array_observation(support::plaintext_url());
     let ours = compio_native_fixed_array_observation().await;
     assert_eq!(ours.server_dimensions, ours.rebound_dimensions);
     assert_eq!(theirs.server_dimensions, theirs.rebound_dimensions);
@@ -2039,7 +2039,7 @@ async fn compio_native_byte_string_observation() -> NativeByteStringObservation 
 #[compio::test]
 async fn both_drivers_agree_on_byte_and_string_text_and_binary_codecs() {
     let cases = byte_string_format_cases();
-    let theirs = tokio_byte_string_format_observations(common::plaintext_url(), cases.clone());
+    let theirs = tokio_byte_string_format_observations(support::plaintext_url(), cases.clone());
     let ours = compio_byte_string_format_observations(&cases).await;
     assert_eq!(ours, theirs);
 
@@ -2091,7 +2091,7 @@ async fn both_drivers_agree_on_byte_and_string_text_and_binary_codecs() {
         assert_eq!(observation.text_encoded_text, rendered);
     }
 
-    let theirs = tokio_native_byte_string_observation(common::plaintext_url());
+    let theirs = tokio_native_byte_string_observation(support::plaintext_url());
     let ours = compio_native_byte_string_observation().await;
     assert_eq!(ours, theirs);
     assert_eq!(
@@ -2328,7 +2328,7 @@ async fn compio_native_smol_str_observation() -> NativeSmolStrObservation {
 #[cfg(feature = "with-smol_str-01")]
 #[compio::test]
 async fn native_smol_str_codecs_cover_storage_boundary_and_char_padding() {
-    let theirs = tokio_native_smol_str_observation(common::plaintext_url());
+    let theirs = tokio_native_smol_str_observation(support::plaintext_url());
     let ours = compio_native_smol_str_observation().await;
     assert_eq!(ours, theirs);
 
@@ -2466,7 +2466,7 @@ async fn compio_json_format_observations(cases: &[RawCase]) -> Vec<FormatObserva
 #[compio::test]
 async fn both_drivers_agree_on_json_text_and_binary_codecs() {
     let cases = json_format_cases();
-    let theirs = tokio_json_format_observations(common::plaintext_url(), cases.clone());
+    let theirs = tokio_json_format_observations(support::plaintext_url(), cases.clone());
     let ours = compio_json_format_observations(&cases).await;
     assert_format_differential(&cases, &ours, &theirs);
 
@@ -2646,7 +2646,7 @@ async fn compio_native_extended_scalar_observation() -> NativeExtendedScalarObse
 #[compio::test]
 async fn both_drivers_agree_on_extended_scalar_text_and_binary_codecs() {
     let cases = extended_scalar_format_cases();
-    let theirs = tokio_extended_scalar_format_observations(common::plaintext_url(), cases.clone());
+    let theirs = tokio_extended_scalar_format_observations(support::plaintext_url(), cases.clone());
     let ours = compio_extended_scalar_format_observations(&cases).await;
     assert_format_differential(&cases, &ours, &theirs);
 
@@ -2694,7 +2694,7 @@ async fn both_drivers_agree_on_extended_scalar_text_and_binary_codecs() {
         );
     }
 
-    let theirs = tokio_native_extended_scalar_observation(common::plaintext_url());
+    let theirs = tokio_native_extended_scalar_observation(support::plaintext_url());
     let ours = compio_native_extended_scalar_observation().await;
     assert_eq!(ours, theirs);
     assert_eq!(ours.oid_decoded, u32::MAX);
@@ -2735,7 +2735,7 @@ async fn both_drivers_agree_on_extended_scalar_text_and_binary_codecs() {
 #[ignore = "both postgres-types IpAddr codecs discard INET prefix lengths"]
 #[compio::test]
 async fn native_inet_codecs_must_not_discard_prefix_lengths() {
-    let theirs = tokio_native_extended_scalar_observation(common::plaintext_url());
+    let theirs = tokio_native_extended_scalar_observation(support::plaintext_url());
     let ours = compio_native_extended_scalar_observation().await;
     assert_eq!(ours.inet4_server_mask, ours.inet4_rebound_mask);
     assert_eq!(theirs.inet4_server_mask, theirs.inet4_rebound_mask);
@@ -2930,7 +2930,7 @@ async fn compio_native_cidr_observation() -> NativeCidrObservation {
 #[cfg(feature = "with-cidr-0_3")]
 #[compio::test]
 async fn native_cidr_codecs_preserve_prefixes_and_expose_upstream_flag_defect() {
-    let theirs = tokio_native_cidr_observation(common::plaintext_url());
+    let theirs = tokio_native_cidr_observation(support::plaintext_url());
     let ours = compio_native_cidr_observation().await;
 
     assert_eq!(ours.decoded_text, theirs.decoded_text);
@@ -3125,7 +3125,7 @@ async fn compio_native_eui48_observation() -> NativeEui48Observation {
 #[cfg(feature = "with-eui48-1")]
 #[compio::test]
 async fn native_eui48_codecs_cover_macaddr_and_expose_macaddr8_limit() {
-    let theirs = tokio_native_eui48_observation(common::plaintext_url());
+    let theirs = tokio_native_eui48_observation(support::plaintext_url());
     let ours = compio_native_eui48_observation().await;
     assert_eq!(ours, theirs);
 
@@ -3167,7 +3167,7 @@ async fn native_eui48_codecs_cover_macaddr_and_expose_macaddr8_limit() {
 #[ignore = "both eui48::MacAddress codecs reject PostgreSQL MACADDR8"]
 #[compio::test]
 async fn native_eui48_codecs_must_support_macaddr8() {
-    let theirs = tokio_native_eui48_observation(common::plaintext_url());
+    let theirs = tokio_native_eui48_observation(support::plaintext_url());
     let ours = compio_native_eui48_observation().await;
     assert!(ours.macaddr8_encode_supported);
     assert!(ours.macaddr8_decode_supported);
@@ -3308,7 +3308,7 @@ async fn compio_native_bit_vec_observation() -> NativeBitVecObservation {
 #[cfg(feature = "with-bit-vec-0_9")]
 #[compio::test]
 async fn native_bit_vec_codecs_cover_lengths_and_final_byte_padding() {
-    let theirs = tokio_native_bit_vec_observation(common::plaintext_url());
+    let theirs = tokio_native_bit_vec_observation(support::plaintext_url());
     let ours = compio_native_bit_vec_observation().await;
     assert_eq!(ours, theirs);
 
@@ -3456,7 +3456,7 @@ async fn compio_native_uuid_observation() -> NativeUuidObservation {
 #[cfg(feature = "with-uuid-1")]
 #[compio::test]
 async fn native_uuid_codecs_match_server_text_and_wire() {
-    let theirs = tokio_native_uuid_observation(common::plaintext_url());
+    let theirs = tokio_native_uuid_observation(support::plaintext_url());
     let ours = compio_native_uuid_observation().await;
     assert_eq!(ours, theirs);
 
@@ -3665,7 +3665,7 @@ async fn compio_native_json_observation() -> NativeJsonObservation {
 #[cfg(feature = "with-serde_json-1")]
 #[compio::test]
 async fn native_serde_json_codecs_cover_json_and_jsonb_wire_contracts() {
-    let theirs = tokio_native_json_observation(common::plaintext_url());
+    let theirs = tokio_native_json_observation(support::plaintext_url());
     let ours = compio_native_json_observation().await;
     assert_eq!(ours, theirs);
 
@@ -3935,7 +3935,7 @@ async fn compio_native_geo_observation() -> NativeGeoObservation {
 #[cfg(feature = "with-geo-types-0_7")]
 #[compio::test]
 async fn native_geo_types_codecs_cover_geometry_wires_and_shared_limits() {
-    let theirs = tokio_native_geo_observation(common::plaintext_url());
+    let theirs = tokio_native_geo_observation(support::plaintext_url());
     let ours = compio_native_geo_observation().await;
     assert_eq!(ours.decoded_point, theirs.decoded_point);
     assert_eq!(ours.decoded_box, theirs.decoded_box);
@@ -4047,7 +4047,7 @@ async fn native_geo_types_codecs_cover_geometry_wires_and_shared_limits() {
 #[ignore = "upstream geo-types Rect codec still emits PostgreSQL BOX corners in reverse order"]
 #[compio::test]
 async fn native_geo_rect_codecs_must_emit_server_box_order() {
-    let theirs = tokio_native_geo_observation(common::plaintext_url());
+    let theirs = tokio_native_geo_observation(support::plaintext_url());
     let ours = compio_native_geo_observation().await;
     assert_eq!(ours.outbound_wires[1], ours.server_wires[1].0);
     assert_eq!(theirs.outbound_wires[1], theirs.server_wires[1].0);
@@ -4058,7 +4058,7 @@ async fn native_geo_rect_codecs_must_emit_server_box_order() {
 #[ignore = "both geo-types LineString codecs discard PostgreSQL PATH closed state"]
 #[compio::test]
 async fn native_geo_path_codecs_must_preserve_closed_flag() {
-    let theirs = tokio_native_geo_observation(common::plaintext_url());
+    let theirs = tokio_native_geo_observation(support::plaintext_url());
     let ours = compio_native_geo_observation().await;
     assert_eq!(ours.outbound_wires[3], ours.server_wires[3].0);
     assert_eq!(theirs.outbound_wires[3], theirs.server_wires[3].0);
@@ -4102,7 +4102,7 @@ async fn compio_array_observation() -> ArrayObservation {
 /// The shared one-dimensional array codec preserves empty and NULL elements.
 #[compio::test]
 async fn native_one_dimensional_arrays_round_trip_identically() {
-    let theirs = tokio_array_observation(common::plaintext_url());
+    let theirs = tokio_array_observation(support::plaintext_url());
     let ours = compio_array_observation().await;
     assert_eq!(ours, theirs);
     assert!(ours.empty.is_empty());
@@ -4166,7 +4166,7 @@ async fn compio_numeric_format_observations(cases: &[RawCase]) -> Vec<FormatObse
 #[compio::test]
 async fn both_drivers_agree_on_numeric_text_and_binary_codecs() {
     let cases = numeric_format_cases();
-    let theirs = tokio_numeric_format_observations(common::plaintext_url(), cases.clone());
+    let theirs = tokio_numeric_format_observations(support::plaintext_url(), cases.clone());
     let ours = compio_numeric_format_observations(&cases).await;
     assert_format_differential(&cases, &ours, &theirs);
 
@@ -4447,7 +4447,7 @@ async fn ranges_and_multiranges_round_trip_empty_unbounded_and_inclusive_bounds(
 #[compio::test]
 async fn named_composite_values_round_trip_field_for_field() {
     let setup = compio_client().await;
-    let composite = common::test_object_name("cpg_diff_composite");
+    let composite = support::test_object_name("cpg_diff_composite");
     setup
         .batch_execute(&format!(
             "CREATE TYPE {composite} AS (id int4, label text, amount int8)"
@@ -4481,7 +4481,7 @@ async fn named_composite_values_round_trip_field_for_field() {
 #[compio::test]
 async fn domains_over_every_value_family_round_trip_as_their_base_wire_type() {
     let setup = compio_client().await;
-    let prefix = common::test_object_name("cpg_diff_domain");
+    let prefix = support::test_object_name("cpg_diff_domain");
     let composite = format!("{prefix}_composite_base");
     setup
         .batch_execute(&format!("CREATE TYPE {composite} AS (id int4, label text)"))
@@ -4728,7 +4728,7 @@ async fn compio_interval_infinity_states() -> Vec<String> {
 #[compio::test]
 async fn both_drivers_agree_on_temporal_text_and_binary_codecs() {
     let cases = temporal_format_cases();
-    let theirs = tokio_temporal_format_observations(common::plaintext_url(), cases.clone());
+    let theirs = tokio_temporal_format_observations(support::plaintext_url(), cases.clone());
     let ours = compio_temporal_format_observations(&cases).await;
     assert_format_differential(&cases, &ours, &theirs);
 
@@ -4809,7 +4809,7 @@ async fn both_drivers_agree_on_temporal_text_and_binary_codecs() {
         }
     );
 
-    let theirs = tokio_interval_infinity_states(common::plaintext_url());
+    let theirs = tokio_interval_infinity_states(support::plaintext_url());
     let ours = compio_interval_infinity_states().await;
     assert_eq!(
         ours, theirs,
@@ -5111,7 +5111,7 @@ async fn compio_native_jiff_observation() -> NativeJiffObservation {
 #[cfg(feature = "with-jiff-0_2")]
 #[compio::test]
 async fn native_jiff_codecs_cover_temporal_edges_and_remain_closed() {
-    let theirs = tokio_native_jiff_observation(common::plaintext_url());
+    let theirs = tokio_native_jiff_observation(support::plaintext_url());
     let ours = compio_native_jiff_observation().await;
     assert_eq!(ours, theirs);
 
@@ -5374,7 +5374,7 @@ async fn compio_typed_temporal_observation() -> TypedTemporalObservation {
 /// Upstream aliases `PostgreSQL` 24:00 to midnight; this port refuses the loss.
 #[compio::test]
 async fn time_24_refusal_matches_the_server_instead_of_tokio() {
-    let theirs = tokio_typed_temporal_observation(common::plaintext_url());
+    let theirs = tokio_typed_temporal_observation(support::plaintext_url());
     let ours = compio_typed_temporal_observation().await;
 
     let expected = vec![
@@ -5577,7 +5577,7 @@ async fn compio_system_time_observation() -> SystemTimeObservation {
 /// Finite `SystemTime` uses signed microseconds from PostgreSQL's 2000 epoch.
 #[compio::test]
 async fn finite_system_time_round_trips_identically_for_both_timestamp_types() {
-    let theirs = tokio_system_time_observation(common::plaintext_url());
+    let theirs = tokio_system_time_observation(support::plaintext_url());
     let ours = compio_system_time_observation().await;
     assert_eq!(ours, theirs);
     assert_eq!(ours.timestamp, system_time_cases());
@@ -5623,7 +5623,7 @@ async fn compio_positive_infinity_as_system_time() -> ValueOutcome<SystemTime> {
 /// Bare `SystemTime` cannot represent infinity; upstream aliases it to a date.
 #[compio::test]
 async fn bare_system_time_refuses_infinity_here_while_tokio_returns_a_finite_value() {
-    let theirs = tokio_positive_infinity_as_system_time(common::plaintext_url());
+    let theirs = tokio_positive_infinity_as_system_time(support::plaintext_url());
     let ours = compio_positive_infinity_as_system_time().await;
     assert_eq!(ours, ValueOutcome::LocalFailure);
 
@@ -5675,7 +5675,7 @@ async fn compio_overflowing_system_time(value: SystemTime) -> ValueOutcome<Strin
 async fn system_time_wire_overflow_is_refused_here_while_tokio_aliases_infinity() {
     let postgres_epoch = UNIX_EPOCH + Duration::from_secs(POSTGRES_EPOCH_FROM_UNIX_SECS);
     let value = postgres_epoch + Duration::from_micros(i64::MAX as u64 + 1);
-    let theirs = tokio_overflowing_system_time(common::plaintext_url(), value);
+    let theirs = tokio_overflowing_system_time(support::plaintext_url(), value);
     let ours = compio_overflowing_system_time(value).await;
 
     assert_eq!(ours, ValueOutcome::LocalFailure);
@@ -5752,8 +5752,8 @@ async fn compio_domain_typed_observation(scalar: &str, array: &str) -> DomainTyp
 #[compio::test]
 async fn base_codecs_fit_domain_wire_values_but_tokio_rejects_them() {
     let setup = compio_client().await;
-    let scalar = common::test_object_name("cpg_diff_typed_domain");
-    let array = common::test_object_name("cpg_diff_typed_array_domain");
+    let scalar = support::test_object_name("cpg_diff_typed_domain");
+    let array = support::test_object_name("cpg_diff_typed_array_domain");
     setup
         .batch_execute(&format!(
             "CREATE DOMAIN {scalar} AS int4 CHECK (VALUE > 0); \
@@ -5763,7 +5763,7 @@ async fn base_codecs_fit_domain_wire_values_but_tokio_rejects_them() {
         .expect("create shared typed domains");
 
     let theirs =
-        tokio_domain_typed_observation(common::plaintext_url(), scalar.clone(), array.clone());
+        tokio_domain_typed_observation(support::plaintext_url(), scalar.clone(), array.clone());
     let ours = compio_domain_typed_observation(&scalar, &array).await;
     assert_eq!(
         ours,
@@ -5839,7 +5839,7 @@ async fn compio_record_array() -> ValueOutcome<Vec<Vec<RecordField>>> {
 /// `_record` is an array type here; upstream incorrectly calls it pseudo.
 #[compio::test]
 async fn record_arrays_decode_here_while_tokio_misclassifies_them() {
-    let theirs = tokio_record_array(common::plaintext_url());
+    let theirs = tokio_record_array(support::plaintext_url());
     let ours = compio_record_array().await;
     let ValueOutcome::Value(records) = ours else {
         panic!("this driver did not decode PostgreSQL's record array: {ours:?}");

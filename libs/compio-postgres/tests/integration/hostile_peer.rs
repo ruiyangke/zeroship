@@ -98,7 +98,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 #[allow(unused_imports)]
-use crate::common;
+use crate::support;
 
 const ASYNC_WATCHDOG: Duration = Duration::from_secs(5);
 const SOCKET_WATCHDOG: Duration = Duration::from_secs(2);
@@ -1456,7 +1456,7 @@ async fn an_error_after_coalesced_bind_complete_keeps_the_cached_statement() {
             first.code().map(compio_postgres::error::SqlState::code),
             Some("26000"),
             "the first execution lost its scripted SQLSTATE: {}",
-            common::error_chain(&first)
+            support::error_chain(&first)
         );
 
         {
@@ -1607,7 +1607,7 @@ async fn plaintext_sasl_refusal(
         Err(error) => error,
     };
     server.finish();
-    common::error_chain(&error)
+    support::error_chain(&error)
 }
 
 fn assert_sasl_initial_response(body: &[u8], mechanism: &str, gs2_prefix: &[u8]) {
@@ -1783,7 +1783,7 @@ async fn scram_refusal_chain(server: StubServer, what: &str) -> String {
             drop(pair);
             panic!("the driver accepted {what}")
         }
-        Err(error) => common::error_chain(&error),
+        Err(error) => support::error_chain(&error),
     }
 }
 
@@ -1844,7 +1844,7 @@ async fn an_invalid_scram_server_verifier_is_refused() {
                 panic!("the driver accepted an invalid SCRAM server verifier")
             }
         };
-        let chain = common::error_chain(&error);
+        let chain = support::error_chain(&error);
         assert!(
             chain.contains("SCRAM verification error"),
             "invalid SCRAM verifier reported the wrong error: {chain}"
@@ -1878,7 +1878,7 @@ async fn authentication_ok_cannot_replace_scram_final() {
                 panic!("AuthenticationOk completed SCRAM without a server-final proof")
             }
         };
-        let chain = common::error_chain(&error);
+        let chain = support::error_chain(&error);
         assert!(
             chain.contains("scram-sha-256") && chain.contains("did not complete authentication"),
             "early AuthenticationOk reported the wrong error: {chain}"
@@ -2022,7 +2022,7 @@ async fn scram_plus_without_endpoint_does_not_fallback_to_bare_scram() {
             Ok(_) => panic!("PLUS without endpoint material fell back to bare SCRAM"),
             Err(error) => error,
         };
-        let chain = common::error_chain(&error);
+        let chain = support::error_chain(&error);
         assert!(
             chain.contains("tls-server-end-point channel binding is unavailable"),
             "PLUS without endpoint material reported the wrong error: {chain}"
@@ -2199,7 +2199,7 @@ async fn protocol_negotiation_rejection(requested: ProtocolVersion, response: Ve
         Err(error) => error,
     };
     server.finish();
-    common::error_chain(&error)
+    support::error_chain(&error)
 }
 
 #[compio::test]
@@ -2248,7 +2248,7 @@ async fn the_first_delayed_frame_crossing_the_byte_budget_is_refused() {
                     panic!("messages totaling exactly 1 MiB were refused: {error}")
                 }
                 (false, Err(error)) => {
-                    let chain = common::error_chain(&error);
+                    let chain = support::error_chain(&error);
                     assert!(
                         chain.contains("exceed 1048576 bytes"),
                         "the first crossing frame reported the wrong error: {chain}"
@@ -2335,7 +2335,7 @@ async fn the_delayed_handshake_queue_is_bounded_by_message_count_not_only_bytes(
                         panic!("exactly 256 delayed messages were refused: {error}")
                     }
                     (false, Err(error)) => {
-                        let chain = common::error_chain(&error);
+                        let chain = support::error_chain(&error);
                         assert!(
                             chain.contains("too many asynchronous messages"),
                             "message 257 was refused by something other than the count \
@@ -2434,7 +2434,7 @@ async fn backend_key_data_after_keyless_startup_completion_is_refused() {
                 panic!("BackendKeyData after ReadyForQuery was accepted")
             }
         };
-        let chain = common::error_chain(&error);
+        let chain = support::error_chain(&error);
         assert!(
             chain.contains("BackendKeyData after startup completed"),
             "late BackendKeyData reported the wrong error: {chain}"
@@ -2542,7 +2542,7 @@ async fn startup_without_backend_key_data_is_usable_but_not_cancellable() {
         .await
         .expect("missing-key cancellation hung")
         .expect_err("a cancellation request was fabricated without a key");
-        let chain = common::error_chain(&cancellation);
+        let chain = support::error_chain(&cancellation);
         assert!(
             chain.contains("did not provide BackendKeyData"),
             "missing-key cancellation reported the wrong error: {chain}"
@@ -2616,7 +2616,7 @@ async fn a_post_write_cancel_confirmation_error_retires_the_bare_session() {
             .await
             .expect("post-write cancel confirmation exceeded its operation watchdog")
             .expect_err("a stalled cancel confirmation unexpectedly succeeded");
-        let chain = common::error_chain(&error);
+        let chain = support::error_chain(&error);
         assert!(
             chain.contains("connection timed out"),
             "the stalled cancel returned the wrong error: {chain}"
@@ -2970,7 +2970,7 @@ async fn protocol_negotiation_after_startup_completion_is_refused() {
             Ok(_) => panic!("negotiation after ReadyForQuery was accepted"),
             Err(error) => error,
         };
-        let chain = common::error_chain(&error);
+        let chain = support::error_chain(&error);
         assert!(
             chain.contains("NegotiateProtocolVersion after startup completed"),
             "post-startup negotiation reported the wrong error: {chain}"
@@ -3172,7 +3172,7 @@ async fn serialized_write_failure_drains_complete_frames_before_a_partial_tail()
                 error.code().map(|code| code.code()),
                 Some("57P01"),
                 "the local flush error replaced the buffered server diagnosis: {}",
-                common::error_chain(&error)
+                support::error_chain(&error)
             );
         };
         let notification = async {
@@ -3195,9 +3195,9 @@ async fn serialized_write_failure_drains_complete_frames_before_a_partial_tail()
         let driver_result = driver.await.expect("serialized connection task panicked");
         let error = driver_result.expect_err("the scripted third flush unexpectedly succeeded");
         assert!(
-            common::error_chain(&error).contains("scripted third flush failure"),
+            support::error_chain(&error).contains("scripted third flush failure"),
             "the connection task reported the wrong local write failure: {}",
-            common::error_chain(&error)
+            support::error_chain(&error)
         );
 
         drop(client);
@@ -3277,9 +3277,9 @@ async fn split_write_failure_gives_buffered_dispatch_one_scheduling_turn() {
         let driver_result = driver.await.expect("split connection task panicked");
         let error = driver_result.expect_err("the gated third flush unexpectedly succeeded");
         assert!(
-            common::error_chain(&error).contains("scripted gated flush failure"),
+            support::error_chain(&error).contains("scripted gated flush failure"),
             "the split loop reported the wrong write failure: {}",
-            common::error_chain(&error)
+            support::error_chain(&error)
         );
         drop(client);
     })
@@ -3345,7 +3345,7 @@ async fn hostile_response_retires_session(process_id: i32, response: Vec<u8>) ->
     });
 
     let (client, connection) = stub_config(server.addr)
-        .connect(common::suite_tls())
+        .connect(support::suite_tls())
         .await
         .expect("connect to scripted PostgreSQL peer");
     let driver = compio::runtime::spawn(async move { connection.run().await });
@@ -3375,13 +3375,13 @@ async fn hostile_response_retires_session(process_id: i32, response: Vec<u8>) ->
     }
 
     let connection = match compio::time::timeout(OPERATION_WATCHDOG, driver).await {
-        Ok(Ok(Err(error))) => Some(common::error_chain(&error)),
+        Ok(Ok(Err(error))) => Some(support::error_chain(&error)),
         _ => None,
     };
     drop(client);
     server.finish();
     HostileOutcome {
-        query: common::error_chain(&error),
+        query: support::error_chain(&error),
         connection,
     }
 }
@@ -3417,9 +3417,9 @@ async fn an_oversized_application_header_is_refused_without_its_body() {
             .await
             .expect("the oversized header made the query wait for its absent body")
             .expect_err("the driver accepted a message above the configured ceiling");
-        let query_chain = common::error_chain(&query);
+        let query_chain = support::error_chain(&query);
         let driver_chain = match compio::time::timeout(OPERATION_WATCHDOG, driver).await {
-            Ok(Ok(Err(error))) => common::error_chain(&error),
+            Ok(Ok(Err(error))) => support::error_chain(&error),
             other => panic!("the oversized header did not retire the connection: {other:?}"),
         };
         let expected = "message too large: 129 bytes (max 64)";
@@ -3487,7 +3487,7 @@ async fn exact_limit_frame_survives_short_header_reads(allow_split: bool) {
             panic!(
                 "an exact-limit frame was rejected; query: {}; driver: {driver_result:?}; reads: \
                  {:?}",
-                common::error_chain(&error),
+                support::error_chain(&error),
                 state.borrow().response_read_sizes
             );
         }
@@ -3584,13 +3584,13 @@ async fn a_serialized_frame_one_byte_over_the_limit_is_refused_from_its_header()
             .await
             .expect("the over-limit header made the query hang")
             .expect_err("the driver accepted a frame one byte above its ceiling");
-        let query_chain = common::error_chain(&query);
+        let query_chain = support::error_chain(&query);
         let driver_error = compio::time::timeout(OPERATION_WATCHDOG, driver)
             .await
             .expect("the over-limit connection did not retire")
             .expect("the over-limit connection task panicked")
             .expect_err("the over-limit connection closed without its framing error");
-        let driver_chain = common::error_chain(&driver_error);
+        let driver_chain = support::error_chain(&driver_error);
         let expected = "message too large: 65 bytes (max 64)";
         assert!(
             query_chain.contains(expected) || driver_chain.contains(expected),
@@ -3686,7 +3686,7 @@ async fn a_server_error_remains_sticky_across_an_intervening_frame() {
             error.code().map(compio_postgres::error::SqlState::code),
             Some("23505"),
             "the malformed tail replaced SQLSTATE 23505: {}",
-            common::error_chain(&error)
+            support::error_chain(&error)
         );
 
         let driver_error = compio::time::timeout(OPERATION_WATCHDOG, driver)
@@ -3695,10 +3695,10 @@ async fn a_server_error_remains_sticky_across_an_intervening_frame() {
             .expect("the sticky-error connection task panicked")
             .expect_err("the malformed tail left the connection reusable");
         assert!(
-            common::error_chain(&driver_error)
+            support::error_chain(&driver_error)
                 .contains("invalid message length: header length < 4"),
             "the deferred malformed-tail diagnosis disappeared: {}",
-            common::error_chain(&driver_error)
+            support::error_chain(&driver_error)
         );
 
         drop(client);
@@ -3820,7 +3820,7 @@ async fn a_cancel_key_outside_the_allowed_length_is_refused() {
 
         let error = compio::time::timeout(
             OPERATION_WATCHDOG,
-            stub_config(server.addr).connect(common::suite_tls()),
+            stub_config(server.addr).connect(support::suite_tls()),
         )
         .await
         .unwrap_or_else(|_| panic!("{label} cancel key hung the handshake"))
@@ -3901,7 +3901,7 @@ async fn a_peer_that_trickles_a_frame_one_byte_at_a_time_is_understood() {
     });
 
     let (client, connection) = stub_config(server.addr)
-        .connect(common::suite_tls())
+        .connect(support::suite_tls())
         .await
         .expect("connect to scripted PostgreSQL peer");
     let driver = compio::runtime::spawn(async move { connection.run().await });
@@ -4094,7 +4094,7 @@ async fn dropping_a_caller_owned_tls_client_sends_close_notify() {
             .unwrap_or_else(|error| {
                 panic!(
                     "caller-owned TLS connection task failed during clean teardown: {}",
-                    common::error_chain(&error)
+                    support::error_chain(&error)
                 )
             });
     }))
@@ -4214,7 +4214,7 @@ async fn a_tls_record_fragmented_below_its_header_is_reassembled() {
             .unwrap_or_else(|error| {
                 panic!(
                     "a one-byte ciphertext fragment was treated as EOF: {}",
-                    common::error_chain(&error)
+                    support::error_chain(&error)
                 )
             });
         let value = messages.iter().find_map(|message| match message {
@@ -4354,7 +4354,7 @@ async fn a_refused_tls_split_preserves_ciphertext_already_read_from_socket() {
         let messages = query.unwrap_or_else(|error| {
             panic!(
                 "refused TLS split corrupted the barrier query: {}",
-                common::error_chain(&error)
+                support::error_chain(&error)
             )
         });
         assert!(
@@ -4459,7 +4459,7 @@ async fn local_tls_teardown_is_clean_eof_even_with_a_late_server_frame() {
         driver_result.unwrap_or_else(|error| {
             panic!(
                 "typed local close_notify was surfaced as a read error: {}",
-                common::error_chain(&error)
+                support::error_chain(&error)
             )
         });
         server.finish();
@@ -4548,7 +4548,7 @@ async fn a_non_marker_tls_read_error_is_not_mapped_to_eof() {
             io_error_kind(&error),
             Some(ErrorKind::InvalidData),
             "the invalid TLS record surfaced as the wrong error: {}",
-            common::error_chain(&error)
+            support::error_chain(&error)
         );
 
         drop(client);
@@ -4933,7 +4933,7 @@ async fn a_truncated_frame_followed_by_silence_does_not_hang() {
         let mut config = stub_config(server.addr);
         config.read_timeout(READ_TIMEOUT);
         let (client, connection) = config
-            .connect(common::suite_tls())
+            .connect(support::suite_tls())
             .await
             .expect("connect to scripted PostgreSQL peer");
         let driver = compio::runtime::spawn(async move { connection.run().await });
@@ -4950,7 +4950,7 @@ async fn a_truncated_frame_followed_by_silence_does_not_hang() {
         assert!(
             error.is_read_timeout(),
             "a truncated frame followed by silence ended with {} rather than the read deadline",
-            common::error_chain(&error)
+            support::error_chain(&error)
         );
         assert!(
             elapsed < PEER_HOLD,
@@ -5061,7 +5061,7 @@ async fn execute_text_params_against(
     });
 
     let (client, connection) = stub_config(server.addr)
-        .connect(common::suite_tls())
+        .connect(support::suite_tls())
         .await
         .expect("connect to scripted PostgreSQL peer");
     let driver = compio::runtime::spawn(async move { connection.run().await });
@@ -5100,7 +5100,7 @@ async fn query_text_params_against(
     });
 
     let (client, connection) = stub_config(server.addr)
-        .connect(common::suite_tls())
+        .connect(support::suite_tls())
         .await
         .expect("connect to scripted PostgreSQL peer");
     let driver = compio::runtime::spawn(async move { connection.run().await });
@@ -5153,7 +5153,7 @@ async fn hostile_prepare_retires_session(process_id: i32, response: Vec<u8>) -> 
     });
 
     let (client, connection) = stub_config(server.addr)
-        .connect(common::suite_tls())
+        .connect(support::suite_tls())
         .await
         .expect("connect to scripted PostgreSQL peer");
     let driver = compio::runtime::spawn(async move { connection.run().await });
@@ -5173,7 +5173,7 @@ async fn hostile_prepare_retires_session(process_id: i32, response: Vec<u8>) -> 
     let _ = compio::time::timeout(OPERATION_WATCHDOG, driver).await;
     drop(client);
     server.finish();
-    common::error_chain(&error)
+    support::error_chain(&error)
 }
 
 /// Command tags are server-owned C strings, but the affected-row parser still
@@ -5192,9 +5192,9 @@ async fn execute_text_params_rejects_non_utf8_command_tags() {
             .expect_err("execute_text_params accepted a non-UTF-8 command tag");
         assert_eq!(error.to_string(), "error parsing response from server");
         assert!(
-            common::error_chain(&error).contains("invalid utf-8"),
+            support::error_chain(&error).contains("invalid utf-8"),
             "the malformed command tag reported the wrong parse error: {}",
-            common::error_chain(&error)
+            support::error_chain(&error)
         );
     }))
     .await
@@ -5249,7 +5249,7 @@ async fn prepare_preserves_a_terminal_error_after_its_description() {
         });
 
         let (client, connection) = stub_config(server.addr)
-            .connect(common::suite_tls())
+            .connect(support::suite_tls())
             .await
             .expect("connect to scripted PostgreSQL peer");
         let driver = compio::runtime::spawn(async move { connection.run().await });
@@ -5265,7 +5265,7 @@ async fn prepare_preserves_a_terminal_error_after_its_description() {
             error.code().map(|code| code.code()),
             Some("57P01"),
             "prepare discarded terminal SQLSTATE 57P01: {}",
-            common::error_chain(&error)
+            support::error_chain(&error)
         );
 
         let _ = compio::time::timeout(OPERATION_WATCHDOG, driver).await;
@@ -5321,7 +5321,7 @@ async fn an_extended_query_data_row_shorter_than_its_description_is_refused() {
         });
 
         let (client, connection) = stub_config(server.addr)
-            .connect(common::suite_tls())
+            .connect(support::suite_tls())
             .await
             .expect("connect to scripted PostgreSQL peer");
         let driver = compio::runtime::spawn(async move { connection.run().await });
@@ -5336,10 +5336,10 @@ async fn an_extended_query_data_row_shorter_than_its_description_is_refused() {
             .expect("the query hung instead of rejecting a short DataRow")
             .expect_err("the driver built a row with fewer fields than columns");
         assert!(
-            common::error_chain(&error)
+            support::error_chain(&error)
                 .contains("DataRow carries 1 fields but its RowDescription declared 2 columns"),
             "an extended-protocol short DataRow reported {:?} rather than the arity check",
-            common::error_chain(&error)
+            support::error_chain(&error)
         );
 
         let _ = compio::time::timeout(OPERATION_WATCHDOG, driver).await;
@@ -5509,7 +5509,7 @@ async fn hostile_copy_out_retires_session(process_id: i32, response: Vec<u8>) ->
     let server = copy_stub_server(process_id, response);
 
     let (client, connection) = stub_config(server.addr)
-        .connect(common::suite_tls())
+        .connect(support::suite_tls())
         .await
         .expect("connect to scripted PostgreSQL peer");
     let driver = compio::runtime::spawn(async move { connection.run().await });
@@ -5534,7 +5534,7 @@ async fn hostile_copy_out_retires_session(process_id: i32, response: Vec<u8>) ->
     let _ = compio::time::timeout(OPERATION_WATCHDOG, driver).await;
     drop(client);
     server.finish();
-    common::error_chain(&error)
+    support::error_chain(&error)
 }
 
 /// Drive `copy_in` against a peer that answers the COPY batch with `response`.
@@ -5583,7 +5583,7 @@ async fn hostile_copy_in_retires_session(process_id: i32, response: Vec<u8>) -> 
     });
 
     let (client, connection) = stub_config(server.addr)
-        .connect(common::suite_tls())
+        .connect(support::suite_tls())
         .await
         .expect("connect to scripted PostgreSQL peer");
     let driver = compio::runtime::spawn(async move { connection.run().await });
@@ -5609,7 +5609,7 @@ async fn hostile_copy_in_retires_session(process_id: i32, response: Vec<u8>) -> 
     let _ = compio::time::timeout(OPERATION_WATCHDOG, driver).await;
     drop(client);
     server.finish();
-    common::error_chain(&error)
+    support::error_chain(&error)
 }
 
 /// `CopyInMessage::Abort` is the one COPY producer exit which yields `None`
@@ -5693,7 +5693,7 @@ fn an_abort_before_bind_complete_releases_copy_input() {
             });
 
             let (client, connection) = stub_config(server.addr)
-                .connect(common::suite_tls())
+                .connect(support::suite_tls())
                 .await
                 .expect("connect to scripted PostgreSQL peer");
             let driver = compio::runtime::spawn(async move { connection.run().await });
@@ -5709,7 +5709,7 @@ fn an_abort_before_bind_complete_releases_copy_input() {
                 panic!("COPY IN accepted CopyInResponse before BindComplete");
             };
             assert!(
-                common::error_chain(&copy_error).contains("unexpected message from server"),
+                support::error_chain(&copy_error).contains("unexpected message from server"),
                 "out-of-order CopyInResponse reported the wrong failure: {copy_error}"
             );
 
@@ -5811,7 +5811,7 @@ async fn a_well_formed_copy_out_is_accepted() {
         let server = copy_stub_server(520, well_formed_copy_out());
 
         let (client, connection) = stub_config(server.addr)
-            .connect(common::suite_tls())
+            .connect(support::suite_tls())
             .await
             .expect("connect to scripted PostgreSQL peer");
         let driver = compio::runtime::spawn(async move { connection.run().await });
@@ -5924,7 +5924,7 @@ async fn a_copy_in_response_to_copy_out_is_actively_ended() {
         });
 
         let (client, connection) = stub_config(server.addr)
-            .connect(common::suite_tls())
+            .connect(support::suite_tls())
             .await
             .expect("connect to scripted PostgreSQL peer");
         let driver = compio::runtime::spawn(async move { connection.run().await });
@@ -5940,7 +5940,7 @@ async fn a_copy_in_response_to_copy_out_is_actively_ended() {
             Ok(Err(error)) => error,
         };
         assert!(
-            common::error_chain(&error).contains("wrong-way COPY IN refused"),
+            support::error_chain(&error).contains("wrong-way COPY IN refused"),
             "COPY refusal lost the server's diagnosis: {error}"
         );
 
@@ -6033,7 +6033,7 @@ async fn a_copy_out_response_cannot_transition_to_copy_in() {
         });
 
         let (client, connection) = stub_config(server.addr)
-            .connect(common::suite_tls())
+            .connect(support::suite_tls())
             .await
             .expect("connect to scripted PostgreSQL peer");
         let driver = compio::runtime::spawn(async move { connection.run().await });
@@ -6058,7 +6058,7 @@ async fn a_copy_out_response_cannot_transition_to_copy_in() {
             .await
             .expect_err("the driver accepted COPY OUT changing to COPY IN");
         assert!(
-            common::error_chain(&error).contains("unexpected message from server"),
+            support::error_chain(&error).contains("unexpected message from server"),
             "the COPY direction transition reported the wrong error: {error}"
         );
 
@@ -6125,7 +6125,7 @@ async fn copy_response_direction_changes_preserve_batch_wire_order() {
         });
 
         let (client, connection) = stub_config(server.addr)
-            .connect(common::suite_tls())
+            .connect(support::suite_tls())
             .await
             .expect("connect to scripted PostgreSQL peer");
         let driver = compio::runtime::spawn(async move { connection.run().await });
@@ -6139,7 +6139,7 @@ async fn copy_response_direction_changes_preserve_batch_wire_order() {
         .expect("batched COPY direction transition hung")
         .expect_err("the driver accepted a batched COPY direction transition");
         assert!(
-            common::error_chain(&error).contains("unexpected message from server"),
+            support::error_chain(&error).contains("unexpected message from server"),
             "the batched COPY direction transition reported the wrong error: {error}"
         );
 
@@ -6393,7 +6393,7 @@ async fn binary_copy_out_against(
 
     let server = copy_stub_server(process_id, response);
     let (client, connection) = stub_config(server.addr)
-        .connect(common::suite_tls())
+        .connect(support::suite_tls())
         .await
         .expect("connect to scripted PostgreSQL peer");
     let driver = compio::runtime::spawn(async move { connection.run().await });
@@ -6473,7 +6473,7 @@ async fn two_binary_tuples_in_one_message_are_refused_rather_than_silently_halve
             ),
             Err(error) => error,
         };
-        let chain = common::error_chain(&error);
+        let chain = support::error_chain(&error);
         assert!(
             chain.contains("trailing bytes"),
             "a coalesced binary COPY chunk reported {chain:?} rather than naming the leftover \
@@ -6505,7 +6505,7 @@ async fn bytes_after_the_binary_copy_trailer_are_refused() {
             }
             Err(error) => error,
         };
-        let chain = common::error_chain(&error);
+        let chain = support::error_chain(&error);
         assert!(
             chain.contains("trailing bytes after the binary COPY trailer"),
             "binary trailer garbage reported {chain:?} instead of naming the trailer suffix"
@@ -6535,7 +6535,7 @@ async fn copy_data_after_the_binary_copy_trailer_is_refused() {
             }
             Err(error) => error,
         };
-        let chain = common::error_chain(&error);
+        let chain = support::error_chain(&error);
         assert!(
             chain.contains("CopyData after the binary COPY trailer"),
             "cross-frame binary trailer garbage was not refused by name: {chain}"
@@ -6563,7 +6563,7 @@ async fn empty_copy_data_after_the_binary_copy_trailer_is_refused() {
             ),
             Err(error) => error,
         };
-        let chain = common::error_chain(&error);
+        let chain = support::error_chain(&error);
         assert!(
             chain.contains("0 bytes of CopyData after the binary COPY trailer"),
             "empty CopyData after the binary trailer was not refused by name: {chain}"
@@ -6603,7 +6603,7 @@ async fn protocol_copy_done_without_the_binary_trailer_is_a_parse_error() {
             }
             Err(error) => error,
         };
-        let chain = common::error_chain(&error);
+        let chain = support::error_chain(&error);
         assert!(
             !error.is_closed(),
             "protocol CopyDone without a binary trailer was mislabeled as a closed connection: \
@@ -6681,7 +6681,7 @@ async fn a_row_description_format_code_outside_text_or_binary_is_refused() {
             .await
             .expect("the malformed RowDescription hung instead of erroring")
             .expect_err("format code 2 must be refused, not decoded");
-        let rendered = common::error_chain(&error);
+        let rendered = support::error_chain(&error);
         assert!(
             rendered.contains("invalid format code 2"),
             "the refusal did not name the offending code: {rendered}"
@@ -6777,7 +6777,7 @@ async fn handshake_cut(process_id: i32, take_password: bool) -> String {
     .expect("the hang-up peer left startup hanging instead of reporting closure")
     .expect_err("startup succeeded against a peer that hung up");
     server.finish();
-    common::error_chain(&error)
+    support::error_chain(&error)
 }
 
 /// Read one frontend frame whatever its tag.
@@ -6849,7 +6849,7 @@ async fn a_command_timeout_whose_recovery_never_finishes_discards_the_session() 
     .expect("the stalled recovery outlived this test's own watchdog");
     let error = outcome.expect_err("a silent peer cannot answer, so this must fail");
 
-    let chain = common::error_chain(&error);
+    let chain = support::error_chain(&error);
     assert!(
         chain.contains("CancelRequest recovery did not reach ReadyForQuery"),
         "the stalled recovery did not report its own deadline: {chain}"

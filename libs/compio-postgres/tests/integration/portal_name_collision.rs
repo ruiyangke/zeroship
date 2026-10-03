@@ -6,13 +6,13 @@ use compio_postgres::error::SqlState;
 use compio_postgres::{Client, SimpleQueryMessage};
 
 #[allow(unused_imports)]
-use crate::common;
+use crate::support;
 
 async fn connected() -> Client {
-    let url = common::test_url();
-    let (client, connection) = compio_postgres::connect(&url, common::suite_tls())
+    let url = support::test_url();
+    let (client, connection) = compio_postgres::connect(&url, support::suite_tls())
         .await
-        .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+        .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
     compio::runtime::spawn(async move {
         let _ = connection.run().await;
     })

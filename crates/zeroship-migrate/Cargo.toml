@@ -4,18 +4,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Portable, security-first, multi-dialect DB migration engine — the whole product: the vendor-neutral `zeroship-migrate-core` engine composed with the PostgreSQL, SQLite and MySQL backends this build ships. Driver-neutral Postgres/MySQL seam (host-callback / napi bridge) plus in-process SQLite. Runs V8-free: authoring, MySQL, and Postgres execution all run in the Node process (npm drivers) reached through the zeroship-migrate-node napi bridge; it ships NO embedded V8."
-# The integration suites are modules of one `tests/integration/main.rs` target and
-# the process-spawning suite of one `tests/e2e/main.rs`, so the crate links two
-# test executables instead of one per file.
+# Integration and end-to-end suites are modules of one `tests/main.rs` target, so
+# the crate links one test executable instead of one per file.
 autotests = false
 
 [[test]]
-name = "integration"
-path = "tests/integration/main.rs"
-
-[[test]]
-name = "e2e"
-path = "tests/e2e/main.rs"
+name = "main"
+path = "tests/main.rs"
 
 # THE COMPOSITION ROOT, and almost nothing else.
 #
@@ -56,7 +51,7 @@ zeroship-migrate-backend = { workspace = true }
 
 [dev-dependencies]
 # TEST-ONLY: the PostgreSQL and MySQL servers the live suites start and own
-# (`tests/integration/support/server.rs`), and the per-test PostgreSQL fixture
+# (`tests/support/server.rs`), and the per-test PostgreSQL fixture
 # `declared_column_roles.rs` shares with other crates.
 testcontainers = { version = "0.28", default-features = false, features = ["blocking", "watchdog"] }
 url = { workspace = true }

@@ -5,14 +5,14 @@ use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 #[allow(unused_imports)]
-use crate::common;
+use crate::support;
 
 fn test_url() -> String {
-    common::test_url()
+    support::test_url()
 }
 
 async fn connect(url: &str) -> Result<Client, Error> {
-    let (client, connection) = compio_postgres::connect(url, common::suite_tls()).await?;
+    let (client, connection) = compio_postgres::connect(url, support::suite_tls()).await?;
     compio::runtime::spawn(async move {
         if let Err(error) = connection.run().await {
             eprintln!("connection error: {error}");
@@ -46,9 +46,9 @@ async fn query_text_params_preserves_the_outer_error_when_type_resolution_fails(
     let url = test_url();
     let client = connect(&url)
         .await
-        .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+        .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
     let mut events = client.query_events();
-    let type_name = common::test_object_name("cpg_query_diag_text_enum");
+    let type_name = support::test_object_name("cpg_query_diag_text_enum");
     create_failing_custom_type_fixture(&client, &type_name).await;
     let query = failing_custom_type_query(&type_name);
 
@@ -117,8 +117,8 @@ async fn query_typed_preserves_the_outer_error_when_type_resolution_fails() {
     let url = test_url();
     let client = connect(&url)
         .await
-        .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
-    let type_name = common::test_object_name("cpg_query_diag_typed_enum");
+        .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
+    let type_name = support::test_object_name("cpg_query_diag_typed_enum");
     create_failing_custom_type_fixture(&client, &type_name).await;
     let query = failing_custom_type_query(&type_name);
 
@@ -155,11 +155,11 @@ async fn accepted_custom_element_cycle_is_reported() {
         let url = test_url();
         let client = connect(&url)
             .await
-            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
-        let composite = common::test_object_name("cpg_cycle_composite");
-        let base = common::test_object_name("cpg_cycle_base");
-        let input = common::test_object_name("cpg_cycle_input");
-        let output = common::test_object_name("cpg_cycle_output");
+            .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
+        let composite = support::test_object_name("cpg_cycle_composite");
+        let base = support::test_object_name("cpg_cycle_base");
+        let input = support::test_object_name("cpg_cycle_input");
+        let output = support::test_object_name("cpg_cycle_output");
 
         client
             .batch_execute(&format!(
@@ -198,7 +198,7 @@ async fn accepted_custom_element_cycle_is_reported() {
             .await
             .expect_err("the recursive type graph was accepted as acyclic");
         assert_eq!(
-            common::error_chain(&failure),
+            support::error_chain(&failure),
             format!(
                 "error parsing response from server: cycle detected resolving postgres type with OID {oid}"
             )
@@ -265,24 +265,24 @@ async fn stale_typeinfo_statement_failure_cleans_the_cache_for_the_next_lookup()
         let url = test_url();
         let range = connect(&url)
             .await
-            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
-        let range_name = common::test_object_name("cpg_stale_range");
+            .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
+        let range_name = support::test_object_name("cpg_stale_range");
         let range_ddl = format!("CREATE TYPE pg_temp.{range_name} AS RANGE (subtype = int4)");
         let range_query = format!("SELECT NULL::pg_temp.{range_name}");
         assert_stale_helpers_are_retired(&range, &range_ddl, &range_query, 1).await;
 
         let enumeration = connect(&url)
             .await
-            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
-        let enum_name = common::test_object_name("cpg_stale_enum");
+            .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
+        let enum_name = support::test_object_name("cpg_stale_enum");
         let enum_ddl = format!("CREATE TYPE pg_temp.{enum_name} AS ENUM ('value')");
         let enum_query = format!("SELECT NULL::pg_temp.{enum_name}");
         assert_stale_helpers_are_retired(&enumeration, &enum_ddl, &enum_query, 2).await;
 
         let composite = connect(&url)
             .await
-            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
-        let composite_name = common::test_object_name("cpg_stale_composite");
+            .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
+        let composite_name = support::test_object_name("cpg_stale_composite");
         let composite_ddl = format!("CREATE TEMP TABLE {composite_name} (value int4)");
         let composite_query = format!("SELECT NULL::pg_temp.{composite_name}");
         assert_stale_helpers_are_retired(&composite, &composite_ddl, &composite_query, 2).await;
@@ -300,8 +300,8 @@ async fn abandoned_stale_typeinfo_lookup_cleans_the_cache_for_the_next_lookup() 
         let url = test_url();
         let client = connect(&url)
             .await
-            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
-        let type_name = common::test_object_name("cpg_abandoned_stale_range");
+            .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
+        let type_name = support::test_object_name("cpg_abandoned_stale_range");
         client
             .batch_execute(&format!(
                 "CREATE TYPE pg_temp.{type_name} AS RANGE (subtype = int4)"

@@ -19,7 +19,7 @@
 //!    DSN env set and no DB reachable — a connection attempt would error/hang).
 //!
 //! Regenerate the goldens with
-//! `cargo test -p zeroship-migrate --test integration -- --ignored update_golden`
+//! `cargo test -p zeroship-migrate --test main -- --ignored update_golden`
 //! (the substring matches all three dialects; append `_pg`/`_sqlite`/`_mysql` for one).
 //!
 //! The regen switch is an `#[ignore]`d test rather than an env var: this crate's tests
@@ -175,7 +175,7 @@ fn golden_pg() {
 
 #[test]
 #[ignore = "regenerates sql_preview_pg.txt; run explicitly with `cargo test -p \
-            zeroship-migrate --test integration -- --ignored update_golden_pg`, \
+            zeroship-migrate --test main -- --ignored update_golden_pg`, \
             then commit the file"]
 fn update_golden_pg() {
     write_golden(
@@ -194,7 +194,7 @@ fn golden_sqlite() {
 
 #[test]
 #[ignore = "regenerates sql_preview_sqlite.txt; run explicitly with `cargo test -p \
-            zeroship-migrate --test integration -- --ignored update_golden_sqlite`, \
+            zeroship-migrate --test main -- --ignored update_golden_sqlite`, \
             then commit the file"]
 fn update_golden_sqlite() {
     write_golden(
@@ -213,7 +213,7 @@ fn golden_mysql() {
 
 #[test]
 #[ignore = "regenerates sql_preview_mysql.txt; run explicitly with `cargo test -p \
-            zeroship-migrate --test integration -- --ignored update_golden_mysql`, \
+            zeroship-migrate --test main -- --ignored update_golden_mysql`, \
             then commit the file"]
 fn update_golden_mysql() {
     write_golden(

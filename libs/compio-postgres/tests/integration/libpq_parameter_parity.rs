@@ -17,7 +17,7 @@ use compio_postgres::config::{Host, ProtocolVersion};
 use compio_postgres::{Config, NoTls};
 
 #[allow(unused_imports)]
-use crate::common;
+use crate::support;
 
 /// What this driver is expected to do with a libpq parameter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -784,10 +784,10 @@ async fn url_shapes_parse_like_libpq_and_an_empty_host_is_refused_at_connect() {
     let error = "postgres:///postgres?user=postgres"
         .parse::<Config>()
         .expect("a hostless URL parses")
-        .connect(common::suite_tls())
+        .connect(support::suite_tls())
         .await
         .expect_err("a hostless config must be refused rather than guessing a socket path");
-    let chain = common::error_chain(&error);
+    let chain = support::error_chain(&error);
     assert!(
         chain.contains("host") && chain.contains("missing"),
         "the refusal must name what is absent, got: {chain}"

@@ -12,7 +12,7 @@ use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 #[allow(unused_imports)]
-use crate::common;
+use crate::support;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -108,14 +108,14 @@ fn arm_start_log_panic() {
 }
 
 fn test_url() -> String {
-    common::test_url()
+    support::test_url()
 }
 
 async fn connect(url: &str) -> Result<Client, Error> {
-    let (client, connection) = compio_postgres::connect(url, common::suite_tls()).await?;
+    let (client, connection) = compio_postgres::connect(url, support::suite_tls()).await?;
     compio::runtime::spawn(async move {
         if let Err(error) = connection.run().await {
-            eprintln!("connection error: {}", common::error_chain(&error));
+            eprintln!("connection error: {}", support::error_chain(&error));
         }
     })
     .detach();
@@ -141,7 +141,7 @@ async fn bind_reports_parameter_count_mismatch_as_an_error() {
         let url = test_url();
         let mut client = connect(&url)
             .await
-            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+            .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
         let transaction = client.transaction().await.unwrap();
         let statement = transaction.prepare("SELECT $1::int4").await.unwrap();
 
@@ -157,7 +157,7 @@ async fn bind_reports_parameter_count_mismatch_as_an_error() {
             Ok(Err(error)) => {
                 // The counts both appear, and in the right roles: one
                 // parameter expected, none supplied.
-                let chain = common::error_chain(&error);
+                let chain = support::error_chain(&error);
                 if chain.contains("expected 1 parameters but got 0") {
                     None
                 } else {
@@ -191,7 +191,7 @@ async fn successful_commit_clears_dirty_after_nested_savepoint_drop() {
         let url = test_url();
         let mut client = connect(&url)
             .await
-            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+            .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
 
         let mut transaction = client.transaction().await.unwrap();
         let nested = transaction.transaction().await.unwrap();
@@ -217,7 +217,7 @@ async fn successful_rollback_clears_dirty_after_nested_savepoint_drop() {
         let url = test_url();
         let mut client = connect(&url)
             .await
-            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+            .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
 
         let mut transaction = client.transaction().await.unwrap();
         let nested = transaction.transaction().await.unwrap();
@@ -243,8 +243,8 @@ async fn panicking_transaction_start_setup_preserves_a_preexisting_transaction()
         let url = test_url();
         let mut client = connect(&url)
             .await
-            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
-        let table = common::test_object_name("cpg_panicking_start");
+            .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
+        let table = support::test_object_name("cpg_panicking_start");
         client
             .batch_execute(&format!(
                 "CREATE TEMP TABLE {table} (value int NOT NULL); BEGIN; \
@@ -287,8 +287,8 @@ async fn panicking_commit_setup_rolls_back_before_the_next_operation() {
         let url = test_url();
         let mut client = connect(&url)
             .await
-            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
-        let table = common::test_object_name("cpg_panicking_commit");
+            .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
+        let table = support::test_object_name("cpg_panicking_commit");
         client
             .batch_execute(&format!("CREATE TEMP TABLE {table} (value int NOT NULL)"))
             .await
@@ -326,8 +326,8 @@ async fn panicking_rollback_setup_rolls_back_before_the_next_operation() {
         let url = test_url();
         let mut client = connect(&url)
             .await
-            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
-        let table = common::test_object_name("cpg_panicking_rollback");
+            .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
+        let table = support::test_object_name("cpg_panicking_rollback");
         client
             .batch_execute(&format!("CREATE TEMP TABLE {table} (value int NOT NULL)"))
             .await
@@ -367,8 +367,8 @@ async fn abandoned_savepoint_creation_cleans_its_server_name() {
         let url = test_url();
         let mut client = connect(&url)
             .await
-            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
-        let name = common::test_object_name("cpg_abandoned_savepoint_creation");
+            .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
+        let name = support::test_object_name("cpg_abandoned_savepoint_creation");
         let mut transaction = client.transaction().await.unwrap();
 
         {
@@ -389,7 +389,7 @@ async fn abandoned_savepoint_creation_cleans_its_server_name() {
             release.code(),
             Some(&compio_postgres::error::SqlState::S_E_INVALID_SPECIFICATION),
             "RELEASE failed for a reason other than the savepoint being absent: {}",
-            common::error_chain(&release)
+            support::error_chain(&release)
         );
 
         transaction.rollback().await.unwrap();
@@ -409,7 +409,7 @@ async fn nonpositive_portal_limits_return_every_row() {
         let url = test_url();
         let mut client = connect(&url)
             .await
-            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+            .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
         let transaction = client.transaction().await.unwrap();
         let statement = transaction
             .prepare("SELECT i::int4 FROM generate_series(1, 5) AS i ORDER BY i")
@@ -442,8 +442,8 @@ async fn abandoned_failed_nested_commit_recovers_before_the_next_outer_operation
         let url = test_url();
         let mut client = connect(&url)
             .await
-            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
-        let name = common::test_object_name("cpg_failed_nested_commit");
+            .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
+        let name = support::test_object_name("cpg_failed_nested_commit");
         let mut transaction = client.transaction().await.unwrap();
         let nested = transaction.savepoint(name).await.unwrap();
         let failure = nested
@@ -503,7 +503,7 @@ async fn abandoning_bind_before_bind_complete_closes_the_server_portal() {
         let url = test_url();
         let mut client = connect(&url)
             .await
-            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+            .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
         let transaction = client.transaction().await.unwrap();
         let statement = transaction.prepare(SQL).await.unwrap();
 
@@ -567,7 +567,7 @@ async fn a_suspended_portal_resumes_and_then_empties() {
         let url = test_url();
         let mut client = connect(&url)
             .await
-            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+            .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
         let transaction = client.transaction().await.unwrap();
         let statement = transaction
             .prepare("SELECT i::int4 FROM generate_series(1, 5) AS i ORDER BY i")
@@ -607,7 +607,7 @@ async fn a_suspended_portal_resumes_and_then_empties() {
 async fn rows_visible_to_another_session(url: &str, table: &str) -> i64 {
     let observer = connect(url)
         .await
-        .unwrap_or_else(|error| common::postgres_unreachable(url, &error));
+        .unwrap_or_else(|error| support::postgres_unreachable(url, &error));
     observer
         .query_one(&format!("SELECT count(*)::int8 FROM \"{table}\""), &[])
         .await
@@ -624,7 +624,7 @@ async fn raw_batch_execution_reports_the_servers_final_command_tag() {
         let url = test_url();
         let client = connect(&url)
             .await
-            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+            .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
 
         let success_tag = client
             .batch_execute_reporting_tag("SELECT 1")
@@ -689,8 +689,8 @@ async fn commit_after_a_failed_statement_reports_that_the_server_rolled_back() {
         let url = test_url();
         let mut client = connect(&url)
             .await
-            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
-        let table = common::test_object_name("cpg_commit_after_failure");
+            .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
+        let table = support::test_object_name("cpg_commit_after_failure");
         client
             .batch_execute(&format!("CREATE TABLE \"{table}\" (id int4 PRIMARY KEY)"))
             .await
@@ -731,7 +731,7 @@ async fn commit_after_a_failed_statement_reports_that_the_server_rolled_back() {
             error.is_transaction_rolled_back(),
             "commit() failed for some other reason, so this test is not about \
              the discarded transaction: {}",
-            common::error_chain(&error)
+            support::error_chain(&error)
         );
     })
     .await
@@ -749,8 +749,8 @@ async fn commit_without_a_failed_statement_still_commits() {
         let url = test_url();
         let mut client = connect(&url)
             .await
-            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
-        let table = common::test_object_name("cpg_commit_clean");
+            .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
+        let table = support::test_object_name("cpg_commit_clean");
         client
             .batch_execute(&format!("CREATE TABLE \"{table}\" (id int4 PRIMARY KEY)"))
             .await
@@ -792,8 +792,8 @@ async fn a_healthy_nested_commit_is_not_mistaken_for_a_rollback() {
         let url = test_url();
         let mut client = connect(&url)
             .await
-            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
-        let table = common::test_object_name("cpg_nested_commit_tag");
+            .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
+        let table = support::test_object_name("cpg_nested_commit_tag");
         client
             .batch_execute(&format!("CREATE TABLE \"{table}\" (id int4 PRIMARY KEY)"))
             .await
@@ -841,9 +841,9 @@ async fn commit_propagates_a_deferred_constraint_failure() {
         let url = test_url();
         let mut client = connect(&url)
             .await
-            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
-        let table = common::test_object_name("cpg_deferred_commit_table");
-        let constraint = common::test_object_name("cpg_deferred_commit_constraint");
+            .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
+        let table = support::test_object_name("cpg_deferred_commit_table");
+        let constraint = support::test_object_name("cpg_deferred_commit_constraint");
         client
             .batch_execute(&format!(
                 "CREATE TEMP TABLE \"{table}\" (\
@@ -889,7 +889,7 @@ async fn commit_propagates_a_deferred_constraint_failure() {
             error.code(),
             Some(&compio_postgres::error::SqlState::UNIQUE_VIOLATION),
             "COMMIT failed for the wrong reason: {}",
-            common::error_chain(&error)
+            support::error_chain(&error)
         );
         assert_eq!(
             persisted.expect("the table was unusable after the failed COMMIT"),
@@ -911,8 +911,8 @@ async fn rollback_propagates_a_missing_savepoint_error() {
         let url = test_url();
         let mut client = connect(&url)
             .await
-            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
-        let name = common::test_object_name("cpg_missing_rollback_savepoint");
+            .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
+        let name = support::test_object_name("cpg_missing_rollback_savepoint");
         let mut transaction = client.transaction().await.unwrap();
         let savepoint = transaction.savepoint(name.clone()).await.unwrap();
 
@@ -928,7 +928,7 @@ async fn rollback_propagates_a_missing_savepoint_error() {
             error.code(),
             Some(&compio_postgres::error::SqlState::S_E_INVALID_SPECIFICATION),
             "rollback() failed for a reason other than the missing savepoint: {}",
-            common::error_chain(&error)
+            support::error_chain(&error)
         );
         cleanup.expect("failed to roll back the outer transaction after the probe");
     }))
@@ -949,8 +949,8 @@ async fn committed_savepoint_is_removed_from_the_server_stack() {
         let url = test_url();
         let mut client = connect(&url)
             .await
-            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
-        let name = common::test_object_name("cpg_committed_savepoint_scope");
+            .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
+        let name = support::test_object_name("cpg_committed_savepoint_scope");
         let mut transaction = client.transaction().await.unwrap();
         let savepoint = transaction.savepoint(name.clone()).await.unwrap();
         let probe = format!("ROLLBACK TO SAVEPOINT \"{name}\"");
@@ -968,7 +968,7 @@ async fn committed_savepoint_is_removed_from_the_server_stack() {
             error.code(),
             Some(&compio_postgres::error::SqlState::S_E_INVALID_SPECIFICATION),
             "the post-commit probe failed for a reason other than an absent savepoint: {}",
-            common::error_chain(&error)
+            support::error_chain(&error)
         );
         cleanup.expect("failed to roll back the outer transaction after the probe");
     }))
@@ -994,8 +994,8 @@ async fn failed_nested_commit_rolls_back_to_its_savepoint_and_spares_the_outer_w
         let url = test_url();
         let mut client = connect(&url)
             .await
-            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
-        let table = common::test_object_name("cpg_failed_nested_release");
+            .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
+        let table = support::test_object_name("cpg_failed_nested_release");
         client
             .batch_execute(&format!("CREATE TEMP TABLE {table} (value int NOT NULL)"))
             .await
@@ -1007,7 +1007,7 @@ async fn failed_nested_commit_rolls_back_to_its_savepoint_and_spares_the_outer_w
             .await
             .expect("the outer transaction could not write before its savepoint");
 
-        let name = common::test_object_name("cpg_failed_nested_release_sp");
+        let name = support::test_object_name("cpg_failed_nested_release_sp");
         let nested = transaction.savepoint(name).await.unwrap();
         nested
             .execute(&format!("INSERT INTO {table} VALUES (2)"), &[])
@@ -1030,7 +1030,7 @@ async fn failed_nested_commit_rolls_back_to_its_savepoint_and_spares_the_outer_w
             error.code(),
             Some(&compio_postgres::error::SqlState::IN_FAILED_SQL_TRANSACTION),
             "the failed nested commit failed for a reason other than its aborted block: {}",
-            common::error_chain(&error)
+            support::error_chain(&error)
         );
 
         // The armed cleanup rolled back TO the savepoint rather than out of the

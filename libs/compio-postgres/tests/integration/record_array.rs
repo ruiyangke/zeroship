@@ -13,7 +13,7 @@ use compio_postgres::Client;
 use compio_postgres::types::{FromSql, Kind, Type};
 
 #[allow(unused_imports)]
-use crate::common;
+use crate::support;
 
 #[derive(Debug, PartialEq, Eq)]
 struct RawRecord(Vec<(u32, Option<Vec<u8>>)>);
@@ -60,10 +60,10 @@ impl<'a> FromSql<'a> for RawRecord {
 
 #[allow(clippy::future_not_send)]
 async fn connect_client() -> Client {
-    let url = common::test_url();
-    let (client, connection) = compio_postgres::connect(&url, common::suite_tls())
+    let url = support::test_url();
+    let (client, connection) = compio_postgres::connect(&url, support::suite_tls())
         .await
-        .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+        .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
     compio::runtime::spawn(async move {
         let _ = connection.run().await;
     })

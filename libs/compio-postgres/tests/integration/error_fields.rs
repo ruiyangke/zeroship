@@ -35,19 +35,19 @@ use compio_postgres::Client;
 use std::time::Duration;
 
 #[allow(unused_imports)]
-use crate::common;
+use crate::support;
 
 const WATCHDOG: Duration = Duration::from_secs(30);
 
 fn test_url() -> String {
-    common::test_url()
+    support::test_url()
 }
 
 async fn connect() -> Client {
     let url = test_url();
-    let (client, connection) = compio_postgres::connect(&url, common::suite_tls())
+    let (client, connection) = compio_postgres::connect(&url, support::suite_tls())
         .await
-        .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+        .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
     compio::runtime::spawn(async move {
         if let Err(error) = connection.run().await {
             eprintln!("connection error: {error}");
@@ -61,7 +61,7 @@ async fn connect() -> Client {
 async fn a_server_error_carries_the_fields_postgresql_sent() {
     compio::time::timeout(WATCHDOG, async {
         let client = connect().await;
-        let table = common::test_object_name("ef");
+        let table = support::test_object_name("ef");
         let primary_key = format!("{table}_pkey");
         let check_constraint = format!("{table}_b_check");
         client

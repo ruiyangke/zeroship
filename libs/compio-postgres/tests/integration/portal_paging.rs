@@ -4,7 +4,7 @@ use compio_postgres::{Client, Error, Portal, Transaction};
 use futures_util::TryStreamExt;
 
 #[allow(unused_imports)]
-use crate::common;
+use crate::support;
 
 const ORDERED_ROWS: &str = "SELECT value::int4 FROM generate_series(1, 10) AS value ORDER BY value";
 
@@ -15,14 +15,14 @@ struct Page {
 }
 
 fn test_url() -> String {
-    common::test_url()
+    support::test_url()
 }
 
 async fn connect(url: &str) -> Result<Client, Error> {
-    let (client, connection) = compio_postgres::connect(url, common::suite_tls()).await?;
+    let (client, connection) = compio_postgres::connect(url, support::suite_tls()).await?;
     compio::runtime::spawn(async move {
         if let Err(error) = connection.run().await {
-            eprintln!("connection error: {}", common::error_chain(&error));
+            eprintln!("connection error: {}", support::error_chain(&error));
         }
     })
     .detach();
@@ -33,7 +33,7 @@ async fn client() -> Client {
     let url = test_url();
     connect(&url)
         .await
-        .unwrap_or_else(|error| common::postgres_unreachable(&url, &error))
+        .unwrap_or_else(|error| support::postgres_unreachable(&url, &error))
 }
 
 async fn bind_ordered_rows(transaction: &Transaction<'_>) -> Portal {
@@ -275,7 +275,7 @@ async fn a_portal_is_refused_by_a_client_that_does_not_own_it() {
         .err()
         .expect("a portal from another client must be refused");
 
-    let rendered = common::error_chain(&error);
+    let rendered = support::error_chain(&error);
     assert!(
         rendered.contains("portal no longer belongs to an active transaction on this client"),
         "the refusal did not name the ownership rule: {rendered}"

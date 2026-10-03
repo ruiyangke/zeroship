@@ -36,20 +36,23 @@
 use compio_postgres::test_utils::connect_serialized;
 use compio_postgres::{Client, Config};
 
-#[allow(dead_code)]
-mod common;
+#[expect(
+    dead_code,
+    reason = "the shared support module carries helpers this process-isolated target does not use"
+)]
+mod support;
 
 async fn serialized_client_with_probe() -> (Client, std::rc::Rc<std::cell::Cell<bool>>) {
-    let url = common::test_url();
+    let url = support::test_url();
     let config: Config = url.parse().expect("test DSN did not parse");
     let (client, connection, split_refused) = connect_serialized(&config)
         .await
-        .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+        .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
     compio::runtime::spawn(async move {
         if let Err(error) = connection.run().await {
             eprintln!(
                 "serialized connection error: {}",
-                common::error_chain(&error)
+                support::error_chain(&error)
             );
         }
     })
@@ -113,7 +116,7 @@ async fn an_error_leaves_the_serialized_session_usable() {
         error.code().map(|code| code.code()),
         Some("22012"),
         "the error lost its SQLSTATE: {}",
-        common::error_chain(&error)
+        support::error_chain(&error)
     );
     let row = client
         .query_one("SELECT 1::int4", &[])
@@ -126,7 +129,7 @@ async fn an_error_leaves_the_serialized_session_usable() {
 #[compio::test]
 async fn transactions_work_on_the_serialized_loop() {
     let mut client = serialized_client().await;
-    let table = common::test_object_name("cpg serialized tx");
+    let table = support::test_object_name("cpg serialized tx");
     client
         .batch_execute(&format!(
             "DROP TABLE IF EXISTS {table}; CREATE TABLE {table}(id int)"
@@ -192,7 +195,7 @@ async fn copy_in_works_on_the_serialized_loop() {
     use futures_util::SinkExt;
 
     let client = serialized_client().await;
-    let table = common::test_object_name("cpg serialized copyin");
+    let table = support::test_object_name("cpg serialized copyin");
     client
         .batch_execute(&format!(
             "DROP TABLE IF EXISTS {table}; CREATE TABLE {table}(id int, pad text)"
@@ -232,9 +235,9 @@ async fn copy_in_works_on_the_serialized_loop() {
 #[compio::test]
 async fn a_post_copy_in_response_error_does_not_leave_a_second_ready_for_query() {
     let (client, split_refused) = serialized_client_with_probe().await;
-    let table = common::test_object_name("cpg post copy response error");
-    let function = common::test_object_name("cpg post copy response error function");
-    let trigger = common::test_object_name("cpg post copy response error trigger");
+    let table = support::test_object_name("cpg post copy response error");
+    let function = support::test_object_name("cpg post copy response error function");
+    let trigger = support::test_object_name("cpg post copy response error trigger");
 
     client
         .batch_execute(&format!(
@@ -268,7 +271,7 @@ async fn a_post_copy_in_response_error_does_not_leave_a_second_ready_for_query()
         error.code().map(compio_postgres::error::SqlState::code),
         Some("P0001"),
         "COPY IN lost the post-G server error: {}",
-        common::error_chain(&error)
+        support::error_chain(&error)
     );
     assert!(
         split_refused.get(),
@@ -284,7 +287,7 @@ async fn a_post_copy_in_response_error_does_not_leave_a_second_ready_for_query()
     let row = follow_up.unwrap_or_else(|error| {
         panic!(
             "a post-G COPY error left a second ReadyForQuery: {}",
-            common::error_chain(&error)
+            support::error_chain(&error)
         )
     });
     assert_eq!(row.get::<_, i32>(0), 7);
@@ -334,12 +337,12 @@ async fn portal_paging_works_on_the_serialized_loop() {
 async fn a_notice_raised_by_an_awaited_statement_is_delivered() {
     use futures_util::StreamExt;
 
-    let url = common::test_url();
+    let url = support::test_url();
     let config: Config = url.parse().expect("test DSN did not parse");
     let (client, mut connection, split_refused) =
         compio_postgres::test_utils::connect_serialized(&config)
             .await
-            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+            .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
     let mut messages = connection.notifications();
     compio::runtime::spawn(async move {
         let _ = connection.run().await;
@@ -400,7 +403,7 @@ async fn an_abandoned_query_leaves_the_serialized_session_usable() {
             // not, and neither is a hang.
             eprintln!(
                 "the abandoned query retired the session: {}",
-                common::error_chain(&error)
+                support::error_chain(&error)
             );
         }
         Err(_) => panic!(
@@ -420,14 +423,14 @@ async fn an_abandoned_query_leaves_the_serialized_session_usable() {
 /// of the assertion is that the call RETURNS rather than hanging.
 #[compio::test]
 async fn a_read_timeout_fires_and_retires_the_serialized_session() {
-    let url = common::test_url();
+    let url = support::test_url();
     let mut config: Config = url.parse().expect("test DSN did not parse");
     config.read_timeout(std::time::Duration::from_millis(250));
 
     let (client, connection, split_refused) =
         compio_postgres::test_utils::connect_serialized(&config)
             .await
-            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+            .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
     compio::runtime::spawn(async move {
         let _ = connection.run().await;
     })
@@ -463,7 +466,7 @@ async fn a_read_timeout_fires_and_retires_the_serialized_session() {
     assert!(
         error.is_read_timeout(),
         "the failure was not reported as a read timeout: {}",
-        common::error_chain(&error)
+        support::error_chain(&error)
     );
     assert!(
         elapsed < std::time::Duration::from_secs(3),
@@ -483,12 +486,12 @@ async fn a_read_timeout_fires_and_retires_the_serialized_session() {
 /// error, so the follow-up query is the real assertion.
 #[compio::test]
 async fn a_cancelled_query_leaves_the_serialized_session_usable() {
-    let url = common::test_url();
+    let url = support::test_url();
     let config: Config = url.parse().expect("test DSN did not parse");
     let (client, connection, split_refused) =
         compio_postgres::test_utils::connect_serialized(&config)
             .await
-            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+            .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
     compio::runtime::spawn(async move {
         let _ = connection.run().await;
     })
@@ -510,7 +513,7 @@ async fn a_cancelled_query_leaves_the_serialized_session_usable() {
         // Long enough that the query is certainly executing, short enough that
         // the test does not sit on it.
         compio::time::sleep(std::time::Duration::from_millis(300)).await;
-        token.cancel_query(common::suite_tls()).await
+        token.cancel_query(support::suite_tls()).await
     });
 
     let outcome = compio::time::timeout(
@@ -530,7 +533,7 @@ async fn a_cancelled_query_leaves_the_serialized_session_usable() {
         error.code().map(compio_postgres::error::SqlState::code),
         Some("57014"),
         "the cancellation did not surface as query_canceled: {}",
-        common::error_chain(&error)
+        support::error_chain(&error)
     );
 
     let row = client

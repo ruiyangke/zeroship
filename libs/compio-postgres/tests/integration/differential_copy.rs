@@ -30,7 +30,7 @@ use compio_postgres::config::ProtocolVersion;
 use futures_util::{SinkExt as _, StreamExt as _};
 
 #[allow(unused_imports)]
-use crate::common;
+use crate::support;
 
 const SESSION_SQL: &str = "SET client_encoding = 'UTF8';
     SET DateStyle = 'ISO, YMD';
@@ -137,13 +137,13 @@ struct Tables {
 impl Tables {
     fn unique() -> Self {
         Self {
-            output: common::test_object_name("cpg_diff_copy_output"),
-            text_input: common::test_object_name("cpg_diff_copy_text_input"),
-            binary_input: common::test_object_name("cpg_diff_copy_binary_input"),
-            constraint_error: common::test_object_name("cpg_diff_copy_constraint"),
-            deferred_constraint: common::test_object_name("cpg_diff_copy_deferred"),
-            malformed_binary: common::test_object_name("cpg_diff_copy_malformed"),
-            cancelled_input: common::test_object_name("cpg_diff_copy_cancelled"),
+            output: support::test_object_name("cpg_diff_copy_output"),
+            text_input: support::test_object_name("cpg_diff_copy_text_input"),
+            binary_input: support::test_object_name("cpg_diff_copy_binary_input"),
+            constraint_error: support::test_object_name("cpg_diff_copy_constraint"),
+            deferred_constraint: support::test_object_name("cpg_diff_copy_deferred"),
+            malformed_binary: support::test_object_name("cpg_diff_copy_malformed"),
+            cancelled_input: support::test_object_name("cpg_diff_copy_cancelled"),
         }
     }
 }
@@ -412,7 +412,7 @@ where
         let result = runtime.block_on(async move {
             let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
                 .await
-                .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+                .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
             let driver = tokio::spawn(async move {
                 let _ = connection.await;
             });
@@ -439,13 +439,13 @@ where
 }
 
 async fn compio_client() -> compio_postgres::Client {
-    let url = common::test_url();
+    let url = support::test_url();
     let mut config: compio_postgres::Config = url.parse().expect("the test DSN parses");
     config.max_protocol_version(ProtocolVersion::V3_0);
     let (client, connection) = config
-        .connect(common::suite_tls())
+        .connect(support::suite_tls())
         .await
-        .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+        .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
     compio::runtime::spawn(async move {
         let _ = connection.run().await;
     })
@@ -1606,7 +1606,7 @@ async fn copy_subprotocol_matches_tokio_or_a_documented_divergence() {
         .await
         .expect("create the shared COPY fixtures");
 
-    let mut theirs = tokio_observations(common::plaintext_url(), tables.clone());
+    let mut theirs = tokio_observations(support::plaintext_url(), tables.clone());
     populate_server_state(&fixture, &tables, &mut theirs).await;
     fixture
         .batch_execute(&reset_mutable_tables_sql(&tables))

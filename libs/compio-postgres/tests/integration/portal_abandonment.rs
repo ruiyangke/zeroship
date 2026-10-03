@@ -11,8 +11,8 @@
 //! would not catch this; only the NEXT operation can.
 
 #[allow(unused_imports)]
-use crate::common;
-use common::{suite_tls, test_url};
+use crate::support;
+use support::{suite_tls, test_url};
 use compio_postgres::Client;
 
 /// A value no query in this file could produce by accident, so reading it back

@@ -18,23 +18,23 @@ use compio_postgres::replication::{OriginFilter, ReplicationMessage, StartReplic
 use std::time::Duration;
 
 #[allow(unused_imports)]
-use crate::common;
+use crate::support;
 
 const WATCHDOG: Duration = Duration::from_secs(30);
 
 async fn client() -> Client {
-    let url = common::test_url();
-    match compio_postgres::connect(&url, common::suite_tls()).await {
+    let url = support::test_url();
+    match compio_postgres::connect(&url, support::suite_tls()).await {
         Ok((client, connection)) => {
             compio::runtime::spawn(async move {
                 if let Err(error) = connection.run().await {
-                    eprintln!("connection error: {}", common::error_chain(&error));
+                    eprintln!("connection error: {}", support::error_chain(&error));
                 }
             })
             .detach();
             client
         }
-        Err(error) => common::postgres_unreachable(&url, &error),
+        Err(error) => support::postgres_unreachable(&url, &error),
     }
 }
 
@@ -44,8 +44,8 @@ async fn stream_until_commit(
     options: StartReplicationOptions<'_>,
 ) -> Vec<PgOutputMessage> {
     let replication = compio_postgres::replication::connect_replication(
-        common::suite_tls(),
-        &common::replication_config("cpg_pgoutput_options"),
+        support::suite_tls(),
+        &support::replication_config("cpg_pgoutput_options"),
     )
     .await
     .expect("replication connect failed");
@@ -56,7 +56,7 @@ async fn stream_until_commit(
         .unwrap_or_else(|error| {
             panic!(
                 "START_REPLICATION on slot {slot} failed: {}",
-                common::error_chain(&error)
+                support::error_chain(&error)
             )
         });
 
@@ -86,14 +86,14 @@ struct Fixture {
 
 impl Fixture {
     async fn create(logical: &str) -> Self {
-        let base = common::test_object_name(logical);
+        let base = support::test_object_name(logical);
         let fixture = Self {
             table: format!("{base}_t"),
             publication: format!("{base}_p"),
             slot: format!("{base}_s"),
             setup: client().await,
         };
-        common::sweep_stale_test_objects(&fixture.setup).await;
+        support::sweep_stale_test_objects(&fixture.setup).await;
         fixture
             .setup
             .batch_execute(&format!(
@@ -118,7 +118,7 @@ impl Fixture {
     }
 
     async fn drop_all(&self) {
-        common::drop_replication_slot(&self.setup, &self.slot)
+        support::drop_replication_slot(&self.setup, &self.slot)
             .await
             .unwrap_or_else(|error| eprintln!("could not drop slot {}: {error}", self.slot));
         let _ = self
@@ -295,7 +295,7 @@ async fn the_origin_none_option_drops_changes_replayed_from_a_peer() {
 async fn origin_case(filter: OriginFilter, expected: &str) {
     {
         let fixture = Fixture::create(&format!("cpg opt origin {expected}")).await;
-        let origin = common::test_object_name(&format!("cpg peer {expected}"));
+        let origin = support::test_object_name(&format!("cpg peer {expected}"));
 
         // Session-scoped: the setup call and the INSERT must run on ONE
         // connection, so they go in a single batch. `batch_execute` is a

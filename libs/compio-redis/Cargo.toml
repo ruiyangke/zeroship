@@ -3,13 +3,13 @@ name = "compio-redis"
 version = "0.1.0"
 edition = "2024"
 description = "Minimal compio-native Redis client — RESP2, pooled connections, zero tokio"
-# The integration suites are modules of one `tests/integration/main.rs` target, so
+# Integration suites are modules of one `tests/main.rs` target, so
 # the crate links one test executable instead of one per file.
 autotests = false
 
 [[test]]
-name = "integration"
-path = "tests/integration/main.rs"
+name = "main"
+path = "tests/main.rs"
 
 [dependencies]
 compio = { workspace = true }

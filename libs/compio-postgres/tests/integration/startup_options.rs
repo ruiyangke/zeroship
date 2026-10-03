@@ -24,19 +24,19 @@ use std::str::FromStr;
 use std::time::Duration;
 
 #[allow(unused_imports)]
-use crate::common;
+use crate::support;
 
 const WATCHDOG: Duration = Duration::from_secs(30);
 
 fn base_url() -> String {
-    common::test_url()
+    support::test_url()
 }
 
 async fn connect_with(config: Config) -> Client {
     let (client, connection) = config
-        .connect(common::suite_tls())
+        .connect(support::suite_tls())
         .await
-        .unwrap_or_else(|error| common::postgres_unreachable(&base_url(), &error));
+        .unwrap_or_else(|error| support::postgres_unreachable(&base_url(), &error));
     compio::runtime::spawn(async move {
         if let Err(error) = connection.run().await {
             eprintln!("connection error: {error}");
@@ -98,7 +98,7 @@ async fn options_reaches_the_backend_in_both_connection_string_forms() {
 #[compio::test]
 async fn application_name_from_the_connection_string_names_the_session() {
     compio::time::timeout(WATCHDOG, async {
-        let chosen = common::test_object_name("startup-app");
+        let chosen = support::test_object_name("startup-app");
         let mut config = Config::from_str(&base_url()).expect("parse the base url");
         config.application_name(&chosen);
         let client = connect_with(config).await;

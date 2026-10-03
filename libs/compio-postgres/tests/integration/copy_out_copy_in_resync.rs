@@ -14,17 +14,17 @@ use compio_postgres::error::SqlState;
 use std::time::Duration;
 
 #[allow(unused_imports)]
-use crate::common;
+use crate::support;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(20);
 const ABORT_MARKER: &str = "extended query execution cannot supply COPY data";
 
 fn test_url() -> String {
-    common::test_url()
+    support::test_url()
 }
 
 async fn connect_client(url: &str) -> Client {
-    let (client, connection) = compio_postgres::connect(url, common::suite_tls())
+    let (client, connection) = compio_postgres::connect(url, support::suite_tls())
         .await
         .expect("connect to PostgreSQL");
     compio::runtime::spawn(async move {
@@ -41,7 +41,7 @@ async fn copy_out_of_copy_from_stdin_leaves_the_session_usable() {
     compio::time::timeout(TEST_TIMEOUT, async {
         let url = test_url();
         let client = connect_client(&url).await;
-        let table = common::test_object_name("cpg_copy_out_wrong_direction");
+        let table = support::test_object_name("cpg_copy_out_wrong_direction");
         client
             .batch_execute(&format!("CREATE TEMPORARY TABLE {table} (v int)"))
             .await
@@ -61,12 +61,12 @@ async fn copy_out_of_copy_from_stdin_leaves_the_session_usable() {
             failure.code(),
             Some(&SqlState::QUERY_CANCELED),
             "the copy was not aborted by this driver: {}",
-            common::error_chain(&failure)
+            support::error_chain(&failure)
         );
         assert!(
-            common::error_chain(&failure).contains(ABORT_MARKER),
+            support::error_chain(&failure).contains(ABORT_MARKER),
             "the failure did not carry this driver's abort reason: {}",
-            common::error_chain(&failure)
+            support::error_chain(&failure)
         );
         assert_eq!(
             client.transaction_status(),
@@ -86,7 +86,7 @@ async fn refused_copy_out_of_copy_from_stdin_was_already_synchronised() {
     compio::time::timeout(TEST_TIMEOUT, async {
         let url = test_url();
         let client = connect_client(&url).await;
-        let missing = common::test_object_name("cpg_copy_out_missing");
+        let missing = support::test_object_name("cpg_copy_out_missing");
 
         let failure = match client.copy_out(&format!("COPY {missing} FROM STDIN")).await {
             Err(error) => error,

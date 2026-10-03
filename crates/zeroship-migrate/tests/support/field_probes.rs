@@ -1,7 +1,7 @@
 //! **The FIELD PROBE inventory**: for every field of every snapshot type, a mutation
 //! that changes ONLY that field.
 //!
-//! Two tests need the same list, and giving them one list is the point. `tests/integration/support/
+//! Two tests need the same list, and giving them one list is the point. `tests/support/
 //! carriers.rs` proved the technique for the rename carrier inventory - exhaustive
 //! destructuring with no `..`, every binding routed through a classifier that demands
 //! something from the author - and this is that technique carried across to its sibling

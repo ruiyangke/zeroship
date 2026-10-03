@@ -30,7 +30,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 #[allow(unused_imports)]
-use crate::common;
+use crate::support;
 
 const READ_TIMEOUT: Duration = Duration::from_millis(75);
 const IDLE_EXPOSURE: Duration = Duration::from_millis(225);
@@ -287,7 +287,7 @@ fn start_options() -> StartReplicationOptions<'static> {
 }
 
 fn test_url() -> String {
-    common::test_url()
+    support::test_url()
 }
 
 /// The credentials, database and TLS settings from the test DSN, with no host
@@ -370,16 +370,16 @@ async fn replication_connect_tries_every_configured_host() {
     config.application_name("cpg_replication_failover");
 
     let mut replication =
-        match compio_postgres::replication::connect_replication(common::suite_tls(), &config).await
+        match compio_postgres::replication::connect_replication(support::suite_tls(), &config).await
         {
             Ok(connection) => connection,
-            Err(e) if common::server_answered(&e) => panic!(
+            Err(e) if support::server_answered(&e) => panic!(
                 "the server refused a replication connection: {}",
-                common::error_chain(&e)
+                support::error_chain(&e)
             ),
             Err(e) => panic!(
                 "a live host listed after a dead one was never tried: {}",
-                common::error_chain(&e)
+                support::error_chain(&e)
             ),
         };
 
@@ -413,16 +413,16 @@ async fn replication_connect_broadcasts_a_single_port_across_hosts() {
     config.application_name("cpg_replication_one_port");
 
     let mut replication =
-        match compio_postgres::replication::connect_replication(common::suite_tls(), &config).await
+        match compio_postgres::replication::connect_replication(support::suite_tls(), &config).await
         {
             Ok(connection) => connection,
-            Err(e) if common::server_answered(&e) => panic!(
+            Err(e) if support::server_answered(&e) => panic!(
                 "the server refused a replication connection: {}",
-                common::error_chain(&e)
+                support::error_chain(&e)
             ),
             Err(e) => panic!(
                 "two hosts sharing one port must connect: {}",
-                common::error_chain(&e)
+                support::error_chain(&e)
             ),
         };
 
@@ -446,13 +446,13 @@ async fn replication_connect_reports_the_error_when_no_host_answers() {
     config.host("127.0.0.1");
     config.port(second_dead);
 
-    let err = compio_postgres::replication::connect_replication(common::suite_tls(), &config)
+    let err = compio_postgres::replication::connect_replication(support::suite_tls(), &config)
         .await
         .expect_err("no host was listening, so this cannot succeed");
     assert!(
-        !common::server_answered(&err),
+        !support::server_answered(&err),
         "nothing answered, so this must be a connect failure: {}",
-        common::error_chain(&err)
+        support::error_chain(&err)
     );
 }
 
@@ -478,10 +478,10 @@ async fn identify_system_returns_the_servers_real_identity() {
     // bare message here would diagnose the wrong cause: a `53300`
     // too_many_connections refusal is a server that ANSWERED, and printing a
     // replication-configuration hint for it is the exact mistake
-    // `tests/common/mod.rs` records a measured incident of.
-    let (client, connection) = match compio_postgres::connect(&url, common::suite_tls()).await {
+    // `tests/support/mod.rs` records a measured incident of.
+    let (client, connection) = match compio_postgres::connect(&url, support::suite_tls()).await {
         Ok(pair) => pair,
-        Err(e) => common::postgres_unreachable(&url, &e),
+        Err(e) => support::postgres_unreachable(&url, &e),
     };
     let driver = compio::runtime::spawn(async move { connection.run().await });
     let expected_systemid: String = client
@@ -499,14 +499,14 @@ async fn identify_system_returns_the_servers_real_identity() {
     // Same reasoning as above: let the shared helper decide whether the server
     // answered before it names a remedy.
     let mut replication =
-        match compio_postgres::replication::connect_replication(common::suite_tls(), &config).await
+        match compio_postgres::replication::connect_replication(support::suite_tls(), &config).await
         {
             Ok(connection) => connection,
-            Err(e) if common::server_answered(&e) => panic!(
+            Err(e) if support::server_answered(&e) => panic!(
                 "the server refused a replication connection: {}",
-                common::error_chain(&e)
+                support::error_chain(&e)
             ),
-            Err(e) => common::postgres_unreachable(&url, &e),
+            Err(e) => support::postgres_unreachable(&url, &e),
         };
 
     let identity = replication
@@ -545,19 +545,19 @@ async fn identify_system_returns_the_servers_real_identity() {
 async fn an_unreceived_lsn_is_not_reported_as_flushed() {
     Box::pin(compio::time::timeout(Duration::from_secs(20), async {
         let url = test_url();
-        let (setup, connection) = match compio_postgres::connect(&url, common::suite_tls()).await {
+        let (setup, connection) = match compio_postgres::connect(&url, support::suite_tls()).await {
             Ok(pair) => pair,
-            Err(error) => common::postgres_unreachable(&url, &error),
+            Err(error) => support::postgres_unreachable(&url, &error),
         };
         compio::runtime::spawn(async move {
             if let Err(error) = connection.run().await {
-                eprintln!("connection error: {}", common::error_chain(&error));
+                eprintln!("connection error: {}", support::error_chain(&error));
             }
         })
         .detach();
 
-        common::sweep_stale_test_objects(&setup).await;
-        let base = common::test_object_name("cpg replication future flush");
+        support::sweep_stale_test_objects(&setup).await;
+        let base = support::test_object_name("cpg replication future flush");
         let publication = format!("{base}_p");
         let slot = format!("{base}_s");
         setup
@@ -584,8 +584,8 @@ async fn an_unreceived_lsn_is_not_reported_as_flushed() {
             .expect("the slot's initial LSN must have a successor");
 
         let replication = compio_postgres::replication::connect_replication(
-            common::suite_tls(),
-            &common::replication_config(&base),
+            support::suite_tls(),
+            &support::replication_config(&base),
         )
         .await
         .expect("replication connect failed");
@@ -631,7 +631,7 @@ async fn an_unreceived_lsn_is_not_reported_as_flushed() {
         // Cleanup precedes the assertion so a failing run cannot consume
         // one of the server's finite replication slots.
         drop(stream);
-        common::drop_replication_slot(&setup, &slot)
+        support::drop_replication_slot(&setup, &slot)
             .await
             .unwrap_or_else(|error| eprintln!("could not drop slot {slot}: {error}"));
         let _ = setup
@@ -668,19 +668,19 @@ async fn an_unreceived_lsn_is_not_reported_as_flushed() {
 async fn the_received_and_processed_lsns_do_not_report_each_other() {
     Box::pin(compio::time::timeout(Duration::from_secs(20), async {
         let url = test_url();
-        let (setup, connection) = match compio_postgres::connect(&url, common::suite_tls()).await {
+        let (setup, connection) = match compio_postgres::connect(&url, support::suite_tls()).await {
             Ok(pair) => pair,
-            Err(error) => common::postgres_unreachable(&url, &error),
+            Err(error) => support::postgres_unreachable(&url, &error),
         };
         compio::runtime::spawn(async move {
             if let Err(error) = connection.run().await {
-                eprintln!("connection error: {}", common::error_chain(&error));
+                eprintln!("connection error: {}", support::error_chain(&error));
             }
         })
         .detach();
 
-        common::sweep_stale_test_objects(&setup).await;
-        let base = common::test_object_name("cpg replication lsn split");
+        support::sweep_stale_test_objects(&setup).await;
+        let base = support::test_object_name("cpg replication lsn split");
         let publication = format!("{base}_p");
         let slot = format!("{base}_s");
         setup
@@ -695,8 +695,8 @@ async fn the_received_and_processed_lsns_do_not_report_each_other() {
             .expect("slot setup failed");
 
         let replication = compio_postgres::replication::connect_replication(
-            common::suite_tls(),
-            &common::replication_config(&base),
+            support::suite_tls(),
+            &support::replication_config(&base),
         )
         .await
         .expect("replication connect failed");
@@ -736,7 +736,7 @@ async fn the_received_and_processed_lsns_do_not_report_each_other() {
         let received_after = stream.last_received_lsn();
 
         drop(stream);
-        common::drop_replication_slot(&setup, &slot)
+        support::drop_replication_slot(&setup, &slot)
             .await
             .unwrap_or_else(|error| eprintln!("could not drop slot {slot}: {error}"));
         let _ = setup
@@ -794,24 +794,24 @@ async fn replication_tls_refusal_is_keyed_to_the_contradiction_not_the_endpoint(
     };
 
     let refused = compio_postgres::replication::connect_replication(
-        common::suite_tls(),
+        support::suite_tls(),
         &config_with(compio_postgres::config::SslMode::Prefer),
     )
     .await
     .expect_err("a weak sslmode with sslrootcert=system is a contradiction");
-    let refused_chain = common::error_chain(&refused);
+    let refused_chain = support::error_chain(&refused);
     assert!(
         refused_chain.contains("sslrootcert=system"),
         "the contradiction must be named by the refusal, got: {refused_chain}"
     );
 
     let dialled = compio_postgres::replication::connect_replication(
-        common::suite_tls(),
+        support::suite_tls(),
         &config_with(compio_postgres::config::SslMode::VerifyFull),
     )
     .await
     .expect_err("nothing is listening on that port, so this cannot succeed");
-    let dialled_chain = common::error_chain(&dialled);
+    let dialled_chain = support::error_chain(&dialled);
     assert!(
         !dialled_chain.contains("sslrootcert=system"),
         "verify-full is not a contradiction, so validation must let it through: {dialled_chain}"
@@ -819,7 +819,7 @@ async fn replication_tls_refusal_is_keyed_to_the_contradiction_not_the_endpoint(
     // Asserted POSITIVELY: without this, any unrelated early failure that
     // merely lacks the literal would satisfy the check above.
     assert!(
-        !common::server_answered(&dialled),
+        !support::server_answered(&dialled),
         "the second arm must reach the socket and be refused there: {dialled_chain}"
     );
 }
@@ -855,7 +855,7 @@ async fn replication_read_timeout_starts_after_startup_and_poisons_identify_syst
         let mut replication = compio::time::timeout(
             OPERATION_WATCHDOG,
             compio_postgres::replication::connect_replication(
-                common::suite_tls(),
+                support::suite_tls(),
                 &stub_config(server.addr),
             ),
         )
@@ -916,7 +916,7 @@ async fn a_stalled_start_replication_exchange_times_out_and_retires_its_session(
         let replication = compio::time::timeout(
             OPERATION_WATCHDOG,
             compio_postgres::replication::connect_replication(
-                common::suite_tls(),
+                support::suite_tls(),
                 &stub_config(server.addr),
             ),
         )
@@ -984,7 +984,7 @@ async fn start_replication_preserves_an_error_behind_asynchronous_messages() {
         let replication = compio::time::timeout(
             OPERATION_WATCHDOG,
             compio_postgres::replication::connect_replication(
-                common::suite_tls(),
+                support::suite_tls(),
                 &stub_config(server.addr),
             ),
         )
@@ -1006,7 +1006,7 @@ async fn start_replication_preserves_an_error_behind_asynchronous_messages() {
             error.code().map(|code| code.code()),
             Some("55000"),
             "START_REPLICATION discarded SQLSTATE 55000 behind an asynchronous message: {}",
-            common::error_chain(&error)
+            support::error_chain(&error)
         );
 
         server.finish();
@@ -1052,7 +1052,7 @@ async fn an_awaited_idle_replication_stream_survives_repeated_read_budgets() {
         let mut replication = compio::time::timeout(
             OPERATION_WATCHDOG,
             compio_postgres::replication::connect_replication(
-                common::suite_tls(),
+                support::suite_tls(),
                 &stub_config(server.addr),
             ),
         )
@@ -1147,7 +1147,7 @@ async fn a_mid_frame_replication_stall_times_out_and_poisons_the_stream() {
         let replication = compio::time::timeout(
             OPERATION_WATCHDOG,
             compio_postgres::replication::connect_replication(
-                common::suite_tls(),
+                support::suite_tls(),
                 &stub_config(server.addr),
             ),
         )
@@ -1227,7 +1227,7 @@ async fn a_replication_error_response_retires_copy_both_after_preserving_57014()
         let replication = compio::time::timeout(
             OPERATION_WATCHDOG,
             compio_postgres::replication::connect_replication(
-                common::suite_tls(),
+                support::suite_tls(),
                 &stub_config(server.addr),
             ),
         )
@@ -1250,7 +1250,7 @@ async fn a_replication_error_response_retires_copy_both_after_preserving_57014()
             first.code().map(|code| code.code()),
             Some("57014"),
             "the replication stream lost the server's cancellation SQLSTATE: {}",
-            common::error_chain(&first)
+            support::error_chain(&first)
         );
 
         // Finish before retrying: logical poison alone is insufficient because
@@ -1264,7 +1264,7 @@ async fn a_replication_error_response_retires_copy_both_after_preserving_57014()
         assert!(
             second.is_cancelled(),
             "the ended CopyBoth exchange was not retired: {}",
-            common::error_chain(&second)
+            support::error_chain(&second)
         );
     })
     .await
@@ -1328,7 +1328,7 @@ async fn copy_done_half_close_preserves_a_fatal_terminal_error() {
         let replication = compio::time::timeout(
             OPERATION_WATCHDOG,
             compio_postgres::replication::connect_replication(
-                common::suite_tls(),
+                support::suite_tls(),
                 &stub_config(server.addr),
             ),
         )
@@ -1354,13 +1354,13 @@ async fn copy_done_half_close_preserves_a_fatal_terminal_error() {
             error.code().map(|code| code.code()),
             Some("57P01"),
             "backend CopyDone replaced SQLSTATE 57P01: {}",
-            common::error_chain(&error)
+            support::error_chain(&error)
         );
         assert!(
-            common::error_chain(&error)
+            support::error_chain(&error)
                 .contains("terminating connection due to administrator command"),
             "backend CopyDone replaced the server's FATAL message: {}",
-            common::error_chain(&error)
+            support::error_chain(&error)
         );
     })
     .await
@@ -1421,7 +1421,7 @@ async fn a_replication_cancel_token_sends_the_full_key_and_surfaces_57014() {
         });
 
         let replication = compio_postgres::replication::connect_replication(
-            common::suite_tls(),
+            support::suite_tls(),
             &stub_config(server.addr),
         )
         .await
@@ -1436,7 +1436,7 @@ async fn a_replication_cancel_token_sends_the_full_key_and_surfaces_57014() {
             OPERATION_WATCHDOG,
             futures_util::future::join(
                 stream.next(),
-                token.cancel_query(common::suite_tls()),
+                token.cancel_query(support::suite_tls()),
             ),
         )
         .await
@@ -1447,7 +1447,7 @@ async fn a_replication_cancel_token_sends_the_full_key_and_surfaces_57014() {
             error.code().map(|code| code.code()),
             Some("57014"),
             "the original replication connection lost 57014: {}",
-            common::error_chain(&error)
+            support::error_chain(&error)
         );
 
         let retired = stream
@@ -1497,7 +1497,7 @@ async fn an_unrepresentable_start_lsn_is_refused_before_replication_starts() {
         let replication = compio::time::timeout(
             OPERATION_WATCHDOG,
             compio_postgres::replication::connect_replication(
-                common::suite_tls(),
+                support::suite_tls(),
                 &stub_config(server.addr),
             ),
         )
@@ -1553,7 +1553,7 @@ async fn a_representable_start_lsn_still_starts_replication() {
 
         let replication = compio::time::timeout(
             OPERATION_WATCHDOG,
-            compio_postgres::replication::connect_replication(common::suite_tls(), &stub_config(server.addr)),
+            compio_postgres::replication::connect_replication(support::suite_tls(), &stub_config(server.addr)),
         )
         .await
         .expect("scripted replication startup exceeded its watchdog")
@@ -1625,7 +1625,7 @@ async fn a_null_field_in_identify_system_is_refused_rather_than_defaulted() {
         let mut replication = compio::time::timeout(
             OPERATION_WATCHDOG,
             compio_postgres::replication::connect_replication(
-                common::suite_tls(),
+                support::suite_tls(),
                 &stub_config(server.addr),
             ),
         )
@@ -1705,7 +1705,7 @@ async fn identify_system_refuses_a_response_that_carried_no_row() {
         let mut replication = compio::time::timeout(
             OPERATION_WATCHDOG,
             compio_postgres::replication::connect_replication(
-                common::suite_tls(),
+                support::suite_tls(),
                 &stub_config(server.addr),
             ),
         )
@@ -1725,7 +1725,7 @@ async fn identify_system_refuses_a_response_that_carried_no_row() {
             Ok(Err(error)) => error,
         };
 
-        let rendered = common::error_chain(&error).to_lowercase();
+        let rendered = support::error_chain(&error).to_lowercase();
         assert!(
             rendered.contains("identify_system"),
             "the refusal should name IDENTIFY_SYSTEM: {rendered}"
@@ -1755,7 +1755,7 @@ async fn identify_system_accepts_a_response_that_carried_a_row() {
         let mut replication = compio::time::timeout(
             OPERATION_WATCHDOG,
             compio_postgres::replication::connect_replication(
-                common::suite_tls(),
+                support::suite_tls(),
                 &stub_config(server.addr),
             ),
         )
@@ -1807,7 +1807,7 @@ async fn identify_system_tolerates_an_asynchronous_parameter_status() {
         let mut replication = compio::time::timeout(
             OPERATION_WATCHDOG,
             compio_postgres::replication::connect_replication(
-                common::suite_tls(),
+                support::suite_tls(),
                 &stub_config(server.addr),
             ),
         )
@@ -1862,7 +1862,7 @@ async fn an_unaccountable_message_retires_the_replication_session() {
         let mut replication = compio::time::timeout(
             OPERATION_WATCHDOG,
             compio_postgres::replication::connect_replication(
-                common::suite_tls(),
+                support::suite_tls(),
                 &stub_config(server.addr),
             ),
         )
@@ -1877,7 +1877,7 @@ async fn an_unaccountable_message_retires_the_replication_session() {
         assert!(
             !first.is_cancelled(),
             "the first call must report the message, not the refusal: {}",
-            common::error_chain(&first)
+            support::error_chain(&first)
         );
 
         let second = compio::time::timeout(OPERATION_WATCHDOG, replication.identify_system())
@@ -1888,7 +1888,7 @@ async fn an_unaccountable_message_retires_the_replication_session() {
             second.is_cancelled(),
             "the session was left undrained, so it must be refused rather than \
              answered from the stale frames: {}",
-            common::error_chain(&second)
+            support::error_chain(&second)
         );
 
         drop(replication);
@@ -1928,7 +1928,7 @@ async fn an_identify_system_error_outranks_a_later_unaccountable_message() {
         let mut replication = compio::time::timeout(
             OPERATION_WATCHDOG,
             compio_postgres::replication::connect_replication(
-                common::suite_tls(),
+                support::suite_tls(),
                 &stub_config(server.addr),
             ),
         )
@@ -1944,7 +1944,7 @@ async fn an_identify_system_error_outranks_a_later_unaccountable_message() {
             error.code().map(|code| code.code()),
             Some("22012"),
             "IDENTIFY_SYSTEM discarded SQLSTATE 22012 behind an unexpected message: {}",
-            common::error_chain(&error)
+            support::error_chain(&error)
         );
 
         let retry = compio::time::timeout(OPERATION_WATCHDOG, replication.identify_system())
@@ -1954,7 +1954,7 @@ async fn an_identify_system_error_outranks_a_later_unaccountable_message() {
         assert!(
             retry.is_cancelled(),
             "the unaccountable message did not retire the session: {}",
-            common::error_chain(&retry)
+            support::error_chain(&retry)
         );
 
         drop(replication);
@@ -2004,7 +2004,7 @@ async fn an_identify_system_error_leaves_the_session_able_to_answer_the_next_com
         let mut replication = compio::time::timeout(
             OPERATION_WATCHDOG,
             compio_postgres::replication::connect_replication(
-                common::suite_tls(),
+                support::suite_tls(),
                 &stub_config(server.addr),
             ),
         )
@@ -2016,7 +2016,7 @@ async fn an_identify_system_error_leaves_the_session_able_to_answer_the_next_com
             .await
             .expect("the refused identify_system exceeded its watchdog")
             .expect_err("the server refused IDENTIFY_SYSTEM, so this must be an error");
-        let rendered = common::error_chain(&refusal);
+        let rendered = support::error_chain(&refusal);
         assert!(
             rendered.contains("57P03"),
             "the server's SQLSTATE must survive: {rendered}"
@@ -2077,7 +2077,7 @@ async fn a_fatal_identify_system_error_survives_the_close_that_follows_it() {
         let mut replication = compio::time::timeout(
             OPERATION_WATCHDOG,
             compio_postgres::replication::connect_replication(
-                common::suite_tls(),
+                support::suite_tls(),
                 &stub_config(server.addr),
             ),
         )
@@ -2089,7 +2089,7 @@ async fn a_fatal_identify_system_error_survives_the_close_that_follows_it() {
             .await
             .expect("the refused identify_system exceeded its watchdog")
             .expect_err("the server refused IDENTIFY_SYSTEM, so this must be an error");
-        let rendered = common::error_chain(&refusal);
+        let rendered = support::error_chain(&refusal);
         assert!(
             rendered.contains("57P01"),
             "the server's SQLSTATE was replaced by the close that followed it: {rendered}"
@@ -2110,7 +2110,7 @@ async fn a_fatal_identify_system_error_survives_the_close_that_follows_it() {
         assert!(
             second.is_cancelled(),
             "the session survived a transport error mid-response: {}",
-            common::error_chain(&second)
+            support::error_chain(&second)
         );
 
         drop(replication);
@@ -2167,7 +2167,7 @@ async fn a_configured_ceiling_governs_the_replication_stream() {
 
         let replication = compio::time::timeout(
             OPERATION_WATCHDOG,
-            compio_postgres::replication::connect_replication(common::suite_tls(), &config),
+            compio_postgres::replication::connect_replication(support::suite_tls(), &config),
         )
         .await
         .expect("scripted replication startup exceeded its watchdog")
@@ -2241,7 +2241,7 @@ async fn a_declared_length_is_refused_before_the_parser_reserves_for_it() {
 
         let mut replication = compio::time::timeout(
             OPERATION_WATCHDOG,
-            compio_postgres::replication::connect_replication(common::suite_tls(), &config),
+            compio_postgres::replication::connect_replication(support::suite_tls(), &config),
         )
         .await
         .expect("scripted replication startup exceeded its watchdog")

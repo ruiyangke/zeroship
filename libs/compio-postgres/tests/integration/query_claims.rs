@@ -7,22 +7,22 @@ use futures_util::{SinkExt, TryStreamExt};
 use std::time::Duration;
 
 #[allow(unused_imports)]
-use crate::common;
+use crate::support;
 
 const TEST_WATCHDOG: Duration = Duration::from_secs(10);
 
 fn test_url() -> String {
-    common::test_url()
+    support::test_url()
 }
 
 async fn connect() -> Client {
     let url = test_url();
-    let (client, connection) = compio_postgres::connect(&url, common::suite_tls())
+    let (client, connection) = compio_postgres::connect(&url, support::suite_tls())
         .await
-        .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+        .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
     compio::runtime::spawn(async move {
         if let Err(error) = connection.run().await {
-            eprintln!("connection error: {}", common::error_chain(&error));
+            eprintln!("connection error: {}", support::error_chain(&error));
         }
     })
     .detach();
@@ -34,7 +34,7 @@ async fn copy_in_close_commits_input_and_keeps_the_client_usable() {
     compio::time::timeout(TEST_WATCHDOG, async {
         let client = connect().await;
         let process_id = client.process_id();
-        let table = common::test_object_name("query_claims_copy_close");
+        let table = support::test_object_name("query_claims_copy_close");
         client
             .batch_execute(&format!("CREATE TEMP TABLE {table} (n int4 NOT NULL)"))
             .await
@@ -70,7 +70,7 @@ async fn copy_in_close_commits_input_and_keeps_the_client_usable() {
 async fn query_text_params_coerces_by_position_and_decodes_binary_results() {
     compio::time::timeout(TEST_WATCHDOG, async {
         let client = connect().await;
-        let table = common::test_object_name("query_claims_text_query");
+        let table = support::test_object_name("query_claims_text_query");
         client
             .batch_execute(&format!(
                 "CREATE TEMP TABLE {table} (\
@@ -104,7 +104,7 @@ async fn pool_query_text_params_casts_text_values_to_column_types() {
             let pool = Pool::connect(&url, 1)
                 .await
                 .expect("connect one-slot text-parameter pool");
-            let table = common::test_object_name("query_claims_pool_text_cast");
+            let table = support::test_object_name("query_claims_pool_text_cast");
             Box::pin(pool.batch_execute(&format!(
                 "CREATE TEMP TABLE {table} (n int4 NOT NULL, enabled bool NOT NULL)"
             )))
@@ -226,7 +226,7 @@ async fn transaction_query_text_params_scopes_set_local_to_every_exit() {
 async fn execute_text_params_coerces_nulls_and_returns_the_affected_count() {
     compio::time::timeout(TEST_WATCHDOG, async {
         let client = connect().await;
-        let table = common::test_object_name("query_claims_text_execute");
+        let table = support::test_object_name("query_claims_text_execute");
         client
             .batch_execute(&format!(
                 "CREATE TEMP TABLE {table} (\
@@ -274,7 +274,7 @@ async fn execute_text_params_reports_bind_count_overflow_without_poisoning_the_c
             error.to_string(),
             "error encoding message to server",
             "bind count overflow was classified as a server response: {}",
-            common::error_chain(&error)
+            support::error_chain(&error)
         );
 
         let observed_process_id: i32 = client
@@ -304,7 +304,7 @@ async fn execute_text_params_preserves_server_cast_errors() {
             error.code(),
             Some(&SqlState::INVALID_TEXT_REPRESENTATION),
             "execute_text_params replaced the server's cast error: {}",
-            common::error_chain(&error)
+            support::error_chain(&error)
         );
 
         let observed_process_id: i32 = client
@@ -324,9 +324,9 @@ async fn execute_text_params_preserves_server_cast_errors() {
 async fn execute_text_params_reports_a_closed_connection_before_enqueue() {
     Box::pin(compio::time::timeout(TEST_WATCHDOG, async {
         let url = test_url();
-        let (client, connection) = compio_postgres::connect(&url, common::suite_tls())
+        let (client, connection) = compio_postgres::connect(&url, support::suite_tls())
             .await
-            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+            .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
         drop(connection);
 
         let error = client
@@ -336,7 +336,7 @@ async fn execute_text_params_reports_a_closed_connection_before_enqueue() {
         assert!(
             error.is_closed(),
             "a closed request channel was reported as {}",
-            common::error_chain(&error)
+            support::error_chain(&error)
         );
     }))
     .await
@@ -347,7 +347,7 @@ async fn execute_text_params_reports_a_closed_connection_before_enqueue() {
 async fn row_stream_reports_affected_rows_only_after_exhaustion() {
     compio::time::timeout(TEST_WATCHDOG, async {
         let client = connect().await;
-        let table = common::test_object_name("query_claims_rows_affected");
+        let table = support::test_object_name("query_claims_rows_affected");
         client
             .batch_execute(&format!(
                 "CREATE TEMP TABLE {table} (n int4 NOT NULL); \
@@ -408,7 +408,7 @@ async fn query_scalar_rejects_extra_columns_even_with_no_rows() {
         // empty case's failure message: otherwise the test proves both calls erred,
         // not that they erred for the SAME reason. Both must name the column count,
         // which is the claim.
-        let populated = common::error_chain(
+        let populated = support::error_chain(
             &client
                 .query_scalar::<i32, _>("SELECT 1, 2", &[])
                 .await
@@ -419,7 +419,7 @@ async fn query_scalar_rejects_extra_columns_even_with_no_rows() {
             "a two-column scalar query must fail on the column count: {populated:?}"
         );
 
-        let empty = common::error_chain(
+        let empty = support::error_chain(
             &client
                 .query_scalar::<i32, _>("SELECT 1, 2 WHERE false", &[])
                 .await
@@ -475,7 +475,7 @@ async fn query_opt_scalar_rejects_extra_columns_even_with_no_rows() {
                 "an empty result set hid the arity error the populated one reports",
             ),
         ] {
-            let cause = common::error_chain(
+            let cause = support::error_chain(
                 &client
                     .query_opt_scalar::<i32, _>(sql, &[])
                     .await
@@ -510,7 +510,7 @@ async fn query_opt_scalar_rejects_extra_columns_even_with_no_rows() {
         // as a ROW-count rule. The column here is single, so a helper reporting
         // an arity failure would be wrong about which rule it applied, and the
         // denial below is what separates this case from the two above.
-        let cause = common::error_chain(
+        let cause = support::error_chain(
             &client
                 .query_opt_scalar::<i32, _>("SELECT g FROM generate_series(1, 2) g", &[])
                 .await
@@ -600,7 +600,7 @@ async fn binary_copy_write_refuses_a_short_value_list() {
     use compio_postgres::types::Type;
 
     let client = connect().await;
-    let table = common::test_object_name("query_claims_binary_arity");
+    let table = support::test_object_name("query_claims_binary_arity");
     client
         .batch_execute(&format!("CREATE TEMP TABLE {table} (a int4, b text)"))
         .await
@@ -647,7 +647,7 @@ async fn a_refused_binary_copy_row_leaves_nothing_behind() {
 
     compio::time::timeout(TEST_WATCHDOG, async {
         let client = connect().await;
-        let table = common::test_object_name("query_claims_binary_rollback");
+        let table = support::test_object_name("query_claims_binary_rollback");
         client
             .batch_execute(&format!("CREATE TEMP TABLE {table} (v text)"))
             .await
@@ -722,7 +722,7 @@ async fn an_accepted_binary_copy_row_between_two_others_is_kept() {
 
     compio::time::timeout(TEST_WATCHDOG, async {
         let client = connect().await;
-        let table = common::test_object_name("query_claims_binary_control");
+        let table = support::test_object_name("query_claims_binary_control");
         client
             .batch_execute(&format!("CREATE TEMP TABLE {table} (v text)"))
             .await
@@ -808,7 +808,7 @@ async fn a_binary_copy_row_refused_after_writing_bytes_leaves_no_garbage() {
 
     compio::time::timeout(TEST_WATCHDOG, async {
         let client = connect().await;
-        let table = common::test_object_name("query_claims_binary_partial");
+        let table = support::test_object_name("query_claims_binary_partial");
         client
             .batch_execute(&format!("CREATE TEMP TABLE {table} (v text)"))
             .await
@@ -998,7 +998,7 @@ async fn query_one_scalar_still_reports_a_missing_row_as_a_row_problem() {
 async fn query_one_scalar_refuses_more_than_one_row() {
     let client = connect().await;
 
-    let cause = common::error_chain(
+    let cause = support::error_chain(
         &client
             .query_one_scalar::<i32, _>("SELECT g FROM generate_series(1, 2) g", &[])
             .await

@@ -160,7 +160,7 @@ async fn column_exists(session: &CompioPgSession, schema: &str, table: &str, col
 
 #[compio::test]
 async fn ir_envelope_lowers_and_applies_over_native_compio_seam() {
-    let postgres = crate::fixture::Postgres::start();
+    let postgres = crate::support::fixture::Postgres::start();
     let url = postgres.url();
 
     // (a) live compio client, (b) wrapped in this crate's SqlSession adapter.

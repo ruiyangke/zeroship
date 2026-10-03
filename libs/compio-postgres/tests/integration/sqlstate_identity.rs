@@ -19,14 +19,14 @@ use compio_postgres::Client;
 use compio_postgres::error::SqlState;
 
 #[allow(unused_imports)]
-use crate::common;
+use crate::support;
 
 fn test_url() -> String {
-    common::test_url()
+    support::test_url()
 }
 
 async fn connect_client(url: &str) -> Client {
-    let (client, connection) = compio_postgres::connect(url, common::suite_tls())
+    let (client, connection) = compio_postgres::connect(url, support::suite_tls())
         .await
         .expect("connect to PostgreSQL");
     compio::runtime::spawn(async move {
@@ -97,7 +97,7 @@ async fn schema_free_errors_carry_the_constants_this_crate_names() {
 async fn constraint_violations_carry_the_constants_this_crate_names() {
     let url = test_url();
     let client = connect_client(&url).await;
-    let table = common::test_object_name("sqlstate_probe");
+    let table = support::test_object_name("sqlstate_probe");
 
     // Temporary, so the shared review database keeps no residue even if this
     // test fails part way through.

@@ -21,19 +21,19 @@ use compio_postgres::{Client, Error};
 use std::time::Duration;
 
 #[allow(unused_imports)]
-use crate::common;
+use crate::support;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(20);
 
 fn test_url() -> String {
-    common::test_url()
+    support::test_url()
 }
 
 async fn connect(url: &str) -> Result<Client, Error> {
-    let (client, connection) = compio_postgres::connect(url, common::suite_tls()).await?;
+    let (client, connection) = compio_postgres::connect(url, support::suite_tls()).await?;
     compio::runtime::spawn(async move {
         if let Err(error) = connection.run().await {
-            eprintln!("connection error: {}", common::error_chain(&error));
+            eprintln!("connection error: {}", support::error_chain(&error));
         }
     })
     .detach();
@@ -44,8 +44,8 @@ async fn connected() -> Client {
     let url = test_url();
     match compio::time::timeout(TEST_TIMEOUT, connect(&url)).await {
         Ok(Ok(client)) => client,
-        Ok(Err(error)) => common::postgres_unreachable(&url, &error),
-        Err(_) => panic!("connecting to {} timed out", common::redact_dsn(&url)),
+        Ok(Err(error)) => support::postgres_unreachable(&url, &error),
+        Err(_) => panic!("connecting to {} timed out", support::redact_dsn(&url)),
     }
 }
 

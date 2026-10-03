@@ -55,8 +55,8 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use crate::dialect_corpus::corpus;
-use crate::dialect_matrix::dialect_table::{Disposition, DispositionRow, DIALECT_TABLE};
+use crate::integration::dialect_corpus::corpus;
+use crate::integration::dialect_matrix::dialect_table::{Disposition, DispositionRow, DIALECT_TABLE};
 use zeroship_migrate::model::ir::Op;
 
 /// The `op` wire tag (op-kind discriminant) of a concrete op, via its serde image.

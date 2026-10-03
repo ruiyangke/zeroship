@@ -27,16 +27,16 @@ use futures_util::StreamExt;
 use std::time::Duration;
 
 #[allow(unused_imports)]
-use crate::common;
+use crate::support;
 
 const DELIVERY_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn test_url() -> String {
-    common::test_url()
+    support::test_url()
 }
 
 async fn connect_client(url: &str) -> Result<Client, Error> {
-    let (client, connection) = compio_postgres::connect(url, common::suite_tls()).await?;
+    let (client, connection) = compio_postgres::connect(url, support::suite_tls()).await?;
     compio::runtime::spawn(async move {
         if let Err(error) = connection.run().await {
             eprintln!("connection error: {error}");
@@ -60,7 +60,7 @@ async fn a_notification_carries_the_notifying_backends_process_id() {
     let url = test_url();
 
     // Listener. The async sink has to be taken before `run()` is spawned.
-    let (listener, mut listener_connection) = compio_postgres::connect(&url, common::suite_tls())
+    let (listener, mut listener_connection) = compio_postgres::connect(&url, support::suite_tls())
         .await
         .expect("connect the listener");
     let mut notifications = listener_connection.notifications();
@@ -71,7 +71,7 @@ async fn a_notification_carries_the_notifying_backends_process_id() {
     })
     .detach();
 
-    let channel = common::test_object_name("zs_notify_pid");
+    let channel = support::test_object_name("zs_notify_pid");
     listener
         .batch_execute(&format!("LISTEN {channel}"))
         .await
@@ -124,7 +124,7 @@ async fn a_notification_carries_the_notifying_backends_process_id() {
 async fn a_notification_without_a_payload_delivers_an_empty_string() {
     let url = test_url();
 
-    let (listener, mut listener_connection) = compio_postgres::connect(&url, common::suite_tls())
+    let (listener, mut listener_connection) = compio_postgres::connect(&url, support::suite_tls())
         .await
         .expect("connect the listener");
     let mut notifications = listener_connection.notifications();
@@ -135,7 +135,7 @@ async fn a_notification_without_a_payload_delivers_an_empty_string() {
     })
     .detach();
 
-    let channel = common::test_object_name("zs_notify_empty");
+    let channel = support::test_object_name("zs_notify_empty");
     listener
         .batch_execute(&format!("LISTEN {channel}"))
         .await

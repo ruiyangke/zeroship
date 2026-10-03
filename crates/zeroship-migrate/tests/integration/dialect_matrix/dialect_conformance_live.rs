@@ -95,7 +95,7 @@ use std::path::PathBuf;
 use serde_json::{json, Value};
 use tempfile::TempDir;
 
-use crate::dialect_matrix::dialect_table::{Disposition, DIALECT_TABLE};
+use crate::integration::dialect_matrix::dialect_table::{Disposition, DIALECT_TABLE};
 use crate::support::mysql::{quote_ident, DatabaseGuard, MysqlDevSession};
 use crate::support::PgDevSession;
 use zeroship_migrate::apply::backend::MigrationBackend;
@@ -117,7 +117,7 @@ use zeroship_migrate_sqlite::SqliteBackend;
 /// What the MySQL leg needed, and where each piece of it lives. Recorded as a
 /// constant so it is in the file a MySQL author opens, not only in a doc.
 ///
-/// 1. Shared support, in `tests/integration/support/mysql.rs`: `mysql_url()`, the DSN of the
+/// 1. Shared support, in `tests/support/mysql.rs`: `mysql_url()`, the DSN of the
 ///    MySQL server this binary owns, and `MysqlDevSession`, which implements
 ///    `driver::SqlSession` over the blocking `mysql` crate exactly as `PgDevSession`
 ///    does over the PostgreSQL one. `DatabaseGuard` is the `SchemaGuard` sibling.
@@ -1567,7 +1567,7 @@ async fn every_postgres_row_of_the_dialect_table_answers_to_a_live_server() {
 
     let (before_total, _) = probe_schemas(&session).await;
     let mut ledger: Vec<(String, String, Verdict)> = Vec::new();
-    for (kind, variant, op) in crate::dialect_corpus::corpus() {
+    for (kind, variant, op) in crate::integration::dialect_corpus::corpus() {
         let verdict = pg_verdict(&url, kind, variant, &op).await;
         ledger.push((kind.to_string(), variant.to_string(), verdict));
     }
@@ -1623,7 +1623,7 @@ async fn every_mysql_row_of_the_dialect_table_answers_to_a_live_server() {
         "no probe database may be on the server before the sweep creates one: {before:?}"
     );
     let mut ledger: Vec<(String, String, Verdict)> = Vec::new();
-    for (kind, variant, op) in crate::dialect_corpus::corpus() {
+    for (kind, variant, op) in crate::integration::dialect_corpus::corpus() {
         let verdict = mysql_verdict(&url, kind, variant, &op).await;
         ledger.push((kind.to_string(), variant.to_string(), verdict));
     }
@@ -1650,7 +1650,7 @@ async fn every_mysql_row_of_the_dialect_table_answers_to_a_live_server() {
 #[compio::test]
 async fn every_sqlite_row_of_the_dialect_table_answers_to_a_live_database() {
     let mut ledger: Vec<(String, String, Verdict)> = Vec::new();
-    for (kind, variant, op) in crate::dialect_corpus::corpus() {
+    for (kind, variant, op) in crate::integration::dialect_corpus::corpus() {
         let verdict = sqlite_verdict(kind, variant, &op).await;
         ledger.push((kind.to_string(), variant.to_string(), verdict));
     }

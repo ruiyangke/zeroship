@@ -548,7 +548,7 @@ const FOLD_REFUSED: usize = 0;
 ///
 /// The destructuring is EXHAUSTIVE with no `..`: a field added to any of these four
 /// snapshot types is a compile error until it is routed, which is the same mechanism
-/// `crates/zeroship-migrate/tests/integration/support/carriers.rs` uses to prove a carrier inventory complete.
+/// `crates/zeroship-migrate/tests/support/carriers.rs` uses to prove a carrier inventory complete.
 fn column_field_differences(mine: &ColumnSnapshot, theirs: &ColumnSnapshot) -> Vec<&'static str> {
     let ColumnSnapshot {
         name,

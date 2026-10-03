@@ -8,8 +8,11 @@ use compio_postgres::Client;
 use log::{Level, LevelFilter, Log, Metadata, Record};
 use std::sync::{Mutex, Once};
 
-#[allow(dead_code)]
-mod common;
+#[expect(
+    dead_code,
+    reason = "the shared support module carries helpers this process-isolated target does not use"
+)]
+mod support;
 
 const QUERY_LOG_TARGET: &str = "compio_postgres::query";
 
@@ -47,10 +50,10 @@ fn install_query_logger() {
 // `#[compio::test]` runtime on the same thread.
 #[allow(clippy::future_not_send)]
 async fn client() -> Client {
-    let url = common::test_url();
-    let (client, connection) = compio_postgres::connect(&url, common::suite_tls())
+    let url = support::test_url();
+    let (client, connection) = compio_postgres::connect(&url, support::suite_tls())
         .await
-        .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+        .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
     compio::runtime::spawn(async move {
         if let Err(error) = connection.run().await {
             eprintln!("query Debug test connection error: {error}");

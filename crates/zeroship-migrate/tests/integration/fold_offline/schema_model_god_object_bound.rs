@@ -10,7 +10,7 @@
 //! reasonable case, and the growth never trips a gate.
 //!
 //! This is that compiler check, in the form the repo already trusts.
-//! `tests/integration/support/carriers.rs` proved a rename-carrier inventory complete by
+//! `tests/support/carriers.rs` proved a rename-carrier inventory complete by
 //! EXHAUSTIVELY DESTRUCTURING every snapshot type with no `..` and routing every binding
 //! through a classifier that demands a reason. This does the same to
 //! [`FieldDescriptor`], the runtime wire contract, against

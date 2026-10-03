@@ -4,9 +4,9 @@
 
 #[compio::test]
 async fn ping_set_get_del_roundtrip() {
-    let fixture = crate::common::fixtures();
+    let fixture = crate::support::fixtures();
     let url = fixture.redis_url();
-    let mut c = crate::common::connect(&url).await;
+    let mut c = crate::support::connect(&url).await;
     c.ping().await.expect("ping");
 
     c.set("zs:test:k1", b"hello", None).await.expect("set");
@@ -22,9 +22,9 @@ async fn ping_set_get_del_roundtrip() {
 
 #[compio::test]
 async fn ttl_ms_expires() {
-    let fixture = crate::common::fixtures();
+    let fixture = crate::support::fixtures();
     let url = fixture.redis_url();
-    let mut c = crate::common::connect(&url).await;
+    let mut c = crate::support::connect(&url).await;
     c.set("zs:test:ttl", b"bye", Some(100))
         .await
         .expect("set ttl");
@@ -38,9 +38,9 @@ async fn ttl_ms_expires() {
 
 #[compio::test]
 async fn incr_is_atomic_and_correct() {
-    let fixture = crate::common::fixtures();
+    let fixture = crate::support::fixtures();
     let url = fixture.redis_url();
-    let mut c = crate::common::connect(&url).await;
+    let mut c = crate::support::connect(&url).await;
     c.del("zs:test:counter").await.ok();
 
     // Serial incr — correctness.
@@ -58,9 +58,9 @@ async fn incr_is_atomic_and_correct() {
 
 #[compio::test]
 async fn scan_prefix_returns_matching_keys() {
-    let fixture = crate::common::fixtures();
+    let fixture = crate::support::fixtures();
     let url = fixture.redis_url();
-    let mut c = crate::common::connect(&url).await;
+    let mut c = crate::support::connect(&url).await;
 
     // Seed a few keys under a unique prefix so the test is isolated.
     let prefix = "zs:scan:42";
@@ -93,9 +93,9 @@ async fn scan_prefix_returns_matching_keys() {
 
 #[compio::test]
 async fn pool_acquire_and_reuse() {
-    let fixture = crate::common::fixtures();
+    let fixture = crate::support::fixtures();
     let url = fixture.redis_url();
-    let pool = crate::common::connect_pool(&url, 4).await;
+    let pool = crate::support::connect_pool(&url, 4).await;
     // Five sequential acquires share the same underlying 1-conn pool.
     for i in 0..5 {
         let mut c = pool.acquire().await.expect("acquire");
@@ -108,9 +108,9 @@ async fn pool_acquire_and_reuse() {
 
 #[compio::test]
 async fn null_reply_on_missing_key() {
-    let fixture = crate::common::fixtures();
+    let fixture = crate::support::fixtures();
     let url = fixture.redis_url();
-    let mut c = crate::common::connect(&url).await;
+    let mut c = crate::support::connect(&url).await;
     c.del("zs:test:missing").await.ok();
     let v = c.get("zs:test:missing").await.expect("get");
     assert!(v.is_none());
@@ -118,9 +118,9 @@ async fn null_reply_on_missing_key() {
 
 #[compio::test]
 async fn binary_safe_values() {
-    let fixture = crate::common::fixtures();
+    let fixture = crate::support::fixtures();
     let url = fixture.redis_url();
-    let mut c = crate::common::connect(&url).await;
+    let mut c = crate::support::connect(&url).await;
     // NUL bytes + non-UTF8 sequences must survive round-trip.
     let value: Vec<u8> = (0..=255u8).collect();
     c.set("zs:test:bin", &value, None).await.unwrap();
@@ -131,9 +131,9 @@ async fn binary_safe_values() {
 
 #[compio::test]
 async fn set_nx_acts_as_lock() {
-    let fixture = crate::common::fixtures();
+    let fixture = crate::support::fixtures();
     let url = fixture.redis_url();
-    let mut c = crate::common::connect(&url).await;
+    let mut c = crate::support::connect(&url).await;
     c.del("zs:test:lock").await.ok();
 
     // First acquire: key doesn't exist, SET NX succeeds.
@@ -157,9 +157,9 @@ async fn set_nx_acts_as_lock() {
 
 #[compio::test]
 async fn exists_pexpire_pttl_lifecycle() {
-    let fixture = crate::common::fixtures();
+    let fixture = crate::support::fixtures();
     let url = fixture.redis_url();
-    let mut c = crate::common::connect(&url).await;
+    let mut c = crate::support::connect(&url).await;
     c.del("zs:test:life").await.ok();
 
     // Missing key: EXISTS=false, PTTL=-2.
@@ -183,9 +183,9 @@ async fn exists_pexpire_pttl_lifecycle() {
 
 #[compio::test]
 async fn decr_by_and_strlen() {
-    let fixture = crate::common::fixtures();
+    let fixture = crate::support::fixtures();
     let url = fixture.redis_url();
-    let mut c = crate::common::connect(&url).await;
+    let mut c = crate::support::connect(&url).await;
     c.del("zs:test:cnt").await.ok();
 
     // Seed via incr, then decrement.
@@ -203,9 +203,9 @@ async fn decr_by_and_strlen() {
 
 #[compio::test]
 async fn mget_mset_batch_roundtrip() {
-    let fixture = crate::common::fixtures();
+    let fixture = crate::support::fixtures();
     let url = fixture.redis_url();
-    let mut c = crate::common::connect(&url).await;
+    let mut c = crate::support::connect(&url).await;
 
     let keys = ["zs:test:m1", "zs:test:m2", "zs:test:m3"];
     for k in &keys {

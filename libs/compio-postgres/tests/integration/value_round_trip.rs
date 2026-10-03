@@ -15,8 +15,8 @@
 //! indistinguishable from the `-0.0` that was sent.
 
 #[allow(unused_imports)]
-use crate::common;
-use common::{suite_tls, test_url};
+use crate::support;
+use support::{suite_tls, test_url};
 use compio_postgres::Client;
 use compio_postgres::types::ToSql;
 

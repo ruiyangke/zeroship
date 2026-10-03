@@ -6,18 +6,21 @@ use std::sync::Once;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-#[allow(dead_code)]
-mod common;
+#[expect(
+    dead_code,
+    reason = "the shared support module carries helpers this process-isolated target does not use"
+)]
+mod support;
 
 fn test_url() -> String {
-    common::test_url()
+    support::test_url()
 }
 
 async fn connect(url: &str) -> Result<Client, Error> {
-    let (client, connection) = compio_postgres::connect(url, common::suite_tls()).await?;
+    let (client, connection) = compio_postgres::connect(url, support::suite_tls()).await?;
     compio::runtime::spawn(async move {
         if let Err(error) = connection.run().await {
-            eprintln!("connection error: {}", common::error_chain(&error));
+            eprintln!("connection error: {}", support::error_chain(&error));
         }
     })
     .detach();
@@ -126,13 +129,13 @@ fn arm_notice_panic() {
 #[compio::test]
 async fn dropping_an_unrun_connection_does_not_leave_the_backend_alive() {
     let url = test_url();
-    let (client, connection) = compio_postgres::connect(&url, common::suite_tls())
+    let (client, connection) = compio_postgres::connect(&url, support::suite_tls())
         .await
-        .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+        .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
     let pid = client.process_id();
     let observer = connect(&url)
         .await
-        .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+        .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
 
     drop(connection);
 
@@ -150,13 +153,13 @@ async fn dropping_an_unrun_connection_does_not_leave_the_backend_alive() {
 #[compio::test]
 async fn cancelling_the_run_future_does_not_leave_the_backend_alive() {
     let url = test_url();
-    let (client, connection) = compio_postgres::connect(&url, common::suite_tls())
+    let (client, connection) = compio_postgres::connect(&url, support::suite_tls())
         .await
-        .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+        .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
     let pid = client.process_id();
     let observer = connect(&url)
         .await
-        .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+        .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
 
     let timed_out = compio::time::timeout(Duration::from_millis(50), connection.run()).await;
     assert!(timed_out.is_err(), "an idle Connection::run returned before cancellation");
@@ -176,13 +179,13 @@ async fn cancelling_the_run_future_does_not_leave_the_backend_alive() {
 #[compio::test]
 async fn panicking_run_does_not_leave_the_backend_alive() {
     let url = test_url();
-    let (client, connection) = compio_postgres::connect(&url, common::suite_tls())
+    let (client, connection) = compio_postgres::connect(&url, support::suite_tls())
         .await
-        .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+        .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
     let pid = client.process_id();
     let observer = connect(&url)
         .await
-        .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+        .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
     let driver = compio::runtime::spawn(async move { connection.run().await });
 
     arm_notice_panic();
@@ -227,15 +230,15 @@ async fn panicking_run_does_not_leave_the_backend_alive() {
 async fn a_local_protocol_failure_does_not_leave_the_backend_alive() {
     let url = test_url();
     let (broken_client, broken_connection) =
-        compio_postgres::connect(&url, common::suite_tls())
+        compio_postgres::connect(&url, support::suite_tls())
             .await
-            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+            .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
     let broken_pid = broken_client.process_id();
     let driver = compio::runtime::spawn(async move { broken_connection.run().await });
 
     let observer = connect(&url)
         .await
-        .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+        .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
 
     // One DataRow larger than the 64 MiB framing ceiling makes the driver
     // reject locally while PostgreSQL is still trying to write that session.
@@ -253,9 +256,9 @@ async fn a_local_protocol_failure_does_not_leave_the_backend_alive() {
         .expect("connection task panicked")
         .expect_err("the local framing refusal was reported as a clean close");
     assert!(
-        common::error_chain(&driver_error).contains("message too large"),
+        support::error_chain(&driver_error).contains("message too large"),
         "the test missed the intended local refusal: {}",
-        common::error_chain(&driver_error),
+        support::error_chain(&driver_error),
     );
 
     assert_backend_dies_before_client_drop(

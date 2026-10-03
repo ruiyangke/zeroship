@@ -12,8 +12,8 @@
 //! AND the password does not appear anywhere in it.
 
 #[allow(unused_imports)]
-use crate::common;
-use common::test_url;
+use crate::support;
+use support::test_url;
 use compio_postgres::{Config, Error, NoTls};
 use std::time::Duration;
 
@@ -147,7 +147,7 @@ async fn a_missing_database_is_named() {
         "host={} port={} user={} dbname={} password={}",
         s.host, s.port, s.user, s.dbname, s.password
     );
-    let transport = common::test_transport(&probe_dsn, NoTls).await;
+    let transport = support::test_transport(&probe_dsn, NoTls).await;
 
     let chain = failure(format!(
         "host={} port={} user={} dbname=zz_no_such_database password={}",
@@ -157,8 +157,8 @@ async fn a_missing_database_is_named() {
 
     assert_says(&chain, "zz_no_such_database", "missing database");
     match transport {
-        common::TestTransport::Direct => assert_says(&chain, "does not exist", "missing database"),
-        common::TestTransport::TransactionPooler => assert_says(
+        support::TestTransport::Direct => assert_says(&chain, "does not exist", "missing database"),
+        support::TestTransport::TransactionPooler => assert_says(
             &chain,
             "no such database: zz_no_such_database",
             "missing database",

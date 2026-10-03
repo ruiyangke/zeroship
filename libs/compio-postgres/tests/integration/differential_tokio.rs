@@ -45,7 +45,7 @@
 //! tokio reactor is ever installed on a compio thread.
 
 #[allow(unused_imports)]
-use crate::common;
+use crate::support;
 
 /// What both drivers are asked to report for one statement.
 ///
@@ -120,7 +120,7 @@ fn tokio_outcomes(url: String, statements: Vec<String>) -> Vec<Outcome> {
         let outcomes = runtime.block_on(async move {
             let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
                 .await
-                .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+                .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
             let driver = tokio::spawn(async move {
                 let _ = connection.await;
             });
@@ -146,9 +146,9 @@ fn tokio_outcomes(url: String, statements: Vec<String>) -> Vec<Outcome> {
 }
 
 async fn compio_outcomes(url: &str, statements: &[String]) -> Vec<Outcome> {
-    let (client, connection) = compio_postgres::connect(url, common::suite_tls())
+    let (client, connection) = compio_postgres::connect(url, support::suite_tls())
         .await
-        .unwrap_or_else(|error| common::postgres_unreachable(url, &error));
+        .unwrap_or_else(|error| support::postgres_unreachable(url, &error));
     compio::runtime::spawn(async move {
         let _ = connection.run().await;
     })
@@ -170,9 +170,9 @@ async fn compio_outcomes(url: &str, statements: &[String]) -> Vec<Outcome> {
 /// Both drivers, the same statements, the same server, compared case by case.
 #[compio::test]
 async fn both_drivers_agree_on_command_tags_and_sqlstates() {
-    let url = common::test_url();
-    let ours_table = common::test_object_name("cpg_diff_ours");
-    let theirs_table = common::test_object_name("cpg_diff_theirs");
+    let url = support::test_url();
+    let ours_table = support::test_object_name("cpg_diff_ours");
+    let theirs_table = support::test_object_name("cpg_diff_theirs");
     let theirs_statements: Vec<String> = cases(&theirs_table)
         .into_iter()
         .map(|(sql, _)| sql)
@@ -182,7 +182,7 @@ async fn both_drivers_agree_on_command_tags_and_sqlstates() {
 
     // A transaction pooler can route both logical sessions through one
     // backend, so each driver needs its own process-scoped TEMPORARY table.
-    let theirs = tokio_outcomes(common::plaintext_url(), theirs_statements);
+    let theirs = tokio_outcomes(support::plaintext_url(), theirs_statements);
     let ours = compio_outcomes(&url, &statements).await;
 
     assert_eq!(
@@ -269,7 +269,7 @@ fn tokio_transaction_outcomes(url: String, sequences: Vec<Vec<&'static str>>) ->
         let outcomes = runtime.block_on(async move {
             let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
                 .await
-                .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+                .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
             let driver = tokio::spawn(async move {
                 let _ = connection.await;
             });
@@ -304,9 +304,9 @@ async fn compio_transaction_outcomes(
     url: &str,
     sequences: &[Vec<&'static str>],
 ) -> Vec<Vec<Outcome>> {
-    let (client, connection) = compio_postgres::connect(url, common::suite_tls())
+    let (client, connection) = compio_postgres::connect(url, support::suite_tls())
         .await
-        .unwrap_or_else(|error| common::postgres_unreachable(url, &error));
+        .unwrap_or_else(|error| support::postgres_unreachable(url, &error));
     compio::runtime::spawn(async move {
         let _ = connection.run().await;
     })
@@ -338,7 +338,7 @@ async fn compio_transaction_outcomes(
 /// sequential raw-SQL surface.
 #[compio::test]
 async fn both_drivers_agree_on_transaction_recovery() {
-    let url = common::test_url();
+    let url = support::test_url();
     let sequences = transaction_sequences();
     let statements: Vec<Vec<&'static str>> = sequences
         .iter()
@@ -346,7 +346,7 @@ async fn both_drivers_agree_on_transaction_recovery() {
         .collect();
 
     // Each driver runs every sequence, in order, on one independent session.
-    let theirs = tokio_transaction_outcomes(common::plaintext_url(), statements.clone());
+    let theirs = tokio_transaction_outcomes(support::plaintext_url(), statements.clone());
     let ours = compio_transaction_outcomes(&url, &statements).await;
 
     assert_eq!(
@@ -568,7 +568,7 @@ fn tokio_fields(url: String, fixture: String, statements: Vec<String>) -> Vec<Op
                 runtime.block_on(async move {
                     let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
                         .await
-                        .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+                        .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
                     let driver = tokio::spawn(async move {
                         let _ = connection.await;
                     });
@@ -609,9 +609,9 @@ fn tokio_fields(url: String, fixture: String, statements: Vec<String>) -> Vec<Op
 }
 
 async fn compio_fields(url: &str, fixture: &str, statements: &[String]) -> Vec<Option<Fields>> {
-    let (client, connection) = compio_postgres::connect(url, common::suite_tls())
+    let (client, connection) = compio_postgres::connect(url, support::suite_tls())
         .await
-        .unwrap_or_else(|error| common::postgres_unreachable(url, &error));
+        .unwrap_or_else(|error| support::postgres_unreachable(url, &error));
     compio::runtime::spawn(async move {
         let _ = connection.run().await;
     })
@@ -653,11 +653,11 @@ async fn compio_fields(url: &str, fixture: &str, statements: &[String]) -> Vec<O
 /// field.
 #[compio::test]
 async fn both_drivers_agree_on_every_error_field() {
-    let url = common::test_url();
-    let ours_table = common::test_object_name("cpg_diff_err_ours");
-    let ours_constraint = common::test_object_name("cpg_diff_uq_ours");
-    let theirs_table = common::test_object_name("cpg_diff_err_theirs");
-    let theirs_constraint = common::test_object_name("cpg_diff_uq_theirs");
+    let url = support::test_url();
+    let ours_table = support::test_object_name("cpg_diff_err_ours");
+    let ours_constraint = support::test_object_name("cpg_diff_uq_ours");
+    let theirs_table = support::test_object_name("cpg_diff_err_theirs");
+    let theirs_constraint = support::test_object_name("cpg_diff_uq_theirs");
     let theirs_statements: Vec<String> = error_cases(&theirs_table)
         .into_iter()
         .map(|(sql, _)| sql)
@@ -668,7 +668,7 @@ async fn both_drivers_agree_on_every_error_field() {
     let ours_fixture = error_fixture(&ours_table, &ours_constraint);
 
     let theirs = normalise_fixture_fields(
-        tokio_fields(common::plaintext_url(), theirs_fixture, theirs_statements),
+        tokio_fields(support::plaintext_url(), theirs_fixture, theirs_statements),
         &theirs_table,
         &theirs_constraint,
     );
@@ -742,7 +742,7 @@ fn tokio_notices(url: String) -> Vec<Notice> {
         let collected = runtime.block_on(async move {
             let (client, mut connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
                 .await
-                .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+                .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
 
             // The connection must be POLLED for async messages to surface, so
             // it cannot simply be spawned and forgotten as elsewhere in this
@@ -783,9 +783,9 @@ fn tokio_notices(url: String) -> Vec<Notice> {
 async fn compio_notices(url: &str) -> Vec<Notice> {
     use futures_util::StreamExt;
 
-    let (client, mut connection) = compio_postgres::connect(url, common::suite_tls())
+    let (client, mut connection) = compio_postgres::connect(url, support::suite_tls())
         .await
-        .unwrap_or_else(|error| common::postgres_unreachable(url, &error));
+        .unwrap_or_else(|error| support::postgres_unreachable(url, &error));
     let mut messages = connection.notifications();
     compio::runtime::spawn(async move {
         let _ = connection.run().await;
@@ -819,8 +819,8 @@ async fn compio_notices(url: &str) -> Vec<Notice> {
 /// The parsed result must still agree.
 #[compio::test]
 async fn both_drivers_agree_on_a_raised_notice() {
-    let url = common::test_url();
-    let theirs = tokio_notices(common::plaintext_url());
+    let url = support::test_url();
+    let theirs = tokio_notices(support::plaintext_url());
     let ours = compio_notices(&url).await;
 
     assert_eq!(
@@ -950,7 +950,7 @@ fn tokio_notifications(
                     let (listener, mut listener_connection) =
                         tokio_postgres::connect(&url, tokio_postgres::NoTls)
                             .await
-                            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+                            .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
                     let (message_sender, mut message_receiver) = futures_channel::mpsc::unbounded();
 
                     // `Connection` is not a Stream, but `poll_message` is its
@@ -981,7 +981,7 @@ fn tokio_notifications(
                     let (notifier, notifier_connection) =
                         tokio_postgres::connect(&url, tokio_postgres::NoTls)
                             .await
-                            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+                            .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
                     let notifier_driver = tokio::spawn(async move {
                         let _ = notifier_connection.await;
                     });
@@ -1068,9 +1068,9 @@ async fn compio_notifications(
 
     compio::time::timeout(NOTIFICATION_SCENARIO_TIMEOUT, async {
         let (listener, mut listener_connection) =
-            compio_postgres::connect(url, common::suite_tls())
+            compio_postgres::connect(url, support::suite_tls())
                 .await
-                .unwrap_or_else(|error| common::postgres_unreachable(url, &error));
+                .unwrap_or_else(|error| support::postgres_unreachable(url, &error));
         let mut messages = listener_connection.notifications();
         compio::runtime::spawn(async move {
             let _ = listener_connection.run().await;
@@ -1087,9 +1087,9 @@ async fn compio_notifications(
             .expect("listener pid")
             .get::<_, i32>(0);
 
-        let (notifier, notifier_connection) = compio_postgres::connect(url, common::suite_tls())
+        let (notifier, notifier_connection) = compio_postgres::connect(url, support::suite_tls())
             .await
-            .unwrap_or_else(|error| common::postgres_unreachable(url, &error));
+            .unwrap_or_else(|error| support::postgres_unreachable(url, &error));
         compio::runtime::spawn(async move {
             let _ = notifier_connection.run().await;
         })
@@ -1160,16 +1160,16 @@ async fn compio_notifications(
 /// outside this sequential surface.
 #[compio::test]
 async fn both_drivers_agree_on_listen_notify_routing() {
-    let url = common::test_url();
+    let url = support::test_url();
     // Channels are database-global rather than schema-scoped. Process-unique
     // names keep concurrent differential binaries from cross-delivering and
     // corrupting both the order and the unlistened-channel assertion.
-    let listened_channel = common::test_object_name("cpg_diff_notify");
-    let unlistened_channel = common::test_object_name("cpg_diff_notify_ignored");
+    let listened_channel = support::test_object_name("cpg_diff_notify");
+    let unlistened_channel = support::test_object_name("cpg_diff_notify_ignored");
     let expected = expected_notifications(&listened_channel);
 
     let theirs = tokio_notifications(
-        common::plaintext_url(),
+        support::plaintext_url(),
         listened_channel.clone(),
         unlistened_channel.clone(),
     );
@@ -1252,7 +1252,7 @@ fn tokio_described(url: String, statements: Vec<String>) -> Vec<Described> {
         let collected = runtime.block_on(async move {
             let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
                 .await
-                .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+                .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
             let driver = tokio::spawn(async move {
                 let _ = connection.await;
             });
@@ -1293,12 +1293,12 @@ fn tokio_described(url: String, statements: Vec<String>) -> Vec<Described> {
 /// Both drivers parse Describe themselves, so the metadata must match.
 #[compio::test]
 async fn both_drivers_agree_on_prepared_statement_metadata() {
-    let url = common::test_url();
-    let table = common::test_object_name("cpg describe");
+    let url = support::test_url();
+    let table = support::test_object_name("cpg describe");
 
-    let (client, connection) = compio_postgres::connect(&url, common::suite_tls())
+    let (client, connection) = compio_postgres::connect(&url, support::suite_tls())
         .await
-        .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+        .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
     compio::runtime::spawn(async move {
         let _ = connection.run().await;
     })
@@ -1324,7 +1324,7 @@ async fn both_drivers_agree_on_prepared_statement_metadata() {
     let cases = describe_cases(&table);
     let statements: Vec<String> = cases.iter().map(|(sql, _)| sql.clone()).collect();
 
-    let theirs = tokio_described(common::plaintext_url(), statements.clone());
+    let theirs = tokio_described(support::plaintext_url(), statements.clone());
 
     let mut ours = Vec::new();
     for statement in &statements {
@@ -1405,7 +1405,7 @@ fn tokio_copy_out(url: String, sql: String) -> Vec<u8> {
         let bytes = runtime.block_on(async move {
             let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
                 .await
-                .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+                .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
             let driver = tokio::spawn(async move {
                 let _ = connection.await;
             });
@@ -1431,12 +1431,12 @@ fn tokio_copy_out(url: String, sql: String) -> Vec<u8> {
 async fn both_drivers_agree_on_copy_out_bytes() {
     use futures_util::TryStreamExt;
 
-    let url = common::test_url();
-    let table = common::test_object_name("cpg copyout");
+    let url = support::test_url();
+    let table = support::test_object_name("cpg copyout");
 
-    let (client, connection) = compio_postgres::connect(&url, common::suite_tls())
+    let (client, connection) = compio_postgres::connect(&url, support::suite_tls())
         .await
-        .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+        .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
     compio::runtime::spawn(async move {
         let _ = connection.run().await;
     })
@@ -1456,7 +1456,7 @@ async fn both_drivers_agree_on_copy_out_bytes() {
         .expect("copy fixture");
 
     let sql = copy_out_sql(&table);
-    let theirs = tokio_copy_out(common::plaintext_url(), sql.clone());
+    let theirs = tokio_copy_out(support::plaintext_url(), sql.clone());
 
     let stream = client.copy_out(&sql).await.expect("copy_out");
     let ours: Vec<u8> = {
@@ -1526,7 +1526,7 @@ fn tokio_copy_in(url: String, table: String, body: String) -> u64 {
         let written = runtime.block_on(async move {
             let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
                 .await
-                .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+                .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
             let driver = tokio::spawn(async move {
                 let _ = connection.await;
             });
@@ -1559,14 +1559,14 @@ fn tokio_copy_in(url: String, table: String, body: String) -> u64 {
 async fn both_drivers_agree_on_copy_in_results() {
     use futures_util::SinkExt;
 
-    let url = common::test_url();
-    let base = common::test_object_name("cpg copyin");
+    let url = support::test_url();
+    let base = support::test_object_name("cpg copyin");
     let ours_table = format!("{base}_ours");
     let theirs_table = format!("{base}_theirs");
 
-    let (client, connection) = compio_postgres::connect(&url, common::suite_tls())
+    let (client, connection) = compio_postgres::connect(&url, support::suite_tls())
         .await
-        .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+        .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
     compio::runtime::spawn(async move {
         let _ = connection.run().await;
     })
@@ -1586,7 +1586,7 @@ async fn both_drivers_agree_on_copy_in_results() {
     }
 
     let body = copy_in_body();
-    let theirs_count = tokio_copy_in(common::plaintext_url(), theirs_table.clone(), body.clone());
+    let theirs_count = tokio_copy_in(support::plaintext_url(), theirs_table.clone(), body.clone());
 
     let sink = client
         .copy_in::<_, bytes::Bytes>(&format!("COPY {ours_table} FROM STDIN"))
@@ -1687,7 +1687,7 @@ fn tokio_paging(url: String, page: i32) -> Paging {
         let paging = runtime.block_on(async move {
             let (mut client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
                 .await
-                .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+                .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
             let driver = tokio::spawn(async move {
                 let _ = connection.await;
             });
@@ -1727,11 +1727,11 @@ fn tokio_paging(url: String, page: i32) -> Paging {
 /// CommandComplete. Both must page identically.
 #[compio::test]
 async fn both_drivers_agree_on_portal_paging() {
-    let url = common::test_url();
+    let url = support::test_url();
 
-    let (mut client, connection) = compio_postgres::connect(&url, common::suite_tls())
+    let (mut client, connection) = compio_postgres::connect(&url, support::suite_tls())
         .await
-        .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+        .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
     compio::runtime::spawn(async move {
         let _ = connection.run().await;
     })
@@ -1739,7 +1739,7 @@ async fn both_drivers_agree_on_portal_paging() {
 
     let mut divergences = Vec::new();
     for page in PAGE_SIZES {
-        let theirs = tokio_paging(common::plaintext_url(), page);
+        let theirs = tokio_paging(support::plaintext_url(), page);
 
         let transaction = client.transaction().await.expect("transaction");
         let statement = transaction.prepare(&portal_sql()).await.expect("prepare");
@@ -1804,7 +1804,7 @@ fn tokio_binary_roundtrip(url: String, table: String) -> (u64, Vec<(i32, String,
 
             let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
                 .await
-                .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+                .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
             let driver = tokio::spawn(async move {
                 let _ = connection.await;
             });
@@ -1871,14 +1871,14 @@ fn tokio_binary_roundtrip(url: String, table: String) -> (u64, Vec<(i32, String,
 async fn both_drivers_agree_on_binary_copy_roundtrip() {
     use futures_util::TryStreamExt;
 
-    let url = common::test_url();
-    let base = common::test_object_name("cpg bincopy");
+    let url = support::test_url();
+    let base = support::test_object_name("cpg bincopy");
     let ours_table = format!("{base}_ours");
     let theirs_table = format!("{base}_theirs");
 
-    let (client, connection) = compio_postgres::connect(&url, common::suite_tls())
+    let (client, connection) = compio_postgres::connect(&url, support::suite_tls())
         .await
-        .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+        .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
     compio::runtime::spawn(async move {
         let _ = connection.run().await;
     })
@@ -1894,7 +1894,7 @@ async fn both_drivers_agree_on_binary_copy_roundtrip() {
             .expect("binary copy fixture");
     }
 
-    let theirs = tokio_binary_roundtrip(common::plaintext_url(), theirs_table.clone());
+    let theirs = tokio_binary_roundtrip(support::plaintext_url(), theirs_table.clone());
 
     let types = [
         compio_postgres::types::Type::INT4,
@@ -2068,7 +2068,7 @@ fn tokio_simple_queries(url: String, scripts: Vec<String>) -> Vec<Vec<Flattened>
         let collected = runtime.block_on(async move {
             let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
                 .await
-                .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+                .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
             let driver = tokio::spawn(async move {
                 let _ = connection.await;
             });
@@ -2095,9 +2095,9 @@ fn tokio_simple_queries(url: String, scripts: Vec<String>) -> Vec<Vec<Flattened>
 /// themselves, so the flattened shape must agree.
 #[compio::test]
 async fn both_drivers_agree_on_simple_query_shapes() {
-    let url = common::test_url();
-    let ours_table = common::test_object_name("cpg_simple_ours");
-    let theirs_table = common::test_object_name("cpg_simple_theirs");
+    let url = support::test_url();
+    let ours_table = support::test_object_name("cpg_simple_ours");
+    let theirs_table = support::test_object_name("cpg_simple_theirs");
     let theirs_sql: Vec<String> = simple_query_scripts(&theirs_table)
         .into_iter()
         .map(|(script, _)| script)
@@ -2105,11 +2105,11 @@ async fn both_drivers_agree_on_simple_query_shapes() {
     let scripts = simple_query_scripts(&ours_table);
     let sql: Vec<String> = scripts.iter().map(|(script, _)| script.clone()).collect();
 
-    let theirs = tokio_simple_queries(common::plaintext_url(), theirs_sql);
+    let theirs = tokio_simple_queries(support::plaintext_url(), theirs_sql);
 
-    let (client, connection) = compio_postgres::connect(&url, common::suite_tls())
+    let (client, connection) = compio_postgres::connect(&url, support::suite_tls())
         .await
-        .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+        .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
     compio::runtime::spawn(async move {
         let _ = connection.run().await;
     })
@@ -2193,7 +2193,7 @@ fn tokio_explicit_prepare(url: String, table: String) -> Vec<Outcome> {
         let outcomes = runtime.block_on(async move {
             let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
                 .await
-                .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+                .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
             let driver = tokio::spawn(async move {
                 let _ = connection.await;
             });
@@ -2233,9 +2233,9 @@ fn tokio_explicit_prepare(url: String, table: String) -> Vec<Outcome> {
 
 /// This crate doing the same with an explicit prepared statement.
 async fn compio_explicit_prepare(url: &str, table: &str) -> Vec<Outcome> {
-    let (client, connection) = compio_postgres::connect(url, common::suite_tls())
+    let (client, connection) = compio_postgres::connect(url, support::suite_tls())
         .await
-        .unwrap_or_else(|error| common::postgres_unreachable(url, &error));
+        .unwrap_or_else(|error| support::postgres_unreachable(url, &error));
     compio::runtime::spawn(async move {
         let _ = connection.run().await;
     })
@@ -2281,7 +2281,7 @@ async fn compio_explicit_prepare(url: &str, table: &str) -> Vec<Outcome> {
 /// `the_implicit_cache_retries_a_stale_plan_outside_a_transaction`.
 #[compio::test]
 async fn both_drivers_refuse_a_stale_explicit_prepared_statement() {
-    let url = common::test_url();
+    let url = support::test_url();
     let expected = vec![
         Outcome::Rows(1),
         Outcome::SqlState("0A000".to_owned()),
@@ -2289,10 +2289,10 @@ async fn both_drivers_refuse_a_stale_explicit_prepared_statement() {
     ];
 
     let theirs = tokio_explicit_prepare(
-        common::plaintext_url(),
-        common::test_object_name("cpg_plan_theirs"),
+        support::plaintext_url(),
+        support::test_object_name("cpg_plan_theirs"),
     );
-    let ours = compio_explicit_prepare(&url, &common::test_object_name("cpg_plan_ours")).await;
+    let ours = compio_explicit_prepare(&url, &support::test_object_name("cpg_plan_ours")).await;
 
     assert_eq!(
         ours, theirs,
@@ -2331,15 +2331,15 @@ async fn both_drivers_refuse_a_stale_explicit_prepared_statement() {
 /// `26000` as the case where it could, and that is not exercised.
 #[compio::test]
 async fn the_implicit_cache_retries_a_stale_plan_outside_a_transaction() {
-    let url = common::test_url();
+    let url = support::test_url();
 
     assert_eq!(
-        compio_implicit_cache(&url, &common::test_object_name("cpg_cache_on"), 16, false).await,
+        compio_implicit_cache(&url, &support::test_object_name("cpg_cache_on"), 16, false).await,
         vec![Outcome::Rows(1), Outcome::Rows(1), Outcome::Rows(1)],
         "the stale cached plan was not retried"
     );
     assert_eq!(
-        compio_implicit_cache(&url, &common::test_object_name("cpg_cache_txn"), 16, true).await,
+        compio_implicit_cache(&url, &support::test_object_name("cpg_cache_txn"), 16, true).await,
         vec![
             Outcome::Rows(1),
             Outcome::Rows(1),
@@ -2348,7 +2348,7 @@ async fn the_implicit_cache_retries_a_stale_plan_outside_a_transaction() {
         "a stale plan inside a transaction must propagate rather than retry"
     );
     assert_eq!(
-        compio_implicit_cache(&url, &common::test_object_name("cpg_cache_off"), 0, true).await,
+        compio_implicit_cache(&url, &support::test_object_name("cpg_cache_off"), 0, true).await,
         vec![Outcome::Rows(1), Outcome::Rows(1), Outcome::Rows(1)],
         "the default configuration cached a statement it was never asked to cache"
     );
@@ -2365,9 +2365,9 @@ async fn compio_implicit_cache(
     let mut config: compio_postgres::Config = url.parse().expect("parse the test DSN");
     config.statement_cache_capacity(capacity);
     let (client, connection) = config
-        .connect(common::suite_tls())
+        .connect(support::suite_tls())
         .await
-        .unwrap_or_else(|error| common::postgres_unreachable(url, &error));
+        .unwrap_or_else(|error| support::postgres_unreachable(url, &error));
     compio::runtime::spawn(async move {
         let _ = connection.run().await;
     })
@@ -2423,7 +2423,7 @@ fn tokio_producerless_copy(url: String, table: String) -> CopyOutcome {
         let outcome = runtime.block_on(async move {
             let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
                 .await
-                .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+                .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
             let driver = tokio::spawn(async move {
                 let _ = connection.await;
             });
@@ -2465,9 +2465,9 @@ fn tokio_producerless_copy(url: String, table: String) -> CopyOutcome {
 }
 
 async fn compio_producerless_copy(url: &str, table: &str) -> CopyOutcome {
-    let (client, connection) = compio_postgres::connect(url, common::suite_tls())
+    let (client, connection) = compio_postgres::connect(url, support::suite_tls())
         .await
-        .unwrap_or_else(|error| common::postgres_unreachable(url, &error));
+        .unwrap_or_else(|error| support::postgres_unreachable(url, &error));
     compio::runtime::spawn(async move {
         let _ = connection.run().await;
     })
@@ -2529,7 +2529,7 @@ async fn compio_producerless_copy(url: &str, table: &str) -> CopyOutcome {
 /// server's SQLSTATE through that path, so there is nothing to compare.
 #[compio::test]
 async fn a_copy_without_a_producer_costs_tokio_the_connection_and_not_this_one() {
-    let url = common::test_url();
+    let url = support::test_url();
 
     // A WATCHDOG, because the failure this pins is a HANG and not an error.
     // MEASURED 2026-08-24: routing the producerless COPY the way upstream does
@@ -2538,13 +2538,13 @@ async fn a_copy_without_a_producer_costs_tokio_the_connection_and_not_this_one()
     // server.
     let ours = compio::time::timeout(
         std::time::Duration::from_secs(20),
-        compio_producerless_copy(&url, &common::test_object_name("cpg_copyfail_ours")),
+        compio_producerless_copy(&url, &support::test_object_name("cpg_copyfail_ours")),
     )
     .await
     .expect("the producerless COPY never returned; the session is wedged in copy mode");
     let theirs = tokio_producerless_copy(
-        common::plaintext_url(),
-        common::test_object_name("cpg_copyfail_theirs"),
+        support::plaintext_url(),
+        support::test_object_name("cpg_copyfail_theirs"),
     );
 
     assert_eq!(
@@ -2578,11 +2578,11 @@ async fn a_copy_without_a_producer_costs_tokio_the_connection_and_not_this_one()
 /// different about failed copies, only about the one case upstream abandons.
 #[compio::test]
 async fn both_drivers_survive_a_copy_out_whose_query_fails() {
-    let url = common::test_url();
+    let url = support::test_url();
 
-    let (client, connection) = compio_postgres::connect(&url, common::suite_tls())
+    let (client, connection) = compio_postgres::connect(&url, support::suite_tls())
         .await
-        .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+        .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
     compio::runtime::spawn(async move {
         let _ = connection.run().await;
     })
@@ -2596,7 +2596,7 @@ async fn both_drivers_survive_a_copy_out_whose_query_fails() {
         failed.code().map(|code| code.code()),
         Some("22012"),
         "the division by zero lost its SQLSTATE: {}",
-        common::error_chain(&failed)
+        support::error_chain(&failed)
     );
     assert!(
         client

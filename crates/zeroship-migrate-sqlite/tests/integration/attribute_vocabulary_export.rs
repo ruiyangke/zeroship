@@ -17,7 +17,7 @@
 //!
 //! # Regenerating
 //!
-//! `cargo test -p zeroship-migrate-sqlite --test integration -- --ignored
+//! `cargo test -p zeroship-migrate-sqlite --test main -- --ignored
 //! update_attribute_vocabulary` rewrites the file; commit it, then re-run the package's
 //! generator. A default run ASSERTS the on-disk file matches, so adding a knob without
 //! regenerating fails rather than shipping a TypeScript surface that silently lacks it.
@@ -58,7 +58,7 @@ fn emit_attribute_vocabulary() {
     let on_disk = std::fs::read_to_string(&path).unwrap_or_else(|e| {
         panic!(
             "attribute-vocabulary.json missing or unreadable at {}: {e}. Run \
-             `cargo test -p zeroship-migrate-sqlite --test integration \
+             `cargo test -p zeroship-migrate-sqlite --test main \
              -- --ignored update_attribute_vocabulary` to generate it.",
             path.display()
         )
@@ -66,7 +66,7 @@ fn emit_attribute_vocabulary() {
     assert_eq!(
         on_disk, generated,
         "attribute-vocabulary.json is stale. Regenerate with `cargo test -p \
-         zeroship-migrate-sqlite --test integration -- --ignored \
+         zeroship-migrate-sqlite --test main -- --ignored \
          update_attribute_vocabulary` and commit it, then re-run the TypeScript generator."
     );
 }
@@ -79,7 +79,7 @@ fn emit_attribute_vocabulary() {
 /// command, with no environment read in either.
 #[test]
 #[ignore = "regenerates attribute-vocabulary.json; run explicitly with \
-            `cargo test -p zeroship-migrate-sqlite --test integration \
+            `cargo test -p zeroship-migrate-sqlite --test main \
             -- --ignored update_attribute_vocabulary`, then commit the file"]
 fn update_attribute_vocabulary() {
     let path = artifact_path();

@@ -313,7 +313,7 @@ fn sample_ts_authors_ir_version_1_envelope_in_v8() {
 /// over the compio seam to an owned `PostgreSQL` server.
 #[compio::test]
 async fn authored_v1_envelope_lowers_and_applies_over_native_compio_seam() {
-    let postgres = crate::fixture::Postgres::start();
+    let postgres = crate::support::fixture::Postgres::start();
     let url = postgres.url();
 
     // (1) AUTHOR the envelope in zeroship-runtime's V8 (the whole point of Stage 2).

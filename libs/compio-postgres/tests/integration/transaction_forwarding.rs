@@ -30,12 +30,12 @@ use futures_util::TryStreamExt;
 use std::time::Duration;
 
 #[allow(unused_imports)]
-use crate::common;
+use crate::support;
 
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(20);
 
 fn test_url() -> String {
-    common::test_url()
+    support::test_url()
 }
 
 /// Cancellation needs a TCP session it can reconnect to, matching
@@ -47,12 +47,12 @@ fn plaintext_url() -> String {
 }
 
 async fn connect_client(url: &str) -> Client {
-    let (client, connection) = compio_postgres::connect(url, common::suite_tls())
+    let (client, connection) = compio_postgres::connect(url, support::suite_tls())
         .await
         .expect("connect to PostgreSQL");
     compio::runtime::spawn(async move {
         if let Err(error) = connection.run().await {
-            eprintln!("connection error: {}", common::error_chain(&error));
+            eprintln!("connection error: {}", support::error_chain(&error));
         }
     })
     .detach();
@@ -72,7 +72,7 @@ async fn row_count(client: &Client, table: &str) -> i64 {
 async fn execute_typed_inside_a_transaction_is_rolled_back_with_it() {
     let url = test_url();
     let mut client = connect_client(&url).await;
-    let table = common::test_object_name("cpg_txn_exec_typed");
+    let table = support::test_object_name("cpg_txn_exec_typed");
     client
         .batch_execute(&format!("CREATE TEMPORARY TABLE {table} (v int)"))
         .await
@@ -123,7 +123,7 @@ async fn execute_typed_inside_a_transaction_is_rolled_back_with_it() {
 async fn copy_out_inside_a_transaction_sees_that_transactions_uncommitted_rows() {
     let url = test_url();
     let mut client = connect_client(&url).await;
-    let table = common::test_object_name("cpg_txn_copy_out");
+    let table = support::test_object_name("cpg_txn_copy_out");
     client
         .batch_execute(&format!("CREATE TEMPORARY TABLE {table} (v int)"))
         .await
@@ -222,7 +222,7 @@ async fn a_transactions_cancel_token_cancels_that_transactions_query() {
     let cancel_task = compio::runtime::spawn(async move {
         wait_until_pg_sleep_is_running(&observer, pid, MARKER).await;
         token
-            .cancel_query(common::suite_tls())
+            .cancel_query(support::suite_tls())
             .await
             .expect("send the CancelRequest");
     });
@@ -242,6 +242,6 @@ async fn a_transactions_cancel_token_cancels_that_transactions_query() {
         error.code().map(SqlState::code),
         Some("57014"),
         "expected 57014 query_canceled, got {}",
-        common::error_chain(&error)
+        support::error_chain(&error)
     );
 }

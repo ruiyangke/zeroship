@@ -12,9 +12,9 @@
 //! the connection is still usable afterwards. These tests hold that.
 
 #[allow(unused_imports)]
-use crate::common;
+use crate::support;
 use bytes::Bytes;
-use common::{suite_tls, test_object_name, test_url};
+use support::{suite_tls, test_object_name, test_url};
 use compio_postgres::CopyFormat;
 use compio_postgres::{Client, CopyInSink, Error};
 use futures_util::{Sink, SinkExt};
@@ -118,7 +118,7 @@ async fn a_post_copy_in_response_error_does_not_leave_a_second_ready_for_query()
         error.code().map(|code| code.code()),
         Some("P0001"),
         "COPY IN lost the post-G server error: {}",
-        common::error_chain(&error)
+        support::error_chain(&error)
     );
 
     assert_still_usable(&client, "a post-G COPY error").await;
@@ -131,7 +131,7 @@ async fn terminated_copy() -> (Client, Client, i32, Pin<Box<CopyInSink<Bytes>>>)
         .query_one_scalar("SELECT pg_backend_pid()", &[])
         .await
         .expect("read the COPY backend PID");
-    let table = common::test_object_name("cpg_copy_producer_diagnosis");
+    let table = support::test_object_name("cpg_copy_producer_diagnosis");
     victim
         .batch_execute(&format!("CREATE TEMPORARY TABLE {table} (v int)"))
         .await
@@ -169,7 +169,7 @@ fn assert_copy_rejection(error: &Error, operation: &str) {
         error.code().map(|code| code.code()),
         Some("57P01"),
         "{operation} discarded SQLSTATE 57P01: {}",
-        common::error_chain(error),
+        support::error_chain(error),
     );
     assert!(
         !error.is_closed(),
@@ -358,7 +358,7 @@ async fn a_finished_copy_sink_does_not_report_connection_closed() {
     assert!(
         !error.is_closed(),
         "finished COPY sink state was misreported as connection closed: {}",
-        common::error_chain(&error),
+        support::error_chain(&error),
     );
     assert_eq!(error.to_string(), "COPY IN sink is already finished");
 
@@ -438,7 +438,7 @@ async fn copy_in_waits_for_sync_before_reporting_success() {
         error.code().map(|code| code.code()),
         Some("23503"),
         "the Sync failure lost its SQLSTATE: {}",
-        common::error_chain(&error),
+        support::error_chain(&error),
     );
 
     let stored: i64 = client

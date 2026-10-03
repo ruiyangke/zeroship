@@ -10,10 +10,10 @@ use std::rc::Rc;
 use std::time::Duration;
 
 #[allow(unused_imports)]
-use crate::common;
+use crate::support;
 
 fn test_url() -> String {
-    common::test_url()
+    support::test_url()
 }
 
 /// Warm-up's budget covers its `after_connect` hooks, and expiry closes every
@@ -171,7 +171,7 @@ fn config(max_size: usize, min_idle: usize) -> PoolConfig {
 async fn connect_pool(url: &str, config: PoolConfig) -> Pool {
     Pool::connect_with_pool_config(url, config)
         .await
-        .unwrap_or_else(|error| common::postgres_unreachable(url, &error))
+        .unwrap_or_else(|error| support::postgres_unreachable(url, &error))
 }
 
 fn read_startup(stream: &mut std::net::TcpStream) {
@@ -680,7 +680,7 @@ async fn warm_up_refuses_a_connection_after_connect_left_ineligible() {
     let error = Pool::connect_with_pool_config(&url, config)
         .await
         .expect_err("an expired-on-arrival connection must not seed the pool");
-    let cause = common::error_chain(&error);
+    let cause = support::error_chain(&error);
     assert!(
         cause.contains("warm-up after_connect left connection"),
         "the refusal must name the unusable warm-up connection, got: {cause}"
@@ -957,13 +957,13 @@ async fn a_validation_error_discards_an_otherwise_live_session() {
             let pool = Pool::connect_with_config(connection_config, pool_config)
                 .await
                 .map_err(|error| {
-                    format!("construct scripted pool: {}", common::error_chain(&error))
+                    format!("construct scripted pool: {}", support::error_chain(&error))
                 })?;
 
             let first = Box::pin(pool.acquire()).await.map_err(|error| {
                 format!(
                     "successful-validation control failed: {}",
-                    common::error_chain(&error)
+                    support::error_chain(&error)
                 )
             })?;
             let after_success = (
@@ -976,7 +976,7 @@ async fn a_validation_error_discards_an_otherwise_live_session() {
             let second = Box::pin(pool.acquire()).await.map_err(|error| {
                 format!(
                     "checkout after validation refusal failed: {}",
-                    common::error_chain(&error)
+                    support::error_chain(&error)
                 )
             })?;
             let after_refusal = (
@@ -1438,7 +1438,7 @@ async fn the_session_attrs_probe_runs_before_after_connect() {
     // pool-construction error all produce an error AND a hook that never ran.
     // The test would then assert an ordering while its evidence was "nothing
     // happened".
-    let cause = common::error_chain(
+    let cause = support::error_chain(
         &outcome.expect_err("a writable server satisfied target_session_attrs=read-only"),
     );
     assert!(

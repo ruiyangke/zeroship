@@ -3,7 +3,7 @@
 # do not survive transaction pooling, so these failures are the contract,
 # not a regression.
 #
-# features: tls,live-tls-tests,live-unix-socket   target: --test integration
+# features: tls,live-tls-tests,live-unix-socket   target: --test main
 #
 # Two flapper entries, and both are UNLISTED so a run with or without them
 # still matches this file:

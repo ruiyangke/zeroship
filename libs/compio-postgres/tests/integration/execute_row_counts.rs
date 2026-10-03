@@ -22,14 +22,14 @@ use compio_postgres::types::{ToSql, Type};
 use std::time::Duration;
 
 #[allow(unused_imports)]
-use crate::common;
+use crate::support;
 
 fn test_url() -> String {
-    common::test_url()
+    support::test_url()
 }
 
 async fn connect_client(url: &str) -> Client {
-    let (client, connection) = compio_postgres::connect(url, common::suite_tls())
+    let (client, connection) = compio_postgres::connect(url, support::suite_tls())
         .await
         .expect("connect to PostgreSQL");
     compio::runtime::spawn(async move {
@@ -46,7 +46,7 @@ async fn connect_client(url: &str) -> Client {
 async fn execute_reports_the_count_from_each_command_tag_shape() {
     let url = test_url();
     let client = connect_client(&url).await;
-    let table = common::test_object_name("cpg_rowcount");
+    let table = support::test_object_name("cpg_rowcount");
 
     // DDL: the tag is `CREATE TABLE`, whose last token does not parse. Zero is
     // the answer, and reaching it must not be an error.
@@ -128,7 +128,7 @@ async fn execute_reports_the_count_from_each_command_tag_shape() {
 async fn the_count_is_rows_affected_not_parameters_supplied() {
     let url = test_url();
     let client = connect_client(&url).await;
-    let table = common::test_object_name("cpg_rowcount_params");
+    let table = support::test_object_name("cpg_rowcount_params");
 
     client
         .batch_execute(&format!(

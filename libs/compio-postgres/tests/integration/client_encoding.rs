@@ -34,12 +34,12 @@ use compio_postgres::{Client, Error};
 use std::time::Duration;
 
 #[allow(unused_imports)]
-use crate::common;
+use crate::support;
 
 const WATCHDOG: Duration = Duration::from_secs(30);
 
 fn test_url() -> String {
-    common::test_url()
+    support::test_url()
 }
 
 /// Keeps the driver's join handle, because the cause of a retirement is its
@@ -48,9 +48,9 @@ async fn connect_keeping_driver() -> (Client, JoinHandle<Result<(), Error>>) {
     let url = test_url();
     // No type annotation: the transport is chosen by `suite_tls`, and naming
     // one here would pin the file to plaintext.
-    let (client, connection) = compio_postgres::connect(&url, common::suite_tls())
+    let (client, connection) = compio_postgres::connect(&url, support::suite_tls())
         .await
-        .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+        .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
     let driver = compio::runtime::spawn(async move { connection.run().await });
     (client, driver)
 }
@@ -84,7 +84,7 @@ async fn a_non_utf8_session_encoding_retires_the_connection() {
         drop(client);
         let outcome = driver.await.expect("the driver task panicked");
         let error = outcome.expect_err("the driver must report why it retired");
-        let chain = common::error_chain(&error);
+        let chain = support::error_chain(&error);
         assert!(
             chain.contains("client_encoding"),
             "the driver's error must name the setting that caused it, got: {chain}"
@@ -117,7 +117,7 @@ async fn encoding_retirement_preserves_a_pipelined_server_error() {
         let outcome = driver.await.expect("the driver task panicked");
         let driver_error = outcome.expect_err("the encoding change did not retire the session");
         assert!(
-            common::error_chain(&driver_error).contains("client_encoding"),
+            support::error_chain(&driver_error).contains("client_encoding"),
             "the driver did not retain the encoding-retirement cause: {driver_error}"
         );
     })
@@ -169,7 +169,7 @@ async fn setting_the_encoding_to_utf8_changes_nothing() {
 #[compio::test]
 async fn the_startup_packet_announces_utf8_rather_than_inheriting_it() {
     let (client, _driver) = connect_keeping_driver().await;
-    let transport = common::test_transport(&test_url(), common::suite_tls()).await;
+    let transport = support::test_transport(&test_url(), support::suite_tls()).await;
 
     let row = client
         .query_one(
@@ -183,13 +183,13 @@ async fn the_startup_packet_announces_utf8_rather_than_inheriting_it() {
 
     assert_eq!(setting, "UTF8", "the session must be UTF8");
     match transport {
-        common::TestTransport::Direct => assert_eq!(
+        support::TestTransport::Direct => assert_eq!(
             source, "client",
             "client_encoding must come from the driver's STARTUP PACKET, not from \
              the server's default -- if this reads `default`, the driver stopped \
              announcing it and is merely lucky that this server agrees"
         ),
-        common::TestTransport::TransactionPooler => assert_eq!(
+        support::TestTransport::TransactionPooler => assert_eq!(
             client.parameter("client_encoding"),
             Some("UTF8".to_string()),
             "the pooler must expose the UTF8 frontend setting it tracks independently of \

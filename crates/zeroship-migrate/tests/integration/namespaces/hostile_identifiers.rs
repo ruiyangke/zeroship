@@ -119,7 +119,7 @@ fn create_index(name: &str) -> Value {
 
 /// Lower `ops` through the shipped guarded load-and-lower path, returning the
 /// rendered DDL statements in plan order.
-fn lower(ops: &[Value], dialect: &DialectId) -> Result<Vec<String>, LoadAndLowerGuardedError> {
+fn lower(ops: &[Value], dialect: &DialectId) -> Result<Vec<String>, Box<LoadAndLowerGuardedError>> {
     let artifact = IrAuthor::new(
         zeroship_migrate::shipping_vendors(),
         PROJECT,
@@ -133,7 +133,8 @@ fn lower(ops: &[Value], dialect: &DialectId) -> Result<Vec<String>, LoadAndLower
         &BTreeMap::new(),
         &LiveSchema::default(),
         &GuardConfig::from_policy(crate::support::no_inject(PROJECT), (*dialect).clone(), PROJECT),
-    )?;
+    )
+    .map_err(Box::new)?;
     Ok(artifact
         .plan
         .steps
@@ -152,10 +153,10 @@ fn lower(ops: &[Value], dialect: &DialectId) -> Result<Vec<String>, LoadAndLower
 fn assert_refused_by_the_identifier_gate(
     label: &str,
     dialect: &DialectId,
-    outcome: Result<Vec<String>, LoadAndLowerGuardedError>,
+    outcome: Result<Vec<String>, Box<LoadAndLowerGuardedError>>,
     expected_reason: &str,
 ) {
-    match outcome {
+    match outcome.map_err(|error| *error) {
         Err(LoadAndLowerGuardedError::Load(IrLoadError::Validate(error))) => {
             assert_eq!(
                 (error.code.as_str(), error.op_index, error.reason.as_str()),

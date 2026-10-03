@@ -33,7 +33,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use compio_postgres::{Client, NoTls};
-use crate::fixture::world::World;
+use crate::support::fixture::world::World;
 use ntex::http::StatusCode;
 use ntex::web::{self, test};
 use serde_json::{json, Value};
@@ -73,7 +73,7 @@ async fn connect(url: &str) -> Client {
 /// The control database as `zeroship_control`, the login the migration service
 /// actually opens, so the reconciler runs under the grants it actually holds.
 async fn control_as_service() -> Arc<Client> {
-    let mut url = url::Url::parse(&crate::fixture::migrated_url()).expect("the fixture DSN parses");
+    let mut url = url::Url::parse(&crate::support::fixture::migrated_url()).expect("the fixture DSN parses");
     url.set_username("zeroship_control")
         .expect("the DSN accepts a username");
     url.set_password(Some("zeroship_control"))
@@ -159,7 +159,7 @@ fn service_state(
     (
         Arc::new(MigrationServiceState::new(
             tenant_url.to_owned(),
-            crate::fixture::migrated_url(),
+            crate::support::fixture::migrated_url(),
             tmp.clone(),
             authenticator,
             Arc::new(AllowAllMutations),
@@ -268,9 +268,9 @@ async fn pass(reconciler: &Reconciler) -> String {
 /// assertion that looked only at the second.
 #[ntex::test]
 async fn a_table_migrates_into_the_named_database_and_not_into_the_other() {
-    let cluster_fixture = crate::tenant::Cluster::start();
+    let cluster_fixture = crate::support::fixture::tenant::Cluster::start();
     let cluster = connect(cluster_fixture.url()).await;
-    let pg = connect(&crate::fixture::migrated_url()).await;
+    let pg = connect(&crate::support::fixture::migrated_url()).await;
     let world = World::new(&pg, "apply-target").await;
     let reconciler = Reconciler::new(
         ControlStore::new(control_as_service().await),
@@ -369,9 +369,9 @@ async fn a_table_migrates_into_the_named_database_and_not_into_the_other() {
 /// reached the tenant.
 #[ntex::test]
 async fn an_apply_reaches_a_database_no_app_is_bound_to() {
-    let cluster_fixture = crate::tenant::Cluster::start();
+    let cluster_fixture = crate::support::fixture::tenant::Cluster::start();
     let cluster = connect(cluster_fixture.url()).await;
-    let pg = connect(&crate::fixture::migrated_url()).await;
+    let pg = connect(&crate::support::fixture::migrated_url()).await;
     let world = World::new(&pg, "apply-unbound").await;
     let reconciler = Reconciler::new(
         ControlStore::new(control_as_service().await),
@@ -466,9 +466,9 @@ async fn bindings_on(pg: &Client, database: &DatabaseId) -> i64 {
 /// service's report are two different witnesses to the same commit.
 #[ntex::test]
 async fn an_apply_that_commits_a_schema_delta_mints_no_binding_role_and_retires_none() {
-    let cluster_fixture = crate::tenant::Cluster::start();
+    let cluster_fixture = crate::support::fixture::tenant::Cluster::start();
     let cluster = connect(cluster_fixture.url()).await;
-    let pg = connect(&crate::fixture::migrated_url()).await;
+    let pg = connect(&crate::support::fixture::migrated_url()).await;
     let world = World::new(&pg, "apply-roles").await;
     let reconciler = Reconciler::new(
         ControlStore::new(control_as_service().await),
@@ -781,9 +781,9 @@ async fn holds_column_privilege(
 ///   arm afterwards.
 #[ntex::test]
 async fn an_apply_leaves_its_table_reachable_through_the_binding_and_no_wider() {
-    let cluster_fixture = crate::tenant::Cluster::start();
+    let cluster_fixture = crate::support::fixture::tenant::Cluster::start();
     let mut cluster = connect(cluster_fixture.url()).await;
-    let pg = connect(&crate::fixture::migrated_url()).await;
+    let pg = connect(&crate::support::fixture::migrated_url()).await;
     let world = World::new(&pg, "apply-grants").await;
     let reconciler = Reconciler::new(
         ControlStore::new(control_as_service().await),

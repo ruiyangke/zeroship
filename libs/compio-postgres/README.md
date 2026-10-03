@@ -92,7 +92,7 @@ The executor and socket lifecycle remain compio-native.
 ## Running the tests
 
 Everything needs a live server; nothing skips. A missing database is a FAILED
-run, not a green one - see the header of `tests/common/mod.rs` for why.
+run, not a green one - see the header of `tests/support/mod.rs` for why.
 
 ```bash
 # The server the suites use by default, from the repository root.
@@ -107,7 +107,7 @@ PG_TEST_URL=postgres://user:password@host:port/dbname \
 ```
 
 With `PG_TEST_URL` unset the suites dial `DEFAULT_TEST_URL` in
-`tests/common/env.rs`, the address that script provisions.
+`tests/support/env.rs`, the address that script provisions.
 
 `--test-threads=1` is not superstition: several tests measure server-visible
 state (backend counts, replication slots, prepared statements) that concurrent

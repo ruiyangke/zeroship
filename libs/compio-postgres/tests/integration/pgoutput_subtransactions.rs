@@ -28,7 +28,7 @@ use compio_postgres::replication::{ReplicationMessage, StartReplicationOptions, 
 use std::time::Duration;
 
 #[allow(unused_imports)]
-use crate::common;
+use crate::support;
 
 const WATCHDOG: Duration = Duration::from_secs(120);
 const DECODING_WORK_MEM: &str = "64kB";
@@ -37,30 +37,30 @@ const DECODING_WORK_MEM: &str = "64kB";
 const ROWS_PER_HALF: i32 = 2000;
 
 async fn client() -> Client {
-    let url = common::test_url();
-    match compio_postgres::connect(&url, common::suite_tls()).await {
+    let url = support::test_url();
+    match compio_postgres::connect(&url, support::suite_tls()).await {
         Ok((client, connection)) => {
             compio::runtime::spawn(async move {
                 if let Err(error) = connection.run().await {
-                    eprintln!("connection error: {}", common::error_chain(&error));
+                    eprintln!("connection error: {}", support::error_chain(&error));
                 }
             })
             .detach();
             client
         }
-        Err(error) => common::postgres_unreachable(&url, &error),
+        Err(error) => support::postgres_unreachable(&url, &error),
     }
 }
 
 #[compio::test]
 async fn a_streamed_transaction_with_a_savepoint_decodes() {
     compio::time::timeout(WATCHDOG, async {
-        let base = common::test_object_name("cpg subtxn");
+        let base = support::test_object_name("cpg subtxn");
         let table = format!("{base}_t");
         let publication = format!("{base}_p");
         let slot = format!("{base}_s");
         let setup = client().await;
-        common::sweep_stale_test_objects(&setup).await;
+        support::sweep_stale_test_objects(&setup).await;
 
         setup
             .batch_execute(&format!(
@@ -83,10 +83,10 @@ async fn a_streamed_transaction_with_a_savepoint_decodes() {
         // The write happens after the stream starts, so the walsender decodes
         // it live; reading a committed transaction back afterwards can discard
         // a rolled-back subtransaction without ever streaming it.
-        let mut config = common::replication_config("cpg_subtxn");
+        let mut config = support::replication_config("cpg_subtxn");
         config.options(format!("-c logical_decoding_work_mem={DECODING_WORK_MEM}"));
         let replication =
-            compio_postgres::replication::connect_replication(common::suite_tls(), &config)
+            compio_postgres::replication::connect_replication(support::suite_tls(), &config)
                 .await
                 .expect("replication connect failed");
         let mut stream = replication
@@ -171,7 +171,7 @@ async fn a_streamed_transaction_with_a_savepoint_decodes() {
         }
 
         drop(stream);
-        common::drop_replication_slot(&setup, &slot)
+        support::drop_replication_slot(&setup, &slot)
             .await
             .unwrap_or_else(|error| eprintln!("could not drop slot {slot}: {error}"));
         let _ = setup
@@ -221,12 +221,12 @@ async fn a_streamed_transaction_with_a_savepoint_decodes() {
 #[compio::test]
 async fn a_stream_abort_never_lands_inside_an_open_chunk() {
     compio::time::timeout(WATCHDOG, async {
-        let base = common::test_object_name("cpg subabort");
+        let base = support::test_object_name("cpg subabort");
         let table = format!("{base}_t");
         let publication = format!("{base}_p");
         let slot = format!("{base}_s");
         let setup = client().await;
-        common::sweep_stale_test_objects(&setup).await;
+        support::sweep_stale_test_objects(&setup).await;
 
         setup
             .batch_execute(&format!(
@@ -250,10 +250,10 @@ async fn a_stream_abort_never_lands_inside_an_open_chunk() {
         // starts, below, so the walsender decodes it live; a committed
         // transaction read back afterwards can discard the rolled-back
         // subtransaction without ever streaming it.
-        let mut config = common::replication_config("cpg_subabort");
+        let mut config = support::replication_config("cpg_subabort");
         config.options(format!("-c logical_decoding_work_mem={DECODING_WORK_MEM}"));
         let replication =
-            compio_postgres::replication::connect_replication(common::suite_tls(), &config)
+            compio_postgres::replication::connect_replication(support::suite_tls(), &config)
                 .await
                 .expect("replication connect failed");
         let mut stream = replication
@@ -368,7 +368,7 @@ async fn a_stream_abort_never_lands_inside_an_open_chunk() {
              leading xid and takes the relation oid four bytes early"
         );
 
-        common::drop_replication_slot(&setup, &slot)
+        support::drop_replication_slot(&setup, &slot)
             .await
             .unwrap_or_else(|error| panic!("fixture teardown failed: {error}"));
         setup

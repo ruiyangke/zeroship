@@ -3,9 +3,8 @@ name = "zeroship-migrate-server"
 version = "0.1.0"
 edition = "2021"
 description = "zeroship standalone creator migration service"
-# The integration suites are modules of one `tests/integration/main.rs` target and
-# the binary-launching suite of one `tests/e2e/main.rs`, so the crate links two
-# test executables instead of one per file.
+# Integration and end-to-end suites are modules of one `tests/main.rs` target, so
+# the crate links one test executable instead of one per file.
 autotests = false
 
 [[package.metadata.zeroship-config.targets]]
@@ -94,13 +93,8 @@ v8 = { workspace = true }
 # Database verification is mandatory in ordinary cargo test runs. PostgreSQL
 # targets own their servers through private Testcontainers fixtures.
 [[test]]
-name = "integration"
-path = "tests/integration/main.rs"
-
-# Launching the shipped binary in a child process.
-[[test]]
-name = "e2e"
-path = "tests/e2e/main.rs"
+name = "main"
+path = "tests/main.rs"
 
 [lints]
 workspace = true

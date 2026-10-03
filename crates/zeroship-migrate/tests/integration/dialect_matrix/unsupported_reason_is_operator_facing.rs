@@ -29,8 +29,8 @@
 //! a refusal that is re-worded or intercepted upstream is judged on what the
 //! operator would really be shown.
 
-use crate::dialect_corpus::corpus;
-use crate::dialect_matrix::dialect_table::{Disposition, DIALECT_TABLE};
+use crate::integration::dialect_corpus::corpus;
+use crate::integration::dialect_matrix::dialect_table::{Disposition, DIALECT_TABLE};
 use zeroship_migrate::model::op_support::INTERNAL_NO_REFUSAL_REASON;
 use zeroship_migrate::model::validate::validate_op;
 

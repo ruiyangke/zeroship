@@ -55,7 +55,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 #[allow(unused_imports)]
-use crate::common;
+use crate::support;
 
 const ASYNC_WATCHDOG: Duration = Duration::from_secs(5);
 const SOCKET_WATCHDOG: Duration = Duration::from_secs(2);
@@ -249,14 +249,14 @@ async fn a_server_that_never_authenticates_is_refused_under_require_password() {
         // `let ... else` rather than `expect_err`: the Ok half carries a
         // `Connection`, which is not `Debug`, so `expect_err` does not apply.
         let Err(error) =
-            compio::time::timeout(CONNECT_WATCHDOG, config.connect(common::suite_tls()))
+            compio::time::timeout(CONNECT_WATCHDOG, config.connect(support::suite_tls()))
                 .await
                 .expect("connect hung instead of refusing an unauthenticated server")
         else {
             panic!("the driver accepted a server that never authenticated it")
         };
 
-        let chain = common::error_chain(&error);
+        let chain = support::error_chain(&error);
         assert!(
             chain.contains("did not complete authentication"),
             "refusal did not name the missing authentication: {chain}"
@@ -277,7 +277,7 @@ async fn the_same_server_is_accepted_when_no_policy_is_set() {
         let config = base_config(server.addr);
 
         let (client, connection) =
-            compio::time::timeout(CONNECT_WATCHDOG, config.connect(common::suite_tls()))
+            compio::time::timeout(CONNECT_WATCHDOG, config.connect(support::suite_tls()))
                 .await
                 .expect("connect hung against a trust server")
                 .expect("the default policy rejected a server it should accept");
@@ -302,14 +302,14 @@ async fn a_rejected_method_is_refused_even_though_the_server_offers_it() {
         config.require_auth(RequireAuth::Reject(AuthMethods::new(AuthMethod::Password)));
 
         let Err(error) =
-            compio::time::timeout(CONNECT_WATCHDOG, config.connect(common::suite_tls()))
+            compio::time::timeout(CONNECT_WATCHDOG, config.connect(support::suite_tls()))
                 .await
                 .expect("connect hung instead of refusing a rejected method")
         else {
             panic!("the driver used an authentication method its policy rejects")
         };
 
-        let chain = common::error_chain(&error);
+        let chain = support::error_chain(&error);
         assert!(
             chain.contains("cleartext password"),
             "refusal did not name the rejected method: {chain}"
@@ -347,7 +347,7 @@ async fn the_same_method_is_accepted_when_the_policy_requires_it() {
         config.require_auth(require_password());
 
         let (client, connection) =
-            compio::time::timeout(CONNECT_WATCHDOG, config.connect(common::suite_tls()))
+            compio::time::timeout(CONNECT_WATCHDOG, config.connect(support::suite_tls()))
                 .await
                 .expect("connect hung against a password server")
                 .expect("require_auth=password rejected a password handshake");
@@ -436,14 +436,14 @@ async fn a_gssapi_demand_is_refused_by_the_name_of_what_the_server_asked_for() {
         config.require_auth(RequireAuth::Require(AuthMethods::new(AuthMethod::Password)));
 
         let Err(error) =
-            compio::time::timeout(CONNECT_WATCHDOG, config.connect(common::suite_tls()))
+            compio::time::timeout(CONNECT_WATCHDOG, config.connect(support::suite_tls()))
                 .await
                 .expect("connect hung instead of refusing a GSSAPI demand")
         else {
             panic!("the driver accepted a GSSAPI demand under a password-only policy")
         };
 
-        let chain = common::error_chain(&error);
+        let chain = support::error_chain(&error);
         assert!(
             chain.contains("server requested GSSAPI authentication"),
             "the refusal did not name GSSAPI as what the server asked for: {chain}"
@@ -467,14 +467,14 @@ async fn the_same_gssapi_demand_without_a_policy_is_refused_as_unsupported() {
         let config = base_config(server.addr);
 
         let Err(error) =
-            compio::time::timeout(CONNECT_WATCHDOG, config.connect(common::suite_tls()))
+            compio::time::timeout(CONNECT_WATCHDOG, config.connect(support::suite_tls()))
                 .await
                 .expect("connect hung instead of refusing an unsupported method")
         else {
             panic!("the driver claimed to have performed GSSAPI authentication")
         };
 
-        let chain = common::error_chain(&error);
+        let chain = support::error_chain(&error);
         assert!(
             chain.contains("unsupported authentication method: GSSAPI"),
             "an unpoliced GSSAPI demand must fail as unsupported: {chain}"

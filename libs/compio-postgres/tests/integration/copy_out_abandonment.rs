@@ -11,8 +11,8 @@
 //! answer. "The drop did not panic" would not catch this.
 
 #[allow(unused_imports)]
-use crate::common;
-use common::{suite_tls, test_url};
+use crate::support;
+use support::{suite_tls, test_url};
 use compio_postgres::Client;
 use futures_util::StreamExt;
 

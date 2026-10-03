@@ -33,7 +33,7 @@ use std::sync::Arc;
 
 use compio_postgres::error::SqlState;
 use compio_postgres::{Client, NoTls};
-use crate::fixture::world::World;
+use crate::support::fixture::world::World;
 use uuid::Uuid;
 use zeroship_core::database_role::DatabaseCapability;
 use zeroship_core::{database_derivation, BindingId, DatabaseId};
@@ -63,14 +63,14 @@ async fn connect(url: &str) -> Client {
 
 /// The control database as the superuser, for fixture setup only.
 async fn control_superuser() -> Client {
-    connect(&crate::fixture::migrated_url()).await
+    connect(&crate::support::fixture::migrated_url()).await
 }
 
 /// The control database as `zeroship_control`: the login the migration service
 /// actually opens, so the reconciler's statements are measured against the
 /// grants it actually holds.
 async fn control_as_service() -> Arc<Client> {
-    let mut url = url::Url::parse(&crate::fixture::migrated_url()).expect("the fixture DSN parses");
+    let mut url = url::Url::parse(&crate::support::fixture::migrated_url()).expect("the fixture DSN parses");
     url.set_username("zeroship_control")
         .expect("the DSN accepts a username");
     url.set_password(Some("zeroship_control"))
@@ -423,7 +423,7 @@ async fn seed_table(cluster: &Client, database: &DatabaseId, total: i32) {
 /// and the control rows.
 #[ntex::test]
 async fn a_pass_registers_bootstraps_and_converges_then_a_second_pass_changes_nothing() {
-    let cluster_fixture = crate::tenant::Cluster::start();
+    let cluster_fixture = crate::support::fixture::tenant::Cluster::start();
     let cluster = connect(cluster_fixture.url()).await;
     let pg = control_superuser().await;
     let world = World::new(&pg, "converge").await;
@@ -596,7 +596,7 @@ async fn a_pass_registers_bootstraps_and_converges_then_a_second_pass_changes_no
 /// the fence is the membership shape rather than anything in a process.
 #[ntex::test]
 async fn a_converged_binding_reaches_its_own_database_and_is_refused_its_neighbour() {
-    let cluster_fixture = crate::tenant::Cluster::start();
+    let cluster_fixture = crate::support::fixture::tenant::Cluster::start();
     let cluster = connect(cluster_fixture.url()).await;
     let pg = control_superuser().await;
     let world = World::new(&pg, "fence").await;
@@ -843,7 +843,7 @@ async fn a_converged_binding_reaches_its_own_database_and_is_refused_its_neighbo
 /// one.
 #[ntex::test]
 async fn revoking_withdraws_every_edge_and_keeps_the_role_so_the_refusal_stays_42501() {
-    let cluster_fixture = crate::tenant::Cluster::start();
+    let cluster_fixture = crate::support::fixture::tenant::Cluster::start();
     let cluster = connect(cluster_fixture.url()).await;
     let pg = control_superuser().await;
     let world = World::new(&pg, "revoke").await;
@@ -973,7 +973,7 @@ async fn revoking_withdraws_every_edge_and_keeps_the_role_so_the_refusal_stays_4
 /// would pass over a reconciler that never reaps anything at all.
 #[ntex::test]
 async fn the_reap_drops_an_undeclared_role_only_when_the_declaration_read_completed() {
-    let cluster_fixture = crate::tenant::Cluster::start();
+    let cluster_fixture = crate::support::fixture::tenant::Cluster::start();
     let cluster = connect(cluster_fixture.url()).await;
     let pg = control_superuser().await;
     let world = World::new(&pg, "reap").await;
@@ -1023,7 +1023,7 @@ async fn the_reap_drops_an_undeclared_role_only_when_the_declaration_read_comple
     ))
     .await
     .expect("create the incomplete-read probe login");
-    let mut probe_url = url::Url::parse(&crate::fixture::migrated_url()).expect("the fixture DSN parses");
+    let mut probe_url = url::Url::parse(&crate::support::fixture::migrated_url()).expect("the fixture DSN parses");
     probe_url.set_username(&probe).expect("username");
     probe_url
         .set_password(Some(TENANT_PASSWORD))
@@ -1084,7 +1084,7 @@ async fn the_reap_drops_an_undeclared_role_only_when_the_declaration_read_comple
 /// first and never the second.
 #[ntex::test]
 async fn an_undeclared_schema_is_reported_and_a_deleting_declaration_removes_it() {
-    let cluster_fixture = crate::tenant::Cluster::start();
+    let cluster_fixture = crate::support::fixture::tenant::Cluster::start();
     let cluster = connect(cluster_fixture.url()).await;
     let pg = control_superuser().await;
     let world = World::new(&pg, "teardown").await;
@@ -1187,7 +1187,7 @@ async fn an_undeclared_schema_is_reported_and_a_deleting_declaration_removes_it(
 /// A `deleting` database an app still binds is refused, not destroyed.
 #[ntex::test]
 async fn a_deleting_database_an_app_still_binds_is_refused() {
-    let cluster_fixture = crate::tenant::Cluster::start();
+    let cluster_fixture = crate::support::fixture::tenant::Cluster::start();
     let cluster = connect(cluster_fixture.url()).await;
     let pg = control_superuser().await;
     let world = World::new(&pg, "bound-teardown").await;
@@ -1253,7 +1253,7 @@ async fn a_deleting_database_an_app_still_binds_is_refused() {
 /// reports nothing unusual about it.
 #[ntex::test]
 async fn a_direct_worker_membership_in_a_database_role_refuses_the_pass() {
-    let cluster_fixture = crate::tenant::Cluster::start();
+    let cluster_fixture = crate::support::fixture::tenant::Cluster::start();
     let cluster = connect(cluster_fixture.url()).await;
     let pg = control_superuser().await;
     let world = World::new(&pg, "posture").await;
@@ -1305,8 +1305,8 @@ async fn a_direct_worker_membership_in_a_database_role_refuses_the_pass() {
 /// capacity would read a confusing SQL error instead of the reason.
 #[ntex::test]
 async fn a_cluster_below_the_version_floor_is_refused_and_never_bootstrapped() {
-    let (image, tag) = crate::tenant::PRE_FENCE_IMAGE;
-    let cluster_fixture = crate::tenant::Cluster::of(image, tag);
+    let (image, tag) = crate::support::fixture::tenant::PRE_FENCE_IMAGE;
+    let cluster_fixture = crate::support::fixture::tenant::Cluster::of(image, tag);
     let cluster = connect(cluster_fixture.url()).await;
     let pg = control_superuser().await;
     let world = World::new(&pg, "old-major").await;
@@ -1385,7 +1385,7 @@ async fn a_cluster_below_the_version_floor_is_refused_and_never_bootstrapped() {
 /// that invented one would undo that rule.
 #[ntex::test]
 async fn an_unconfigured_zone_refuses_to_choose_among_several() {
-    let cluster_fixture = crate::tenant::Cluster::start();
+    let cluster_fixture = crate::support::fixture::tenant::Cluster::start();
     let pg = control_superuser().await;
     // Two of this test's own, so the ambiguity holds whatever else is declared.
     let first = World::new(&pg, "zone-a").await;
@@ -1442,7 +1442,7 @@ async fn an_unconfigured_zone_refuses_to_choose_among_several() {
 /// database on it.
 #[ntex::test]
 async fn two_services_on_one_cluster_converge_on_one_row_and_a_zone_change_is_refused() {
-    let cluster_fixture = crate::tenant::Cluster::start();
+    let cluster_fixture = crate::support::fixture::tenant::Cluster::start();
     let pg = control_superuser().await;
     let world = World::new(&pg, "identity").await;
     let elsewhere = World::new(&pg, "elsewhere").await;
@@ -1507,12 +1507,12 @@ mod migrated_server_lifetime {
 
     /// The child test, by its full path in this binary.
     const CHILD_TEST: &str =
-        "datastore_reconciler_pg::migrated_server_lifetime::the_migrated_server_reports_its_container";
+        "integration::datastore_reconciler_pg::migrated_server_lifetime::the_migrated_server_reports_its_container";
 
     #[test]
     fn the_migrated_server_reports_its_container() {
         lifetime::report_owner();
-        let server = crate::fixture::migrated();
+        let server = crate::support::fixture::migrated();
         assert!(
             server.url().ends_with("/migrate_server_tests"),
             "{}",

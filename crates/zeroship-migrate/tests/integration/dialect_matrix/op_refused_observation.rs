@@ -8,7 +8,7 @@
 //! live PostgreSQL, a live MySQL and SQLite, and the answer is the REASON CLASS of the
 //! refusal, or `None` when the op applied.
 //!
-//! Layer 1 ([`crate::dialect_matrix::dialect_conformance_live`]) already records an outcome class per
+//! Layer 1 ([`crate::integration::dialect_matrix::dialect_conformance_live`]) already records an outcome class per
 //! corpus row, but it does so under ONE charter - `crate::support::operator_charter`, which
 //! grants `safety.destructive_ops = "allow"`. Every refusal a POSTURE could cause is
 //! therefore invisible to it by construction. This file is the other axis: one op, two
@@ -137,7 +137,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{json, Value};
 use tempfile::TempDir;
 
-use crate::dialect_matrix::dialect_conformance_live::Outcome;
+use crate::integration::dialect_matrix::dialect_conformance_live::Outcome;
 use crate::support::mysql::{quote_ident, DatabaseGuard, MysqlDevSession};
 use crate::support::PgDevSession;
 use zeroship_migrate::apply::backend::MigrationBackend;
@@ -248,9 +248,9 @@ fn classify(error: &LoadAndLowerGuardedError) -> Result<ReasonClass, String> {
     match error {
         LoadAndLowerGuardedError::Load(IrLoadError::Validate(authoring)) => {
             let code = authoring.code.as_str();
-            if crate::dialect_matrix::dialect_conformance_live::CAPABILITY_CODES.contains(&code) {
+            if crate::integration::dialect_matrix::dialect_conformance_live::CAPABILITY_CODES.contains(&code) {
                 Ok(ReasonClass::capability(leaked_static(code)))
-            } else if crate::dialect_matrix::dialect_conformance_live::POLICY_CODES.contains(&code) {
+            } else if crate::integration::dialect_matrix::dialect_conformance_live::POLICY_CODES.contains(&code) {
                 Ok(ReasonClass::policy(leaked_static(code)))
             } else {
                 Err(format!(

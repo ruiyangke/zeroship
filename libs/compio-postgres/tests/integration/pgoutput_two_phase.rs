@@ -12,24 +12,24 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 #[allow(unused_imports)]
-use crate::common;
+use crate::support;
 
 const WATCHDOG: Duration = Duration::from_secs(60);
 const EARLY_DELIVERY_TIMEOUT: Duration = Duration::from_secs(10);
 
 async fn client() -> Client {
-    let url = common::test_url();
-    match compio_postgres::connect(&url, common::suite_tls()).await {
+    let url = support::test_url();
+    match compio_postgres::connect(&url, support::suite_tls()).await {
         Ok((client, connection)) => {
             compio::runtime::spawn(async move {
                 if let Err(error) = connection.run().await {
-                    eprintln!("connection error: {}", common::error_chain(&error));
+                    eprintln!("connection error: {}", support::error_chain(&error));
                 }
             })
             .detach();
             client
         }
-        Err(error) => common::postgres_unreachable(&url, &error),
+        Err(error) => support::postgres_unreachable(&url, &error),
     }
 }
 
@@ -54,13 +54,13 @@ fn two_phase_defaults_off() {
 #[compio::test]
 async fn two_phase_start_option_enables_a_plain_slot_before_commit() {
     compio::time::timeout(WATCHDOG, async {
-        let base = common::test_object_name("cpg two phase early");
+        let base = support::test_object_name("cpg two phase early");
         let table = format!("{base}_t");
         let publication = format!("{base}_p");
         let slot = format!("{base}_s");
         let gid = format!("{base}_gid");
         let setup = client().await;
-        common::sweep_stale_replication_slots(&setup).await;
+        support::sweep_stale_replication_slots(&setup).await;
 
         setup
             .batch_execute(&format!(
@@ -79,8 +79,8 @@ async fn two_phase_start_option_enables_a_plain_slot_before_commit() {
             .expect("plain slot setup failed");
 
         let replication = compio_postgres::replication::connect_replication(
-            common::suite_tls(),
-            &common::replication_config("cpg_two_phase_early"),
+            support::suite_tls(),
+            &support::replication_config("cpg_two_phase_early"),
         )
         .await
         .expect("replication connect failed");
@@ -111,7 +111,7 @@ async fn two_phase_start_option_enables_a_plain_slot_before_commit() {
             let mut begin = None;
             loop {
                 match stream.next().await.map_err(|error| {
-                    format!("replication stream failed: {}", common::error_chain(&error))
+                    format!("replication stream failed: {}", support::error_chain(&error))
                 })? {
                     Some(ReplicationMessage::XLogData { body, .. }) => {
                         match decoder
@@ -167,7 +167,7 @@ async fn two_phase_start_option_enables_a_plain_slot_before_commit() {
         let finish_result = setup.batch_execute(&format!("{finish} '{gid}'")).await;
 
         drop(stream);
-        let slot_dropped = common::drop_replication_slot(&setup, &slot).await;
+        let slot_dropped = support::drop_replication_slot(&setup, &slot).await;
         let cleanup_result = setup
             .batch_execute(&format!(
                 "DROP PUBLICATION {publication};
@@ -194,7 +194,7 @@ async fn two_phase_start_option_enables_a_plain_slot_before_commit() {
 #[compio::test]
 async fn prepared_transactions_expose_every_two_phase_frame() {
     compio::time::timeout(WATCHDOG, async {
-        let base = common::test_object_name("cpg two phase observe");
+        let base = support::test_object_name("cpg two phase observe");
         let table = format!("{base}_t");
         let publication = format!("{base}_p");
         let slot = format!("{base}_s");
@@ -203,7 +203,7 @@ async fn prepared_transactions_expose_every_two_phase_frame() {
         let stream_commit_gid = format!("{base}_stream_commit");
         let stream_rollback_gid = format!("{base}_stream_rollback");
         let setup = client().await;
-        common::sweep_stale_replication_slots(&setup).await;
+        support::sweep_stale_replication_slots(&setup).await;
 
         let configured: String = setup
             .query_one("SHOW max_prepared_transactions", &[])
@@ -216,7 +216,7 @@ async fn prepared_transactions_expose_every_two_phase_frame() {
              max_prepared_transactions={configured}"
         );
 
-        common::drop_replication_slot(&setup, &slot)
+        support::drop_replication_slot(&setup, &slot)
             .await
             .unwrap_or_else(|error| panic!("fixture setup failed: {error}"));
         setup
@@ -236,10 +236,10 @@ async fn prepared_transactions_expose_every_two_phase_frame() {
             .await
             .expect("TWO_PHASE slot setup failed");
 
-        let mut config = common::replication_config("cpg_two_phase_observe");
+        let mut config = support::replication_config("cpg_two_phase_observe");
         config.options("-c logical_decoding_work_mem=64kB");
         let replication =
-            compio_postgres::replication::connect_replication(common::suite_tls(), &config)
+            compio_postgres::replication::connect_replication(support::suite_tls(), &config)
                 .await
                 .expect("replication connect failed");
         let mut stream = replication
@@ -409,7 +409,7 @@ async fn prepared_transactions_expose_every_two_phase_frame() {
             produced.expect("two-phase transaction sequence failed");
         let (messages, decode_error, stream_prepares_inside_a_chunk) = observed;
         drop(stream);
-        let slot_dropped = common::drop_replication_slot(&setup, &slot).await;
+        let slot_dropped = support::drop_replication_slot(&setup, &slot).await;
         setup
             .batch_execute(&format!(
                 "DROP PUBLICATION {publication};

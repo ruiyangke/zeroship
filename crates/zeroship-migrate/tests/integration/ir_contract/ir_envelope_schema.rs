@@ -4,7 +4,7 @@
 //! targets. This test emits it (`schemars::schema_for!`) and gates the on-disk
 //! file against the freshly generated one:
 //!
-//! - `cargo test -p zeroship-migrate --test integration -- --ignored update_ir_envelope_schema`
+//! - `cargo test -p zeroship-migrate --test main -- --ignored update_ir_envelope_schema`
 //!   REWRITES the file (regenerate after an intentional IR shape change), then commit it.
 //! - the default run ASSERTS the on-disk file equals the generated schema, so a
 //!   silent IR-shape drift (a new/removed `Op` variant, a renamed field) fails
@@ -38,7 +38,7 @@ fn emit_ir_envelope_schema() {
     let on_disk = std::fs::read_to_string(&path).unwrap_or_else(|e| {
         panic!(
             "ir-envelope.schema.json missing or unreadable at {}: {e}. \
-             Run `cargo test -p zeroship-migrate --test integration -- --ignored \
+             Run `cargo test -p zeroship-migrate --test main -- --ignored \
              update_ir_envelope_schema` to generate it.",
             path.display()
         )
@@ -46,7 +46,7 @@ fn emit_ir_envelope_schema() {
     assert_eq!(
         on_disk, generated,
         "ir-envelope.schema.json is stale. Regenerate with \
-         `cargo test -p zeroship-migrate --test integration -- --ignored \
+         `cargo test -p zeroship-migrate --test main -- --ignored \
          update_ir_envelope_schema` and commit it."
     );
 }
@@ -56,7 +56,7 @@ fn emit_ir_envelope_schema() {
 /// developer affordance that keeps it green after an intentional IR shape change.
 #[test]
 #[ignore = "regenerates ir-envelope.schema.json; run explicitly with \
-            `cargo test -p zeroship-migrate --test integration -- --ignored \
+            `cargo test -p zeroship-migrate --test main -- --ignored \
             update_ir_envelope_schema`, then commit the file"]
 fn update_ir_envelope_schema() {
     let path = schema_path();

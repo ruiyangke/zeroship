@@ -42,7 +42,7 @@ use compio_postgres::error::SqlState;
 use std::time::Duration;
 
 #[allow(unused_imports)]
-use crate::common;
+use crate::support;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -54,11 +54,11 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(20);
 const ABORT_MARKER: &str = "simple query execution cannot supply COPY data";
 
 fn test_url() -> String {
-    common::test_url()
+    support::test_url()
 }
 
 async fn connect_client(url: &str) -> Client {
-    let (client, connection) = compio_postgres::connect(url, common::suite_tls())
+    let (client, connection) = compio_postgres::connect(url, support::suite_tls())
         .await
         .expect("connect to PostgreSQL");
     compio::runtime::spawn(async move {
@@ -73,7 +73,7 @@ async fn connect_client(url: &str) -> Client {
 /// Temporary, so nothing survives the session even if an assertion below fails
 /// part way through - the review database is shared with other suites.
 async fn probe_table(client: &Client, suffix: &str) -> String {
-    let name = common::test_object_name(&format!("cpg_copy_resync_{suffix}"));
+    let name = support::test_object_name(&format!("cpg_copy_resync_{suffix}"));
     client
         .batch_execute(&format!("CREATE TEMPORARY TABLE {name} (v int)"))
         .await
@@ -97,12 +97,12 @@ async fn batch_execute_of_copy_from_stdin_leaves_the_session_usable() {
             failure.code(),
             Some(&SqlState::QUERY_CANCELED),
             "the copy was not aborted by this driver: {}",
-            common::error_chain(&failure)
+            support::error_chain(&failure)
         );
         assert!(
-            common::error_chain(&failure).contains(ABORT_MARKER),
+            support::error_chain(&failure).contains(ABORT_MARKER),
             "the failure did not carry this driver's copy-abort reason: {}",
-            common::error_chain(&failure)
+            support::error_chain(&failure)
         );
 
         let value: i32 = client
@@ -135,11 +135,11 @@ async fn batch_execute_of_copy_from_stdin_leaves_the_session_usable() {
 #[compio::test]
 async fn batch_copy_abort_settles_before_the_follow_up_query() {
     let url = test_url();
-    let (client, connection) = compio_postgres::connect(&url, common::suite_tls())
+    let (client, connection) = compio_postgres::connect(&url, support::suite_tls())
         .await
         .expect("connect the durable COPY probe client");
     let driver = compio::runtime::spawn(async move { connection.run().await });
-    let table = common::test_object_name("cpg_copy_resync_pooler");
+    let table = support::test_object_name("cpg_copy_resync_pooler");
     client
         .batch_execute(&format!("CREATE TABLE {table} (v int)"))
         .await
@@ -171,12 +171,12 @@ async fn batch_copy_abort_settles_before_the_follow_up_query() {
         failure.code(),
         Some(&SqlState::QUERY_CANCELED),
         "the copy was not aborted by this driver: {}",
-        common::error_chain(&failure)
+        support::error_chain(&failure)
     );
     assert!(
-        common::error_chain(&failure).contains(ABORT_MARKER),
+        support::error_chain(&failure).contains(ABORT_MARKER),
         "the failure did not carry this driver's copy-abort reason: {}",
-        common::error_chain(&failure)
+        support::error_chain(&failure)
     );
     assert_eq!(
         follow_up.expect("the COPY abort consumed the follow-up response"),
@@ -203,9 +203,9 @@ async fn simple_query_of_copy_from_stdin_leaves_the_session_usable() {
             .await
             .expect_err("simple_query fed a COPY it has no data channel for");
         assert!(
-            common::error_chain(&failure).contains(ABORT_MARKER),
+            support::error_chain(&failure).contains(ABORT_MARKER),
             "the failure did not carry this driver's copy-abort reason: {}",
-            common::error_chain(&failure)
+            support::error_chain(&failure)
         );
 
         let value: i32 = client
@@ -244,7 +244,7 @@ async fn a_transaction_survives_an_abandoned_copy_from_stdin() {
                 failure.code(),
                 Some(&SqlState::QUERY_CANCELED),
                 "the copy was not aborted by this driver: {}",
-                common::error_chain(&failure)
+                support::error_chain(&failure)
             );
             // The COPY error aborted the transaction block; rolling back is the
             // only legal move, and it has to reach the server.
@@ -293,12 +293,12 @@ async fn batch_execute_of_copy_to_stdout_was_never_desynchronised() {
             failure.code().is_none(),
             "COPY TO STDOUT was answered with a server error rather than \
              rejected locally: {}",
-            common::error_chain(&failure)
+            support::error_chain(&failure)
         );
         assert!(
-            !common::error_chain(&failure).contains(ABORT_MARKER),
+            !support::error_chain(&failure).contains(ABORT_MARKER),
             "the copy-abort path fired for a COPY that never entered copy mode: {}",
-            common::error_chain(&failure)
+            support::error_chain(&failure)
         );
 
         let value: i32 = client

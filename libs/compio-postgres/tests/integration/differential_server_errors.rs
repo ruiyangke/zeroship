@@ -27,7 +27,7 @@ use compio_postgres::config::ProtocolVersion;
 use futures_util::SinkExt;
 
 #[allow(unused_imports)]
-use crate::common;
+use crate::support;
 
 const SESSION_TIMEOUT: &str = "SET statement_timeout = '50ms'";
 const RESET_TIMEOUT: &str = "SET statement_timeout = 0";
@@ -116,7 +116,7 @@ where
         runtime.block_on(async move {
             let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
                 .await
-                .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+                .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
             let driver = tokio::spawn(async move {
                 let _ = connection.await;
             });
@@ -130,13 +130,13 @@ where
 }
 
 async fn compio_client() -> compio_postgres::Client {
-    let url = common::test_url();
+    let url = support::test_url();
     let mut config: compio_postgres::Config = url.parse().expect("the test DSN parses");
     config.max_protocol_version(ProtocolVersion::V3_0);
     let (client, connection) = config
-        .connect(common::suite_tls())
+        .connect(support::suite_tls())
         .await
-        .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+        .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
     compio::runtime::spawn(async move {
         let _ = connection.run().await;
     })
@@ -590,7 +590,7 @@ fn assert_field_space_was_exercised(observations: &[ErrorObservation], schema: &
 #[compio::test]
 async fn every_server_error_field_matches_tokio_postgres() {
     let setup = compio_client().await;
-    let schema = common::test_object_name("cpg_differential_server_errors");
+    let schema = support::test_object_name("cpg_differential_server_errors");
     setup
         .batch_execute(&fixture_sql(&schema))
         .await
@@ -598,7 +598,7 @@ async fn every_server_error_field_matches_tokio_postgres() {
 
     let cases = error_cases();
     let session = session_sql(&schema);
-    let theirs = tokio_observations(common::plaintext_url(), session.clone(), cases.clone());
+    let theirs = tokio_observations(support::plaintext_url(), session.clone(), cases.clone());
     let ours = compio_observations(&session, &cases).await;
 
     setup

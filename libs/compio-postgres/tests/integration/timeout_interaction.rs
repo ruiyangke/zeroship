@@ -21,7 +21,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 #[allow(unused_imports)]
-use crate::common;
+use crate::support;
 
 /// Bounds a connect that must SUCCEED -- every scripted peer in this file
 /// accepts, and no test here expects a connect to fail. So this is a hang
@@ -389,7 +389,7 @@ fn assert_single_retirement(pool: &Pool) {
 }
 
 fn live_url() -> String {
-    let url = common::test_url();
+    let url = support::test_url();
     let separator = if url.contains('?') { '&' } else { '?' };
     format!("{url}{separator}sslmode=disable")
 }
@@ -515,7 +515,7 @@ async fn read_timeout_during_command_recovery_keeps_command_classification() {
 async fn command_timeout_recovers_without_a_read_timeout() {
     compio::time::timeout(ASYNC_WATCHDOG, async {
         let url = live_url();
-        let transport = common::test_transport(&url, common::suite_tls()).await;
+        let transport = support::test_transport(&url, support::suite_tls()).await;
         let mut connection_config: Config = url.parse().expect("parse PG_TEST_URL");
         connection_config
             .connect_timeout(CONNECT_TIMEOUT)
@@ -529,7 +529,7 @@ async fn command_timeout_recovers_without_a_read_timeout() {
         let pool_config = live_pool_config(COMMAND_FIRST_TIMEOUT);
         let pool = Pool::connect_with_config(connection_config, pool_config)
             .await
-            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+            .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
         let mut client = pool
             .acquire()
             .await

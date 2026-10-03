@@ -7,13 +7,13 @@ use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 #[allow(unused_imports)]
-use crate::common;
+use crate::support;
 
 const CALLERS: usize = 8;
 const LONG_WINDOW: Duration = Duration::from_secs(6 * 60 * 60);
 
 fn test_url() -> String {
-    common::test_url()
+    support::test_url()
 }
 
 fn config(max_size: usize, min_idle: usize) -> PoolConfig {
@@ -30,7 +30,7 @@ fn config(max_size: usize, min_idle: usize) -> PoolConfig {
 async fn connect_pool(url: &str, config: PoolConfig) -> Pool {
     Pool::connect_with_pool_config(url, config)
         .await
-        .unwrap_or_else(|error| common::postgres_unreachable(url, &error))
+        .unwrap_or_else(|error| support::postgres_unreachable(url, &error))
 }
 
 fn poll_once<F: Future>(future: Pin<&mut F>) -> Poll<F::Output> {

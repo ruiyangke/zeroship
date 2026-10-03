@@ -41,29 +41,29 @@ use compio_postgres::replication::{ReplicationMessage, StartReplicationOptions};
 use std::time::Duration;
 
 #[allow(unused_imports)]
-use crate::common;
+use crate::support;
 
 /// Bounds the whole publish-then-stream exchange. A live walsender that never
 /// answers must fail the test rather than hang the suite.
 const WATCHDOG: Duration = Duration::from_secs(20);
 
 fn test_url() -> String {
-    common::test_url()
+    support::test_url()
 }
 
 async fn client() -> Client {
     let url = test_url();
-    match compio_postgres::connect(&url, common::suite_tls()).await {
+    match compio_postgres::connect(&url, support::suite_tls()).await {
         Ok((client, connection)) => {
             compio::runtime::spawn(async move {
                 if let Err(error) = connection.run().await {
-                    eprintln!("connection error: {}", common::error_chain(&error));
+                    eprintln!("connection error: {}", support::error_chain(&error));
                 }
             })
             .detach();
             client
         }
-        Err(error) => common::postgres_unreachable(&url, &error),
+        Err(error) => support::postgres_unreachable(&url, &error),
     }
 }
 
@@ -79,7 +79,7 @@ fn quoted(name: &str) -> String {
 /// Returns `Err` with the server's message if the stream fails first - which
 /// is the pre-fix behaviour this file is about.
 async fn stream_one_insert(logical: &str, publication: &str) -> Result<PgOutputMessage, String> {
-    let base = common::test_object_name(logical);
+    let base = support::test_object_name(logical);
     let table = format!("{base}_t");
     let slot = format!("{base}_s");
     let setup = client().await;
@@ -110,7 +110,7 @@ async fn stream_one_insert(logical: &str, publication: &str) -> Result<PgOutputM
 
     let result = read_first_insert(&slot, publication).await;
 
-    common::drop_replication_slot(&setup, &slot)
+    support::drop_replication_slot(&setup, &slot)
         .await
         .unwrap_or_else(|error| eprintln!("could not drop slot {slot}: {error}"));
     let _ = setup
@@ -126,14 +126,14 @@ async fn stream_one_insert(logical: &str, publication: &str) -> Result<PgOutputM
 
 async fn read_first_insert(slot: &str, publication: &str) -> Result<PgOutputMessage, String> {
     let replication = compio_postgres::replication::connect_replication(
-        common::suite_tls(),
-        &common::replication_config("cpg_publication_names"),
+        support::suite_tls(),
+        &support::replication_config("cpg_publication_names"),
     )
     .await
     .map_err(|error| {
         format!(
             "replication connect failed: {}",
-            common::error_chain(&error)
+            support::error_chain(&error)
         )
     })?;
 
@@ -146,7 +146,7 @@ async fn read_first_insert(slot: &str, publication: &str) -> Result<PgOutputMess
             ..Default::default()
         })
         .await
-        .map_err(|error| format!("START_REPLICATION failed: {}", common::error_chain(&error)))?;
+        .map_err(|error| format!("START_REPLICATION failed: {}", support::error_chain(&error)))?;
 
     // A keepalive can precede the data, so read until the Insert, the error,
     // or the watchdog.
@@ -154,7 +154,7 @@ async fn read_first_insert(slot: &str, publication: &str) -> Result<PgOutputMess
         let message = stream
             .next()
             .await
-            .map_err(|error| common::error_chain(&error))?;
+            .map_err(|error| support::error_chain(&error))?;
         match message {
             Some(ReplicationMessage::XLogData { body, .. }) => {
                 match pgoutput::decode(&body)
@@ -181,7 +181,7 @@ async fn read_first_insert(slot: &str, publication: &str) -> Result<PgOutputMess
 /// being adversarial; a name with an apostrophe in it is just a name.
 #[compio::test]
 async fn a_publication_name_containing_a_quote_still_streams_its_changes() {
-    let publication = format!("{}_it's", common::test_object_name("cpg quote pub"));
+    let publication = format!("{}_it's", support::test_object_name("cpg quote pub"));
     let outcome = compio::time::timeout(WATCHDOG, stream_one_insert("cpg quote pub", &publication))
         .await
         .expect("the quote-named publication exchange exceeded its watchdog");
@@ -200,7 +200,7 @@ async fn a_publication_name_containing_a_quote_still_streams_its_changes() {
 /// separator, so pgoutput is asked for two publications that do not exist.
 #[compio::test]
 async fn a_publication_name_containing_a_comma_still_streams_its_changes() {
-    let publication = format!("{},us", common::test_object_name("cpg comma pub"));
+    let publication = format!("{},us", support::test_object_name("cpg comma pub"));
     let outcome = compio::time::timeout(WATCHDOG, stream_one_insert("cpg comma pub", &publication))
         .await
         .expect("the comma-named publication exchange exceeded its watchdog");
@@ -219,7 +219,7 @@ async fn a_publication_name_containing_a_comma_still_streams_its_changes() {
 /// publication is looked up under a name that does not exist.
 #[compio::test]
 async fn a_publication_name_containing_upper_case_still_streams_its_changes() {
-    let publication = format!("{}_MixedCase", common::test_object_name("cpg case pub"));
+    let publication = format!("{}_MixedCase", support::test_object_name("cpg case pub"));
     let outcome = compio::time::timeout(WATCHDOG, stream_one_insert("cpg case pub", &publication))
         .await
         .expect("the mixed-case publication exchange exceeded its watchdog");
@@ -240,7 +240,7 @@ async fn a_publication_name_containing_upper_case_still_streams_its_changes() {
 /// the panic messages happened to be reached some other way.
 #[compio::test]
 async fn an_ordinary_publication_name_still_streams_its_changes() {
-    let publication = common::test_object_name("cpg plain pub");
+    let publication = support::test_object_name("cpg plain pub");
     let outcome = compio::time::timeout(WATCHDOG, stream_one_insert("cpg plain pub", &publication))
         .await
         .expect("the ordinary publication exchange exceeded its watchdog");
@@ -268,7 +268,7 @@ async fn an_ordinary_publication_name_still_streams_its_changes() {
 /// `CREATE PUBLICATION "back\slash"` succeeds.
 #[compio::test]
 async fn a_publication_name_containing_a_backslash_still_streams_its_changes() {
-    let publication = format!("{}_back\\slash", common::test_object_name("cpg bs pub"));
+    let publication = format!("{}_back\\slash", support::test_object_name("cpg bs pub"));
     let outcome = compio::time::timeout(WATCHDOG, stream_one_insert("cpg bs pub", &publication))
         .await
         .expect("the backslash-named publication exchange exceeded its watchdog");

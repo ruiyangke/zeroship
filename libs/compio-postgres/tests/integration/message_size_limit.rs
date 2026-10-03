@@ -14,9 +14,9 @@
 //! does about an unexplained disconnect is retry it.
 
 #[allow(unused_imports)]
-use crate::common;
+use crate::support;
 
-use common::{suite_tls, test_url};
+use support::{suite_tls, test_url};
 use compio_postgres::{Client, Error};
 
 /// One megabyte, as the server counts it.

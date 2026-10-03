@@ -8,24 +8,24 @@ use std::task::{Context, Waker};
 use std::time::{Duration, Instant};
 
 #[allow(unused_imports)]
-use crate::common;
+use crate::support;
 
 const EVENT_TIMEOUT: Duration = Duration::from_secs(5);
 const OBJECT_TEST_TIMEOUT: Duration = Duration::from_secs(30);
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn test_url() -> String {
-    common::test_url()
+    support::test_url()
 }
 
 async fn connect() -> Client {
     let url = test_url();
-    let (client, connection) = compio_postgres::connect(&url, common::suite_tls())
+    let (client, connection) = compio_postgres::connect(&url, support::suite_tls())
         .await
-        .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+        .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
     compio::runtime::spawn(async move {
         if let Err(error) = connection.run().await {
-            eprintln!("connection error: {}", common::error_chain(&error));
+            eprintln!("connection error: {}", support::error_chain(&error));
         }
     })
     .detach();
@@ -40,19 +40,19 @@ async fn drop_test_table(table: &str) -> Result<(), String> {
     );
 
     compio::time::timeout(CLEANUP_TIMEOUT, async {
-        let (client, connection) = compio_postgres::connect(&url, common::suite_tls())
+        let (client, connection) = compio_postgres::connect(&url, support::suite_tls())
             .await
-            .map_err(|error| common::error_chain(&error))?;
+            .map_err(|error| support::error_chain(&error))?;
         compio::runtime::spawn(async move {
             if let Err(error) = connection.run().await {
-                eprintln!("cleanup connection error: {}", common::error_chain(&error));
+                eprintln!("cleanup connection error: {}", support::error_chain(&error));
             }
         })
         .detach();
         client
             .batch_execute(&sql)
             .await
-            .map_err(|error| common::error_chain(&error))
+            .map_err(|error| support::error_chain(&error))
     })
     .await
     .map_err(|_| format!("dropping {table} exceeded its cleanup timeout"))?
@@ -374,7 +374,7 @@ async fn observer_reports_copy_in_once_with_inserted_rows() {
 
     const BARRIER: &str = "SELECT 4::int4 /* cpg_obs_copy_in_barrier */";
 
-    let table = common::test_object_name("cpg_obs_copy_in");
+    let table = support::test_object_name("cpg_obs_copy_in");
     let sql = format!("COPY {table} (n) FROM STDIN");
     run_with_table_cleanup(
         &table,
@@ -418,7 +418,7 @@ async fn observer_reports_copy_in_once_with_inserted_rows() {
 async fn observer_reports_copy_out_once_with_exported_rows() {
     const BARRIER: &str = "SELECT 5::int4 /* cpg_obs_copy_out_barrier */";
 
-    let table = common::test_object_name("cpg_obs_copy_out");
+    let table = support::test_object_name("cpg_obs_copy_out");
     let sql = format!("COPY {table} TO STDOUT");
     run_with_table_cleanup(
         &table,
@@ -468,7 +468,7 @@ async fn observer_reports_dropped_in_flight_future_cancelled_once() {
         /* cpg_obs_cancelled_future */";
     const BARRIER: &str = "SELECT 6::int4 /* cpg_obs_cancelled_future_barrier */";
     compio::time::timeout(Duration::from_secs(10), async {
-        let lock_name = common::test_object_name("cpg_obs_cancelled_future_lock");
+        let lock_name = support::test_object_name("cpg_obs_cancelled_future_lock");
         let client = connect().await;
         let blocker = connect().await;
         let got_lock: bool = blocker
@@ -547,7 +547,7 @@ async fn replacing_observer_preserves_the_in_flight_requests_receiver() {
     const BARRIER: &str = "SELECT 8::int4 /* cpg_obs_replacement_barrier */";
 
     compio::time::timeout(Duration::from_secs(10), async {
-        let lock_name = common::test_object_name("cpg_obs_replacement_in_flight_lock");
+        let lock_name = support::test_object_name("cpg_obs_replacement_in_flight_lock");
         let client = connect().await;
         let blocker = connect().await;
         let got_lock: bool = blocker

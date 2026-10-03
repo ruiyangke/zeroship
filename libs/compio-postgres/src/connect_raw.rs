@@ -368,7 +368,7 @@ where
 
     /// Every refusal below was mutation-measured on 2026-09-03 and each has a
     /// precisely-named witness, so this function needs no further audit. Six of
-    /// the eleven are invisible to `--lib` and only fail under `--test integration`
+    /// the eleven are invisible to `--lib` and only fail under `--test main`
     /// (the duplicate, unsupported-version, newer-than-requested, negative and
     /// oversized option-count, and trailing-byte cases), which is why a lib-only
     /// run over this function reads as five unbound guards that are not.

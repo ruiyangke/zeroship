@@ -31,10 +31,10 @@
 //! tightening.
 
 #[allow(unused_imports)]
-use crate::common;
+use crate::support;
 
 fn test_url() -> String {
-    common::test_url()
+    support::test_url()
 }
 
 fn with_query(base: &str, query: &str) -> String {
@@ -52,7 +52,7 @@ async fn prefer_with_a_root_cert_falls_back_when_the_connector_cannot_attest() {
         "sslmode=prefer&sslrootcert=/etc/ssl/certs/ca-certificates.crt",
     );
 
-    let (client, connection) = compio_postgres::connect(&dsn, common::suite_tls())
+    let (client, connection) = compio_postgres::connect(&dsn, support::suite_tls())
         .await
         .expect(
             "sslmode=prefer must fall back to plaintext when the connector cannot attest to the \
@@ -81,7 +81,7 @@ async fn prefer_without_a_root_cert_still_connects() {
     let base = test_url();
     let dsn = with_query(&base, "sslmode=prefer");
 
-    let (client, connection) = compio_postgres::connect(&dsn, common::suite_tls())
+    let (client, connection) = compio_postgres::connect(&dsn, support::suite_tls())
         .await
         .expect("sslmode=prefer with no root cert has always connected");
     compio::runtime::spawn(async move {
@@ -110,10 +110,10 @@ async fn verify_full_still_refuses_a_connector_that_cannot_attest() {
         "sslmode=verify-full&sslrootcert=/etc/ssl/certs/ca-certificates.crt",
     );
 
-    let error = compio_postgres::connect(&dsn, common::suite_tls())
+    let error = compio_postgres::connect(&dsn, support::suite_tls())
         .await
         .expect_err("verify-full must not connect through a connector that verifies nothing");
-    let chain = common::error_chain(&error);
+    let chain = support::error_chain(&error);
     assert!(
         chain.contains("verify-full"),
         "the refusal must name the mode that demanded verification: {chain}"

@@ -54,12 +54,12 @@ use compio_postgres::{Pool, PoolConfig};
 use std::time::Duration;
 
 #[allow(unused_imports)]
-use crate::common;
+use crate::support;
 
 const POOL_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn test_url() -> String {
-    common::test_url()
+    support::test_url()
 }
 
 async fn single_connection_pool(url: &str) -> Pool {
@@ -74,7 +74,7 @@ async fn single_connection_pool(url: &str) -> Pool {
     .await
     {
         Ok(Ok(pool)) => pool,
-        Ok(Err(error)) => common::postgres_unreachable(url, &error),
+        Ok(Err(error)) => support::postgres_unreachable(url, &error),
         Err(_) => panic!("pool connection exceeded its timeout"),
     }
 }
@@ -261,7 +261,7 @@ async fn an_open_transaction_does_not_survive_a_release() {
 async fn a_listen_registration_survives_a_release() {
     let url = test_url();
     let pool = single_connection_pool(&url).await;
-    let channel = common::test_object_name("cpg_carry_channel");
+    let channel = support::test_object_name("cpg_carry_channel");
 
     let first_pid = {
         let client = pool.acquire().await.expect("first checkout");

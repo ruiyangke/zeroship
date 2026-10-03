@@ -11,11 +11,11 @@
 //!
 //! ```text
 //! tests/provision_test_backends.sh
-//! cargo test -p compio-postgres --test integration -- integration::
+//! cargo test -p compio-postgres --test main -- integration::api::
 //! ```
 //!
 //! Nothing needs exporting for the provisioned server; `PG_TEST_URL` points
-//! the run at another one (see `common::test_url`).
+//! the run at another one (see `support::test_url`).
 
 use compio_postgres::error::{PoolBudget, SqlState};
 use compio_postgres::types::{IsNull, ToSql, Type, to_sql_checked};
@@ -29,10 +29,10 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 #[allow(unused_imports)]
-use crate::common;
+use crate::support;
 
 fn test_url() -> String {
-    common::test_url()
+    support::test_url()
 }
 
 /// Names the private schema belonging to the calling test.
@@ -44,14 +44,14 @@ fn test_url() -> String {
 /// spawned itself; such a thread shares the schema of whichever test is
 /// running, so open connections from the test's own thread.
 ///
-/// [`common::test_object_name`] adds the process discriminator and owns all
+/// [`support::test_object_name`] adds the process discriminator and owns all
 /// sanitising, hashing, and PostgreSQL identifier-length budgeting. Keeping
 /// that rule in one place matters: appending a PID here after filling all 63
 /// bytes would let PostgreSQL silently truncate the unique part away.
 fn test_schema() -> String {
     let thread = std::thread::current();
     let name = thread.name().unwrap_or("unnamed");
-    common::test_object_name(&format!("cpg_{name}"))
+    support::test_object_name(&format!("cpg_{name}"))
 }
 
 const ADMIN_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -85,7 +85,7 @@ impl AdminSqlError {
 
     fn database(context: &str, error: &Error) -> Self {
         Self {
-            detail: format!("{context}: {}", common::error_chain(error)),
+            detail: format!("{context}: {}", support::error_chain(error)),
             sqlstate: error.code().map(|code| code.code().to_owned()),
         }
     }
@@ -117,7 +117,7 @@ fn execute_admin_sql_bounded(
         .map_err(|error| AdminSqlError::plain(format!("create cleanup runtime: {error}")))?;
     let outcome = runtime.block_on(compio::time::timeout(ADMIN_BATCH_TIMEOUT, async move {
         let (client, connection) = config
-            .connect(common::suite_tls())
+            .connect(support::suite_tls())
             .await
             .map_err(|error| AdminSqlError::database("connect admin client", &error))?;
         let driver = compio::runtime::spawn(async move { connection.run().await });
@@ -135,7 +135,7 @@ fn execute_admin_sql_bounded(
             sqlstate = error.code().map(|code| code.code().to_owned());
             failures.push(format!(
                 "install administrative SQL timeouts: {}",
-                common::error_chain(&error)
+                support::error_chain(&error)
             ));
         } else {
             for statement in statements {
@@ -143,7 +143,7 @@ fn execute_admin_sql_bounded(
                     if sqlstate.is_none() {
                         sqlstate = error.code().map(|code| code.code().to_owned());
                     }
-                    failures.push(format!("{statement}: {}", common::error_chain(&error)));
+                    failures.push(format!("{statement}: {}", support::error_chain(&error)));
                     if !continue_after_error {
                         break;
                     }
@@ -284,7 +284,7 @@ fn schema_scoped_url(url: &str, schema: &str) -> String {
 
 /// Open a client and spawn its driver on the compio runtime.
 async fn connect(url: &str) -> Result<Client, Error> {
-    let (client, connection) = compio_postgres::connect(url, common::suite_tls()).await?;
+    let (client, connection) = compio_postgres::connect(url, support::suite_tls()).await?;
     compio::runtime::spawn(async move {
         if let Err(e) = connection.run().await {
             eprintln!("connection error: {e}");
@@ -299,7 +299,7 @@ async fn connect(url: &str) -> Result<Client, Error> {
 async fn connect_with_statement_cache(url: &str, capacity: usize) -> Result<Client, Error> {
     let mut config: Config = url.parse()?;
     config.statement_cache_capacity(capacity);
-    let (client, connection) = config.connect(common::suite_tls()).await?;
+    let (client, connection) = config.connect(support::suite_tls()).await?;
     compio::runtime::spawn(async move {
         if let Err(e) = connection.run().await {
             eprintln!("connection error: {e}");
@@ -321,7 +321,7 @@ async fn connect_with_statement_cache_threshold(
     config.statement_cache_execution_threshold(
         std::num::NonZeroUsize::new(threshold).expect("test thresholds are nonzero"),
     );
-    let (client, connection) = config.connect(common::suite_tls()).await?;
+    let (client, connection) = config.connect(support::suite_tls()).await?;
     compio::runtime::spawn(async move {
         if let Err(e) = connection.run().await {
             eprintln!("connection error: {e}");
@@ -369,7 +369,7 @@ async fn require_pg() -> TestUrl {
         // status the moment one test could not reach Postgres, discarding every
         // result already produced. A panic ends only this test, so its siblings
         // and any failure already reported still stand - and the run goes red.
-        Ok(Err(error)) => common::postgres_unreachable(&url, &error),
+        Ok(Err(error)) => support::postgres_unreachable(&url, &error),
         Err(_) => panic!(
             "PostgreSQL connection exceeded the {} second test-fixture timeout",
             ADMIN_CONNECT_TIMEOUT.as_secs()
@@ -524,7 +524,7 @@ async fn parameterized_query() {
 async fn create_table_insert_select_drop() {
     let url = require_pg().await;
     let client = connect(&url).await.unwrap();
-    let table = common::test_object_name("test_crud");
+    let table = support::test_object_name("test_crud");
 
     // Clean up from any prior failed run
     client
@@ -584,7 +584,7 @@ async fn create_table_insert_select_drop() {
 async fn transaction_commit() {
     let url = require_pg().await;
     let mut client = connect(&url).await.unwrap();
-    let table = common::test_object_name("test_tx_commit");
+    let table = support::test_object_name("test_tx_commit");
 
     client
         .execute(&format!("DROP TABLE IF EXISTS {table}"), &[])
@@ -632,7 +632,7 @@ async fn transaction_commit() {
 async fn transaction_rollback_on_drop() {
     let url = require_pg().await;
     let mut client = connect(&url).await.unwrap();
-    let table = common::test_object_name("test_tx_rollback");
+    let table = support::test_object_name("test_tx_rollback");
 
     client
         .execute(&format!("DROP TABLE IF EXISTS {table}"), &[])
@@ -781,7 +781,7 @@ async fn wrong_password() {
     // only for the default plaintext DSN and matches nothing else: against any
     // other server the "bad" DSN is the GOOD one, the connection succeeds, and
     // the test fails claiming the server accepted a wrong password.
-    let bad_url = common::with_password(&url, "wrong_password_xyz")
+    let bad_url = support::with_password(&url, "wrong_password_xyz")
         .expect("the test DSN carries no password to make wrong");
     assert_ne!(
         bad_url, url,
@@ -818,7 +818,7 @@ async fn wrong_password() {
 /// and a single fixed table would have them drop and recreate each other's
 /// fixture when the suite runs concurrently.
 async fn create_complex_table(client: &Client) -> String {
-    let table = common::test_object_name("cpg_complex_table");
+    let table = support::test_object_name("cpg_complex_table");
     client
         .execute(&format!("DROP TABLE IF EXISTS {table}"), &[])
         .await
@@ -1185,7 +1185,7 @@ async fn savepoint_name_with_a_space_is_quoted() {
     if let Err(error) = result {
         panic!(
             "a legal savepoint identifier containing a space was rejected: {}",
-            common::error_chain(&error)
+            support::error_chain(&error)
         );
     }
 }
@@ -1194,7 +1194,7 @@ async fn savepoint_name_with_a_space_is_quoted() {
 async fn mixed_case_savepoint_keeps_its_exact_name_and_rolls_back_rows() {
     let url = require_pg().await;
     let mut client = connect(&url).await.unwrap();
-    let table = common::test_object_name("cpg_tx_mixed_case");
+    let table = support::test_object_name("cpg_tx_mixed_case");
 
     client
         .batch_execute(&format!("CREATE TABLE {table} (n int)"))
@@ -1240,7 +1240,7 @@ async fn mixed_case_savepoint_keeps_its_exact_name_and_rolls_back_rows() {
     if let Err(error) = exact_rollback {
         panic!(
             "the savepoint was not created with its exact mixed-case name: {}",
-            common::error_chain(&error)
+            support::error_chain(&error)
         );
     }
 }
@@ -1270,7 +1270,7 @@ async fn savepoint_name_with_a_double_quote_is_escaped() {
     if let Err(error) = result {
         panic!(
             "a legal savepoint identifier containing a double quote was rejected: {}",
-            common::error_chain(&error)
+            support::error_chain(&error)
         );
     }
 }
@@ -1279,7 +1279,7 @@ async fn savepoint_name_with_a_double_quote_is_escaped() {
 async fn semicolon_in_savepoint_name_does_not_split_the_simple_query() {
     let url = require_pg().await;
     let mut client = connect(&url).await.unwrap();
-    let table = common::test_object_name("cpg_tx_semicolon");
+    let table = support::test_object_name("cpg_tx_semicolon");
     let injected_savepoint = format!("point; INSERT INTO {table} VALUES (99); --");
 
     client
@@ -1315,7 +1315,7 @@ async fn semicolon_in_savepoint_name_does_not_split_the_simple_query() {
 async fn inner_savepoint_rollback_keeps_outer_work() {
     let url = require_pg().await;
     let mut client = connect(&url).await.unwrap();
-    let table = common::test_object_name("cpg_tx_nested");
+    let table = support::test_object_name("cpg_tx_nested");
 
     client
         .batch_execute(&format!("CREATE TABLE {table} (n int)"))
@@ -1385,7 +1385,7 @@ async fn inner_savepoint_rollback_keeps_outer_work() {
 async fn a_rolled_back_savepoint_does_not_shadow_an_enclosing_one() {
     let url = require_pg().await;
     let mut client = connect(&url).await.unwrap();
-    let table = common::test_object_name("savepoint_scope");
+    let table = support::test_object_name("savepoint_scope");
 
     client
         .batch_execute(&format!("CREATE TABLE {table} (n int)"))
@@ -1471,7 +1471,7 @@ async fn a_rolled_back_savepoint_is_no_longer_defined() {
 async fn a_savepoint_rollback_recovers_a_failed_statement() {
     let url = require_pg().await;
     let mut client = connect(&url).await.unwrap();
-    let table = common::test_object_name("savepoint_recovery");
+    let table = support::test_object_name("savepoint_recovery");
 
     client
         .batch_execute(&format!("CREATE TABLE {table} (n int)"))
@@ -1535,7 +1535,7 @@ async fn a_savepoint_rollback_recovers_a_failed_statement() {
 async fn a_committed_savepoint_keeps_its_work() {
     let url = require_pg().await;
     let mut client = connect(&url).await.unwrap();
-    let table = common::test_object_name("savepoint_commit");
+    let table = support::test_object_name("savepoint_commit");
 
     client
         .batch_execute(&format!("CREATE TABLE {table} (n int)"))
@@ -2202,7 +2202,7 @@ async fn notify_delivered_on_idle_listener() {
 
     // Listener connection A. Register the async-message sink BEFORE spawning
     // run(), then LISTEN on a channel.
-    let (client_a, mut conn_a) = compio_postgres::connect(&url, common::suite_tls())
+    let (client_a, mut conn_a) = compio_postgres::connect(&url, support::suite_tls())
         .await
         .unwrap();
     let mut notifications = conn_a.notifications();
@@ -2215,7 +2215,7 @@ async fn notify_delivered_on_idle_listener() {
 
     // Unique channel name so concurrent test runs don't cross-deliver. The
     // shared helper owns the process suffix and identifier-length rule.
-    let chan = common::test_object_name("zs_notify_test");
+    let chan = support::test_object_name("zs_notify_test");
     client_a
         .batch_execute(&format!("LISTEN {chan}"))
         .await
@@ -2271,7 +2271,7 @@ async fn copy_in_error_does_not_deadlock() {
 
     let url = require_pg().await;
     let client = connect(&url).await.unwrap();
-    let table = common::test_object_name("cpg_copy_rejected");
+    let table = support::test_object_name("cpg_copy_rejected");
 
     client
         .execute(
@@ -2326,7 +2326,7 @@ async fn copy_in_error_does_not_deadlock() {
                 e.code(),
                 Some(&SqlState::INVALID_TEXT_REPRESENTATION),
                 "the COPY parse error lost its server SQLSTATE: {}",
-                common::error_chain(&e),
+                support::error_chain(&e),
             );
         }
     }
@@ -2357,7 +2357,7 @@ async fn dropped_copy_in_sink_recovers_the_same_connection() {
 
     let url = require_pg().await;
     let client = connect(&url).await.unwrap();
-    let table = common::test_object_name("cpg_copy_drop_in");
+    let table = support::test_object_name("cpg_copy_drop_in");
 
     client
         .execute(&format!("CREATE TEMPORARY TABLE {table} (n int)"), &[])
@@ -2434,7 +2434,7 @@ async fn panicking_copy_input_does_not_leak_partial_bytes_into_the_next_item() {
     compio::time::timeout(std::time::Duration::from_secs(10), async {
         let url = require_pg().await;
         let client = connect(&url).await.unwrap();
-        let table = common::test_object_name("cpg_copy_panicking_buf");
+        let table = support::test_object_name("cpg_copy_panicking_buf");
         client
             .batch_execute(&format!("CREATE TEMP TABLE {table} (value text NOT NULL)"))
             .await
@@ -2528,7 +2528,7 @@ async fn failed_or_panicking_large_copy_input_preserves_its_buffered_predecessor
     compio::time::timeout(std::time::Duration::from_secs(10), async {
         let url = require_pg().await;
         let client = connect(&url).await.unwrap();
-        let table = common::test_object_name("cpg_copy_panicking_frame");
+        let table = support::test_object_name("cpg_copy_panicking_frame");
         client
             .batch_execute(&format!("CREATE TEMP TABLE {table} (value text NOT NULL)"))
             .await
@@ -2593,7 +2593,7 @@ async fn dropped_copy_out_stream_recovers_the_same_connection() {
 
     let url = require_pg().await;
     let client = connect(&url).await.unwrap();
-    let table = common::test_object_name("cpg_copy_drop_out");
+    let table = support::test_object_name("cpg_copy_drop_out");
 
     client
         .batch_execute(&format!(
@@ -2689,9 +2689,9 @@ async fn copy_out_waits_for_the_final_command_status_after_copy_done() {
 
     let url = require_pg().await;
     let client = connect(&url).await.unwrap();
-    let table = common::test_object_name("cpg_copy_out_late_failure");
-    let function = common::test_object_name("cpg_copy_out_late_failure_function");
-    let trigger = common::test_object_name("cpg_copy_out_late_failure_trigger");
+    let table = support::test_object_name("cpg_copy_out_late_failure");
+    let function = support::test_object_name("cpg_copy_out_late_failure_function");
+    let trigger = support::test_object_name("cpg_copy_out_late_failure_trigger");
 
     client
         .batch_execute(&format!(
@@ -2740,7 +2740,7 @@ async fn copy_out_waits_for_the_final_command_status_after_copy_done() {
         error.code().map(|code| code.code()),
         Some("P1234"),
         "the late COPY OUT failure lost its SQLSTATE: {}",
-        common::error_chain(&error),
+        support::error_chain(&error),
     );
     drop(stream);
 
@@ -2765,8 +2765,8 @@ async fn copy_out_waits_for_sync_before_reporting_eof() {
 
     let url = require_pg().await;
     let client = connect(&url).await.unwrap();
-    let parent = common::test_object_name("cpg_copy_out_sync_parent");
-    let child = common::test_object_name("cpg_copy_out_sync_child");
+    let parent = support::test_object_name("cpg_copy_out_sync_parent");
+    let child = support::test_object_name("cpg_copy_out_sync_child");
 
     client
         .batch_execute(&format!(
@@ -2808,7 +2808,7 @@ async fn copy_out_waits_for_sync_before_reporting_eof() {
         error.code(),
         Some(&SqlState::FOREIGN_KEY_VIOLATION),
         "the Sync failure lost its SQLSTATE: {}",
-        common::error_chain(&error),
+        support::error_chain(&error),
     );
     drop(stream);
 
@@ -2835,7 +2835,7 @@ async fn copy_in_spans_many_copy_data_frames() {
 
     let url = require_pg().await;
     let client = connect(&url).await.unwrap();
-    let table = common::test_object_name("cpg_copy_many_frames");
+    let table = support::test_object_name("cpg_copy_many_frames");
     client
         .execute(&format!("CREATE TEMPORARY TABLE {table} (n int)"), &[])
         .await
@@ -2889,7 +2889,7 @@ async fn binary_copy_round_trips_empty_and_null_fields() {
 
     let url = require_pg().await;
     let client = connect(&url).await.unwrap();
-    let table = common::test_object_name("cpg_copy_binary_fields");
+    let table = support::test_object_name("cpg_copy_binary_fields");
     client
         .execute(
             &format!(
@@ -2981,7 +2981,7 @@ async fn binary_copy_out_of_many_variable_width_rows_arrives_one_tuple_per_frame
 
     let url = require_pg().await;
     let client = connect(&url).await.unwrap();
-    let table = common::test_object_name("cpg_copy_binary_widths");
+    let table = support::test_object_name("cpg_copy_binary_widths");
     client
         .execute(
             &format!("CREATE TEMPORARY TABLE {table} (n int4, v text)"),
@@ -3043,7 +3043,7 @@ async fn copy_in_inside_transaction_is_rolled_back() {
 
     let url = require_pg().await;
     let mut client = connect(&url).await.unwrap();
-    let table = common::test_object_name("cpg_copy_transaction");
+    let table = support::test_object_name("cpg_copy_transaction");
     client
         .execute(&format!("CREATE TEMPORARY TABLE {table} (n int)"), &[])
         .await
@@ -3091,7 +3091,7 @@ async fn failed_copy_in_transaction_can_be_rolled_back() {
 
     let url = require_pg().await;
     let mut client = connect(&url).await.unwrap();
-    let table = common::test_object_name("cpg_copy_failed_transaction");
+    let table = support::test_object_name("cpg_copy_failed_transaction");
     client
         .execute(
             &format!("CREATE TEMPORARY TABLE {table} (n int PRIMARY KEY)"),
@@ -3911,7 +3911,7 @@ async fn a_large_request_flushed_during_a_large_response_does_not_deadlock() {
 async fn multiplexed_clean_shutdown_completes_without_hang() {
     let url = require_pg().await;
 
-    let (client, connection) = compio_postgres::connect(&url, common::suite_tls())
+    let (client, connection) = compio_postgres::connect(&url, support::suite_tls())
         .await
         .unwrap();
     // Retain the handle so we can await the driver's own clean exit.
@@ -4134,7 +4134,7 @@ async fn single_connection_pool(url: &str) -> Pool {
 async fn released_open_transaction_is_not_inherited_by_the_next_borrower() {
     let url = require_pg().await;
     let pool = single_connection_pool(&url).await;
-    let table = common::test_object_name("tx_leak");
+    let table = support::test_object_name("tx_leak");
 
     {
         let client = pool.acquire().await.unwrap();
@@ -4308,7 +4308,7 @@ async fn errored_batch_in_an_implicit_transaction_rolls_back_session_changes_and
     let url = require_pg().await;
     let pool = single_connection_pool(&url).await;
     let channel = test_schema();
-    let table = common::test_object_name("batch_error_temp");
+    let table = support::test_object_name("batch_error_temp");
     let backend_pid;
 
     {
@@ -4379,7 +4379,7 @@ async fn released_session_changes_in_an_aborted_transaction_are_rolled_back() {
     let url = require_pg().await;
     let pool = single_connection_pool(&url).await;
     let channel = test_schema();
-    let table = common::test_object_name("aborted_batch_temp");
+    let table = support::test_object_name("aborted_batch_temp");
 
     {
         let client = pool.acquire().await.unwrap();
@@ -4573,11 +4573,11 @@ async fn sslmode_require_fails_closed_over_a_plaintext_server() {
     // to `SSLRequest`. Under `--features suite-over-tls` the ordinary test URL
     // names an ENCRYPTED server, where `sslmode=require` is satisfied and this
     // test would be asserting the opposite of its own name.
-    let url = common::tls_disabled_url();
+    let url = support::tls_disabled_url();
     let sep = if url.contains('?') { '&' } else { '?' };
     let require = format!("{url}{sep}sslmode=require");
 
-    // `NoTls` explicitly, and NOT `common::suite_tls()`: the claim is that no
+    // `NoTls` explicitly, and NOT `support::suite_tls()`: the claim is that no
     // build of this crate lets NoTls satisfy `require`, so the transport is
     // the subject of the test rather than a detail of how it connects. Handing
     // it the suite connector under `--features suite-over-tls` made it fail on
@@ -4689,7 +4689,7 @@ fn open_fds() -> usize {
 #[test]
 fn a_connection_does_not_outlive_the_runtime_that_opened_it() {
     let url = test_url();
-    let tag = common::test_object_name("cpg_runtime_lifetime");
+    let tag = support::test_object_name("cpg_runtime_lifetime");
     let sep = if url.contains('?') { '&' } else { '?' };
     let tagged = format!("{url}{sep}application_name={tag}");
 
@@ -4700,7 +4700,7 @@ fn a_connection_does_not_outlive_the_runtime_that_opened_it() {
         rt.block_on(async {
             let client = match connect(&tagged).await {
                 Ok(client) => client,
-                Err(e) => common::postgres_unreachable(&tagged, &e),
+                Err(e) => support::postgres_unreachable(&tagged, &e),
             };
             let rows = client.query("SELECT 1::int4 AS one", &[]).await.unwrap();
             assert_eq!(rows[0].get::<_, i32>("one"), 1);
@@ -4732,7 +4732,7 @@ const FD_PROBE_TEST: &str =
 /// The name the HARNESS knows that test by, which is what `--exact` matches.
 ///
 /// This file is a module inside the consolidated suite binary, so the harness
-/// calls the test `integration::<name>` rather than `<name>`. The bare literal
+/// calls the test `<module>::<name>` rather than `<name>`. The bare literal
 /// selected nothing, the child ran `0 tests`, and the parent then failed on the
 /// missing probe line rather than on anything about descriptors - a filter miss
 /// wearing the costume of a leak. Derived from `module_path!` rather than
@@ -4751,10 +4751,10 @@ fn fd_probe_test_filter() -> String {
 ///
 /// The spelling lives in the sealed key enum, not here. `clippy.toml` denies
 /// `std::env::var_os`, and the one place in this crate permitted to read the
-/// environment is `common::env::get`, which takes the key rather than a name -
+/// environment is `support::env::get`, which takes the key rather than a name -
 /// so the read below cannot use a local `&str` constant, and keeping one for
 /// the WRITE side alone would be the same literal in two files.
-const FD_PROBE_CHILD: common::env::TestEnvKey = common::env::TestEnvKey::FdProbeChild;
+const FD_PROBE_CHILD: support::env::TestEnvKey = support::env::TestEnvKey::FdProbeChild;
 
 /// Marks the child's machine-readable result lines: `<marker><arm> <csv>`.
 const FD_PROBE_MARKER: &str = "FD-PROBE-SERIES ";
@@ -4860,7 +4860,7 @@ const ONE_CONNECTION_ABRUPT_FDS: i64 = 2;
 /// the next runner has to know.
 #[test]
 fn a_torn_down_runtime_leaks_two_descriptors_plus_one_per_live_connection() {
-    if common::env::get(FD_PROBE_CHILD).is_some() {
+    if support::env::get(FD_PROBE_CHILD).is_some() {
         measure_and_report_fd_series();
         return;
     }
@@ -4985,7 +4985,7 @@ enum Teardown {
 /// something this should name, not absorb.
 fn fd_series(url: &str, connections: usize, teardown: Teardown) -> Vec<usize> {
     let sep = if url.contains('?') { '&' } else { '?' };
-    let tag = common::test_object_name("cpg_fd_probe");
+    let tag = support::test_object_name("cpg_fd_probe");
     let tagged = format!("{url}{sep}application_name={tag}");
 
     let mut fds = Vec::with_capacity(FD_PROBE_ITERATIONS + 1);
@@ -4997,7 +4997,7 @@ fn fd_series(url: &str, connections: usize, teardown: Teardown) -> Vec<usize> {
             for _ in 0..connections {
                 let client = match connect(&tagged).await {
                     Ok(client) => client,
-                    Err(e) => common::postgres_unreachable(&tagged, &e),
+                    Err(e) => support::postgres_unreachable(&tagged, &e),
                 };
                 let rows = client.query("SELECT 1::int4 AS one", &[]).await.unwrap();
                 assert_eq!(rows[0].get::<_, i32>("one"), 1);
@@ -5031,7 +5031,7 @@ fn report_fd_series(arm: &str, fds: &[usize]) {
 #[test]
 fn a_connection_is_visible_to_the_server_while_its_runtime_runs() {
     let url = test_url();
-    let tag = common::test_object_name("cpg_runtime_lifetime_live");
+    let tag = support::test_object_name("cpg_runtime_lifetime_live");
     let sep = if url.contains('?') { '&' } else { '?' };
     let tagged = format!("{url}{sep}application_name={tag}");
 
@@ -5039,7 +5039,7 @@ fn a_connection_is_visible_to_the_server_while_its_runtime_runs() {
     let seen = rt.block_on(async {
         let client = match connect(&tagged).await {
             Ok(client) => client,
-            Err(e) => common::postgres_unreachable(&tagged, &e),
+            Err(e) => support::postgres_unreachable(&tagged, &e),
         };
         let rows = client
             .query(
@@ -5080,7 +5080,7 @@ async fn a_server_refusal_reaches_the_reader_with_its_sqlstate() {
     // `Display` cannot carry the detail; the chain below must.
     assert_eq!(err.to_string(), "db error");
 
-    let chain = common::error_chain(&err);
+    let chain = support::error_chain(&err);
     assert!(
         chain.contains("42P01"),
         "the chain must carry the SQLSTATE the server sent, got {chain:?}"
@@ -5090,7 +5090,7 @@ async fn a_server_refusal_reaches_the_reader_with_its_sqlstate() {
         "the chain must carry the server's message, got {chain:?}"
     );
     assert!(
-        common::server_answered(&err),
+        support::server_answered(&err),
         "a DbError means PostgreSQL composed and sent this, so it answered"
     );
 }
@@ -5111,10 +5111,10 @@ async fn nothing_listening_is_not_reported_as_a_server_answer() {
         .expect_err("nothing listens on port 1");
 
     assert!(
-        !common::server_answered(&err),
+        !support::server_answered(&err),
         "no server replied, so the provisioning advice is the correct one"
     );
-    let chain = common::error_chain(&err);
+    let chain = support::error_chain(&err);
     assert!(
         !chain.contains("SQLSTATE"),
         "a transport failure carries no SQLSTATE to print, got {chain:?}"
@@ -5146,8 +5146,8 @@ async fn nothing_listening_is_not_reported_as_a_server_answer() {
 fn a_template_clone_is_not_blocked_by_the_previous_runtime() {
     let url = test_url();
     let (base, _) = url.rsplit_once('/').expect("a database in the DSN");
-    let template = common::test_object_name("cpg_template_lifetime_src");
-    let clone = common::test_object_name("cpg_template_lifetime_clone");
+    let template = support::test_object_name("cpg_template_lifetime_src");
+    let clone = support::test_object_name("cpg_template_lifetime_clone");
     // The session issuing the clone must not itself be ON the template, or it
     // would be the one other session and this would fail on its own connection.
     let admin_url = format!("{base}/postgres");
@@ -5253,7 +5253,7 @@ async fn a_result_set_larger_than_the_single_frame_cap_still_streams() {
             &[],
         )
         .await
-        .unwrap_or_else(|e| panic!("125 MiB result set refused: {}", common::error_chain(&e)));
+        .unwrap_or_else(|e| panic!("125 MiB result set refused: {}", support::error_chain(&e)));
 
     assert_eq!(rows.len(), 8000, "wrong row count for the large result set");
     assert_eq!(
@@ -5390,7 +5390,7 @@ async fn a_pool_refuses_a_configuration_it_cannot_honour() {
 async fn dropping_the_client_closes_the_connection_without_an_error() {
     let url = require_pg().await;
 
-    let (client, connection) = compio_postgres::connect(&url, common::suite_tls())
+    let (client, connection) = compio_postgres::connect(&url, support::suite_tls())
         .await
         .unwrap();
     let task = compio::runtime::spawn(async move { connection.run().await });
@@ -5402,7 +5402,7 @@ async fn dropping_the_client_closes_the_connection_without_an_error() {
     if let Err(e) = outcome {
         panic!(
             "a clean drop resolved run() to an error: {}",
-            common::error_chain(&e)
+            support::error_chain(&e)
         );
     }
 }
@@ -5417,7 +5417,7 @@ async fn dropping_the_client_closes_the_connection_without_an_error() {
 async fn losing_the_backend_under_a_live_client_is_still_an_error() {
     let url = require_pg().await;
 
-    let (client, connection) = compio_postgres::connect(&url, common::suite_tls())
+    let (client, connection) = compio_postgres::connect(&url, support::suite_tls())
         .await
         .unwrap();
     let task = compio::runtime::spawn(async move { connection.run().await });
@@ -5446,7 +5446,7 @@ async fn losing_the_backend_under_a_live_client_is_still_an_error() {
 async fn dropping_an_unfinished_transaction_and_the_client_closes_without_an_error() {
     let url = require_pg().await;
 
-    let (mut client, connection) = compio_postgres::connect(&url, common::suite_tls())
+    let (mut client, connection) = compio_postgres::connect(&url, support::suite_tls())
         .await
         .unwrap();
     let task = compio::runtime::spawn(async move { connection.run().await });
@@ -5459,7 +5459,7 @@ async fn dropping_an_unfinished_transaction_and_the_client_closes_without_an_err
     if let Err(error) = outcome {
         panic!(
             "dropping an unfinished transaction and its client failed run(): {}",
-            common::error_chain(&error)
+            support::error_chain(&error)
         );
     }
 }
@@ -5469,7 +5469,7 @@ async fn dropping_an_unfinished_transaction_and_the_client_closes_without_an_err
 #[compio::test]
 async fn dropping_the_client_with_a_server_transaction_open_rolls_back() {
     let url = require_pg().await;
-    let table = common::test_object_name("cpg_tx_client_drop");
+    let table = support::test_object_name("cpg_tx_client_drop");
 
     let observer = connect(&url).await.unwrap();
     observer
@@ -5477,7 +5477,7 @@ async fn dropping_the_client_with_a_server_transaction_open_rolls_back() {
         .await
         .unwrap();
 
-    let (mut client, connection) = compio_postgres::connect(&url, common::suite_tls())
+    let (mut client, connection) = compio_postgres::connect(&url, support::suite_tls())
         .await
         .unwrap();
     let task = compio::runtime::spawn(async move { connection.run().await });
@@ -5533,7 +5533,7 @@ async fn dropping_the_client_with_a_server_transaction_open_rolls_back() {
     if let Err(error) = outcome {
         panic!(
             "closing a client with an open transaction failed run(): {}",
-            common::error_chain(&error)
+            support::error_chain(&error)
         );
     }
 }
@@ -5544,7 +5544,7 @@ async fn dropping_the_client_with_a_server_transaction_open_rolls_back() {
 async fn dropping_a_bound_portal_and_its_client_closes_without_an_error() {
     let url = require_pg().await;
 
-    let (mut client, connection) = compio_postgres::connect(&url, common::suite_tls())
+    let (mut client, connection) = compio_postgres::connect(&url, support::suite_tls())
         .await
         .unwrap();
     let task = compio::runtime::spawn(async move { connection.run().await });
@@ -5561,7 +5561,7 @@ async fn dropping_a_bound_portal_and_its_client_closes_without_an_error() {
     if let Err(error) = outcome {
         panic!(
             "dropping a bound portal and its client failed run(): {}",
-            common::error_chain(&error)
+            support::error_chain(&error)
         );
     }
 }
@@ -5573,7 +5573,7 @@ async fn dropping_a_bound_portal_and_its_client_closes_without_an_error() {
 async fn an_awaited_query_queued_before_client_drop_still_reports_its_write_error() {
     let url = require_pg().await;
 
-    let (client, connection) = compio_postgres::connect(&url, common::suite_tls())
+    let (client, connection) = compio_postgres::connect(&url, support::suite_tls())
         .await
         .unwrap();
     let observer = client.simple_query_raw("SELECT 1").await.unwrap();
@@ -5693,7 +5693,7 @@ async fn concurrent_typeinfo_cache_loser_is_closed() {
     compio::time::timeout(Duration::from_secs(10), async {
         let url = require_pg().await;
         let client = connect(&url).await.unwrap();
-        let type_name = common::test_object_name("cpg_typeinfo_race");
+        let type_name = support::test_object_name("cpg_typeinfo_race");
         client
             .batch_execute(&format!(
                 "DROP TYPE IF EXISTS pg_temp.{type_name} CASCADE; \
@@ -6001,7 +6001,7 @@ async fn statement_cache_execution_threshold_applies_to_execute() {
     let client = connect_with_statement_cache_threshold(&url, 2, 2)
         .await
         .unwrap();
-    let table = common::test_object_name("cpg_cache_execute_seen");
+    let table = support::test_object_name("cpg_cache_execute_seen");
     client
         .batch_execute(&format!("CREATE TEMP TABLE {table} (value int8)"))
         .await
@@ -6112,7 +6112,7 @@ async fn statement_cache_execution_threshold_applies_to_copy_out() {
 async fn post_bind_error_keeps_copy_out_statement_cached() {
     let url = test_url();
     let client = connect_with_statement_cache(&url, 2).await.unwrap();
-    let target = common::test_object_name("cpg_copy_out_inner_execute");
+    let target = support::test_object_name("cpg_copy_out_inner_execute");
     let sql = format!("EXECUTE {target} /* cpg_copy_out_post_bind_cache */");
 
     client
@@ -6127,7 +6127,7 @@ async fn post_bind_error_keeps_copy_out_statement_cached() {
     assert!(
         initial.code().is_none(),
         "the initial COPY refusal unexpectedly came from PostgreSQL: {}",
-        common::error_chain(&initial)
+        support::error_chain(&initial)
     );
     assert_eq!(
         prepared_statement_names(&client, &sql).await.len(),
@@ -6147,7 +6147,7 @@ async fn post_bind_error_keeps_copy_out_statement_cached() {
         error.code(),
         Some(&SqlState::INVALID_SQL_STATEMENT_NAME),
         "the missing inner statement reported the wrong error: {}",
-        common::error_chain(&error)
+        support::error_chain(&error)
     );
     assert_eq!(
         error
@@ -6194,7 +6194,7 @@ async fn post_bind_error_keeps_copy_in_statement_cached() {
 
     let url = test_url();
     let client = connect_with_statement_cache(&url, 2).await.unwrap();
-    let target = common::test_object_name("cpg_copy_in_inner_execute");
+    let target = support::test_object_name("cpg_copy_in_inner_execute");
     let sql = format!("EXECUTE {target} /* cpg_copy_in_post_bind_cache */");
 
     client
@@ -6208,7 +6208,7 @@ async fn post_bind_error_keeps_copy_in_statement_cached() {
     assert!(
         initial.code().is_none(),
         "the initial COPY refusal unexpectedly came from PostgreSQL: {}",
-        common::error_chain(&initial)
+        support::error_chain(&initial)
     );
     assert_eq!(
         prepared_statement_names(&client, &sql).await.len(),
@@ -6227,7 +6227,7 @@ async fn post_bind_error_keeps_copy_in_statement_cached() {
         error.code(),
         Some(&SqlState::INVALID_SQL_STATEMENT_NAME),
         "the missing inner statement reported the wrong error: {}",
-        common::error_chain(&error)
+        support::error_chain(&error)
     );
     assert_eq!(
         error
@@ -6282,7 +6282,7 @@ async fn clear_type_cache_refreshes_implicitly_cached_statement_metadata() {
 
     let url = require_pg().await;
     let client = connect_with_statement_cache(&url, 2).await.unwrap();
-    let type_name = common::test_object_name("cpg_cache_enum");
+    let type_name = support::test_object_name("cpg_cache_enum");
 
     client
         .batch_execute(&format!("CREATE TYPE {type_name} AS ENUM ('before')"))
@@ -6547,7 +6547,7 @@ async fn statement_cache_bypass_is_one_shot() {
 async fn statement_cache_retries_stale_result_shape_once_after_0a000() {
     let url = test_url();
     let client = connect_with_statement_cache(&url, 2).await.unwrap();
-    let table = common::test_object_name("cpg_cache_plan_shape");
+    let table = support::test_object_name("cpg_cache_plan_shape");
     let sql = format!("SELECT * FROM {table}");
 
     client
@@ -6596,10 +6596,10 @@ async fn statement_cache_retries_stale_result_shape_once_after_0a000() {
 async fn statement_cache_does_not_retry_0a000_after_parameter_input() {
     let url = test_url();
     let client = connect_with_statement_cache(&url, 3).await.unwrap();
-    let table = common::test_object_name("cpg_cache_domain_shape");
-    let sequence = common::test_object_name("cpg_cache_domain_0a000_seq");
-    let function = common::test_object_name("cpg_cache_domain_0a000_check");
-    let domain = common::test_object_name("cpg_cache_domain_0a000");
+    let table = support::test_object_name("cpg_cache_domain_shape");
+    let sequence = support::test_object_name("cpg_cache_domain_0a000_seq");
+    let function = support::test_object_name("cpg_cache_domain_0a000_check");
+    let domain = support::test_object_name("cpg_cache_domain_0a000");
     client
         .batch_execute(&format!(
             "CREATE TEMP SEQUENCE {sequence}; \
@@ -6684,7 +6684,7 @@ async fn statement_cache_does_not_retry_0a000_after_parameter_input() {
 async fn statement_cache_does_not_retry_0a000_inside_a_transaction() {
     let url = test_url();
     let client = connect_with_statement_cache(&url, 2).await.unwrap();
-    let table = common::test_object_name("cpg_cache_plan_shape_in_tx");
+    let table = support::test_object_name("cpg_cache_plan_shape_in_tx");
     let sql = format!("SELECT * FROM {table}");
 
     client
@@ -6819,7 +6819,7 @@ async fn statement_cache_knows_an_existing_transaction_is_aborted() {
 async fn statement_cache_retries_stale_result_shape_while_a_peer_request_is_in_flight() {
     let url = test_url();
     let client = std::rc::Rc::new(connect_with_statement_cache(&url, 3).await.unwrap());
-    let table = common::test_object_name("cpg_cache_shape_busy");
+    let table = support::test_object_name("cpg_cache_shape_busy");
     let sql = format!("SELECT * FROM {table}");
 
     client
@@ -6897,7 +6897,7 @@ async fn statement_cache_retries_stale_result_shape_under_sustained_concurrency(
 
     let url = test_url();
     let client = std::rc::Rc::new(connect_with_statement_cache(&url, 8).await.unwrap());
-    let table = common::test_object_name("cpg_cache_shape_load");
+    let table = support::test_object_name("cpg_cache_shape_load");
     let sql = format!("SELECT * FROM {table}");
     client
         .batch_execute(&format!(
@@ -6972,7 +6972,7 @@ async fn statement_cache_retries_stale_result_shape_under_sustained_concurrency(
 async fn statement_cache_does_not_reprepare_an_explicit_statement() {
     let url = test_url();
     let client = connect_with_statement_cache(&url, 2).await.unwrap();
-    let table = common::test_object_name("cpg_explicit_plan_shape");
+    let table = support::test_object_name("cpg_explicit_plan_shape");
     let sql = format!("SELECT * FROM {table}");
 
     client
@@ -7049,9 +7049,9 @@ async fn statement_cache_does_not_retry_a_cold_26000() {
 async fn statement_cache_requires_server_provenance_before_retrying_26000() {
     let url = test_url();
     let client = connect_with_statement_cache(&url, 2).await.unwrap();
-    let sequence = common::test_object_name("cpg_cache_domain_26000_seq");
-    let function = common::test_object_name("cpg_cache_domain_26000_check");
-    let domain = common::test_object_name("cpg_cache_domain_26000");
+    let sequence = support::test_object_name("cpg_cache_domain_26000_seq");
+    let function = support::test_object_name("cpg_cache_domain_26000_check");
+    let domain = support::test_object_name("cpg_cache_domain_26000");
     client
         .batch_execute(&format!(
             "CREATE TEMP SEQUENCE {sequence}; \
@@ -7117,7 +7117,7 @@ async fn statement_cache_does_not_retry_26000_after_bind_complete() {
     let mut events = client.query_events();
 
     const BARRIER_SQL: &str = "SELECT 69::int4 AS cpg_cache_retry_barrier";
-    let target = common::test_object_name("cpg_cache_retry_target");
+    let target = support::test_object_name("cpg_cache_retry_target");
     let sql = format!("EXECUTE {target}");
     client
         .batch_execute(&format!("PREPARE {target} AS SELECT 66::int4"))
@@ -7181,9 +7181,9 @@ async fn statement_cache_does_not_retry_26000_after_bind_complete() {
 async fn statement_cache_never_replays_a_committed_effect_after_bind_complete() {
     let url = test_url();
     let client = connect_with_statement_cache(&url, 2).await.unwrap();
-    let table = common::test_object_name("cpg_cache_retry_rows");
-    let procedure = common::test_object_name("cpg_cache_retry_procedure");
-    let missing = common::test_object_name("cpg_cache_retry_missing");
+    let table = support::test_object_name("cpg_cache_retry_rows");
+    let procedure = support::test_object_name("cpg_cache_retry_procedure");
+    let missing = support::test_object_name("cpg_cache_retry_missing");
     let sql = format!("CALL pg_temp.{procedure}($1)");
 
     client
@@ -7243,7 +7243,7 @@ async fn cancelled_cached_plan_error_is_not_handed_to_the_next_borrower() {
     let pool = Pool::connect_with_config(connection_config, pool_config)
         .await
         .unwrap();
-    let table = common::test_object_name("cpg_cancelled_cache_plan_shape");
+    let table = support::test_object_name("cpg_cancelled_cache_plan_shape");
     let sql = format!("SELECT * FROM {table}");
 
     let backend_pid;
@@ -7400,7 +7400,7 @@ async fn stale_cached_copy_in_reprepares_before_bind() {
 
     let url = test_url();
     let client = connect_with_statement_cache(&url, 2).await.unwrap();
-    let table = common::test_object_name("cpg_stale_cached_copy_in");
+    let table = support::test_object_name("cpg_stale_cached_copy_in");
 
     client
         .batch_execute(&format!("CREATE TEMP TABLE {table} (n int4 NOT NULL)"))
@@ -7503,7 +7503,7 @@ async fn statement_cache_retries_a_statement_missing_after_discard_all() {
 async fn statement_cache_retries_execute_without_double_applying() {
     let url = test_url();
     let client = connect_with_statement_cache(&url, 2).await.unwrap();
-    let table = common::test_object_name("cpg_cache_execute_retry");
+    let table = support::test_object_name("cpg_cache_execute_retry");
 
     client
         .batch_execute(&format!("CREATE TEMP TABLE {table} (n int4 NOT NULL)"))
@@ -7548,9 +7548,9 @@ async fn prepared_statement_server_errors_do_not_poison_the_connection() {
 
     let url = require_pg().await;
     let client = connect(&url).await.unwrap();
-    let result_shape_table = common::test_object_name("cpg_prep_result_shape");
-    let dropped_table = common::test_object_name("cpg_prep_dropped");
-    let typed_table = common::test_object_name("cpg_prep_typed");
+    let result_shape_table = support::test_object_name("cpg_prep_result_shape");
+    let dropped_table = support::test_object_name("cpg_prep_dropped");
+    let typed_table = support::test_object_name("cpg_prep_typed");
 
     client
         .batch_execute(&format!(
@@ -7572,7 +7572,7 @@ async fn prepared_statement_server_errors_do_not_poison_the_connection() {
         .unwrap();
     let shape_error = client.query(&result_shape, &[]).await.unwrap_err();
     let shape_code = shape_error.code().map(SqlState::code).map(str::to_string);
-    let shape_detail = common::error_chain(&shape_error);
+    let shape_detail = support::error_chain(&shape_error);
     let recovered_after_shape: i32 = client
         .query_one_scalar("SELECT 45::int4", &[])
         .await
@@ -7600,7 +7600,7 @@ async fn prepared_statement_server_errors_do_not_poison_the_connection() {
         .unwrap();
     let dropped_error = client.query(&dropped, &[]).await.unwrap_err();
     let dropped_code = dropped_error.code().map(SqlState::code).map(str::to_string);
-    let dropped_detail = common::error_chain(&dropped_error);
+    let dropped_detail = support::error_chain(&dropped_error);
     let recovered_after_drop: i32 = client
         .query_one_scalar("SELECT 46::int4", &[])
         .await
@@ -7622,7 +7622,7 @@ async fn prepared_statement_server_errors_do_not_poison_the_connection() {
         .await
         .unwrap_err();
     let typed_code = typed_error.code().map(SqlState::code).map(str::to_string);
-    let typed_detail = common::error_chain(&typed_error);
+    let typed_detail = support::error_chain(&typed_error);
     let recovered_after_typed: i32 = client
         .query_one_scalar("SELECT 47::int4", &[])
         .await
@@ -7866,7 +7866,7 @@ async fn generated_name_collision_preserves_existing_statement() {
     assert_eq!(prepare_code.as_deref(), Some("42P05"));
     let existing_outcome = match existing_value {
         Some(Ok(value)) => format!("value {value}"),
-        Some(Err(error)) => format!("error {:?}: {}", error.code(), common::error_chain(&error)),
+        Some(Err(error)) => format!("error {:?}: {}", error.code(), support::error_chain(&error)),
         None => "prepare did not return a colliding statement name".to_string(),
     };
     assert_eq!(
@@ -7929,8 +7929,8 @@ async fn custom_multirange_resolves_its_element_type() {
 
     let url = require_pg().await;
     let client = connect(&url).await.unwrap();
-    let range = common::test_object_name("cpg_prep_range");
-    let multirange = common::test_object_name("cpg_prep_multirange");
+    let range = support::test_object_name("cpg_prep_range");
+    let multirange = support::test_object_name("cpg_prep_multirange");
 
     client
         .batch_execute(&format!(
@@ -7993,7 +7993,7 @@ async fn rejected_copy_start_does_not_poison_the_connection() {
         err.code(),
         Some(&SqlState::UNDEFINED_TABLE),
         "expected 42P01 from the refused COPY start: {}",
-        common::error_chain(&err)
+        support::error_chain(&err)
     );
 
     let row = compio::time::timeout(
@@ -8017,7 +8017,7 @@ async fn fallback_application_name_names_the_session() {
     let session_name = |dsn: String| async move {
         let mut config: Config = dsn.parse().unwrap();
         config.statement_cache_capacity(0);
-        let (client, connection) = config.connect(common::suite_tls()).await.unwrap();
+        let (client, connection) = config.connect(support::suite_tls()).await.unwrap();
         compio::runtime::spawn(async move {
             let _ = connection.run().await;
         })
@@ -8065,7 +8065,7 @@ async fn an_abandoned_copy_in_returns_a_usable_entry_to_the_pool() {
     let pool = Pool::connect_with_pool_config(&url, pool_config)
         .await
         .unwrap();
-    let table = common::test_object_name("cpg_pooled_abandoned_copy");
+    let table = support::test_object_name("cpg_pooled_abandoned_copy");
 
     let borrowed_pid = {
         let client = pool.acquire().await.unwrap();
@@ -8150,7 +8150,7 @@ async fn abandoned_copy_in_startup_rejection_does_not_poison_the_next_operation(
         let url = require_pg().await;
         let target = connect(&url).await.unwrap();
         let blocker = connect(&url).await.unwrap();
-        let table = common::test_object_name("cpg_copy_abandoned_startup");
+        let table = support::test_object_name("cpg_copy_abandoned_startup");
 
         target
             .batch_execute(&format!("CREATE TABLE {table} (value text NOT NULL)"))

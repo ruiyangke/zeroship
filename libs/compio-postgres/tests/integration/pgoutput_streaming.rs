@@ -38,7 +38,7 @@ use std::collections::BTreeSet;
 use std::time::Duration;
 
 #[allow(unused_imports)]
-use crate::common;
+use crate::support;
 
 const WATCHDOG: Duration = Duration::from_secs(120);
 const ABORT_OBSERVATION: Duration = Duration::from_secs(3);
@@ -52,18 +52,18 @@ const DECODING_WORK_MEM: &str = "64kB";
 const ROWS: i32 = 4000;
 
 async fn client() -> Client {
-    let url = common::test_url();
-    match compio_postgres::connect(&url, common::suite_tls()).await {
+    let url = support::test_url();
+    match compio_postgres::connect(&url, support::suite_tls()).await {
         Ok((client, connection)) => {
             compio::runtime::spawn(async move {
                 if let Err(error) = connection.run().await {
-                    eprintln!("connection error: {}", common::error_chain(&error));
+                    eprintln!("connection error: {}", support::error_chain(&error));
                 }
             })
             .detach();
             client
         }
-        Err(error) => common::postgres_unreachable(&url, &error),
+        Err(error) => support::postgres_unreachable(&url, &error),
     }
 }
 
@@ -113,7 +113,7 @@ where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = u32>,
 {
-    let mut config = common::replication_config("cpg_streaming");
+    let mut config = support::replication_config("cpg_streaming");
     // The walsender is the process that decodes, so the limit has to be set
     // on ITS session. Startup options are the only channel a replication
     // connection has for that - it never runs a `SET`.
@@ -124,12 +124,12 @@ where
     config.options(options);
 
     let replication =
-        compio_postgres::replication::connect_replication(common::suite_tls(), &config)
+        compio_postgres::replication::connect_replication(support::suite_tls(), &config)
             .await
             .map_err(|error| {
                 format!(
                     "replication connect failed: {}",
-                    common::error_chain(&error)
+                    support::error_chain(&error)
                 )
             })?;
 
@@ -147,7 +147,7 @@ where
             ..Default::default()
         })
         .await
-        .map_err(|error| format!("START_REPLICATION failed: {}", common::error_chain(&error)))?;
+        .map_err(|error| format!("START_REPLICATION failed: {}", support::error_chain(&error)))?;
 
     // The write runs while the stream is live, so a rolled-back
     // subtransaction is streamed and then aborted rather than discarded
@@ -164,7 +164,7 @@ where
     let mut ours = false;
     loop {
         match stream.next().await.map_err(|error| {
-            format!("replication stream failed: {}", common::error_chain(&error))
+            format!("replication stream failed: {}", support::error_chain(&error))
         })? {
             Some(ReplicationMessage::XLogData { body, .. }) => {
                 let message = decoder
@@ -221,14 +221,14 @@ struct Fixture {
 
 impl Fixture {
     async fn create(logical: &str) -> Self {
-        let base = common::test_object_name(logical);
+        let base = support::test_object_name(logical);
         let fixture = Self {
             table: format!("{base}_t"),
             publication: format!("{base}_p"),
             slot: format!("{base}_s"),
             setup: client().await,
         };
-        common::sweep_stale_test_objects(&fixture.setup).await;
+        support::sweep_stale_test_objects(&fixture.setup).await;
         fixture
             .setup
             .batch_execute(&format!(
@@ -331,7 +331,7 @@ impl Fixture {
     }
 
     async fn drop_all(&self) {
-        common::drop_replication_slot(&self.setup, &self.slot)
+        support::drop_replication_slot(&self.setup, &self.slot)
             .await
             .unwrap_or_else(|error| panic!("replication slot did not detach for cleanup: {error}"));
 
@@ -665,8 +665,8 @@ async fn streaming_below_its_minimum_proto_version_is_refused_locally() {
     ] {
         // One connection per case: `start_logical_replication` consumes it.
         let replication = compio_postgres::replication::connect_replication(
-            common::suite_tls(),
-            &common::replication_config("cpg_streaming_refusal"),
+            support::suite_tls(),
+            &support::replication_config("cpg_streaming_refusal"),
         )
         .await
         .expect("replication connect failed");
@@ -686,7 +686,7 @@ async fn streaming_below_its_minimum_proto_version_is_refused_locally() {
         assert!(
             error.as_db_error().is_none(),
             "the invalid combination reached PostgreSQL instead of being refused locally: {}",
-            common::error_chain(&error)
+            support::error_chain(&error)
         );
         let rendered = format!("{error}");
         let chain = std::iter::successors(std::error::Error::source(&error), |error| {
@@ -708,8 +708,8 @@ async fn streaming_below_its_minimum_proto_version_is_refused_locally() {
 #[compio::test]
 async fn protocol_above_four_is_refused_locally() {
     let replication = compio_postgres::replication::connect_replication(
-        common::suite_tls(),
-        &common::replication_config("cpg_protocol_ceiling"),
+        support::suite_tls(),
+        &support::replication_config("cpg_protocol_ceiling"),
     )
     .await
     .expect("replication connect failed");
@@ -723,7 +723,7 @@ async fn protocol_above_four_is_refused_locally() {
         })
         .await
         .expect_err("proto_version 5 must be refused before START_REPLICATION");
-    let chain = common::error_chain(&error);
+    let chain = support::error_chain(&error);
 
     assert!(
         error.as_db_error().is_none(),
@@ -740,8 +740,8 @@ async fn protocol_above_four_is_refused_locally() {
 #[compio::test]
 async fn protocol_below_one_is_refused_locally() {
     let replication = compio_postgres::replication::connect_replication(
-        common::suite_tls(),
-        &common::replication_config("cpg_protocol_floor"),
+        support::suite_tls(),
+        &support::replication_config("cpg_protocol_floor"),
     )
     .await
     .expect("replication connect failed");
@@ -755,7 +755,7 @@ async fn protocol_below_one_is_refused_locally() {
         })
         .await
         .expect_err("proto_version 0 must be refused before START_REPLICATION");
-    let chain = common::error_chain(&error);
+    let chain = support::error_chain(&error);
 
     assert!(
         error.as_db_error().is_none(),

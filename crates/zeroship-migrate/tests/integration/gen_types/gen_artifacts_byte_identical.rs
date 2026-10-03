@@ -45,8 +45,11 @@ use zeroship_migrate::{
 // copying its app-schema binding. A dev-dependency on zeroship-migrate-server would
 // form a package cycle because that service depends on zeroship-migrate. The source
 // inclusion keeps this arm on the exact ManagedPolicyConfig code and exact embedded
-// policy files the service binary uses.
-#[allow(dead_code)]
+// policy files the service binary uses; it exposes more than this test reads.
+#[expect(
+    dead_code,
+    reason = "the included production policy module exposes more than this byte-identity test uses"
+)]
 #[path = "../../../../zeroship-migrate-server/src/policy.rs"]
 mod migrate_server_policy;
 

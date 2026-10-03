@@ -1,17 +1,17 @@
 //! PostgreSQL's allowed SIMPLE `Query` reply sequences.
 
 #[allow(unused_imports)]
-use crate::common;
+use crate::support;
 use compio_postgres::error::SqlState;
 use compio_postgres::types::Type;
 use compio_postgres::{Client, SimpleQueryFormat, SimpleQueryMessage};
 use futures_util::StreamExt;
 
 async fn connected() -> Client {
-    let url = common::test_url();
-    let (client, connection) = compio_postgres::connect(&url, common::suite_tls())
+    let url = support::test_url();
+    let (client, connection) = compio_postgres::connect(&url, support::suite_tls())
         .await
-        .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+        .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
     compio::runtime::spawn(async move {
         let _ = connection.run().await;
     })
@@ -54,7 +54,7 @@ fn flatten(message: &SimpleQueryMessage) -> Seen {
 #[compio::test]
 async fn mixed_statements_preserve_every_reply_in_wire_order() {
     let client = connected().await;
-    let table = common::test_object_name("cpg_simple_mixed");
+    let table = support::test_object_name("cpg_simple_mixed");
     let messages = client
         .simple_query(&format!(
             "SELECT 11::int4 AS first; \
@@ -171,7 +171,7 @@ async fn binary_cursor_fetch_never_exposes_binary_values_as_text() {
         "binary int4 bytes were exposed as text: {decoded:?}"
     );
     let error = decoded.expect_err("the binary value was exposed as text");
-    let cause = common::error_chain(&error);
+    let cause = support::error_chain(&error);
     assert!(
         cause.contains("column is in binary format; use SimpleQueryRow::raw_value"),
         "the text-access error did not direct the caller to the raw bytes: {cause}"

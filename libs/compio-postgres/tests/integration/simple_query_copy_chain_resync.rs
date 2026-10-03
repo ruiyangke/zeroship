@@ -17,17 +17,17 @@ use futures_util::TryStreamExt;
 use std::time::Duration;
 
 #[allow(unused_imports)]
-use crate::common;
+use crate::support;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(20);
 const ABORT_MARKER: &str = "simple query execution cannot supply COPY data";
 
 fn test_url() -> String {
-    common::test_url()
+    support::test_url()
 }
 
 async fn connect_client(url: &str) -> Client {
-    let (client, connection) = compio_postgres::connect(url, common::suite_tls())
+    let (client, connection) = compio_postgres::connect(url, support::suite_tls())
         .await
         .expect("connect to PostgreSQL");
     compio::runtime::spawn(async move {
@@ -40,7 +40,7 @@ async fn connect_client(url: &str) -> Client {
 }
 
 async fn copy_table(client: &Client, suffix: &str) -> String {
-    let table = common::test_object_name(&format!("cpg_simple_copy_chain_{suffix}"));
+    let table = support::test_object_name(&format!("cpg_simple_copy_chain_{suffix}"));
     client
         .batch_execute(&format!(
             "CREATE TEMPORARY TABLE {table} (v int); INSERT INTO {table} VALUES (1)"
@@ -78,9 +78,9 @@ async fn batch_execute_finds_copy_in_after_copy_out_and_recovers() {
         assert_eq!(value, 42);
         assert_eq!(failure.code(), Some(&SqlState::QUERY_CANCELED));
         assert!(
-            common::error_chain(&failure).contains(ABORT_MARKER),
+            support::error_chain(&failure).contains(ABORT_MARKER),
             "the later COPY-IN was not aborted by this driver: {}",
-            common::error_chain(&failure)
+            support::error_chain(&failure)
         );
         assert_eq!(
             client.transaction_status(),
@@ -110,9 +110,9 @@ async fn simple_query_finds_copy_in_after_copy_out_and_recovers() {
         assert_eq!(value, 43);
         assert_eq!(failure.code(), Some(&SqlState::QUERY_CANCELED));
         assert!(
-            common::error_chain(&failure).contains(ABORT_MARKER),
+            support::error_chain(&failure).contains(ABORT_MARKER),
             "the later COPY-IN was not aborted by this driver: {}",
-            common::error_chain(&failure)
+            support::error_chain(&failure)
         );
     })
     .await
@@ -245,7 +245,7 @@ async fn drop_recovery_stays_usable_when_copy_in_is_rejected_before_start() {
     compio::time::timeout(TEST_TIMEOUT, async {
         let url = test_url();
         let client = connect_client(&url).await;
-        let missing = common::test_object_name("cpg_simple_copy_chain_missing");
+        let missing = support::test_object_name("cpg_simple_copy_chain_missing");
 
         let stream = client
             .simple_query_raw(&format!(

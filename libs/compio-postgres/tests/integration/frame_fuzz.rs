@@ -58,7 +58,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 #[allow(unused_imports)]
-use crate::common;
+use crate::support;
 
 const ASYNC_WATCHDOG: Duration = Duration::from_secs(30);
 const SOCKET_WATCHDOG: Duration = Duration::from_secs(2);
@@ -262,7 +262,7 @@ async fn drive_one_case(seed: u64, response: Vec<u8>) {
         thread::sleep(Duration::from_millis(120));
     });
 
-    let (client, connection) = match stub_config(server.addr).connect(common::suite_tls()).await {
+    let (client, connection) = match stub_config(server.addr).connect(support::suite_tls()).await {
         Ok(pair) => pair,
         Err(_) => {
             // A handshake this generator never touches; nothing to drive.
@@ -434,7 +434,7 @@ async fn drive_one_handshake(seed: u64, response: Vec<u8>) {
     // hang or a panic is not.
     let outcome = compio::time::timeout(
         OPERATION_WATCHDOG,
-        stub_config(server.addr).connect(common::suite_tls()),
+        stub_config(server.addr).connect(support::suite_tls()),
     )
     .await
     .unwrap_or_else(|_| {

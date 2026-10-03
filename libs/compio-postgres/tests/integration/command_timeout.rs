@@ -9,12 +9,12 @@ use compio_postgres::{Config, Pool, PoolConfig};
 use std::time::{Duration, Instant};
 
 #[allow(unused_imports)]
-use crate::common;
+use crate::support;
 
 const OUTER_WATCHDOG: Duration = Duration::from_secs(5);
 
 fn test_url() -> String {
-    let url = common::test_url();
+    let url = support::test_url();
     let separator = if url.contains('?') { '&' } else { '?' };
     format!("{url}{separator}sslmode=disable")
 }
@@ -30,7 +30,7 @@ async fn connect_pool(command_timeout: Duration) -> Pool {
 
     Pool::connect_with_config(connection_config, pool_config)
         .await
-        .unwrap_or_else(|error| common::postgres_unreachable(&url, &error))
+        .unwrap_or_else(|error| support::postgres_unreachable(&url, &error))
 }
 
 #[test]
@@ -48,7 +48,7 @@ fn command_timeout_is_opt_in_pool_policy() {
 #[compio::test]
 async fn overrun_is_cancelled_and_the_same_client_remains_usable() {
     compio::time::timeout(OUTER_WATCHDOG, async {
-        let transport = common::test_transport(&test_url(), common::suite_tls()).await;
+        let transport = support::test_transport(&test_url(), support::suite_tls()).await;
         let pool = connect_pool(Duration::from_millis(100)).await;
         let mut client = pool.acquire().await.expect("check out the only connection");
         let announced_pid = client.process_id();
@@ -87,7 +87,7 @@ async fn overrun_is_cancelled_and_the_same_client_remains_usable() {
 #[compio::test]
 async fn timeout_inside_raw_transaction_rolls_back_before_same_client_reuse() {
     compio::time::timeout(OUTER_WATCHDOG, async {
-        let transport = common::test_transport(&test_url(), common::suite_tls()).await;
+        let transport = support::test_transport(&test_url(), support::suite_tls()).await;
         let pool = connect_pool(Duration::from_millis(100)).await;
         let mut client = pool.acquire().await.expect("check out the only connection");
         let announced_pid = client.process_id();
@@ -112,7 +112,7 @@ async fn timeout_inside_raw_transaction_rolls_back_before_same_client_reuse() {
 #[compio::test]
 async fn command_inside_the_deadline_is_untouched() {
     compio::time::timeout(OUTER_WATCHDOG, async {
-        let transport = common::test_transport(&test_url(), common::suite_tls()).await;
+        let transport = support::test_transport(&test_url(), support::suite_tls()).await;
         let pool = connect_pool(Duration::from_millis(750)).await;
         let mut client = pool.acquire().await.expect("check out the only connection");
         let announced_pid = client.process_id();
@@ -137,7 +137,7 @@ async fn command_inside_the_deadline_is_untouched() {
 #[compio::test]
 async fn direct_pooled_client_query_does_not_enter_command_scope() {
     compio::time::timeout(OUTER_WATCHDOG, async {
-        let transport = common::test_transport(&test_url(), common::suite_tls()).await;
+        let transport = support::test_transport(&test_url(), support::suite_tls()).await;
         let pool = connect_pool(Duration::from_millis(50)).await;
         let client = pool.acquire().await.expect("check out the only connection");
         let announced_pid = client.process_id();

@@ -20,23 +20,23 @@ use compio_postgres::replication::{ReplicationMessage, StartReplicationOptions};
 use std::time::Duration;
 
 #[allow(unused_imports)]
-use crate::common;
+use crate::support;
 
 const WATCHDOG: Duration = Duration::from_secs(30);
 
 async fn client() -> Client {
-    let url = common::test_url();
-    match compio_postgres::connect(&url, common::suite_tls()).await {
+    let url = support::test_url();
+    match compio_postgres::connect(&url, support::suite_tls()).await {
         Ok((client, connection)) => {
             compio::runtime::spawn(async move {
                 if let Err(error) = connection.run().await {
-                    eprintln!("connection error: {}", common::error_chain(&error));
+                    eprintln!("connection error: {}", support::error_chain(&error));
                 }
             })
             .detach();
             client
         }
-        Err(error) => common::postgres_unreachable(&url, &error),
+        Err(error) => support::postgres_unreachable(&url, &error),
     }
 }
 
@@ -49,8 +49,8 @@ async fn client() -> Client {
 /// them, not four - and a count that guesses high simply waits forever.
 async fn decoded_stream(slot: &str, publication: &str) -> Vec<PgOutputMessage> {
     let replication = compio_postgres::replication::connect_replication(
-        common::suite_tls(),
-        &common::replication_config("cpg_pgoutput_live"),
+        support::suite_tls(),
+        &support::replication_config("cpg_pgoutput_live"),
     )
     .await
     .expect("replication connect failed");
@@ -95,12 +95,12 @@ fn text(column: &TupleColumn) -> &str {
 #[compio::test]
 async fn a_live_walsender_decodes_to_the_values_the_catalog_reports() {
     compio::time::timeout(WATCHDOG, async {
-        let base = common::test_object_name("cpg pgoutput live");
+        let base = support::test_object_name("cpg pgoutput live");
         let table = format!("{base}_t");
         let publication = format!("{base}_p");
         let slot = format!("{base}_s");
         let setup = client().await;
-        common::sweep_stale_test_objects(&setup).await;
+        support::sweep_stale_test_objects(&setup).await;
 
         setup
             .batch_execute(&format!(
@@ -156,7 +156,7 @@ async fn a_live_walsender_decodes_to_the_values_the_catalog_reports() {
         // Commit run rather than four transactions.
         let messages = decoded_stream(&slot, &publication).await;
 
-        common::drop_replication_slot(&setup, &slot)
+        support::drop_replication_slot(&setup, &slot)
             .await
             .unwrap_or_else(|error| eprintln!("could not drop slot {slot}: {error}"));
         let _ = setup
@@ -295,12 +295,12 @@ async fn a_live_walsender_decodes_to_the_values_the_catalog_reports() {
 #[compio::test]
 async fn a_key_only_old_tuple_is_not_confusable_with_a_row_that_held_nulls() {
     compio::time::timeout(WATCHDOG, async {
-        let base = common::test_object_name("cpg ident kinds");
+        let base = support::test_object_name("cpg ident kinds");
         let table = format!("{base}_t");
         let publication = format!("{base}_p");
         let slot = format!("{base}_s");
         let setup = client().await;
-        common::sweep_stale_test_objects(&setup).await;
+        support::sweep_stale_test_objects(&setup).await;
 
         setup
             .batch_execute(&format!(
@@ -333,7 +333,7 @@ async fn a_key_only_old_tuple_is_not_confusable_with_a_row_that_held_nulls() {
 
         let messages = decoded_stream(&slot, &publication).await;
 
-        common::drop_replication_slot(&setup, &slot)
+        support::drop_replication_slot(&setup, &slot)
             .await
             .unwrap_or_else(|error| eprintln!("could not drop slot {slot}: {error}"));
         let _ = setup
@@ -386,12 +386,12 @@ async fn a_key_only_old_tuple_is_not_confusable_with_a_row_that_held_nulls() {
 #[compio::test]
 async fn a_null_column_decodes_as_null_and_not_as_empty_text() {
     compio::time::timeout(WATCHDOG, async {
-        let base = common::test_object_name("cpg pgoutput null");
+        let base = support::test_object_name("cpg pgoutput null");
         let table = format!("{base}_t");
         let publication = format!("{base}_p");
         let slot = format!("{base}_s");
         let setup = client().await;
-        common::sweep_stale_test_objects(&setup).await;
+        support::sweep_stale_test_objects(&setup).await;
 
         setup
             .batch_execute(&format!(
@@ -415,7 +415,7 @@ async fn a_null_column_decodes_as_null_and_not_as_empty_text() {
 
         let messages = decoded_stream(&slot, &publication).await;
 
-        common::drop_replication_slot(&setup, &slot)
+        support::drop_replication_slot(&setup, &slot)
             .await
             .unwrap_or_else(|error| eprintln!("could not drop slot {slot}: {error}"));
         let _ = setup

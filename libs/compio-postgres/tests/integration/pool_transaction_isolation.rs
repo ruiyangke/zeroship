@@ -24,10 +24,10 @@ use futures_util::FutureExt;
 use std::time::Duration;
 
 #[allow(unused_imports)]
-use crate::common;
+use crate::support;
 
 fn test_url() -> String {
-    common::test_url()
+    support::test_url()
 }
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -42,7 +42,7 @@ async fn connect_pool(url: &str, config: PoolConfig) -> Pool {
     .await
     {
         Ok(Ok(pool)) => pool,
-        Ok(Err(error)) => common::postgres_unreachable(url, &error),
+        Ok(Err(error)) => support::postgres_unreachable(url, &error),
         Err(_) => panic!(
             "pool connection exceeded its {} second timeout",
             POOL_CONNECT_TIMEOUT.as_secs()
@@ -59,11 +59,11 @@ async fn drop_test_schema(pool: &Pool, schema: &str) -> Result<(), String> {
         let client = pool
             .acquire()
             .await
-            .map_err(|error| common::error_chain(&error))?;
+            .map_err(|error| support::error_chain(&error))?;
         client
             .batch_execute(&sql)
             .await
-            .map_err(|error| common::error_chain(&error))
+            .map_err(|error| support::error_chain(&error))
     }
     .boxed_local();
     compio::time::timeout(CLEANUP_TIMEOUT, cleanup)
@@ -74,8 +74,8 @@ async fn drop_test_schema(pool: &Pool, schema: &str) -> Result<(), String> {
 #[compio::test]
 async fn a_raw_begin_does_not_leak_to_the_next_borrower() {
     let url = test_url();
-    let schema = common::test_object_name("cpg_pool_tx_isolation");
-    let table = common::test_object_name("cpg_pool_tx_isolation_table");
+    let schema = support::test_object_name("cpg_pool_tx_isolation");
+    let table = support::test_object_name("cpg_pool_tx_isolation_table");
     let relation = format!("{schema}.{table}");
     // One connection, so the release and the next acquisition are guaranteed to
     // be the same backend - without that the test can pass by being handed a
@@ -217,8 +217,8 @@ async fn a_raw_begin_does_not_leak_to_the_next_borrower() {
 #[compio::test]
 async fn a_stale_dirty_flag_does_not_suppress_the_release_rollback() {
     let url = test_url();
-    let schema = common::test_object_name("cpg_pool_stale_dirty");
-    let table = common::test_object_name("cpg_pool_stale_dirty_table");
+    let schema = support::test_object_name("cpg_pool_stale_dirty");
+    let table = support::test_object_name("cpg_pool_stale_dirty_table");
     let relation = format!("{schema}.{table}");
     // One connection, so the release and the next acquisition are the same
     // backend -- and asserted below, because `max_size(1)` does not guarantee
@@ -390,7 +390,7 @@ async fn an_aborted_transaction_does_not_leak_to_the_next_borrower() {
         .unwrap_or_else(|e| {
             panic!(
                 "the next borrower inherited an aborted transaction: {}",
-                common::error_chain(&e)
+                support::error_chain(&e)
             )
         })[0]
         .get("pid");
@@ -406,7 +406,7 @@ async fn an_aborted_transaction_does_not_leak_to_the_next_borrower() {
         .unwrap_or_else(|e| {
             panic!(
                 "the next borrower inherited an aborted transaction: {}",
-                common::error_chain(&e)
+                support::error_chain(&e)
             )
         });
     assert_eq!(rows[0].get::<_, i32>("n"), 1);
@@ -441,7 +441,7 @@ async fn a_terminated_backend_is_not_handed_to_the_next_borrower() {
 
     let (killer, connection) = compio::time::timeout(
         POOL_CONNECT_TIMEOUT,
-        compio_postgres::connect(&url, common::suite_tls()),
+        compio_postgres::connect(&url, support::suite_tls()),
     )
     .await
     .expect("second connection exceeded its timeout")
@@ -464,7 +464,7 @@ async fn a_terminated_backend_is_not_handed_to_the_next_borrower() {
         .unwrap_or_else(|e| {
             panic!(
                 "the pool handed out the terminated backend: {}",
-                common::error_chain(&e)
+                support::error_chain(&e)
             )
         });
     assert_ne!(

@@ -136,7 +136,7 @@ pub struct DsnParts {
 ///
 /// The password is taken to the LAST `@` inside the authority, so a password
 /// containing `@` cannot truncate the host -- the same rule `redact_dsn`
-/// applies in `libs/compio-postgres/tests/common/mod.rs`. The helpers below are
+/// applies in `libs/compio-postgres/tests/support/mod.rs`. The helpers below are
 /// bash's own parameter expansions, kept literal so the two implementations can
 /// be compared line by line rather than by intent.
 pub fn split_dsn(dsn: &str) -> DsnParts {

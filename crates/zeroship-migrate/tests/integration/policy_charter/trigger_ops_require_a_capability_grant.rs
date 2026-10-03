@@ -41,7 +41,7 @@
 //!
 //! Both charters here grant `safety.destructive_ops = "allow"`. That knob is the OTHER
 //! rule a trigger drop meets, and it is the subject of
-//! `crate::dialect_matrix::op_refused_observation`'s live red. Holding it at `allow`
+//! `crate::integration::dialect_matrix::op_refused_observation`'s live red. Holding it at `allow`
 //! isolates the capability axis: anything that refuses below refused for want of a
 //! GRANT, which is the only question this file asks.
 

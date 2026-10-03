@@ -19,12 +19,12 @@ use std::task::Poll;
 use std::time::Duration;
 
 #[allow(unused_imports)]
-use crate::common;
+use crate::support;
 
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn test_url() -> String {
-    common::test_url()
+    support::test_url()
 }
 
 fn error_chain(error: &(dyn std::error::Error + 'static)) -> String {
@@ -50,7 +50,7 @@ fn plaintext_url() -> String {
 }
 
 async fn connect(url: &str) -> Result<Client, Error> {
-    let (client, connection) = compio_postgres::connect(url, common::suite_tls()).await?;
+    let (client, connection) = compio_postgres::connect(url, support::suite_tls()).await?;
     compio::runtime::spawn(async move {
         if let Err(error) = connection.run().await {
             eprintln!("connection error: {}", error_chain(&error));
@@ -354,7 +354,7 @@ async fn a_cancel_request_with_the_wrong_secret_key_is_inert() {
 
         // Arm two: the same PID with the session's own key.
         token
-            .cancel_query(common::suite_tls())
+            .cancel_query(support::suite_tls())
             .await
             .expect("send CancelRequest");
     });
@@ -385,7 +385,7 @@ async fn running_query_cancel_returns_57014_and_preserves_session() {
     let cancel_task = compio::runtime::spawn(async move {
         wait_until_pg_sleep_is_running(&observer, pid, MARKER).await;
         token
-            .cancel_query(common::suite_tls())
+            .cancel_query(support::suite_tls())
             .await
             .expect("send CancelRequest");
     });
@@ -509,8 +509,8 @@ async fn two_cancels_for_one_running_query_leave_the_session_usable() {
     let cancel_task = compio::runtime::spawn(async move {
         wait_until_pg_sleep_is_running(&observer, pid, MARKER).await;
         futures_util::future::join(
-            first.cancel_query(common::suite_tls()),
-            second.cancel_query(common::suite_tls()),
+            first.cancel_query(support::suite_tls()),
+            second.cancel_query(support::suite_tls()),
         )
         .await
     });
@@ -555,7 +555,7 @@ async fn cancel_after_query_finished_is_harmless() {
 async fn stale_cancel_token_completes_cleanly_without_hanging() {
     let url = plaintext_url();
     let observer = connect(&url).await.unwrap();
-    let (client, connection) = compio_postgres::connect(&url, common::suite_tls())
+    let (client, connection) = compio_postgres::connect(&url, support::suite_tls())
         .await
         .unwrap();
     let pid = client.process_id();
@@ -573,7 +573,7 @@ async fn stale_cancel_token_completes_cleanly_without_hanging() {
     // PostgreSQL sends no result for CancelRequest, so a reachable postmaster
     // cannot report that the PID/key pair is stale. Ok means the packet was
     // sent cleanly; it does not claim that a query was cancelled.
-    compio::time::timeout(OPERATION_TIMEOUT, token.cancel_query(common::suite_tls()))
+    compio::time::timeout(OPERATION_TIMEOUT, token.cancel_query(support::suite_tls()))
         .await
         .expect("stale CancelToken hung")
         .expect("stale CancelToken could not send its fire-and-forget packet");
@@ -667,7 +667,7 @@ async fn cancel_during_copy_in_surfaces_57014_and_preserves_session() {
     let observer = connect(&url).await.unwrap();
     let pid = client.process_id();
     let token = client.cancel_token();
-    let table = common::test_object_name("cpg_cancel_copy_in");
+    let table = support::test_object_name("cpg_cancel_copy_in");
 
     client
         .batch_execute(&format!("CREATE TEMPORARY TABLE {table} (v int4)"))
@@ -685,7 +685,7 @@ async fn cancel_during_copy_in_surfaces_57014_and_preserves_session() {
     wait_until_copy_progress(&observer, pid, true).await;
 
     token
-        .cancel_query(common::suite_tls())
+        .cancel_query(support::suite_tls())
         .await
         .expect("send CancelRequest during COPY IN");
 
@@ -732,7 +732,7 @@ async fn cancel_during_copy_out_surfaces_57014_and_preserves_session() {
     };
     let (copy_result, cancel_result) = compio::time::timeout(
         OPERATION_TIMEOUT,
-        futures_util::future::join(stream_result, token.cancel_query(common::suite_tls())),
+        futures_util::future::join(stream_result, token.cancel_query(support::suite_tls())),
     )
     .await
     .expect("COPY OUT cancellation did not resolve before the test deadline");
@@ -765,7 +765,7 @@ async fn cancel_inside_transaction_requires_rollback_then_preserves_session() {
 
     let cancel_task = compio::runtime::spawn(async move {
         wait_until_pg_sleep_is_running(&observer, pid, MARKER).await;
-        token.cancel_query(common::suite_tls()).await
+        token.cancel_query(support::suite_tls()).await
     });
     let (query_result, cancel_result) = compio::time::timeout(
         OPERATION_TIMEOUT,

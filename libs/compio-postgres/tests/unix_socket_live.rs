@@ -12,8 +12,11 @@
 //! or return early, and an early return is counted by the harness as a PASS,
 //! so the absent-fixture case would look identical to the working one.
 
-#[allow(dead_code)]
-mod common;
+#[expect(
+    dead_code,
+    reason = "the shared support module carries helpers this process-isolated target does not use"
+)]
+mod support;
 use compio_postgres::{Client, Config, NoTls};
 use std::path::PathBuf;
 

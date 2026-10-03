@@ -25,14 +25,14 @@
 use compio_postgres::{Client, Error};
 
 #[allow(unused_imports)]
-use crate::common;
+use crate::support;
 
 fn test_url() -> String {
-    common::test_url()
+    support::test_url()
 }
 
 async fn connect(url: &str) -> Result<Client, Error> {
-    let (client, connection) = compio_postgres::connect(url, common::suite_tls()).await?;
+    let (client, connection) = compio_postgres::connect(url, support::suite_tls()).await?;
     compio::runtime::spawn(async move {
         if let Err(error) = connection.run().await {
             eprintln!("connection error: {error}");
@@ -52,7 +52,7 @@ async fn a_startup_reported_parameter_is_readable_through_the_client() {
     let url = test_url();
     let client = match connect(&url).await {
         Ok(client) => client,
-        Err(error) => common::postgres_unreachable(&url, &error),
+        Err(error) => support::postgres_unreachable(&url, &error),
     };
 
     let version = client
@@ -104,7 +104,7 @@ async fn every_long_stable_reported_parameter_survives_startup() {
     let url = test_url();
     let client = match connect(&url).await {
         Ok(client) => client,
-        Err(error) => common::postgres_unreachable(&url, &error),
+        Err(error) => support::postgres_unreachable(&url, &error),
     };
 
     let missing: Vec<&str> = ALWAYS_REPORTED
@@ -131,11 +131,11 @@ async fn a_reported_parameter_updates_after_the_server_reports_it() {
     let url = test_url();
     let client = match connect(&url).await {
         Ok(client) => client,
-        Err(error) => common::postgres_unreachable(&url, &error),
+        Err(error) => support::postgres_unreachable(&url, &error),
     };
 
     let before = client.parameter("application_name");
-    let chosen = common::test_object_name("param-status");
+    let chosen = support::test_object_name("param-status");
     client
         .batch_execute(&format!("SET application_name TO '{chosen}'"))
         .await
@@ -161,7 +161,7 @@ async fn a_parameter_the_server_does_not_report_never_appears() {
     let url = test_url();
     let client = match connect(&url).await {
         Ok(client) => client,
-        Err(error) => common::postgres_unreachable(&url, &error),
+        Err(error) => support::postgres_unreachable(&url, &error),
     };
 
     client

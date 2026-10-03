@@ -1072,12 +1072,12 @@ fn the_refusal_probes_still_exercise_the_named_type_arms() {
 }
 
 /// Regenerates the corpus golden. Run explicitly:
-///   cargo test -p zeroship-migrate --test integration -- --ignored update_runtime_metadata_from_the_fold_goldens
+///   cargo test -p zeroship-migrate --test main -- --ignored update_runtime_metadata_from_the_fold_goldens
 /// The leading '#' comment block is preserved verbatim, and data lines keep the
 /// golden's existing order (new keys append, removed keys drop), so running this
 /// on an unchanged tree rewrites byte-identically.
 #[test]
-#[ignore = "regenerates the corpus golden; run explicitly with `cargo test -p zeroship-migrate --test integration -- --ignored update_runtime_metadata_from_the_fold_goldens`, then commit the file"]
+#[ignore = "regenerates the corpus golden; run explicitly with `cargo test -p zeroship-migrate --test main -- --ignored update_runtime_metadata_from_the_fold_goldens`, then commit the file"]
 fn update_runtime_metadata_from_the_fold_goldens() {
     let path = manifest_path(CORPUS_GOLDEN);
     let existing = std::fs::read_to_string(&path).unwrap_or_default();

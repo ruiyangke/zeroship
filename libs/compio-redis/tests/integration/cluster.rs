@@ -10,7 +10,7 @@ fn seeds_refs(v: &[String]) -> Vec<&str> {
 
 #[compio::test]
 async fn connect_and_roundtrip() {
-    let fixture = crate::common::fixtures();
+    let fixture = crate::support::fixtures();
     let s = fixture.cluster_urls();
     let seeds = seeds_refs(&s);
     let cc = ClusterClient::connect(&seeds, 4).await.expect("connect");
@@ -25,7 +25,7 @@ async fn connect_and_roundtrip() {
 
 #[compio::test]
 async fn hash_tag_isolation_enables_mget() {
-    let fixture = crate::common::fixtures();
+    let fixture = crate::support::fixtures();
     let s = fixture.cluster_urls();
     let seeds = seeds_refs(&s);
     let cc = ClusterClient::connect(&seeds, 4).await.expect("connect");
@@ -50,7 +50,7 @@ async fn hash_tag_isolation_enables_mget() {
 
 #[compio::test]
 async fn cross_slot_mget_errors_without_network_call() {
-    let fixture = crate::common::fixtures();
+    let fixture = crate::support::fixtures();
     let s = fixture.cluster_urls();
     let seeds = seeds_refs(&s);
     let cc = ClusterClient::connect(&seeds, 4).await.expect("connect");
@@ -65,7 +65,7 @@ async fn cross_slot_mget_errors_without_network_call() {
 
 #[compio::test]
 async fn atomic_incr_survives_routing() {
-    let fixture = crate::common::fixtures();
+    let fixture = crate::support::fixtures();
     let s = fixture.cluster_urls();
     let seeds = seeds_refs(&s);
     let cc = ClusterClient::connect(&seeds, 4).await.expect("connect");
@@ -80,7 +80,7 @@ async fn atomic_incr_survives_routing() {
 
 #[compio::test]
 async fn scan_on_routing_key_returns_matching() {
-    let fixture = crate::common::fixtures();
+    let fixture = crate::support::fixtures();
     let s = fixture.cluster_urls();
     let seeds = seeds_refs(&s);
     let cc = ClusterClient::connect(&seeds, 4).await.expect("connect");
@@ -113,7 +113,7 @@ async fn scan_on_routing_key_returns_matching() {
 
 #[compio::test]
 async fn ttl_lifecycle_on_cluster() {
-    let fixture = crate::common::fixtures();
+    let fixture = crate::support::fixtures();
     let s = fixture.cluster_urls();
     let seeds = seeds_refs(&s);
     let cc = ClusterClient::connect(&seeds, 4).await.expect("connect");
@@ -169,9 +169,9 @@ async fn non_cluster_redis_behavior_is_bounded() {
     // against `ClusterBootstrap` - a red test whose message names the wrong
     // problem. Proving the node is up first means the match below is only ever
     // read as what it is about.
-    let fixture = crate::common::fixtures();
+    let fixture = crate::support::fixtures();
     let url = fixture.redis_url();
-    drop(crate::common::connect(&url).await);
+    drop(crate::support::connect(&url).await);
     match ClusterClient::connect(&[url.as_str()], 4).await {
         Ok(cc) => {
             // Empty-topology case: slot lookup must return NoRoute.
@@ -196,7 +196,7 @@ async fn non_cluster_redis_behavior_is_bounded() {
 
 #[compio::test]
 async fn set_nx_is_idempotent() {
-    let fixture = crate::common::fixtures();
+    let fixture = crate::support::fixtures();
     let s = fixture.cluster_urls();
     let seeds = seeds_refs(&s);
     let cc = ClusterClient::connect(&seeds, 4).await.expect("connect");
@@ -219,7 +219,7 @@ async fn set_nx_is_idempotent() {
 
 #[compio::test]
 async fn pexpire_and_pttl_semantics() {
-    let fixture = crate::common::fixtures();
+    let fixture = crate::support::fixtures();
     let s = fixture.cluster_urls();
     let seeds = seeds_refs(&s);
     let cc = ClusterClient::connect(&seeds, 4).await.expect("connect");
@@ -245,7 +245,7 @@ async fn pexpire_and_pttl_semantics() {
 
 #[compio::test]
 async fn binary_safe_values_roundtrip_through_cluster() {
-    let fixture = crate::common::fixtures();
+    let fixture = crate::support::fixtures();
     let s = fixture.cluster_urls();
     let seeds = seeds_refs(&s);
     let cc = ClusterClient::connect(&seeds, 4).await.expect("connect");
@@ -265,7 +265,7 @@ async fn binary_safe_values_roundtrip_through_cluster() {
 
 #[compio::test]
 async fn cloned_handle_shares_topology_and_pools() {
-    let fixture = crate::common::fixtures();
+    let fixture = crate::support::fixtures();
     let s = fixture.cluster_urls();
     let seeds = seeds_refs(&s);
     let cc1 = ClusterClient::connect(&seeds, 4).await.expect("connect");
@@ -285,7 +285,7 @@ async fn cloned_handle_shares_topology_and_pools() {
 
 #[compio::test]
 async fn cross_slot_mset_rejected_before_network() {
-    let fixture = crate::common::fixtures();
+    let fixture = crate::support::fixtures();
     let s = fixture.cluster_urls();
     let seeds = seeds_refs(&s);
     let cc = ClusterClient::connect(&seeds, 4).await.expect("connect");
@@ -299,7 +299,7 @@ async fn cross_slot_mset_rejected_before_network() {
 
 #[compio::test]
 async fn empty_batch_ops_are_noops() {
-    let fixture = crate::common::fixtures();
+    let fixture = crate::support::fixtures();
     let s = fixture.cluster_urls();
     let seeds = seeds_refs(&s);
     let cc = ClusterClient::connect(&seeds, 4).await.expect("connect");
@@ -310,7 +310,7 @@ async fn empty_batch_ops_are_noops() {
 
 #[compio::test]
 async fn mget_preserves_order_and_holes() {
-    let fixture = crate::common::fixtures();
+    let fixture = crate::support::fixtures();
     let s = fixture.cluster_urls();
     let seeds = seeds_refs(&s);
     let cc = ClusterClient::connect(&seeds, 4).await.expect("connect");
@@ -343,7 +343,7 @@ async fn mget_preserves_order_and_holes() {
 
 #[compio::test]
 async fn decr_by_can_go_negative() {
-    let fixture = crate::common::fixtures();
+    let fixture = crate::support::fixtures();
     let s = fixture.cluster_urls();
     let seeds = seeds_refs(&s);
     let cc = ClusterClient::connect(&seeds, 4).await.expect("connect");
@@ -361,7 +361,7 @@ async fn decr_by_can_go_negative() {
 
 #[compio::test]
 async fn incr_on_non_numeric_errors_with_server() {
-    let fixture = crate::common::fixtures();
+    let fixture = crate::support::fixtures();
     let s = fixture.cluster_urls();
     let seeds = seeds_refs(&s);
     let cc = ClusterClient::connect(&seeds, 4).await.expect("connect");
@@ -384,7 +384,7 @@ async fn incr_on_non_numeric_errors_with_server() {
 
 #[compio::test]
 async fn large_value_roundtrip() {
-    let fixture = crate::common::fixtures();
+    let fixture = crate::support::fixtures();
     let s = fixture.cluster_urls();
     let seeds = seeds_refs(&s);
     let cc = ClusterClient::connect(&seeds, 4).await.expect("connect");

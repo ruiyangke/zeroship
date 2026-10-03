@@ -12,8 +12,8 @@
 //! drive many distinguishable requests at once and check who got what.
 
 #[allow(unused_imports)]
-use crate::common;
-use common::{suite_tls, test_url};
+use crate::support;
+use support::{suite_tls, test_url};
 use compio_postgres::Client;
 
 /// Enough concurrency that an off-by-one in routing cannot stay hidden behind

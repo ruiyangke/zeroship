@@ -43,7 +43,7 @@
 //! the numbers.
 //!
 //! `PG_TEST_URL` selects the server; absent, the test suites' default is used
-//! (`DEFAULT_TEST_URL` in `tests/common/env.rs`).
+//! (`DEFAULT_TEST_URL` in `tests/support/env.rs`).
 //! Nothing here creates or drops schemas: the statement `SELECT 1` needs none,
 //! and a benchmark that mutates the database measures the mutation.
 
@@ -58,7 +58,7 @@ use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 ///
 /// Keeping this in the test support module gives the benchmark and suites one
 /// typed implementation of their process input and one server address.
-#[path = "../tests/common/env.rs"]
+#[path = "../tests/support/env.rs"]
 mod env;
 
 fn test_url() -> String {

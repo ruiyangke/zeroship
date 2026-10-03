@@ -5,7 +5,7 @@
 //! dependency, so it cannot use the typed keys in `zeroship_core::config` that
 //! the rest of the workspace reads the environment through. Exactly one
 //! substitute is permitted: a dependency-free sealed key enum, in exactly
-//! `libs/<crate>/tests/common/env.rs`, whose variants map to literal names and
+//! `libs/<crate>/tests/support/env.rs`, whose variants map to literal names and
 //! whose raw access lives in one accessor.
 //!
 //! The workspace source gate recognizes this file BY PATH and by shape. It
@@ -33,7 +33,6 @@ pub enum TestEnvKey {
     ///
     /// Prefixed because, unlike `PG_TEST_URL`, it names no shared service and
     /// exists only inside one test's re-exec.
-    #[allow(dead_code, reason = "Only the descriptor-budget test uses this shared key.")]
     FdProbeChild,
 }
 
@@ -68,7 +67,7 @@ pub fn get(key: TestEnvKey) -> Option<String> {
 /// script exports nothing.
 ///
 /// ONE DEFINITION, beside the key it defaults. The test targets reach it
-/// through `common::test_url` and `common::plaintext_url`, and
+/// through `support::test_url` and `support::plaintext_url`, and
 /// `benches/query_live.rs` includes this file, so no target carries a second
 /// spelling of the address.
 pub const DEFAULT_TEST_URL: &str = "postgres://postgres:zeroship@127.0.0.1:5440/zeroship";

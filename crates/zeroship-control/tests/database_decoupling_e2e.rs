@@ -46,7 +46,7 @@ mod common;
 /// deployed major, `fsync=off`, a throwaway container per test because
 /// `pg_authid` and `pg_auth_members` are cluster-shared. A second spelling in
 /// this crate would let the two drift and make a failure here unattributable.
-#[path = "../../zeroship-migrate-server/tests/integration/fixture/tenant.rs"]
+#[path = "../../zeroship-migrate-server/tests/support/fixture/tenant.rs"]
 #[allow(
     dead_code,
     reason = "the shared fixture also serves the version-floor arm, which this target does not have"

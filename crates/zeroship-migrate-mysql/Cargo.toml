@@ -4,13 +4,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "The MySQL backend for zeroship-migrate: this vendor's DML, schema, DDL, value-format and guard behavior. Implements the zeroship-migrate-backend contract; does NOT depend on the engine."
-# The integration suites are modules of one `tests/integration/main.rs` target, so
+# Integration suites are modules of one `tests/main.rs` target, so
 # the crate links one test executable instead of one per file.
 autotests = false
 
 [[test]]
-name = "integration"
-path = "tests/integration/main.rs"
+name = "main"
+path = "tests/main.rs"
 
 [dependencies]
 # The CONTRACT: the required renderer traits, the render errors their signatures name,

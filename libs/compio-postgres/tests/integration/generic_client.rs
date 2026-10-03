@@ -7,19 +7,19 @@ use futures_util::TryStreamExt;
 use std::time::Duration;
 
 #[allow(unused_imports)]
-use crate::common;
+use crate::support;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(20);
 
 fn test_url() -> String {
-    common::test_url()
+    support::test_url()
 }
 
 async fn connect(url: &str) -> Result<Client, Error> {
-    let (client, connection) = compio_postgres::connect(url, common::suite_tls()).await?;
+    let (client, connection) = compio_postgres::connect(url, support::suite_tls()).await?;
     compio::runtime::spawn(async move {
         if let Err(error) = connection.run().await {
-            eprintln!("connection error: {}", common::error_chain(&error));
+            eprintln!("connection error: {}", support::error_chain(&error));
         }
     })
     .detach();
@@ -31,7 +31,7 @@ fn expect_ok<T>(result: Result<T, Error>, context: &str) -> T {
         let sqlstate = error.code().map_or("none", |code| code.code());
         panic!(
             "{context} failed with SQLSTATE {sqlstate}: {}",
-            common::error_chain(&error)
+            support::error_chain(&error)
         )
     })
 }
@@ -328,7 +328,7 @@ where
         error.code(),
         Some(&SqlState::DATATYPE_MISMATCH),
         "{implementation} GenericClient::prepare_typed returned the wrong error: {}",
-        common::error_chain(&error)
+        support::error_chain(&error)
     );
 }
 
@@ -338,7 +338,7 @@ async fn query_and_query_opt_preserve_cardinality_for_client_and_transaction() {
         let url = test_url();
         let mut client = connect(&url)
             .await
-            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+            .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
 
         assert_cardinality_delegates(&client, "Client").await;
 
@@ -359,8 +359,8 @@ async fn prepare_typed_preserves_explicit_types_for_client_and_transaction() {
         let url = test_url();
         let mut client = connect(&url)
             .await
-            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
-        let table = common::test_object_name("cpg_generic_client_typed");
+            .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
+        let table = support::test_object_name("cpg_generic_client_typed");
         expect_ok(
             client
                 .batch_execute(&format!(
@@ -386,8 +386,8 @@ async fn shared_methods_for_client_and_transaction_remain_inside_the_transaction
         let url = test_url();
         let mut client = connect(&url)
             .await
-            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
-        let table = common::test_object_name("cpg_generic_client_shared");
+            .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
+        let table = support::test_object_name("cpg_generic_client_shared");
         expect_ok(
             client
                 .batch_execute(&format!(
@@ -422,8 +422,8 @@ async fn transaction_method_preserves_top_level_and_nested_rollback_scopes() {
         let url = test_url();
         let mut client = connect(&url)
             .await
-            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
-        let table = common::test_object_name("cpg_generic_client_transaction");
+            .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
+        let table = support::test_object_name("cpg_generic_client_transaction");
         expect_ok(
             client
                 .batch_execute(&format!(

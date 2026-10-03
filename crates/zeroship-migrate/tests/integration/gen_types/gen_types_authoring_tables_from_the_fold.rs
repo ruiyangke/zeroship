@@ -1414,12 +1414,12 @@ fn both_artifacts_agree_about_the_key_the_op_installed() {
 }
 
 /// Regenerates the corpus golden. Run explicitly:
-///   cargo test -p zeroship-migrate --test integration -- --ignored update_authoring_tables_from_the_fold_goldens
+///   cargo test -p zeroship-migrate --test main -- --ignored update_authoring_tables_from_the_fold_goldens
 /// The leading '#' comment block is preserved verbatim, and data lines keep the
 /// golden's existing order (new keys append, removed keys drop), so running this
 /// on an unchanged tree rewrites byte-identically.
 #[test]
-#[ignore = "regenerates the corpus golden; run explicitly with `cargo test -p zeroship-migrate --test integration -- --ignored update_authoring_tables_from_the_fold_goldens`, then commit the file"]
+#[ignore = "regenerates the corpus golden; run explicitly with `cargo test -p zeroship-migrate --test main -- --ignored update_authoring_tables_from_the_fold_goldens`, then commit the file"]
 fn update_authoring_tables_from_the_fold_goldens() {
     let path = manifest_path(CORPUS_GOLDEN);
     let existing = std::fs::read_to_string(&path).unwrap_or_default();

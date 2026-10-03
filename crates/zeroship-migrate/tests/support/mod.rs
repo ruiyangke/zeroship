@@ -59,7 +59,7 @@ use postgres::{Client, NoTls, Row as PgRow};
 use zeroship_migrate::driver::{Bind, DbError, Row, SqlSession, Value};
 use zeroship_migrate::{effective_policy_from_charter_toml, EffectivePolicy};
 
-pub const CONFINED_CHARTER_TOML: &str = include_str!("../../fixtures/confined-charter.toml");
+pub const CONFINED_CHARTER_TOML: &str = include_str!("../fixtures/confined-charter.toml");
 
 #[must_use]
 pub fn confined_charter() -> EffectivePolicy {

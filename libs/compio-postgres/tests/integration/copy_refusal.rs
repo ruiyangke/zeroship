@@ -6,19 +6,19 @@ use compio_postgres::{Client, Error};
 use std::time::Duration;
 
 #[allow(unused_imports)]
-use crate::common;
+use crate::support;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(20);
 const COPY_OUT_REFUSAL: &str = "COPY TO STDOUT is not supported by this API; use Client::copy_out";
 
 async fn connect_client() -> Client {
-    let url = common::test_url();
-    let (client, connection) = compio_postgres::connect(&url, common::suite_tls())
+    let url = support::test_url();
+    let (client, connection) = compio_postgres::connect(&url, support::suite_tls())
         .await
-        .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+        .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
     compio::runtime::spawn(async move {
         if let Err(error) = connection.run().await {
-            eprintln!("connection error: {}", common::error_chain(&error));
+            eprintln!("connection error: {}", support::error_chain(&error));
         }
     })
     .detach();
@@ -34,7 +34,7 @@ fn assert_named_copy_out_refusal(api: &str, error: Error) {
     assert!(
         error.code().is_none(),
         "{api} reported a server error instead of a local refusal: {}",
-        common::error_chain(&error)
+        support::error_chain(&error)
     );
 }
 
@@ -42,7 +42,7 @@ fn assert_named_copy_out_refusal(api: &str, error: Error) {
 async fn unsupported_copy_out_is_refused_by_name_at_every_public_entry_point() {
     compio::time::timeout(TEST_TIMEOUT, async {
         let client = connect_client().await;
-        let table = common::test_object_name("copy_out_refusal");
+        let table = support::test_object_name("copy_out_refusal");
         client
             .batch_execute(&format!(
                 "CREATE TEMPORARY TABLE {table} (v int4); \
@@ -161,7 +161,7 @@ async fn copy_in_prefers_a_later_server_error_to_its_direction_refusal() {
             error.code().map(|code| code.code()),
             Some("22012"),
             "copy_in discarded division_by_zero behind its direction refusal: {}",
-            common::error_chain(&error),
+            support::error_chain(&error),
         );
 
         let value: i32 = client
@@ -181,7 +181,7 @@ async fn copy_in_prefers_a_later_server_error_to_its_direction_refusal() {
 async fn copy_in_prefers_a_later_server_error_to_non_copy_refusal() {
     compio::time::timeout(TEST_TIMEOUT, async {
         let client = connect_client().await;
-        let table = common::test_object_name("copy_in_non_copy");
+        let table = support::test_object_name("copy_in_non_copy");
         client
             .batch_execute(&format!(
                 "CREATE TEMPORARY TABLE {table} (
@@ -202,7 +202,7 @@ async fn copy_in_prefers_a_later_server_error_to_non_copy_refusal() {
             error.code().map(|code| code.code()),
             Some("23505"),
             "copy_in discarded unique_violation behind unexpected-message: {}",
-            common::error_chain(&error),
+            support::error_chain(&error),
         );
 
         let local = match client
@@ -215,7 +215,7 @@ async fn copy_in_prefers_a_later_server_error_to_non_copy_refusal() {
         assert!(
             local.code().is_none(),
             "successful non-COPY control invented a server diagnosis: {}",
-            common::error_chain(&local),
+            support::error_chain(&local),
         );
 
         let stored: i64 = client
@@ -238,7 +238,7 @@ async fn copy_in_prefers_a_later_server_error_to_non_copy_refusal() {
 async fn copy_out_prefers_a_later_server_error_to_non_copy_refusal() {
     compio::time::timeout(TEST_TIMEOUT, async {
         let client = connect_client().await;
-        let table = common::test_object_name("copy_out_non_copy");
+        let table = support::test_object_name("copy_out_non_copy");
         client
             .batch_execute(&format!(
                 "CREATE TEMPORARY TABLE {table} (
@@ -259,7 +259,7 @@ async fn copy_out_prefers_a_later_server_error_to_non_copy_refusal() {
             error.code().map(|code| code.code()),
             Some("23505"),
             "copy_out discarded unique_violation behind unexpected-message: {}",
-            common::error_chain(&error),
+            support::error_chain(&error),
         );
 
         let local = match client
@@ -272,7 +272,7 @@ async fn copy_out_prefers_a_later_server_error_to_non_copy_refusal() {
         assert!(
             local.code().is_none(),
             "successful non-COPY control invented a server diagnosis: {}",
-            common::error_chain(&local),
+            support::error_chain(&local),
         );
 
         let stored: i64 = client
@@ -307,7 +307,7 @@ async fn copy_out_prefers_a_later_server_error_to_row_response() {
             error.code().map(|code| code.code()),
             Some("22012"),
             "copy_out discarded division_by_zero behind a row response: {}",
-            common::error_chain(&error),
+            support::error_chain(&error),
         );
 
         let value: i32 = client

@@ -6,8 +6,8 @@
 //! an application does.
 
 #[allow(unused_imports)]
-use crate::common;
-use common::{suite_tls, test_url};
+use crate::support;
+use support::{suite_tls, test_url};
 use compio_postgres::Config;
 use std::path::{Path, PathBuf};
 

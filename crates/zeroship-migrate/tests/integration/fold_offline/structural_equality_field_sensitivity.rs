@@ -25,7 +25,7 @@
 //! `schema_model::Column` is a compile error HERE until a mutation for it exists, and a
 //! field with a mutation that does not change equality is a test FAILURE. Two gates,
 //! different failure modes, neither sufficient alone - the same shape
-//! `tests/integration/support/carriers.rs` uses for the rename carrier inventory, carried across to
+//! `tests/support/carriers.rs` uses for the rename carrier inventory, carried across to
 //! its sibling problem rather than reinvented.
 //!
 //! ## The recorded status quo

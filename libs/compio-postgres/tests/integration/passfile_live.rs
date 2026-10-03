@@ -15,8 +15,8 @@
 //! still_fails` is the standing check that this is still true.
 
 #[allow(unused_imports)]
-use crate::common;
-use common::{suite_tls, test_url};
+use crate::support;
+use support::{suite_tls, test_url};
 use compio_postgres::Config;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};

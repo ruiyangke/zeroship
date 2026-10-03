@@ -1,20 +1,12 @@
 //! The platform corpus through the real Node host, recorder and `PostgreSQL`.
 
-#[path = "platform_corpus/fixture.rs"]
 mod fixture;
-#[path = "platform_corpus/app_identity.rs"]
 mod app_identity;
-#[path = "platform_corpus/credential_storage.rs"]
 mod credential_storage;
-#[path = "platform_corpus/database_placement.rs"]
 mod database_placement;
-#[path = "platform_corpus/organization_authority.rs"]
 mod organization_authority;
-#[path = "platform_corpus/table_identity.rs"]
 mod table_identity;
-#[path = "platform_corpus/user_erasure.rs"]
 mod user_erasure;
-#[path = "platform_corpus/user_identity.rs"]
 mod user_identity;
 
 use serde::Deserialize;

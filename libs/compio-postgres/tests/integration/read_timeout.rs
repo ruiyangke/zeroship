@@ -16,7 +16,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 #[allow(unused_imports)]
-use crate::common;
+use crate::support;
 
 const READ_TIMEOUT: Duration = Duration::from_millis(75);
 const ASYNC_WATCHDOG: Duration = Duration::from_secs(5);
@@ -290,7 +290,7 @@ fn stub_config(addr: SocketAddr) -> Config {
 }
 
 fn live_url() -> String {
-    let url = common::test_url();
+    let url = support::test_url();
     let separator = if url.contains('?') { '&' } else { '?' };
     format!("{url}{separator}sslmode=disable")
 }
@@ -316,7 +316,7 @@ fn read_timeout_is_opt_in_connection_policy() {
     let rejected = "host=localhost read_timeout=1"
         .parse::<Config>()
         .expect_err("programmatic read policy became a libpq-looking DSN parameter");
-    let cause = common::error_chain(&rejected);
+    let cause = support::error_chain(&rejected);
     assert!(
         cause.contains("unknown option") && !cause.contains("read_timeout"),
         "the DSN parser rejected the string for the wrong reason: {cause}"
@@ -336,7 +336,7 @@ async fn a_silent_server_trips_a_distinguishable_read_timeout() {
         });
 
         let (client, connection) = stub_config(server.addr)
-            .connect(common::suite_tls())
+            .connect(support::suite_tls())
             .await
             .expect("connect to scripted PostgreSQL peer");
         let driver = compio::runtime::spawn(async move { connection.run().await });
@@ -392,7 +392,7 @@ async fn silence_mid_frame_trips_the_deadline_and_retires_the_session() {
         });
 
         let (client, connection) = stub_config(server.addr)
-            .connect(common::suite_tls())
+            .connect(support::suite_tls())
             .await
             .expect("connect to partial-frame peer");
         let driver = compio::runtime::spawn(async move { connection.run().await });
@@ -455,7 +455,7 @@ async fn a_copy_in_response_to_a_producerless_query_still_spends_the_read_budget
         });
 
         let (client, connection) = stub_config(server.addr)
-            .connect(common::suite_tls())
+            .connect(support::suite_tls())
             .await
             .expect("connect to producerless-COPY peer");
         let driver = compio::runtime::spawn(async move { connection.run().await });
@@ -514,7 +514,7 @@ async fn an_idle_connection_does_not_spend_the_read_budget() {
         });
 
         let (client, mut connection) = stub_config(server.addr)
-            .connect(common::suite_tls())
+            .connect(support::suite_tls())
             .await
             .expect("connect to scripted PostgreSQL peer");
         let mut notifications = connection.notifications();
@@ -726,7 +726,7 @@ async fn a_complete_backpressured_response_does_not_arm_an_idle_read() {
         });
 
         let (client, connection) = stub_config(server.addr)
-            .connect(common::suite_tls())
+            .connect(support::suite_tls())
             .await
             .expect("connect to complete-response peer");
         let driver = compio::runtime::spawn(async move { connection.run().await });
@@ -800,7 +800,7 @@ async fn a_complete_response_is_delivered_before_the_peers_eof() {
         });
 
         let (client, connection) = stub_config_without_read_timeout(server.addr)
-            .connect(common::suite_tls())
+            .connect(support::suite_tls())
             .await
             .expect("connect to response-then-EOF peer");
         let driver = compio::runtime::spawn(async move { connection.run().await });
@@ -840,9 +840,9 @@ async fn a_normal_live_query_inside_the_deadline_is_untouched() {
         let mut config: Config = url.parse().expect("parse PG_TEST_URL");
         config.read_timeout(Duration::from_secs(1));
         let (client, connection) = config
-            .connect(common::suite_tls())
+            .connect(support::suite_tls())
             .await
-            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+            .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
         let driver = compio::runtime::spawn(async move { connection.run().await });
 
         let row = client
@@ -920,11 +920,11 @@ async fn copy_input_time_is_not_charged_as_server_read_silence() {
         let mut config: Config = url.parse().expect("parse PG_TEST_URL");
         config.read_timeout(COPY_READ_DEADLINE);
         let (client, connection) = config
-            .connect(common::suite_tls())
+            .connect(support::suite_tls())
             .await
-            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+            .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
         let driver = compio::runtime::spawn(async move { connection.run().await });
-        let table = common::test_object_name("cpg_read_timeout_copy");
+        let table = support::test_object_name("cpg_read_timeout_copy");
 
         client
             .batch_execute(&format!("CREATE TEMPORARY TABLE {table} (n int)"))
@@ -1028,7 +1028,7 @@ async fn copy_done_starts_a_deadline_for_the_final_server_response() {
         });
 
         let (client, connection) = stub_config(server.addr)
-            .connect(common::suite_tls())
+            .connect(support::suite_tls())
             .await
             .expect("connect to terminal-silent COPY peer");
         let driver = compio::runtime::spawn(async move { connection.run().await });

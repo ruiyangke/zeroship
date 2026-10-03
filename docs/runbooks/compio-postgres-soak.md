@@ -419,7 +419,7 @@ No watchdog fired - the only lines containing `watchdog` are the three
 phase-start budget declarations, which is worth stating because a grep for
 `watchdog` matches those and can be misread as a firing. No panic, no hang.
 Recovery: 63 `pool_` tests passed against the restarted server on the FIRST
-attempt (7 in `--lib`, 56 in `--test integration`); the 2026-08-27 run recorded 49,
+attempt (7 in `--lib`, 56 in `--test main`); the 2026-08-27 run recorded 49,
 the difference being tests added since.
 
 This run is the check on `4404f6981`, which changed when a cancel retires a

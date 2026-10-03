@@ -126,7 +126,7 @@ async fn readyz_is_503_when_postgres_is_unreachable() {
 
 #[ntex::test]
 async fn readyz_is_200_when_postgres_answers() {
-    let postgres = crate::fixture::Postgres::start();
+    let postgres = crate::support::fixture::Postgres::start();
     let (status, body) = status_of(state_on(postgres.url()), "/readyz").await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
     assert!(body.contains("true"), "body: {body}");

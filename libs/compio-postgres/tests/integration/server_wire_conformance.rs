@@ -17,7 +17,7 @@ use compio_postgres::error::SqlState;
 use compio_postgres::types::{self, IsNull, PgLsn, ToSql, Type};
 use futures_util::{SinkExt, TryStreamExt};
 
-use crate::common;
+use crate::support;
 
 type BoxError = Box<dyn Error + Send + Sync>;
 
@@ -25,10 +25,10 @@ const BINARY_COPY_SIGNATURE: &[u8; 11] = b"PGCOPY\n\xff\r\n\0";
 
 #[allow(clippy::future_not_send)]
 async fn compio_client() -> compio_postgres::Client {
-    let url = common::test_url();
-    let (client, connection) = compio_postgres::connect(&url, common::suite_tls())
+    let url = support::test_url();
+    let (client, connection) = compio_postgres::connect(&url, support::suite_tls())
         .await
-        .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+        .unwrap_or_else(|error| support::postgres_unreachable(&url, &error));
     compio::runtime::spawn(async move {
         let _ = connection.run().await;
     })
@@ -44,7 +44,7 @@ async fn binary_copy_payload(client: &compio_postgres::Client, expression: &str)
         .unwrap_or_else(|error| {
             panic!(
                 "binary COPY for {expression}: {}",
-                common::error_chain(&error)
+                support::error_chain(&error)
             )
         })
         .try_collect()
@@ -52,7 +52,7 @@ async fn binary_copy_payload(client: &compio_postgres::Client, expression: &str)
         .unwrap_or_else(|error| {
             panic!(
                 "drain binary COPY for {expression}: {}",
-                common::error_chain(&error)
+                support::error_chain(&error)
             )
         });
     chunks.into_iter().flatten().collect()
@@ -147,7 +147,7 @@ async fn copy_feedback(
     payload: &[u8],
     expected_expression: &str,
 ) -> CopyFeedback {
-    let table = common::test_object_name(&format!("cpg_wire_feedback_{label}"));
+    let table = support::test_object_name(&format!("cpg_wire_feedback_{label}"));
     client
         .batch_execute(&format!(
             "DROP TABLE IF EXISTS {table}; \
@@ -429,7 +429,7 @@ async fn manual_numeric_wire_matches_binary_copy() {
                 panic!(
                     "{}: feed NUMERIC wire back to PostgreSQL: {}",
                     case.name,
-                    common::error_chain(&error)
+                    support::error_chain(&error)
                 )
             });
         assert!(equal, "{}: PostgreSQL changed the NUMERIC value", case.name);
@@ -2062,7 +2062,7 @@ async fn rejected_binary_copy(
     sql_type: &str,
     payload: &[u8],
 ) -> String {
-    let table = common::test_object_name(&format!("cpg_wire_reject_{label}"));
+    let table = support::test_object_name(&format!("cpg_wire_reject_{label}"));
     client
         .batch_execute(&format!(
             "DROP TABLE IF EXISTS {table}; \
@@ -2088,7 +2088,7 @@ async fn rejected_binary_copy(
         .finish()
         .await
         .expect_err("PostgreSQL accepted malformed record wire");
-    let message = common::error_chain(&error);
+    let message = support::error_chain(&error);
     client
         .batch_execute(&format!("DROP TABLE {table}"))
         .await
@@ -2144,7 +2144,7 @@ async fn test_only_anonymous_record_wire_matches_binary_copy() {
 #[compio::test]
 async fn test_only_named_composite_wire_matches_and_enforces_metadata() {
     let client = compio_client().await;
-    let prefix = common::test_object_name("cpg_wire_record");
+    let prefix = support::test_object_name("cpg_wire_record");
     let domain = format!("{prefix}_domain");
     let composite = format!("{prefix}_composite");
     client

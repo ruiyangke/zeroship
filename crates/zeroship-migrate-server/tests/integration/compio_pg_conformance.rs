@@ -147,7 +147,7 @@ async fn seam_temp_schema_oid(session: &CompioPgSession) -> i64 {
 
 #[compio::test]
 async fn compio_pg_session_passes_seam_conformance() {
-    let postgres = crate::fixture::Postgres::start();
+    let postgres = crate::support::fixture::Postgres::start();
     let url = postgres.url();
     let app_name = format!("zs-seam-conformance-{}", std::process::id());
     let session = CompioPgSession::connect_with_config(&tagged_config(url, &app_name))

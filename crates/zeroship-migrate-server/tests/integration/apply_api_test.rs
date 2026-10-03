@@ -37,7 +37,7 @@ use zeroship_migrate_server::MigrationServiceState;
 const TEST_POLICY_SEAL_KEY: &[u8] = b"migrated integration policy seal key";
 
 fn dsn() -> String {
-    crate::fixture::migrated_url()
+    crate::support::fixture::migrated_url()
 }
 
 fn tmpdir(label: &str) -> PathBuf {

@@ -195,7 +195,7 @@ mod tests {
             "the reviewed operation-shape census moved"
         );
         assert_eq!(
-            crate::SHIPPING_VENDORS.len(),
+            crate::integration::SHIPPING_VENDORS.len(),
             3,
             "the reviewed shipping-backend census moved"
         );
@@ -204,12 +204,12 @@ mod tests {
         for row in DIALECT_TABLE {
             assert_eq!(
                 row.dispositions.len(),
-                crate::SHIPPING_VENDORS.len(),
+                crate::integration::SHIPPING_VENDORS.len(),
                 "generated row {}/{} does not cover every registered backend",
                 row.kind,
                 row.variant,
             );
-            for vendor in crate::SHIPPING_VENDORS {
+            for vendor in crate::integration::SHIPPING_VENDORS {
                 let dialect = &vendor.descriptor.id;
                 let expected = row.disposition_for(dialect).unwrap_or_else(|| {
                     panic!(
