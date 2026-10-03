@@ -17,7 +17,9 @@ use zeroship_workflow_manager::policy::control::{self, PlanPolicyStore};
 
 #[compio::test(crate = "crate::support::live")]
 async fn startup_preserves_archived_plans_and_complete_workflow_policy() {
-    let fixture = Box::pin(platform::Platform::new()).await;
+    // The subject is the installation's plan catalog, whose seeded and archived
+    // rows every case in a shared database would change under this one.
+    let fixture = Box::pin(platform::Platform::fresh_database()).await;
     let url = fixture.role_url("zeroship_control").to_string();
     let registry = Registry::new(&url).await.unwrap();
     seed_plans(&registry).await.unwrap();
@@ -74,7 +76,9 @@ async fn startup_preserves_archived_plans_and_complete_workflow_policy() {
 /// anything. Every paid tier is seeded at the platform ceiling instead.
 #[compio::test(crate = "crate::support::live")]
 async fn builtin_seed_gives_free_the_sixty_four_kibibyte_bound() {
-    let fixture = Box::pin(platform::Platform::new()).await;
+    // The subject is the installation's plan catalog, whose seeded and archived
+    // rows every case in a shared database would change under this one.
+    let fixture = Box::pin(platform::Platform::fresh_database()).await;
     let url = fixture.role_url("zeroship_control").to_string();
     let registry = Registry::new(&url).await.unwrap();
     seed_plans(&registry).await.unwrap();

@@ -125,17 +125,15 @@ async fn control_zone_facts_decide_placement() {
         ZoneId::default_zone().as_str()
     );
     let service = service(&platform).await;
+    // Each app is placed in a zone this case alone declares: placement
+    // considers every eligible worker in the app's zone, so a shared default
+    // zone would let another case's worker take the app.
+    let (home, home_signer) = zone_with_signer(&platform).await;
     let (away, away_signer) = zone_with_signer(&platform).await;
-    let home_worker = joined(
-        &platform,
-        &service,
-        platform::DEFAULT_JOIN_SIGNER_ID,
-        ZoneId::default_zone().as_str(),
-    )
-    .await;
+    let home_worker = joined(&platform, &service, &home_signer, home.as_str()).await;
     let away_worker = joined(&platform, &service, &away_signer, away.as_str()).await;
     let (home_app, away_app) = (AppId::mint(), AppId::mint());
-    platform.seed_app(&home_app).await;
+    platform.seed_app_in(&home_app, Some(home.as_str())).await;
     platform.seed_app_in(&away_app, Some(away.as_str())).await;
 
     let Ok(Placed::Assigned(home)) = service.manager.place(&home_app).await else {
@@ -160,7 +158,9 @@ async fn control_zone_facts_decide_placement() {
 /// change, and the manager's role reads nothing it was not granted.
 #[ntex::test]
 async fn zone_facts_are_frozen_and_the_manager_reads_only_its_grants() {
-    let platform = platform::Platform::new().await;
+    // The subject is a platform-wide column grant, which every case in a
+    // shared database would revoke and restore under this one.
+    let platform = platform::Platform::fresh_database().await;
     let (other, other_signer) = zone_with_signer(&platform).await;
     let instance = joined_row(&platform, &other_signer, other.as_str()).await;
     let app = AppId::mint();
@@ -221,16 +221,12 @@ async fn zone_facts_are_frozen_and_the_manager_reads_only_its_grants() {
 async fn archived_apps_stay_placeable_and_deleted_apps_do_not() {
     let platform = platform::Platform::new().await;
     let service = service(&platform).await;
-    let worker = joined(
-        &platform,
-        &service,
-        platform::DEFAULT_JOIN_SIGNER_ID,
-        ZoneId::default_zone().as_str(),
-    )
-    .await;
+    // A zone this case alone declares, so only its own worker is a candidate.
+    let (zone, signer) = zone_with_signer(&platform).await;
+    let worker = joined(&platform, &service, &signer, zone.as_str()).await;
     let (archived, deleted) = (AppId::mint(), AppId::mint());
-    platform.seed_app(&archived).await;
-    platform.seed_app(&deleted).await;
+    platform.seed_app_in(&archived, Some(zone.as_str())).await;
+    platform.seed_app_in(&deleted, Some(zone.as_str())).await;
     let Ok(Placed::Assigned(placement)) = service.manager.place(&deleted).await else {
         panic!("a live app is placeable");
     };
@@ -276,7 +272,9 @@ async fn archived_apps_stay_placeable_and_deleted_apps_do_not() {
 /// wait. The control differs only in the purge.
 #[ntex::test]
 async fn the_purge_cascade_during_the_lock_wait_refuses_placement() {
-    let platform = platform::Platform::new().await;
+    // The lock-wait observer reads every `zeroship_workflow` waiter in the
+    // shared database, so this case gets a database no other case shares.
+    let platform = platform::Platform::fresh_database().await;
     let revoker = platform::connect(platform.admin_url.as_str()).await;
     for revoke in [true, false] {
         let service = service(&platform).await;
@@ -342,8 +340,8 @@ async fn the_purge_cascade_during_the_lock_wait_refuses_placement() {
 async fn blocked_manager(observer: &compio_postgres::Client) {
     let sql = "SELECT count(DISTINCT a.pid) FROM pg_locks l \
          JOIN pg_stat_activity a ON a.pid=l.pid \
-         WHERE a.usename='zeroship_workflow' AND NOT l.granted \
-         AND cardinality(pg_blocking_pids(a.pid)) > 0";
+         WHERE a.usename='zeroship_workflow' AND a.datname=current_database() \
+         AND NOT l.granted AND cardinality(pg_blocking_pids(a.pid)) > 0";
     compio::time::timeout(Duration::from_secs(10), async {
         loop {
             observer
@@ -372,16 +370,12 @@ async fn blocked_manager(observer: &compio_postgres::Client) {
 async fn an_instance_whose_lease_has_run_out_is_not_placed() {
     let platform = platform::Platform::new().await;
     let service = service(&platform).await;
-    let worker = joined(
-        &platform,
-        &service,
-        platform::DEFAULT_JOIN_SIGNER_ID,
-        ZoneId::default_zone().as_str(),
-    )
-    .await;
+    // A zone this case alone declares, so only its own worker is a candidate.
+    let (zone, signer) = zone_with_signer(&platform).await;
+    let worker = joined(&platform, &service, &signer, zone.as_str()).await;
     let (held, fresh) = (AppId::mint(), AppId::mint());
-    platform.seed_app(&held).await;
-    platform.seed_app(&fresh).await;
+    platform.seed_app_in(&held, Some(zone.as_str())).await;
+    platform.seed_app_in(&fresh, Some(zone.as_str())).await;
     // While the lease is live the instance takes an app and owns it.
     assert!(matches!(
         service.manager.place(&held).await,
@@ -402,7 +396,7 @@ async fn an_instance_whose_lease_has_run_out_is_not_placed() {
         .unwrap();
     assert_eq!(
         service.manager.place(&fresh).await,
-        Ok(Placed::Unplaced(ZoneId::default_zone())),
+        Ok(Placed::Unplaced(zone.clone())),
         "a lapsed instance is no longer a candidate"
     );
     assert!(

@@ -8,11 +8,13 @@
 
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Lines, Write};
+use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use compio_postgres::{Client, NoTls};
+use futures::FutureExt;
 
 use zeroship_testkit::fingerprint;
 use zeroship_testkit::postgres::server_inputs;
@@ -1243,4 +1245,54 @@ async fn a_fresh_database_isolates_advisory_locks() {
     drop(other);
     holder_driver.await.expect("holder driver").expect("holder connection");
     other_driver.await.expect("other driver").expect("other connection");
+}
+
+/// A server with room for exactly two sessions, so a third is refused with
+/// SQLSTATE 53300 and the fixture reports the connection budget.
+fn tiny_spec(inputs: &str) -> shared::Spec {
+    let mut spec = test_spec(inputs);
+    spec.args = vec![
+        "docker-entrypoint.sh".to_owned(),
+        "postgres".to_owned(),
+        "-c".to_owned(),
+        "max_connections=2".to_owned(),
+        "-c".to_owned(),
+        "superuser_reserved_connections=0".to_owned(),
+    ];
+    spec
+}
+
+#[compio::test]
+async fn a_connection_with_no_slot_left_names_the_shared_budget() {
+    let dir = scratch("slot-budget");
+    let lease = shared::join(&Scope::at(&dir, GRACE), &tiny_spec("slot-budget"), |_| Ok(()))
+        .expect("boot the slot-budget server");
+    let url = format!(
+        "postgresql://postgres:fixture@127.0.0.1:{}/postgres",
+        lease.port
+    );
+
+    // Hold the two sessions the server has, so the next connection is refused.
+    let mut held = Vec::new();
+    for _ in 0..2 {
+        held.push(connect(&url).await);
+    }
+
+    let outcome = AssertUnwindSafe(zeroship_testkit::postgres::connect_str(&url))
+        .catch_unwind()
+        .await;
+    let panic = outcome.expect_err("a server with no slot left must refuse");
+    let message = panic
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| panic.downcast_ref::<&str>().map(|text| (*text).to_owned()))
+        .unwrap_or_default();
+    assert!(
+        message.contains("connection slot"),
+        "the refusal must name the connection budget: {message}"
+    );
+
+    drop(held);
+    drop(lease);
+    cleanup(&dir);
 }

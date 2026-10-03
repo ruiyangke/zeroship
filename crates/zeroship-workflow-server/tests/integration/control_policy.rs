@@ -36,7 +36,9 @@ struct Fixture {
 impl Fixture {
     async fn new() -> Self {
         Box::pin(async {
-            let platform = platform::Platform::new().await;
+            // The ledger and rollout rows are one installation's, and this
+            // fixture deletes and re-grants them, so it gets its own database.
+            let platform = platform::Platform::fresh_database().await;
             let app = AppId::mint();
             let plan = policy_fixture::seed_app(&platform, &app).await;
             let source = connect_store(&platform).await;
@@ -76,7 +78,7 @@ impl Fixture {
 /// inputs at all now, which
 /// `source_role_cannot_write_inputs_or_read_customer_storage` asserts directly.
 async fn connect_store(platform: &platform::Platform) -> ControlPolicyStore {
-    let facts = app_facts::DatabaseAppFacts::connect(&platform.admin_url.to_string()).await;
+    let facts = app_facts::DatabaseAppFacts::connect(platform.admin_url.as_ref()).await;
     connect_store_with(&platform.runtime_url, facts).await
 }
 
@@ -103,7 +105,9 @@ async fn connect_store_with(
 /// for this probe to check - and no Control database binding for it to hold.
 #[compio::test]
 async fn readiness_checks_publication_grants_alone_with_an_empty_catalog() {
-    let platform = platform::Platform::new().await;
+    // The readiness probe reads the whole app catalog and revokes the ledger
+    // and rollout grants installation-wide, so it gets its own database.
+    let platform = platform::Platform::fresh_database().await;
     let source = connect_store(&platform).await;
     let apps: i64 = platform
         .admin
@@ -570,7 +574,7 @@ async fn publication_reads_after_lock_wait_and_charges_that_wait_to_source_valid
 async fn wait_for_publication_lock(admin: &compio_postgres::Client) {
     compio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let waiting: i64 = admin.query_one("SELECT count(*) FROM pg_stat_activity WHERE usename='zeroship_workflow' AND wait_event_type='Lock'", &[]).await.unwrap().get(0);
+            let waiting: i64 = admin.query_one("SELECT count(*) FROM pg_stat_activity WHERE usename='zeroship_workflow' AND datname=current_database() AND wait_event_type='Lock'", &[]).await.unwrap().get(0);
             if waiting > 0 { break; }
             compio::time::sleep(Duration::from_millis(10)).await;
         }

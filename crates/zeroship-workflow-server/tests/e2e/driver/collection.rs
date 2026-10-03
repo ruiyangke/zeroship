@@ -220,7 +220,9 @@ async fn setup(platform: &platform::Platform) -> (Queue, Recovery, JobSpec) {
 
 #[ntex::test]
 async fn collection_is_independent_without_workers_and_continues_from_exact_settlements() {
-    let platform = platform::Platform::new().await;
+    // The spawned process composes the manager driver and sweep lane, which
+    // enumerate the whole queue, so this case gets a database of its own.
+    let platform = platform::Platform::fresh_database().await;
     private_schema(&platform).await;
     Box::pin(collection_contract(&platform)).await;
 }
@@ -242,7 +244,7 @@ async fn collection_contract(platform: &platform::Platform) {
     // take the very page this case has to be the claimant of and leave the
     // exactness unobservable.
     let mut server = server_process::ServerProcess::without_maintenance_sweeps(
-        &platform,
+        platform,
         &peers,
         platform.work.path(),
         "collection",

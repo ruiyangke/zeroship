@@ -4,7 +4,7 @@
     reason = "HTTP fixtures use the owning ntex compio runtime"
 )]
 
-use crate::support::{holds, platform};
+use crate::support::{holds, platform, zone};
 
 use futures::{
     channel::oneshot,
@@ -142,6 +142,10 @@ struct Fixture {
 impl Fixture {
     async fn new(policy: AppPolicy, configured: bool) -> Self {
         let platform = platform::Platform::new().await;
+        // A zone this case alone declares: placement considers every eligible
+        // worker in the app's zone, so a shared default zone would let another
+        // case's worker take this app.
+        let (zone, join_signer) = zone::declare_zone(&platform).await;
         let worker = WorkerId::mint();
         let signer = Signer {
             issuer: ServiceIssuer::parse(&format!(
@@ -151,7 +155,7 @@ impl Fixture {
             .unwrap(),
             key: ServiceSigningKey::generate(),
         };
-        platform.admin.execute("INSERT INTO zeroship.worker_instances(id,ring_key,public_key,advertise_host,advertise_port,status,join_signer_id,join_token_id,execution_zone_id,expires_at) VALUES($1,$2,$3,'127.0.0.1',8080,'active',$4,'tok_testfixturedefault','ezn_default000000000000000000',now() + interval '1 hour')", &[&worker.as_str(), &vec![1_u8], &signer.key.verifying_key_bytes().to_vec(), &platform::DEFAULT_JOIN_SIGNER_ID]).await.unwrap();
+        platform.admin.execute("INSERT INTO zeroship.worker_instances(id,ring_key,public_key,advertise_host,advertise_port,status,join_signer_id,join_token_id,execution_zone_id,expires_at) VALUES($1,$2,$3,'127.0.0.1',8080,'active',$4,'tok_testfixturedefault',$5,now() + interval '1 hour')", &[&worker.as_str(), &vec![1_u8], &signer.key.verifying_key_bytes().to_vec(), &join_signer, &zone.as_str()]).await.unwrap();
         // Production eligibility: Control's own rows under the manager's grants.
         let eligibility = Rc::new(
             connect_eligibility(&platform.runtime_url, Options::default())
@@ -178,7 +182,7 @@ impl Fixture {
             .await
             .unwrap();
         let app = AppId::mint();
-        platform.seed_app(&app).await;
+        platform.seed_app_in(&app, Some(zone.as_str())).await;
         let Placed::Assigned(assignment) = service.manager.place(&app).await.unwrap() else {
             panic!("the app has one eligible worker");
         };
@@ -189,7 +193,7 @@ impl Fixture {
                     app,
                     7.try_into().unwrap(),
                     policy.clone(),
-                    zeroship_core::ZoneId::default_zone(),
+                    zone.clone(),
                     false,
                     expires,
                 )
@@ -198,7 +202,7 @@ impl Fixture {
                     AppId::mint(),
                     7.try_into().unwrap(),
                     policy,
-                    zeroship_core::ZoneId::default_zone(),
+                    zone.clone(),
                     false,
                     expires,
                 )

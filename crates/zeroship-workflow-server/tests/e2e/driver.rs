@@ -601,7 +601,9 @@ async fn ready(http: &Client, url: &str) {
 
 #[ntex::test]
 async fn server_drives_metadata_without_workers_and_resumes_after_restart() {
-    let platform = platform::Platform::new().await;
+    // The spawned process composes the manager driver and sweep lane, which
+    // enumerate the whole queue, so this case gets a database of its own.
+    let platform = platform::Platform::fresh_database().await;
     private_schema(&platform).await;
     let seed = Box::pin(seed(&platform)).await;
     let peers = peers(&platform);
@@ -670,7 +672,9 @@ async fn job_holder(platform: &platform::Platform, job: &JobId) -> (String, Opti
 /// the lane asserting its own authority.
 #[ntex::test]
 async fn a_default_host_claims_and_settles_the_maintenance_rows_of_its_own_queue() {
-    let platform = platform::Platform::new().await;
+    // The spawned process composes the manager driver and sweep lane, which
+    // enumerate the whole queue, so this case gets a database of its own.
+    let platform = platform::Platform::fresh_database().await;
     let queue = Queue::connect(
         DbBinding::platform(
             "workflow_manager",

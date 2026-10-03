@@ -19,10 +19,9 @@ compio-postgres = { path = "../../libs/compio-postgres" }
 rusqlite = { version = "0.39", features = ["bundled", "preupdate_hook"] }
 serde_json = { version = "1", features = ["raw_value", "preserve_order"] }
 tempfile = "3"
-testcontainers = { version = "0.28", default-features = false, features = ["blocking"] }
-toml = "0.8"
 url = "2"
 zeroship-bundle = { path = "../zeroship-bundle" }
 zeroship-core = { path = "../zeroship-core" }
 zeroship-data-orm = { path = "../zeroship-data-orm" }
+zeroship-testkit = { path = "../../tests/testkit" }
 zeroship-workflow-manager = { path = "../zeroship-workflow-manager" }

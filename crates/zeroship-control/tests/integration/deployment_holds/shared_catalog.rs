@@ -78,7 +78,8 @@ async fn sessions(fixture: &Fixture) -> BTreeSet<i32> {
         .platform
         .admin
         .query(
-            "SELECT pid FROM pg_stat_activity WHERE application_name = $1",
+            "SELECT pid FROM pg_stat_activity \
+              WHERE application_name = $1 AND datname = current_database()",
             &[&CATALOG],
         )
         .await
@@ -185,7 +186,8 @@ async fn catalog_state(fixture: &Fixture) -> Vec<String> {
                            pid, state, coalesce(wait_event_type,'-'), \
                            coalesce(wait_event,'-'), pg_blocking_pids(pid)::text, \
                            left(regexp_replace(query, '\\s+', ' ', 'g'), 120)) \
-               FROM pg_stat_activity WHERE application_name = $1 ORDER BY pid",
+               FROM pg_stat_activity \
+               WHERE application_name = $1 AND datname = current_database() ORDER BY pid",
             &[&CATALOG],
         )
         .await

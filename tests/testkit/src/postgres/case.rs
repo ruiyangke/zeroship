@@ -9,7 +9,7 @@
 //! The runner carries no domain types. A crate's fixture wraps [`Case`] and
 //! implements [`CaseFixture`] to add its own connection helpers.
 
-use compio_postgres::{Client, NoTls};
+use compio_postgres::Client;
 use futures::FutureExt;
 use std::cell::RefCell;
 use std::panic::AssertUnwindSafe;
@@ -46,15 +46,9 @@ impl Case {
 
     /// Open a connection to `url` and track its driver task.
     pub async fn connect_to(&self, url: &str) -> Client {
-        let mut config: compio_postgres::Config = url.parse().expect("fixture database URL");
-        config.connect_timeout(Duration::from_secs(15));
-        let (client, connection) = config
-            .connect(NoTls)
-            .await
-            .expect("connect fixture database");
-        self.drivers
-            .borrow_mut()
-            .push(compio::runtime::spawn(async move { connection.run().await }));
+        let parsed: url::Url = url.parse().expect("fixture database URL");
+        let (client, driver) = super::connect(&parsed).await;
+        self.drivers.borrow_mut().push(driver);
         client
     }
 

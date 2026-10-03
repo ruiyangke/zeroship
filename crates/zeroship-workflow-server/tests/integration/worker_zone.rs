@@ -69,7 +69,9 @@ async fn two_instances_in_two_zones_verify_with_their_own_zones() {
 /// the host report ready and then refuse every worker with a non-default zone.
 #[ntex::test]
 async fn the_readiness_probe_fails_when_the_zone_column_grant_is_revoked() {
-    let platform = platform::Platform::new().await;
+    // The subject is a platform-wide column grant, which every case in a
+    // shared database would read and write under this one.
+    let platform = platform::Platform::fresh_database().await;
     let auth = auth(&platform).await;
     auth.ready().await.unwrap();
 

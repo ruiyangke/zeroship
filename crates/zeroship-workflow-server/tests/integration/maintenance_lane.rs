@@ -128,7 +128,9 @@ fn lane(
 
 impl Fixture {
     async fn new() -> Self {
-        let platform = platform::Platform::new().await;
+        // The lane's turns enumerate every claimable app in the queue, a
+    // queue-global subject, so this case gets a database no other case shares.
+    let platform = platform::Platform::fresh_database().await;
         let eligibility = Rc::new(
             connect_eligibility(&platform.runtime_url, Options::default())
                 .await

@@ -76,63 +76,61 @@ impl ServerProcess {
         client: &Client,
         maintenance_sweeps: bool,
     ) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        drop(listener);
         let config = directory.join(format!("{name}.toml"));
-        let control =
-            queue_control::Control::start(directory, name, platform.admin_url.as_str()).await;
-        super::platform::write_private(
-            &config,
-            toml::to_string(&serde_json::json!({"workflow":{
-                "listen":address.to_string(),"database_url":platform.runtime_url,"service_peers_file":peers,
-                "control_url":control.url(),"service_key_file":control.key_file,
-                // The payload store this process stages and collects objects
-                // through. ONE root for every process this fixture starts,
-                // because that is what a deployment owes: an object one replica
-                // wrote is one another replica and the workers must be able to
-                // read. A root per process would model a misconfiguration.
-                "storage_url":directory.join("payload-objects"),
-                "http_threads":2,"max_request_bytes":MAX_REQUEST_BYTES,
-                "maintenance_sweeps":maintenance_sweeps,
-            }}))
-            .unwrap(),
-        );
+        let mut control =
+            Some(queue_control::Control::start(directory, name, platform.admin_url.as_str()).await);
         let log = directory.join(format!("{name}.log"));
-        let child = spawn(&config, &log);
-        let mut server = Self {
-            child,
-            _control: control,
-            config,
-            log,
-            url: format!("http://{address}"),
-            address,
-        };
-        server.ready(client).await;
-        server
-    }
-    pub async fn ready(&mut self, client: &Client) {
-        let result = compio::time::timeout(Duration::from_secs(30), async {
-            loop {
-                assert!(
-                    self.child.try_wait().unwrap().is_none(),
-                    "{}",
-                    std::fs::read_to_string(&self.log).unwrap()
-                );
-                if let Ok(response) = client.get(format!("{}/readyz", self.url)).send().await {
-                    if response.status() == StatusCode::OK {
-                        break;
+        // The OS hands out an ephemeral port, and two cases starting at once can
+        // be handed the same one before either child binds it. Re-reserve and
+        // retry rather than fail the case on another case's port.
+        for _ in 0..16 {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            drop(listener);
+            super::platform::write_private(
+                &config,
+                toml::to_string(&serde_json::json!({"workflow":{
+                    "listen":address.to_string(),"database_url":platform.runtime_url,"service_peers_file":peers,
+                    "control_url":control.as_ref().unwrap().url(),"service_key_file":control.as_ref().unwrap().key_file,
+                    // The payload store this process stages and collects objects
+                    // through. ONE root for every process this fixture starts,
+                    // because that is what a deployment owes: an object one replica
+                    // wrote is one another replica and the workers must be able to
+                    // read. A root per process would model a misconfiguration.
+                    "storage_url":directory.join("payload-objects"),
+                    "http_threads":2,"max_request_bytes":MAX_REQUEST_BYTES,
+                    "maintenance_sweeps":maintenance_sweeps,
+                }}))
+                .unwrap(),
+            );
+            let mut child = spawn(&config, &log);
+            let url = format!("http://{address}");
+            match wait_started(&mut child, &log, client, &url).await {
+                Started::Ready => {
+                    return Self {
+                        child,
+                        _control: control.take().unwrap(),
+                        config,
+                        log,
+                        url,
+                        address,
                     }
                 }
-                compio::time::sleep(Duration::from_millis(20)).await;
+                Started::AddressInUse => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
             }
-        })
-        .await;
-        assert!(
-            result.is_ok(),
-            "coordinator did not become ready: {}",
-            std::fs::read_to_string(&self.log).unwrap()
-        );
+        }
+        panic!("could not reserve a listening port for {name} after repeated collisions");
+    }
+    pub async fn ready(&mut self, client: &Client) {
+        match wait_started(&mut self.child, &self.log, client, &self.url).await {
+            Started::Ready => {}
+            Started::AddressInUse => {
+                panic!("the coordinator's port was taken while it was starting")
+            }
+        }
     }
     pub async fn restart(&mut self, client: &Client) {
         let _ = self.child.kill();
@@ -165,4 +163,45 @@ fn spawn(config: &Path, log: &Path) -> Child {
         .stderr(output)
         .spawn()
         .unwrap()
+}
+
+/// How a spawned process's readiness wait ended.
+enum Started {
+    Ready,
+    /// The process exited because another case's server already owns the
+    /// reserved address, so the caller reserves a different one.
+    AddressInUse,
+}
+
+/// Wait for `child` to answer `/readyz`, or report why it stopped.
+///
+/// # Panics
+/// When the process exits for any reason other than an address collision, or
+/// does not become ready within the wait.
+async fn wait_started(child: &mut Child, log: &Path, client: &Client, url: &str) -> Started {
+    let result = compio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if child.try_wait().unwrap().is_some() {
+                let text = std::fs::read_to_string(log).unwrap_or_default();
+                if text.contains("Address already in use") {
+                    return Started::AddressInUse;
+                }
+                panic!("{text}");
+            }
+            if let Ok(response) = client.get(format!("{url}/readyz")).send().await {
+                if response.status() == StatusCode::OK {
+                    return Started::Ready;
+                }
+            }
+            compio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    match result {
+        Ok(started) => started,
+        Err(_) => panic!(
+            "coordinator did not become ready: {}",
+            std::fs::read_to_string(log).unwrap_or_default()
+        ),
+    }
 }

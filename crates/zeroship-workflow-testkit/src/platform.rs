@@ -3,12 +3,9 @@
     reason = "fixture clients and connections stay on their compio runtime"
 )]
 
-use std::{os::unix::fs::PermissionsExt, path::Path, process::Command};
-use testcontainers::{
-    core::{IntoContainerPort, WaitFor},
-    runners::SyncRunner,
-    Container, GenericImage, ImageExt,
-};
+use std::{os::unix::fs::PermissionsExt, path::Path};
+
+use zeroship_testkit::postgres::FreshDatabase;
 
 /// The single execution zone these migrations seed
 /// (`db/migrations-ts/20260914000450_execution_zones_default_zone.ts`).
@@ -19,90 +16,67 @@ pub const DEFAULT_ZONE_ID: &str = "ezn_default000000000000000000";
 /// signer behaviour itself (revocation, a second signer) seed their own rows.
 pub const DEFAULT_JOIN_SIGNER_ID: &str = "wjs_testfixturedefault0000000";
 
+/// A case's view of the platform database.
+///
+/// Every case of a run shares one migrated server through
+/// [`zeroship_testkit::postgres::platform`]: [`Platform::new`] joins the
+/// process-shared migrated database, and [`Platform::fresh_database`] takes a
+/// clone of the migrated template for a subject that is platform-global. No
+/// case boots a container or runs the platform migration.
 pub struct Platform {
-    _postgres: Container<GenericImage>,
+    /// The clone a fresh case owns, removed when this handle drops; `None` for
+    /// a case on the process-shared database.
+    _fresh: Option<FreshDatabase>,
+    /// The superuser connection this case seeds and reads its own rows with.
     pub admin: compio_postgres::Client,
-    /// The server's URL as its superuser, `postgres`.
+    /// The case database's URL as its superuser, `postgres`.
     pub admin_url: url::Url,
+    /// The case database's URL as the workflow service login.
     pub runtime_url: String,
+    /// The case's own scratch directory, for peer files, logs and payloads.
     pub work: tempfile::TempDir,
 }
+
 impl Platform {
+    /// Join the process-shared migrated database.
+    ///
+    /// For a case whose subject is scoped to the rows it mints: it mints its
+    /// own app, organization, project, plan, worker and zone ids, and reads
+    /// back by those.
     pub async fn new() -> Self {
-        let postgres = GenericImage::new("postgres", "18")
-            .with_exposed_port(5432.tcp())
-            .with_wait_for(WaitFor::message_on_stdout(
-                "PostgreSQL init process complete; ready for start up.",
-            ))
-            .with_wait_for(WaitFor::message_on_stderr(
-                "database system is ready to accept connections",
-            ))
-            .with_env_var("POSTGRES_HOST_AUTH_METHOD", "trust")
-            .start()
-            .expect("workflow host tests require Testcontainers PostgreSQL");
-        let address = format!(
-            "{}:{}",
-            postgres.get_host().unwrap(),
-            postgres.get_host_port_ipv4(5432).unwrap()
-        );
-        let admin_url =
-            url::Url::parse(&format!("postgres://postgres@{address}/postgres")).unwrap();
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../..")
-            .canonicalize()
-            .unwrap();
-        let work = tempfile::tempdir().unwrap();
-        let config = work.path().join("migrate.toml");
-        write_private(&config, toml::to_string(&serde_json::json!({"env":{"platform":{
-            "url":admin_url.as_str(),"dir":root.join("db/migrations-ts"),"schema":"zeroship","owner_app":"zeroship_platform",
-            "registry":root.join("policies/platform-table-owners.json"),"policy":[root.join("policies/platform.policy.toml")],
-        }}})).unwrap());
-        let result = Command::new("node")
-            .arg(root.join("packages/zero-migrate-cli/dist/cli-bin.js"))
-            .args(["apply", "--config"])
-            .arg(&config)
-            .args(["--env", "platform", "--approve"])
-            .current_dir(&root)
-            .output()
-            .expect("build the canonical migration CLI before testing");
-        assert!(
-            result.status.success(),
-            "platform migration failed:\n{}\n{}",
-            String::from_utf8_lossy(&result.stdout),
-            String::from_utf8_lossy(&result.stderr)
-        );
+        let admin_url = zeroship_testkit::postgres::platform().admin_url();
+        Box::pin(Self::open(admin_url, None)).await
+    }
+
+    /// Take a clone of the migrated template from the process-shared server.
+    ///
+    /// For a case whose subject is platform-global rather than scoped to the
+    /// rows it mints, so isolating it in a database keeps it from another
+    /// case's rows.
+    pub async fn fresh_database() -> Self {
+        let fresh = zeroship_testkit::postgres::platform().fresh_database();
+        let admin_url = fresh.admin_url();
+        Box::pin(Self::open(admin_url, Some(fresh))).await
+    }
+
+    async fn open(admin_url: url::Url, fresh: Option<FreshDatabase>) -> Self {
         let admin = connect(admin_url.as_str()).await;
-        let default_join_signer_id = DEFAULT_JOIN_SIGNER_ID.to_owned();
-        admin
-            .execute(
-                "INSERT INTO zeroship.worker_join_signers (id, public_key, status) \
-                 VALUES ($1, $2, 'active')",
-                &[&default_join_signer_id, &vec![7_u8; 32]],
-            )
-            .await
-            .unwrap();
-        admin
-            .execute(
-                "INSERT INTO zeroship.worker_join_signer_zones (signer_id, execution_zone_id) \
-                 VALUES ($1, 'ezn_default000000000000000000')",
-                &[&default_join_signer_id],
-            )
-            .await
-            .unwrap();
+        seed_default_join_signer(&admin).await;
+        let runtime_url = runtime_url(&admin_url);
         Self {
-            _postgres: postgres,
+            _fresh: fresh,
             admin,
             admin_url,
-            runtime_url: format!("postgres://zeroship_workflow@{address}/postgres"),
-            work,
+            runtime_url,
+            work: tempfile::tempdir().unwrap(),
         }
     }
 
-    /// The server's URL as `role`, whose login the trust authentication accepts.
+    /// The server's URL as `role`, whose own name is its password.
     pub fn role_url(&self, role: &str) -> url::Url {
         let mut url = self.admin_url.clone();
         url.set_username(role).unwrap();
-        url.set_password(None).unwrap();
+        url.set_password(Some(role)).unwrap();
         url
     }
 }
@@ -172,6 +146,38 @@ impl Platform {
         assert_eq!(inserted.unwrap(), 1);
         plan
     }
+}
+
+/// Seed the join signer the fixture's default zone trusts, once per database.
+///
+/// A shared database receives this insert from every case that joins it, so it
+/// is idempotent and a concurrent writer that loses the race is absorbed.
+async fn seed_default_join_signer(admin: &compio_postgres::Client) {
+    admin
+        .execute(
+            "INSERT INTO zeroship.worker_join_signers (id, public_key, status) \
+             VALUES ($1, $2, 'active') ON CONFLICT DO NOTHING",
+            &[&DEFAULT_JOIN_SIGNER_ID, &vec![7_u8; 32]],
+        )
+        .await
+        .unwrap();
+    admin
+        .execute(
+            "INSERT INTO zeroship.worker_join_signer_zones (signer_id, execution_zone_id) \
+             VALUES ($1, 'ezn_default000000000000000000') ON CONFLICT DO NOTHING",
+            &[&DEFAULT_JOIN_SIGNER_ID],
+        )
+        .await
+        .unwrap();
+}
+
+/// The case database's URL as the workflow service login, whose password is
+/// its own name.
+fn runtime_url(admin_url: &url::Url) -> String {
+    let mut url = admin_url.clone();
+    url.set_username("zeroship_workflow").unwrap();
+    url.set_password(Some("zeroship_workflow")).unwrap();
+    url.to_string()
 }
 
 pub async fn connect(url: &str) -> compio_postgres::Client {

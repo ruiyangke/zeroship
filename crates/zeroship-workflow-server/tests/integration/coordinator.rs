@@ -10,11 +10,6 @@ use std::{
     rc::Rc,
     time::Duration,
 };
-use testcontainers::{
-    core::{IntoContainerPort, WaitFor},
-    runners::SyncRunner,
-    Container, GenericImage, ImageExt,
-};
 use zeroship_core::{
     app_id::AppId,
     service_peers::{service_issuer, CONTROL_SERVICE_NAME, WORKER_SERVICE_NAME},
@@ -42,35 +37,25 @@ use zeroship_workflow_server::{
 
 type StoredIds = BTreeMap<(String, String, String), String>;
 
-use crate::support::{holds, zone};
+use crate::support::{holds, platform, zone};
 
 struct Fixture {
-    _postgres: Container<GenericImage>,
+    _platform: platform::Platform,
     admin: Client,
     runtime_url: String,
 }
 impl Fixture {
     async fn new() -> Self {
-        let postgres = GenericImage::new("postgres", "18")
-            .with_exposed_port(5432.tcp())
-            .with_wait_for(WaitFor::message_on_stdout(
-                "PostgreSQL init process complete; ready for start up.",
-            ))
-            .with_wait_for(WaitFor::message_on_stderr(
-                "database system is ready to accept connections",
-            ))
-            .with_env_var("POSTGRES_HOST_AUTH_METHOD", "trust")
-            .start()
-            .expect("coordinator tests require Testcontainers PostgreSQL");
-        let address = format!(
-            "{}:{}",
-            postgres.get_host().unwrap(),
-            postgres.get_host_port_ipv4(5432).unwrap()
-        );
-        let admin = connect(&format!("postgres://postgres@{address}/postgres")).await;
+        let platform = platform::Platform::fresh_database().await;
+        let admin = connect(platform.admin_url.as_str()).await;
+        // The clone carries the migrated platform schema. This fixture's
+        // subject is the coordinator's own generated schema, so it replaces
+        // those schemas before installing it.
         admin
             .batch_execute(
-                "CREATE ROLE coordinator_test LOGIN;
+                "DROP SCHEMA IF EXISTS workflow_manager CASCADE;
+             DROP SCHEMA IF EXISTS zeroship CASCADE;
+             DROP SCHEMA IF EXISTS customer CASCADE;
              CREATE SCHEMA workflow_manager;
              CREATE SCHEMA zeroship;
              CREATE TABLE zeroship.apps(id text PRIMARY KEY,execution_zone_id text,deleted_at timestamptz);
@@ -80,6 +65,11 @@ impl Fixture {
             )
             .await
             .unwrap();
+        // The coordinator login is cluster-global and every case creates the
+        // same one, so the losers of the creation race absorb "already exists".
+        let _ = admin
+            .batch_execute("CREATE ROLE coordinator_test LOGIN PASSWORD 'coordinator_test'")
+            .await;
         admin
             .execute(
                 "INSERT INTO customer.__zeroship_workflow_history(id,secret) VALUES($1,'customer-private-history')",
@@ -106,10 +96,11 @@ impl Fixture {
                workflow_manager.capacity_demands,
                workflow_manager.capacity_targets TO coordinator_test;"
         ).await.unwrap();
+        let runtime_url = platform.role_url("coordinator_test").to_string();
         Self {
-            _postgres: postgres,
+            _platform: platform,
             admin,
-            runtime_url: format!("postgres://coordinator_test@{address}/postgres"),
+            runtime_url,
         }
     }
     async fn service(&self) -> Coordinator {
@@ -727,7 +718,11 @@ async fn metadata_schema_has_no_customer_authority_and_ids_are_bytewise() {
     fixture
         .admin
         .batch_execute(
-            "CREATE ROLE customer_reader;
+            "DO $$ BEGIN
+                 IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='customer_reader') THEN
+                     CREATE ROLE customer_reader;
+                 END IF;
+             END $$;
          GRANT USAGE ON SCHEMA customer TO customer_reader;
          GRANT SELECT ON customer.__zeroship_workflow_history TO customer_reader;
          GRANT customer_reader TO coordinator_test WITH INHERIT FALSE;",

@@ -116,7 +116,9 @@ async fn native_worker_client_uses_the_authenticated_coordinator_api() {
     };
     use zeroship_workflow_client::{Error, Options, WorkerCoordinator};
 
-    let fixture = platform::Platform::new().await;
+    // The spawned process composes the manager driver and sweep lane, which
+    // enumerate the whole queue, so this case gets a database of its own.
+    let fixture = platform::Platform::fresh_database().await;
     let control = service_issuer(CONTROL_SERVICE_NAME).unwrap();
     let control_key = ServiceSigningKey::generate();
     let peers = fixture.work.path().join("native-client-peers.json");
@@ -433,7 +435,9 @@ async fn a_lapsed_instance_lease_refuses_a_worker_and_is_covered_by_readiness() 
     };
     use zeroship_workflow_client::{Error, Options, WorkerCoordinator};
 
-    let fixture = platform::Platform::new().await;
+    // The spawned process composes the manager driver and sweep lane, which
+    // enumerate the whole queue, so this case gets a database of its own.
+    let fixture = platform::Platform::fresh_database().await;
     let control = service_issuer(CONTROL_SERVICE_NAME).unwrap();
     let control_key = ServiceSigningKey::generate();
     let peers = fixture.work.path().join("lease-fence-peers.json");
@@ -720,7 +724,9 @@ async fn rejects_before_body(address: std::net::SocketAddr, path: &str) {
 
 #[ntex::test]
 async fn replicas_authenticate_metadata_and_keep_customer_execution_off_the_protocol() {
-    let fixture = platform::Platform::new().await;
+    // The spawned process composes the manager driver and sweep lane, which
+    // enumerate the whole queue, so this case gets a database of its own.
+    let fixture = platform::Platform::fresh_database().await;
     let control = service_issuer(CONTROL_SERVICE_NAME).unwrap();
     let control_key = ServiceSigningKey::generate();
     let peers = fixture.work.path().join("peers.json");
@@ -1124,7 +1130,9 @@ async fn replicas_authenticate_metadata_and_keep_customer_execution_off_the_prot
         StatusCode::UNAUTHORIZED
     );
 
-    fixture.admin.query("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename='zeroship_workflow'",&[]).await.unwrap();
+    // Scoped to this case's database: on the shared server an unscoped sweep
+    // would terminate every other case's workflow connections too.
+    fixture.admin.query("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename='zeroship_workflow' AND datname=current_database()",&[]).await.unwrap();
     first.expect_failure().await;
     second.expect_failure().await;
     first.restart(&client).await;

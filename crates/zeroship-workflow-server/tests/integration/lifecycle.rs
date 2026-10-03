@@ -91,7 +91,7 @@ async fn delete(platform: &platform::Platform, app: &AppId) {
 /// can. The workflow role holds no grant on the policy inputs, and the closing
 /// lane's deletion check crosses the same endpoint they do.
 async fn connect_lifecycle(platform: &platform::Platform) -> FactsLifecycle {
-    FactsLifecycle::new(app_facts::DatabaseAppFacts::connect(&platform.admin_url.to_string()).await)
+    FactsLifecycle::new(app_facts::DatabaseAppFacts::connect(platform.admin_url.as_ref()).await)
 }
 
 async fn queue(platform: &platform::Platform) -> Queue {
@@ -118,7 +118,9 @@ async fn queue(platform: &platform::Platform) -> Queue {
 /// deleted, and unknown to Control - against one answer.
 #[compio::test]
 async fn only_a_recorded_deletion_abandons_and_an_unknown_app_does_not() {
-    let platform = platform::Platform::new().await;
+    // The closing lane enumerates every app's recovery duty, a queue-global
+    // subject, so this case gets a database no other case shares.
+    let platform = platform::Platform::fresh_database().await;
     let live = AppId::mint();
     let gone = AppId::mint();
     seed(&platform, &live, "lifecycle-live").await;
@@ -163,7 +165,9 @@ async fn only_a_recorded_deletion_abandons_and_an_unknown_app_does_not() {
 /// responsibility and begins closing the idle live one.
 #[compio::test]
 async fn the_driver_abandons_deleted_apps_over_the_canonical_schema() {
-    let platform = platform::Platform::new().await;
+    // The closing lane enumerates every app's recovery duty, a queue-global
+    // subject, so this case gets a database no other case shares.
+    let platform = platform::Platform::fresh_database().await;
     let live = AppId::mint();
     let gone = AppId::mint();
     seed(&platform, &live, "driver-live").await;

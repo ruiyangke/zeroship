@@ -110,7 +110,9 @@ struct Fixture {
 
 impl Fixture {
     async fn new() -> Self {
-        let platform = platform::Platform::new().await;
+        // The fixture installs catalog triggers and reads every catalog session,
+        // installation-global subjects, so it gets a database of its own.
+        let platform = platform::Platform::fresh_database().await;
         let control_url = platform.role_url("zeroship_control").to_string();
         let registry = Registry::new(&control_url).await.unwrap();
         let control_pg = Arc::new(platform::connect(&control_url).await);

@@ -1074,7 +1074,8 @@ async fn catalog_sessions(fixture: &Fixture) -> BTreeSet<i32> {
         .platform
         .admin
         .query(
-            "SELECT pid FROM pg_stat_activity WHERE application_name = $1",
+            "SELECT pid FROM pg_stat_activity \
+              WHERE application_name = $1 AND datname = current_database()",
             &[&sessions::CATALOG],
         )
         .await

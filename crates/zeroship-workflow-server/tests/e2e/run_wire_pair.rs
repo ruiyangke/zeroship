@@ -73,7 +73,9 @@ struct Fixture {
 
 impl Fixture {
     async fn new() -> Self {
-    let platform = platform::Platform::new().await;
+    // The spawned process composes the manager driver and sweep lane, which
+    // enumerate the whole queue, so this case gets a database of its own.
+    let platform = platform::Platform::fresh_database().await;
 
         // Control's verification key, the one thing the service refuses to
         // start without. The peer itself is the shared fake in `queue_control`,

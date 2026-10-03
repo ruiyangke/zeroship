@@ -8920,12 +8920,11 @@ dependencies = [
  "rusqlite",
  "serde_json",
  "tempfile",
- "testcontainers",
- "toml 0.8.23",
  "url",
  "zeroship-bundle",
  "zeroship-core",
  "zeroship-data-orm",
+ "zeroship-testkit",
  "zeroship-workflow-manager",
 ]
 

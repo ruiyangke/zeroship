@@ -325,7 +325,9 @@ async fn payload_columns(
 
 #[ntex::test]
 async fn platform_role_serves_the_journal_without_customer_or_ddl_privileges() {
-    let fixture = platform::Platform::new().await;
+    // The subject is the platform's own grants and role reach, which every
+    // case in a shared database would change under this one.
+    let fixture = platform::Platform::fresh_database().await;
     let eligibility = Rc::new(
         connect_eligibility(&fixture.runtime_url, Options::default())
             .await
@@ -515,7 +517,6 @@ async fn platform_role_serves_the_journal_without_customer_or_ddl_privileges() {
             .unwrap();
         service.verify().await.unwrap();
     }
-    assert!(fixture.work.path().join("migrate.toml").is_file());
 }
 
 #[expect(

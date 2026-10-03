@@ -36,6 +36,33 @@ const WATCHDOG: &str = "/usr/local/bin/zeroship-watchdog";
 /// The port PostgreSQL listens on in the image.
 const POSTGRES_PORT: u16 = 5432;
 
+/// The largest number of cases a run executes against the shared server at once.
+///
+/// The test commands run one case per process: `cargo test` up to its thread
+/// count and nextest up to one per CPU. Sizing the server to the widest of
+/// those keeps the budget from depending on which command a developer ran.
+const PARALLEL_CASES: usize = 32;
+
+/// The most connections one case may hold on the shared server.
+///
+/// A case owns its administrative connection, the pools its in-process service
+/// opens, and a pool per HTTP thread for each server process it spawns. The
+/// number is the ceiling the fixtures are built to, not a reading of what any
+/// case happened to open.
+const CONNECTIONS_PER_CASE: usize = 64;
+
+/// The slots PostgreSQL keeps out of the general budget for superusers.
+const SUPERUSER_RESERVED: usize = 3;
+
+/// The connection budget the shared server is started with.
+///
+/// Every case of a run connects to this one server, so the budget is the
+/// parallel case count times the per-case ceiling plus the reserved superuser
+/// slots. Sizing it to a measured reading would make a run depend on which
+/// cases a filter selected; sizing it to that rule does not.
+const SHARED_MAX_CONNECTIONS: usize =
+    PARALLEL_CASES * CONNECTIONS_PER_CASE + SUPERUSER_RESERVED;
+
 /// The pristine migrated database a fresh-database case is cloned from.
 ///
 /// It is created once by the elected booter, migrated, and then sealed with
@@ -196,23 +223,22 @@ fn spec() -> Result<shared::Spec, String> {
         ("POSTGRES_PASSWORD".to_owned(), "fixture".to_owned()),
         ("POSTGRES_DB".to_owned(), TEMPLATE_DATABASE.to_owned()),
     ];
-    let postgres_args: Vec<String> = [
-        "-c",
-        "max_connections=500",
-        "-c",
-        "fsync=off",
-        "-c",
-        "wal_level=logical",
-        "-c",
-        "max_replication_slots=128",
-        "-c",
-        "max_wal_senders=128",
-        "-c",
-        "max_slot_wal_keep_size=256MB",
-    ]
-    .iter()
-    .map(|argument| (*argument).to_owned())
-    .collect();
+    let postgres_args: Vec<String> = vec![
+        "-c".to_owned(),
+        format!("max_connections={SHARED_MAX_CONNECTIONS}"),
+        "-c".to_owned(),
+        format!("superuser_reserved_connections={SUPERUSER_RESERVED}"),
+        "-c".to_owned(),
+        "fsync=off".to_owned(),
+        "-c".to_owned(),
+        "wal_level=logical".to_owned(),
+        "-c".to_owned(),
+        "max_replication_slots=128".to_owned(),
+        "-c".to_owned(),
+        "max_wal_senders=128".to_owned(),
+        "-c".to_owned(),
+        "max_slot_wal_keep_size=256MB".to_owned(),
+    ];
     let args = server_args(&postgres_args);
     let inputs = server_inputs(&root(), &image, &environment, &args)?;
     Ok(shared::Spec {
@@ -403,7 +429,14 @@ fn database_url(base: &url::Url, name: &str) -> url::Url {
 }
 
 /// Open one connection and spawn its driver task.
-async fn connect(
+///
+/// A refused connection reports whether the shared server had no slot left for
+/// this case, so an undersized budget names itself rather than surfacing as a
+/// case that appears to hang on a database that never answers.
+///
+/// # Panics
+/// When the server refuses the connection.
+pub async fn connect(
     url: &url::Url,
 ) -> (
     Client,
@@ -414,11 +447,48 @@ async fn connect(
     let (client, connection) = config
         .connect(NoTls)
         .await
-        .expect("connect fixture database");
+        .unwrap_or_else(|error| panic!("{}", connection_failure(url, &error)));
     (
         client,
         compio::runtime::spawn(async move { connection.run().await }),
     )
+}
+
+/// Open one connection to a URL this crate has not parsed.
+///
+/// # Panics
+/// When the URL is not a database URL or the server refuses the connection.
+pub async fn connect_str(
+    url: &str,
+) -> (
+    Client,
+    compio::runtime::JoinHandle<Result<(), compio_postgres::Error>>,
+) {
+    let parsed: url::Url = url.parse().expect("fixture database URL");
+    connect(&parsed).await
+}
+
+/// The message a case reports when the shared server refuses its connection.
+///
+/// A connection refused for want of a slot is told apart from every other
+/// connect failure, because the fix is the run's budget rather than the DSN.
+#[must_use]
+pub fn connection_failure(url: &url::Url, error: &compio_postgres::Error) -> String {
+    let database = url.path().trim_start_matches('/');
+    if error
+        .as_db_error()
+        .is_some_and(|db_error| db_error.code().code() == "53300")
+    {
+        format!(
+            "the shared PostgreSQL server has no connection slot left for {database}: it serves \
+             every test process of a worktree under the run's parallel connection budget. A case \
+             holds {CONNECTIONS_PER_CASE} at most, the run executes {PARALLEL_CASES} at once, and \
+             the budget is sized for exactly that; lower a case's pools or raise the budget from \
+             the rule in `spec`. {error}"
+        )
+    } else {
+        format!("connect fixture database {url}: {error}")
+    }
 }
 
 fn root() -> PathBuf {
