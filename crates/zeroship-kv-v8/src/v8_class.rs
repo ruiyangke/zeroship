@@ -19,8 +19,6 @@
 
 use zeroship_runtime::state::OpError;
 use zeroship_runtime_macros::v8_class;
-#[allow(unused_imports)]
-use zeroship_runtime_macros::{v8_constructor, v8_method, v8_name};
 
 use crate::dispatch::{
     dispatch_delete, dispatch_expire, dispatch_get, dispatch_incr, dispatch_list, dispatch_persist,
@@ -188,7 +186,6 @@ fn read_ttl_ms(
 // ---------------------------------------------------------------------------
 
 #[v8_class]
-#[allow(dead_code)]
 impl Kv {
     /// `new Kv()` from JS rejects — real instances are minted via
     /// [`mint_kv`] from `KvBinding::build_instance`, which supplies the

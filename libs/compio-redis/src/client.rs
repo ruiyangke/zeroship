@@ -203,32 +203,22 @@ impl Client {
     /// True if this connection is in a "dirty" state — a command was
     /// started but no full reply has been cleanly decoded since (timed out,
     /// cancelled, decode-errored, or rejected by the size cap). The pool
-    /// (R2) must NOT return a dirty connection to the idle stack.
-    ///
-    /// `allow(dead_code)`: consumed by the pool fail-safe in R2; for now only
-    /// the in-crate red-team tests call it.
-    #[allow(dead_code)]
+    /// must NOT return a dirty connection to the idle stack.
     pub(crate) fn is_dirty(&self) -> bool {
         self.dirty
     }
 
     /// True if the accumulating read buffer is empty. A non-empty `rx` at
     /// checkout time means leftover/partial reply bytes from a prior
-    /// command — the pool (R2) treats that as "do not reuse".
-    ///
-    /// `allow(dead_code)`: consumed by the pool fail-safe in R2; for now only
-    /// the in-crate red-team tests call it.
-    #[allow(dead_code)]
+    /// command - the pool treats that as "do not reuse".
     pub(crate) fn is_rx_empty(&self) -> bool {
         self.rx.is_empty()
     }
 
-    /// Override the per-command timeout. Used by tests to drive the
+    /// Override the per-command timeout. Tests use it to drive the
     /// timeout/dirty-barrier paths deterministically without waiting the
-    /// 5 s default; also lets the pool/cluster layers tune liveness.
-    ///
-    /// `allow(dead_code)`: test/R2-facing knob; no production caller yet.
-    #[allow(dead_code)]
+    /// 5 s default.
+    #[cfg(test)]
     pub(crate) fn set_cmd_timeout(&mut self, d: Duration) {
         self.cmd_timeout = d;
     }

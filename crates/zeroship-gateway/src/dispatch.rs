@@ -13,7 +13,6 @@ use zeroship_bundle::{AssetVariant, CacheCtl, WorkerMode};
 /// matched resource. Constructed by the resource-tree path in
 /// `router.rs::execute_resource_tree`.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub enum Outcome {
     /// Serve a static asset from the object store.
     Static(StaticHit),

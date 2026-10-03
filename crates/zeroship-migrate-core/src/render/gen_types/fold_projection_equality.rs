@@ -57,6 +57,7 @@ use super::differential_corpus::{
     dialect_label, parse, policy, read_golden, CASES, DIALECTS, SCHEMA, STEMS, STREAMS,
 };
 use crate::model::ir::Op;
+use crate::model::schema_model::SchemaModel;
 use crate::model::snapshot::{
     ColumnSnapshot, ConstraintSnapshot, IndexSnapshot, SchemaSnapshot, TableSnapshot,
 };
@@ -77,7 +78,8 @@ use zeroship_migrate_ir::dialect::DialectId;
 /// the walker. The last leg retires the same way when its walker goes.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Projection {
-    /// `FoldedSchema::project_snapshot` against `fold_ops`.
+    /// The finished catalog of `fold_with_catalog`, round-tripped through the
+    /// neutral/vendor split, against `fold_ops`.
     Snapshot,
 }
 
@@ -111,15 +113,29 @@ fn walker_answer(
 
 fn projection_answer(
     projection: Projection,
-    folded: &Result<single_fold::FoldedSchema, String>,
+    folded: &Result<(single_fold::FoldedSchema, SchemaSnapshot), String>,
 ) -> Answer {
-    let folded = match folded {
+    let (_, catalog) = match folded {
         Ok(folded) => folded,
         Err(error) => return Err(error.clone()),
     };
     Ok(match projection {
-        Projection::Snapshot => format!("{:#?}", folded.project_snapshot()),
+        Projection::Snapshot => format!("{:#?}", project_snapshot(catalog)),
     })
+}
+
+/// Round-trip a finished catalog's tables through the neutral/vendor split.
+///
+/// The tables come back through the split, so this exercises
+/// `SchemaModel::from_tables` / `to_tables` on FOLDED shapes across the whole
+/// corpus. The equivalence suites otherwise only ever run the split on
+/// LIVE-INTROSPECTED snapshots, which populate a different set of vendor families,
+/// so a family the split drops on a fold-produced shape is invisible to them.
+fn project_snapshot(catalog: &SchemaSnapshot) -> SchemaSnapshot {
+    let mut snapshot = catalog.clone();
+    let tables = std::mem::take(&mut snapshot.tables);
+    snapshot.tables = SchemaModel::from_tables(&tables).to_tables();
+    snapshot
 }
 
 /// How one comparison came out.
@@ -205,12 +221,19 @@ fn measure(vendors: VendorSet) -> Vec<Measured> {
             let effective = policy(confined);
             // ONE fold per prefix, four projections read from it. Folding once per
             // projection would be four traversals, which is the thing being removed.
-            let folded: Vec<Result<single_fold::FoldedSchema, String>> = (0..=ops.len())
-                .map(|i| {
-                    single_fold::fold(vendors, &ops[..i], dialect, SCHEMA, &effective)
+            let folded: Vec<Result<(single_fold::FoldedSchema, SchemaSnapshot), String>> =
+                (0..=ops.len())
+                    .map(|i| {
+                        single_fold::fold_with_catalog(
+                            vendors,
+                            &ops[..i],
+                            dialect,
+                            SCHEMA,
+                            &effective,
+                        )
                         .map_err(|e| e.to_string())
-                })
-                .collect();
+                    })
+                    .collect();
             for projection in PROJECTIONS {
                 let mut measured = Measured {
                     key: format!("{name}|{}|{}", dialect_label(dialect), projection.label()),
@@ -771,7 +794,7 @@ fn the_neutral_vendor_split_loses_no_field_on_a_folded_shape() {
     for (name, ops, confined) in corpus_streams() {
         for dialect in &DIALECTS {
             let effective = policy(confined);
-            let Ok(folded) = single_fold::fold(
+            let Ok((_, catalog)) = single_fold::fold_with_catalog(
                 crate::test_fixtures::VENDORS,
                 &ops,
                 dialect,
@@ -789,7 +812,7 @@ fn the_neutral_vendor_split_loses_no_field_on_a_folded_shape() {
             ) else {
                 continue;
             };
-            let projected: SchemaSnapshot = folded.project_snapshot();
+            let projected: SchemaSnapshot = project_snapshot(&catalog);
             for (table, theirs) in &walker.tables {
                 let Some(mine) = projected.tables.get(table) else {
                     differences

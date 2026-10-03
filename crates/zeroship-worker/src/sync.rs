@@ -801,7 +801,6 @@ pub fn cached_env_version(envs: &SharedEnvs, app_id: &AppId) -> Option<i64> {
 
 /// Remove the cached env for an app. Used when the bundle load /
 /// env-fetch fails so the next request retries from scratch.
-#[allow(dead_code)]
 pub fn remove_env(envs: &SharedEnvs, app_id: &AppId) {
     if let Ok(mut e) = envs.write() {
         e.remove(app_id);

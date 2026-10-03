@@ -1,5 +1,4 @@
 //! Platform database orchestration owned by xtask.
-#![allow(dead_code)]
 pub mod admin;
 pub mod fingerprint;
 pub mod live_db;

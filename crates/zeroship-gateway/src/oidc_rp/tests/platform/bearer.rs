@@ -71,3 +71,34 @@ async fn resource_audience_is_required_even_when_the_client_id_matches() {
     })
     .await;
 }
+
+// RFC 9068 section 2.2 makes `jti` a REQUIRED access-token claim. The gateway parses
+// the OP access token into `RawAccessClaims`, so a validly-signed token that
+// omits `jti` must fail deserialization and be refused; dropping the required
+// `jti` field would make this token look valid again.
+#[ntex::test]
+async fn access_token_without_jti_is_rejected() {
+    Database::migrated(async |database| {
+        let seeded = App::seed(database, REDIRECT_URI).await;
+        let provider = Provider::start(database).await;
+        let gateway = Gateway::start(database, &provider, &seeded).await;
+        let app = test::init_service(web::App::new().state(gateway.state.clone()).service(
+            web::resource("/{tail}*").route(web::route().to(crate::router::handle_subdomain)),
+        ))
+        .await;
+        let now = crate::tests::browser::now_secs();
+        let claims = json!({
+            "iss": ISSUER, "sub": seeded.subject(), "aud": format!("app:{}", seeded.id.as_str()),
+            "client_id": seeded.client, "scope": "openid email", "iat": now, "exp": now + 300,
+        });
+        let key = provider.signing.to_pkcs8_der().unwrap();
+        let key = jsonwebtoken::EncodingKey::from_ed_der(key.as_bytes());
+        let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::EdDSA);
+        header.typ = Some(zeroship_auth::oidc::ACCESS_TOKEN_TYP.to_owned());
+        header.kid = Some(provider.issuer.kid().to_owned());
+        let token = jsonwebtoken::encode(&header, &claims, &key).unwrap();
+        let refused = test::call_service(&app, request(&token)).await;
+        assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
+    })
+    .await;
+}

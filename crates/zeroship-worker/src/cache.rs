@@ -600,7 +600,6 @@ pub fn net_policy_from_app(app_id: &AppId, app_net: &AppNetPolicy) -> NetPolicy 
 }
 
 /// Remove an app from the cache.
-#[allow(dead_code)]
 pub fn evict_app(app_id: &AppId) {
     CACHE.with(|c| {
         let mut cache = c.borrow_mut();
@@ -608,17 +607,6 @@ pub fn evict_app(app_id: &AppId) {
             cache.isolates.remove(app_id);
         }
     });
-}
-
-/// Check if an app is loaded.
-#[allow(dead_code)]
-pub fn has_app(app_id: &AppId) -> bool {
-    CACHE.with(|c| {
-        let cache = c.borrow();
-        cache
-            .as_ref()
-            .is_some_and(|c| c.isolates.contains_key(app_id))
-    })
 }
 
 /// Get all app IDs currently loaded in the cache.

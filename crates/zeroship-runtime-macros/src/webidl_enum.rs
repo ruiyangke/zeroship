@@ -265,13 +265,11 @@ fn expand_derive(input: DeriveInput) -> TokenStream2 {
             ///
             /// Codegen exhaustively maps the variant set; adding or
             /// removing a variant updates this function automatically.
-            #[allow(dead_code)]
             pub fn from_str(__s: &str) -> ::std::option::Option<Self> {
                 #from_str_body
             }
 
             /// Variant → WebIDL name. Round-trips with `from_str`.
-            #[allow(dead_code)]
             pub fn as_str(&self) -> &'static str {
                 match self {
                     #(#as_str_arms)*

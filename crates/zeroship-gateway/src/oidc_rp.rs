@@ -658,7 +658,10 @@ struct RawAccessClaims {
     // enforces registered claims (exp/iss/aud/sub/nbf), so `jti` presence is
     // enforced here by making it a required (non-`default`) deserialized field —
     // a token missing `jti` fails to parse and is rejected.
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "serde requires the field to reject a token with no jti; the value is not read"
+    )]
     jti: String,
     client_id: String,
     #[serde(default)]

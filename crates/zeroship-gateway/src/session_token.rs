@@ -215,7 +215,6 @@ impl Issuer {
     /// The signing key's `kid` (RFC 7638 thumbprint), so the JWKS endpoint can
     /// publish a matching JWK if needed. Same key/thumbprint as the wrapper.
     #[must_use]
-    #[allow(dead_code)]
     pub fn kid(&self) -> &str {
         &self.kid
     }

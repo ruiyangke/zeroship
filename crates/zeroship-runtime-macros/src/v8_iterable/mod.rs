@@ -127,29 +127,14 @@ pub(crate) use parse::{extract_iterable, inspect_value_pairs, IterMode, Iterable
 /// these locals inside one giant `generate` function; the context
 /// struct collects them once at orchestrator entry and lets the
 /// helpers read whichever fields they need.
-///
-/// `#[allow(dead_code)]` is intentional — several fields (e.g.
-/// `state_ty`, `is_mut`, `takes_scope`, the `iter_*_name_str`
-/// strings) are kept on the context for symmetry with the
-/// orchestrator's intermediate state and for any future emit
-/// fragment to read without changing the context API. Today's
-/// helpers happen to splice the must-str-rendered token form
-/// (`class_name_init` etc.) instead of the raw String.
-#[allow(dead_code)]
 pub(super) struct EmitCtx<'a> {
     pub class_ty: &'a Ident,
-    pub state_ty: &'a Ident,
     pub key_ty: &'a syn::Type,
     pub value_ty: &'a syn::Type,
-    pub value_marshal: Option<&'a syn::Path>,
     pub live: bool,
-    pub is_mut: bool,
-    pub takes_scope: bool,
 
     // Derived idents.
     pub iter_class_ty: Ident,
-    pub iter_class_name_str: String,
-    pub iter_to_string_tag_str: String,
     pub iter_install_slot_ty: Ident,
     pub iter_brand_slot_ty: Ident,
     pub iter_brand_check_fn: Ident,
@@ -436,16 +421,10 @@ fn build_ctx<'a>(
 
     Ok(EmitCtx {
         class_ty,
-        state_ty,
         key_ty,
         value_ty,
-        value_marshal: attr.value_marshal.as_ref(),
         live,
-        is_mut,
-        takes_scope,
         iter_class_ty,
-        iter_class_name_str,
-        iter_to_string_tag_str,
         iter_install_slot_ty,
         iter_brand_slot_ty,
         iter_brand_check_fn,

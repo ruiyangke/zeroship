@@ -87,7 +87,10 @@ pub struct Worker {
 #[derive(FromRow)]
 #[orm(entity = queue_scopes)]
 pub struct Scope {
-    #[allow(dead_code, reason = "the id completes the scope row projection")]
+    #[expect(
+        dead_code,
+        reason = "queue_scopes.id completes the FromRow projection; only dispatch_cursor is read"
+    )]
     pub id: String,
     pub dispatch_cursor: i64,
 }

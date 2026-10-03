@@ -9,7 +9,6 @@ impl RedirectMode {
     ///
     /// Codegen exhaustively maps the variant set; adding or
     /// removing a variant updates this function automatically.
-    #[allow(dead_code)]
     pub fn from_str(__s: &str) -> ::std::option::Option<Self> {
         match __s {
             "follow" => ::std::option::Option::Some(Self::Follow),
@@ -23,7 +22,6 @@ impl RedirectMode {
         }
     }
     /// Variant → WebIDL name. Round-trips with `from_str`.
-    #[allow(dead_code)]
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Follow => "follow",

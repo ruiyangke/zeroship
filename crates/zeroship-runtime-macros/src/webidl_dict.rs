@@ -129,7 +129,6 @@ fn expand_derive(input: DeriveInput) -> TokenStream2 {
             /// Returns `Err(TypeError)` if `value` is a non-null,
             /// non-undefined non-Object, or if any member fails its
             /// own conversion.
-            #[allow(unused_variables, clippy::needless_borrow)]
             pub fn from_v8(
                 scope: &mut ::v8::PinScope,
                 value: ::v8::Local<::v8::Value>,
@@ -385,29 +384,5 @@ fn extract_webidl_name(attrs: &[syn::Attribute]) -> Option<String> {
             return Some(s.value());
         }
     }
-    None
-}
-
-/// Reserved for future extension — `[EnforceRange]` attr on integer
-/// fields. Today integer fields use the bare `u32` / `i32` impl which
-/// does ToUint32 / ToInt32 (modular). For dicts that need spec-strict
-/// EnforceRange behaviour, a `#[webidl_dict(enforce_range)]` attr could
-/// flip the per-field reader. Not implemented in v1; deferred until a
-/// concrete consumer needs it.
-#[allow(dead_code)]
-fn extract_enforce_range(_attrs: &[syn::Attribute]) -> bool {
-    // Stub — no consumer yet.
-    false
-}
-
-/// Reserved for future extension — letting users plug a custom reader
-/// for non-WebIdlConvertible field types. Today every field type MUST
-/// implement WebIdlConvertible (which means: primitives, Option<T>,
-/// Local<Value>, plus user types via WebIdlDict / WebIdlEnum derives).
-/// A `#[webidl_dict(custom_extractor = "fn_name")]` attr could route
-/// the read through a user-supplied function for special cases. Not
-/// implemented in v1.
-#[allow(dead_code)]
-fn extract_custom_extractor(_attrs: &[syn::Attribute]) -> Option<String> {
     None
 }

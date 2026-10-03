@@ -9,7 +9,6 @@ impl EventInit {
     /// Returns `Err(TypeError)` if `value` is a non-null,
     /// non-undefined non-Object, or if any member fails its
     /// own conversion.
-    #[allow(unused_variables, clippy::needless_borrow)]
     pub fn from_v8(
         scope: &mut ::v8::PinScope,
         value: ::v8::Local<::v8::Value>,

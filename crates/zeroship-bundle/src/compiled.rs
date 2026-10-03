@@ -30,7 +30,7 @@ use std::collections::HashMap;
 
 use crate::{
     AssetEntry, CacheCtl, Cors, HttpMethod, Manifest, ProcedureKind, RateLimit, RequiredPrincipal,
-    ResourceEntry, WorkerCode,
+    ResourceEntry,
 };
 
 // ---------------------------------------------------------------------------
@@ -41,10 +41,6 @@ use crate::{
 pub struct CompiledManifest {
     assets: HashMap<String, AssetEntry>,
     runtime_assets: HashMap<String, AssetEntry>,
-    #[allow(dead_code)]
-    worker: Option<WorkerCode>,
-    #[allow(dead_code)]
-    asset_version: i64,
     /// Per-resource flattened policy, computed once at app load.
     effective_policies: HashMap<String, EffectivePolicy>,
     /// RPC wire-id (without the `rpc:` prefix) → key into
@@ -78,7 +74,6 @@ enum GlobSegment {
 /// app-load time by `CompiledManifest::compile`; the per-request lookup
 /// is a single `HashMap::get` keyed by the resource id.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct EffectivePolicy {
     pub auth: RequiredPrincipal,
     pub rate_limit: Option<RateLimit>,
@@ -116,7 +111,6 @@ pub struct EffectivePolicy {
 /// Resource resolution result used by dispatch: the flattened policy plus the
 /// stable resource key that feeds the per-resource rate-limit bucket.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ResolvedResource<'a> {
     pub policy: &'a EffectivePolicy,
     pub key: Cow<'a, str>,
@@ -124,7 +118,6 @@ pub struct ResolvedResource<'a> {
 
 /// What dispatch should actually do once the policy is satisfied.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub enum ResolvedAction {
     /// Forward to the worker as an RPC call (key was `rpc:<id>`, no
     /// explicit redirect/rewrite/static).
@@ -372,8 +365,6 @@ impl CompiledManifest {
         Self {
             assets: m.assets.clone(),
             runtime_assets: m.runtime_assets.clone(),
-            worker: m.worker.clone(),
-            asset_version: m.asset_version,
             effective_policies,
             rpc_index,
             url_index,

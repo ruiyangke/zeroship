@@ -38,10 +38,6 @@ pub mod variants;
 // Re-exports for external callers (`main.rs` registers these ntex routes).
 pub use dispatch::{handle, handle_subdomain};
 
-// Re-exports for intra-crate callers — kept for API stability while
-// the gateway's outer middleware still spells these names against the
-// `crate::router::*` path.
-#[allow(unused_imports)]
-pub(crate) use dispatch::{
-    compute_bucket_id, extract_app_name, is_websocket_upgrade, subscription_affinity_key,
-};
+// Re-export for the intra-crate caller in `auth_token` that spells the
+// name against the `crate::router::*` path.
+pub(crate) use dispatch::extract_app_name;

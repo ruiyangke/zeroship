@@ -4,12 +4,10 @@
 //! Projections read the completed state rather than replaying operations. Named
 //! constraint and index identities survive renames until their objects are dropped.
 //!
-//! The neutral model carries tables; remaining catalog families stay in
-//! `unmodelled`. Authored state preserves information needed by runtime descriptors
-//! and TypeScript schema generation. The catalog projection is also available for
-//! comparison with the independent live-schema fold.
-
-#![cfg_attr(not(test), allow(dead_code))]
+//! Closing the catalog is the fail-closed gate, so every fold finishes it even
+//! though the authored projections do not read it. `fold_with_catalog` hands the
+//! finished catalog out beside the authored projections; `fold` closes the catalog
+//! and keeps only those projections.
 
 use std::collections::{BTreeMap, BTreeSet};
 use zeroship_migrate_backend::registry::VendorSet;
@@ -22,7 +20,6 @@ use super::{
     recover_check_facet, recover_fk_policy, resolved_inject_prefix_len,
 };
 use crate::model::ir::{ColType, IrColumn, IrConstraintKind, IrIndex, Op, TableRuntimeOptions};
-use crate::model::schema_model::SchemaModel;
 use crate::model::snapshot::SchemaSnapshot;
 use crate::model::table_shape::ResolvedInject;
 use crate::render::declarative::CollectionDescriptor;
@@ -90,25 +87,16 @@ pub(crate) struct ImplicitUniqueIndex {
     pub column: String,
 }
 
-/// The value ONE traversal produces.
-///
-/// Named `FoldedSchema` rather than `SchemaModel` on purpose - see the module docs.
-/// The rename is the finding: the neutral model does not yet reach 12 of the 13
-/// object families `fold_ops` produces, so a type that claimed to be `SchemaModel`
-/// would be claiming a completeness nothing has.
+/// The value ONE traversal produces: the authored half and the named-type
+/// definitions, keyed as each field describes.
 ///
 /// The TYPE is public because the `FieldDef` walker it replaced was a public entry
 /// point and its replacement has to be reachable from outside the crate - but
-/// every FIELD stays `pub(crate)`. A `pub` field would leak `AuthoredTable`,
-/// `SchemaModel` and `NamedTypeRegistry` into the public API, which is a far larger
-/// commitment than the one this move needs to make and is what `private_interfaces`
-/// would report.
+/// every FIELD stays `pub(crate)`. A `pub` field would leak `AuthoredTable` and
+/// `NamedTypeRegistry` into the public API, which is a far larger commitment than
+/// the one this move needs to make and is what `private_interfaces` would report.
 #[derive(Debug, Clone)]
 pub struct FoldedSchema {
-    /// The neutral catalog half plus its vendor side table.
-    pub(crate) model: SchemaModel,
-    /// Catalog objects the neutral model does not carry. `tables` is always empty.
-    pub(crate) unmodelled: SchemaSnapshot,
     /// The authored half, keyed by the table's CURRENT name.
     pub(crate) authored: BTreeMap<String, AuthoredTable>,
     /// Named-type definitions the op stream declared. `ColType::Enum`/`Domain` carry
@@ -133,6 +121,26 @@ pub fn fold(
     project_schema: &str,
     effective: &EffectivePolicy,
 ) -> Result<FoldedSchema, FoldError> {
+    fold_with_catalog(vendors, ops, dialect, project_schema, effective)
+        .map(|(folded, _catalog)| folded)
+}
+
+/// The fold's ONE traversal, returning the finished catalog beside the authored
+/// projections.
+///
+/// [`fold`] closes the catalog and drops it. The projection-equality gate reads it to
+/// round-trip its tables through the neutral/vendor split, so the projection is
+/// computed from the same traversal production runs rather than a parallel one.
+///
+/// # Errors
+/// As [`fold`].
+pub(crate) fn fold_with_catalog(
+    vendors: VendorSet,
+    ops: &[Op],
+    dialect: &DialectId,
+    project_schema: &str,
+    effective: &EffectivePolicy,
+) -> Result<(FoldedSchema, SchemaSnapshot), FoldError> {
     let empty = SchemaSnapshot::default();
     let mut catalog = CatalogFold::seed(vendors, &empty, dialect, project_schema, effective);
     let mut state = AuthoredState {
@@ -152,15 +160,14 @@ pub fn fold(
         catalog.advance(op)?;
         state.advance(op, effective)?;
     }
-    let mut catalog = catalog.finish()?;
-    let tables = std::mem::take(&mut catalog.tables);
-
-    Ok(FoldedSchema {
-        model: SchemaModel::from_tables(&tables),
-        unmodelled: catalog,
-        authored: state.tables,
-        named_types: state.named_types,
-    })
+    let catalog = catalog.finish()?;
+    Ok((
+        FoldedSchema {
+            authored: state.tables,
+            named_types: state.named_types,
+        },
+        catalog,
+    ))
 }
 
 /// The authored half's accumulator.
@@ -698,7 +705,7 @@ impl AuthoredState<'_> {
             // EXHAUSTIVE FROM HERE, and the list is the point rather than a `_`. Every
             // variant below states nothing about a table's AUTHORED shape: it moves
             // rows, or creates a relation this map does not hold, or alters a catalog
-            // object the neutral model's `unmodelled` half carries.
+            // object only the catalog half holds.
             //
             // `synchronizeIdentity` advances a live sequence value and does not alter
             // the identity DECLARATION. `dialectal` never arrives - `flatten_dialectal_ops`
@@ -769,20 +776,6 @@ pub(crate) fn field_defs_from_collections(
 }
 
 impl FoldedSchema {
-    /// **Projection 1: the catalog snapshot.** The `fold_ops` output.
-    ///
-    /// The tables come back through the NEUTRAL/VENDOR split, so this projection
-    /// exercises `SchemaModel::from_tables` / `to_tables` on FOLDED shapes across the
-    /// whole corpus. The equivalence suites otherwise only ever run the split on
-    /// LIVE-INTROSPECTED snapshots, which populate a different set of vendor families,
-    /// so a family the split drops on an authored shape is invisible to them.
-    #[must_use]
-    pub(crate) fn project_snapshot(&self) -> SchemaSnapshot {
-        let mut snapshot = self.unmodelled.clone();
-        snapshot.tables = self.model.to_tables();
-        snapshot
-    }
-
     /// **Projection 2: the per-table wire `FieldDef` map.** It feeds
     /// `schema.runtime.json` and, on SQLite, `live.sdk_schemas`.
     ///

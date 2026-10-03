@@ -9,7 +9,6 @@ impl HashAlgo {
     ///
     /// Codegen exhaustively maps the variant set; adding or
     /// removing a variant updates this function automatically.
-    #[allow(dead_code)]
     pub fn from_str(__s: &str) -> ::std::option::Option<Self> {
         if __s.eq_ignore_ascii_case("SHA-1") {
             return ::std::option::Option::Some(Self::Sha1);
@@ -23,7 +22,6 @@ impl HashAlgo {
         ::std::option::Option::None
     }
     /// Variant → WebIDL name. Round-trips with `from_str`.
-    #[allow(dead_code)]
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Sha1 => "SHA-1",
