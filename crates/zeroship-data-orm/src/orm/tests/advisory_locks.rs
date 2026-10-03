@@ -146,7 +146,7 @@ async fn advisory_waiter(oracle: &compio_postgres::Client) -> i32 {
             if let Some(row) = oracle
                 .query_opt(
                     "SELECT pid FROM pg_stat_activity WHERE wait_event_type = 'Lock' \
-                     AND wait_event = 'advisory' LIMIT 1",
+                     AND wait_event = 'advisory' AND datname = current_database() LIMIT 1",
                     &[],
                 )
                 .await
@@ -309,7 +309,8 @@ async fn postgres_advisory_xact_lock_stacks_and_releases_once_at_settlement() {
             let holds: i64 = oracle
                 .query_one(
                     "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND granted \
-                     AND pid <> pg_backend_pid()",
+                     AND pid <> pg_backend_pid() \
+                     AND database = (SELECT oid FROM pg_database WHERE datname = current_database())",
                     &[],
                 )
                 .await

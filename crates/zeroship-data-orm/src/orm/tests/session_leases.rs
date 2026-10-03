@@ -17,7 +17,17 @@ schema! {
     }
 }
 
-const KEY: i64 = 0x0000_1234_0000_5678;
+/// An advisory-lock key no other running case shares.
+///
+/// Advisory locks are cluster-global, and this suite runs many cases at once
+/// against one shared server, so a constant key would make one case's lease
+/// collide with another's. The pid separates processes and the counter
+/// separates the threads of one process.
+fn key() -> i64 {
+    use std::sync::atomic::{AtomicI64, Ordering};
+    static NEXT: AtomicI64 = AtomicI64::new(0);
+    (i64::from(std::process::id()) << 32) ^ NEXT.fetch_add(1, Ordering::Relaxed)
+}
 
 async fn fixture(postgres: bool, pool_size: usize) -> CollectionFixture {
     let fields = value!({
@@ -146,12 +156,13 @@ async fn lease(database: &Database, key: i64) -> Option<SessionLease> {
 async fn postgres_session_lease_holds_the_exact_one_argument_key() {
     let owner = fixture(true, 4).await;
     let oracle = oracle(&owner).await;
-    let held = lease(&owner.database, KEY).await.expect("the key is free");
-    assert!(!session_free(&oracle, KEY).await);
+    let key = key();
+    let held = lease(&owner.database, key).await.expect("the key is free");
+    assert!(!session_free(&oracle, key).await);
     // Control: a distinct key stays free while the lease holds its own.
-    assert!(session_free(&oracle, KEY + 1).await);
+    assert!(session_free(&oracle, key + 1).await);
     held.release().await.unwrap();
-    assert!(session_free(&oracle, KEY).await);
+    assert!(session_free(&oracle, key).await);
     drop(oracle);
     owner.close().await;
 }
@@ -159,18 +170,19 @@ async fn postgres_session_lease_holds_the_exact_one_argument_key() {
 #[compio::test]
 async fn postgres_session_lease_loser_gets_none() {
     let owner = fixture(true, 4).await;
-    let held = lease(&owner.database, KEY).await.expect("the key is free");
-    assert!(lease(&owner.database, KEY).await.is_none());
+    let key = key();
+    let held = lease(&owner.database, key).await.expect("the key is free");
+    assert!(lease(&owner.database, key).await.is_none());
     let other_context = Database::from_schema(
         owner.database.binding.clone(),
         owner.database.backend.clone(),
         lease_schema::schema(),
     )
     .unwrap();
-    assert!(lease(&other_context, KEY).await.is_none());
+    assert!(lease(&other_context, key).await.is_none());
     held.release().await.unwrap();
     // Control: the key is acquirable once released.
-    lease(&other_context, KEY)
+    lease(&other_context, key)
         .await
         .expect("a released key is free")
         .release()
@@ -184,7 +196,8 @@ async fn postgres_session_lease_loser_gets_none() {
 async fn postgres_session_lease_survives_orm_transactions() {
     let owner = fixture(true, 4).await;
     let oracle = oracle(&owner).await;
-    let held = lease(&owner.database, KEY).await.expect("the key is free");
+    let key = key();
+    let held = lease(&owner.database, key).await.expect("the key is free");
     for (index, commit) in [true, false, true].into_iter().enumerate() {
         let result = owner
             .database
@@ -200,12 +213,12 @@ async fn postgres_session_lease_survives_orm_transactions() {
             })
             .await;
         assert_eq!(result.is_ok(), commit);
-        assert!(!session_free(&oracle, KEY).await, "transaction {index}");
+        assert!(!session_free(&oracle, key).await, "transaction {index}");
     }
     // A transaction-scoped lock on the same key conflicts with the lease.
-    assert!(!transaction_free(&oracle, KEY).await);
+    assert!(!transaction_free(&oracle, key).await);
     held.release().await.unwrap();
-    assert!(transaction_free(&oracle, KEY).await);
+    assert!(transaction_free(&oracle, key).await);
     drop(oracle);
     owner.close().await;
 }
@@ -214,8 +227,9 @@ async fn postgres_session_lease_survives_orm_transactions() {
 async fn postgres_dropped_lease_discards_its_session() {
     let owner = fixture(true, 1).await;
     let oracle = oracle(&owner).await;
-    let held = lease(&owner.database, KEY).await.expect("the key is free");
-    let pid = holder(&oracle, KEY).await.expect("the lease holds the key");
+    let key = key();
+    let held = lease(&owner.database, key).await.expect("the key is free");
+    let pid = holder(&oracle, key).await.expect("the lease holds the key");
     drop(held);
     compio::time::timeout(Duration::from_secs(5), async {
         loop {
@@ -235,10 +249,10 @@ async fn postgres_dropped_lease_discards_its_session() {
     })
     .await
     .expect("a dropped lease must close its session");
-    assert!(session_free(&oracle, KEY).await);
+    assert!(session_free(&oracle, key).await);
     // Control: a released lease returns its session to the pool of one.
-    let held = lease(&owner.database, KEY).await.expect("the key is free");
-    let pid = holder(&oracle, KEY).await.expect("the lease holds the key");
+    let held = lease(&owner.database, key).await.expect("the key is free");
+    let pid = holder(&oracle, key).await.expect("the lease holds the key");
     held.release().await.unwrap();
     assert_eq!(next_pooled_pid(&owner).await, pid);
     assert_eq!(advisory_locks_of(&oracle, pid).await, 0);
@@ -250,8 +264,9 @@ async fn postgres_dropped_lease_discards_its_session() {
 async fn postgres_failed_release_never_returns_the_session() {
     let owner = fixture(true, 1).await;
     let oracle = oracle(&owner).await;
-    let held = lease(&owner.database, KEY).await.expect("the key is free");
-    let pid = holder(&oracle, KEY).await.expect("the lease holds the key");
+    let key = key();
+    let held = lease(&owner.database, key).await.expect("the key is free");
+    let pid = holder(&oracle, key).await.expect("the lease holds the key");
     let terminated: bool = oracle
         .query_one("SELECT pg_terminate_backend($1)", &[&pid])
         .await
@@ -261,8 +276,8 @@ async fn postgres_failed_release_never_returns_the_session() {
     held.release().await.unwrap_err();
     assert_ne!(next_pooled_pid(&owner).await, pid);
     // Control: a normal release succeeds and its session is reused.
-    let held = lease(&owner.database, KEY).await.expect("the key is free");
-    let pid = holder(&oracle, KEY).await.expect("the lease holds the key");
+    let held = lease(&owner.database, key).await.expect("the key is free");
+    let pid = holder(&oracle, key).await.expect("the lease holds the key");
     held.release().await.unwrap();
     assert_eq!(next_pooled_pid(&owner).await, pid);
     drop(oracle);
@@ -272,12 +287,13 @@ async fn postgres_failed_release_never_returns_the_session() {
 #[compio::test]
 async fn session_lease_refused_on_transaction_receivers_and_sqlite() {
     let owner = fixture(true, 4).await;
+    let key = key();
     owner
         .database
         .transaction(|tx| async move {
             assert_code(
                 tx.postgres()?
-                    .try_session_lease(AdvisoryKey::single(KEY))
+                    .try_session_lease(AdvisoryKey::single(key))
                     .await
                     .unwrap_err(),
                 "session_lease_requires_root",
@@ -287,7 +303,7 @@ async fn session_lease_refused_on_transaction_receivers_and_sqlite() {
         .await
         .unwrap();
     // Control: the root handle takes the lease.
-    lease(&owner.database, KEY)
+    lease(&owner.database, key)
         .await
         .expect("the key is free")
         .release()

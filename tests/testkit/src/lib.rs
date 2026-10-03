@@ -15,7 +15,8 @@
 //! - [`lifetime`] carries the two measurements a fixture built on the reaper
 //!   owes: its container is gone after the owning process exits, and after that
 //!   process is killed while the container is still starting.
-//! - [`postgres`] is the reaper-owned platform database one test process shares.
+//! - [`postgres`] is the platform and bare servers every test process of a
+//!   worktree shares, and the case databases cloned from them.
 //! - [`redis`] owns the Redis and Dragonfly servers the driver, KV and binding
 //!   suites share.
 //! - [`tenant`] mints the scoped org/project/app/user ids a case owns.

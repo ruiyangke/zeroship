@@ -47,6 +47,15 @@ impl Platform {
         Self { admin_url }
     }
 
+    /// Name a server whose platform corpus is already applied.
+    ///
+    /// [`apply`](Self::apply) runs the migration; this assumes a migrated
+    /// server - a case database cloned from the platform template - and only
+    /// names it, so the fixture's schema and logins are used as they stand.
+    pub fn at(admin_url: String) -> Self {
+        Self { admin_url }
+    }
+
     /// The superuser the fixture declares rows and tenant objects with. Relay
     /// code is never handed this login.
     pub fn admin_url(&self) -> String {

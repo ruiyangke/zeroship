@@ -31,7 +31,6 @@ mod relay_fixture;
 use zeroship_data_orm::cdc::relay::RelayConfig;
 use zeroship_data_testkit::data::tracing as test_tracing;
 use zeroship_data_testkit::data::platform;
-use zeroship_testkit::postgres::server as postgres;
 
 /// The plain identity a creator [`DbBinding`] carries, for the shared ladder.
 fn plain_binding(binding: &DbBinding) -> zeroship_data_testkit::data::HarnessBinding {
@@ -900,11 +899,11 @@ async fn create_app_publication(
 fn db_live_stream_crosses_relay_and_v8_isolates_without_worker_replication() {
     init_v8();
     test_tracing::init_test_tracing();
-    let postgres = postgres::Postgres::start();
-    let url = postgres.url();
+    let database = zeroship_testkit::postgres::platform().fresh_database();
+    let url = database.admin_url().to_string();
     // The Control schema the relay resolves a subscriber against, with the
     // logins a deployment gives the relay and the worker.
-    let platform = platform::Platform::apply(url.clone());
+    let platform = platform::Platform::at(url.clone());
     let runtime_app_id = AppId::mint();
     let app_id = runtime_app_id.as_str().to_string();
     // The edge a trusted host would have resolved for this app, composed once

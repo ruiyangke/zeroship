@@ -42,6 +42,17 @@ impl Database {
         zeroship_testkit::postgres::run::<Self>(test).await;
     }
 
+    /// Run `test` against a database cloned from the migrated template.
+    ///
+    /// A case whose subject is platform-global rather than scoped to the rows
+    /// it mints - here the `signing_keys` registry, where publishing one key
+    /// retires every other active key - uses this so no other process can reach
+    /// the rows it owns.
+    #[expect(clippy::future_not_send, reason = "fixtures belong to their compio runtime")]
+    pub async fn run_fresh(test: impl AsyncFnOnce(&Self)) {
+        zeroship_testkit::postgres::run_fresh::<Self>(test).await;
+    }
+
     pub fn auth_url(&self) -> url::Url {
         let mut url = self.base_url().clone();
         url.set_username("zeroship_auth").unwrap();

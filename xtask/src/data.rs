@@ -34,30 +34,23 @@ pub fn run(filter: Option<&str>) -> Result<()> {
     // build the platform schema with the canonical migration CLI.
     crate::migrations::build_host()?;
 
-    eprintln!("Building the PostgreSQL image used by native fixtures");
-    let _ = zeroship_testkit::postgres::build()?;
+    eprintln!("Booting the PostgreSQL servers the native fixtures share");
+    // Hold the bare and migrated servers for the whole run, so each first boot
+    // is paid once and every test process within the run joins them rather than
+    // rebuilding after the idle grace.
+    let _bare = zeroship_testkit::postgres::server::warm();
+    let _platform = zeroship_testkit::postgres::platform();
     crate::cancelled()?;
-    let mut nextest = cargo();
-    nextest.args([
-        "nextest",
-        "run",
-        "--profile",
-        "data",
-        "--ignore-default-filter",
-        "--no-tests",
-        "fail",
-    ]);
-    packages(&mut nextest);
+    let mut command = cargo();
+    command.args(["nextest", "run", "--profile", "ci", "--no-tests", "fail"]);
+    packages(&mut command);
     if let Some(filter) = filter {
-        nextest.args(["--filter-expr", filter]);
+        command.args(["--filter-expr", filter]);
     }
     // Preserve a failed nextest verdict while still checking Rust documentation.
-    let tests = checked(&mut nextest, "nextest data suite");
+    let tests = checked(&mut command, "nextest data suite");
     let docs = if filter.is_none() {
-        let mut command = cargo();
-        command.args(["test", "--doc", "--no-fail-fast"]);
-        packages(&mut command);
-        checked(&mut command, "data doctests")
+        crate::doctests(PACKAGES, "data doctests")
     } else {
         Ok(())
     };

@@ -17,9 +17,10 @@
 //! report only "AEAD said no", which is true of a design that had stopped
 //! binding the database at all.
 //!
-//! **The server is a throwaway container, and that is not a convenience.**
-//! `pg_authid` and `pg_auth_members` are cluster-shared, so the role DDL below
-//! would be visible to every database on a shared instance.
+//! **The role DDL is cluster-shared, and that is not a convenience.**
+//! `pg_authid` and `pg_auth_members` are shared by every database on a server,
+//! so each arm serializes the migrating service's cluster-global convergence
+//! against the worktree's other cases.
 
 use zeroship_testkit::postgres::server::Postgres;
 
@@ -41,8 +42,9 @@ use zeroship_data_orm::value;
 use zeroship_migrate_server::apply::WORKER_ROLE;
 use zeroship_migrate_server::datastore::cluster;
 
-/// The password the fixture gives the worker login. The container is thrown
-/// away with the test.
+/// The password the fixture gives the worker login. The arm's database is
+/// dropped with the test; the login the corpus shares stays on the worktree's
+/// server for the run.
 const WORKER_PASSWORD: &str = "fixture";
 
 /// The deploy pin is `postgres:16` (`deploy/compose/docker-compose.yml`), and
@@ -68,6 +70,35 @@ const COLLECTION: &str = "notes";
 const COLUMN: &str = "ssn";
 const ROW_PK: &str = "row_a";
 const PLAINTEXT: &str = "123-45-6789";
+
+/// The advisory key that serializes cluster-global role provisioning.
+///
+/// Advisory locks are scoped to the database that takes them, so the lock is
+/// taken on the server's `postgres` database while the role DDL runs in the
+/// case's own database. `pg_authid` and `pg_auth_members` are cluster state,
+/// not case state: the migration service owns them in production and converges
+/// one cluster at a time. Cases sharing the worktree's server must not alter
+/// the same role row at once, or PostgreSQL reports `tuple concurrently
+/// updated`.
+const ROLE_PROVISIONING_LOCK: i64 = 0x7a73_5f72_6f6c_65_5f;
+
+async fn lock_role_provisioning(case_url: &str) -> Client {
+    let mut url = url::Url::parse(case_url).expect("the fixture URL parses");
+    url.set_path("postgres");
+    let lock = connect(url.as_str()).await;
+    lock.batch_execute(&format!("SELECT pg_advisory_lock({ROLE_PROVISIONING_LOCK})"))
+        .await
+        .expect("take the cluster role-provisioning lock");
+    lock
+}
+
+async fn unlock_role_provisioning(lock: &Client) {
+    lock.batch_execute(&format!(
+        "SELECT pg_advisory_unlock({ROLE_PROVISIONING_LOCK})"
+    ))
+    .await
+    .expect("release the cluster role-provisioning lock");
+}
 
 /// Connect a raw client and drive its protocol loop.
 async fn connect(url: &str) -> Client {
@@ -161,6 +192,7 @@ impl Cluster {
     async fn build(url: String) -> Self {
         let mut admin = connect(&url).await;
         require_pinned_major(&admin).await;
+        let lock = lock_role_provisioning(&url).await;
         cluster::apply_bootstrap_corpus(&admin)
             .await
             .expect("the datastore bootstrap corpus applies");
@@ -194,6 +226,7 @@ impl Cluster {
             ))
             .await
             .expect("the operator supplies the worker's authentication material");
+        unlock_role_provisioning(&lock).await;
 
         // One project, one root key, two tenants - exactly what Control serves
         // when a project binds two of its apps to one of its databases.

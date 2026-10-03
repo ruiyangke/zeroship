@@ -155,6 +155,14 @@ fn main() -> ExitCode {
                 ]),
                 "harness unit tests",
             )
+        })
+        // The testkit crate is excluded from the workspace, so no `--workspace`
+        // command compiles its unit tests.
+        .and_then(|()| {
+            checked(
+                cargo().args(["test", "--manifest-path", "tests/testkit/Cargo.toml", "--lib"]),
+                "testkit unit tests",
+            )
         }),
         Task::Test {
             suite: Suite::PlaywrightBrowsers,
@@ -315,6 +323,37 @@ pub(crate) mod script_contract {
             "{directory}'s {name} script yielded no words to check"
         );
     }
+}
+
+/// Run `packages`' tests under nextest with the CI profile.
+///
+/// The worktree's shared server is booted and leased by the caller before this
+/// runs; nextest starts one process per test and each joins that server.
+fn nextest(packages: &[&str], description: &str) -> Result<()> {
+    let mut command = cargo();
+    command.args([
+        "nextest",
+        "run",
+        "--locked",
+        "--profile",
+        "ci",
+        "--no-tests",
+        "fail",
+    ]);
+    for package in packages {
+        command.args(["-p", package]);
+    }
+    checked(&mut command, description)
+}
+
+/// Run `packages`' doctests, which nextest does not run.
+fn doctests(packages: &[&str], description: &str) -> Result<()> {
+    let mut command = cargo();
+    command.args(["test", "--locked", "--no-fail-fast", "--doc"]);
+    for package in packages {
+        command.args(["-p", package]);
+    }
+    checked(&mut command, description)
 }
 
 fn checked(command: &mut Command, description: &str) -> Result<()> {

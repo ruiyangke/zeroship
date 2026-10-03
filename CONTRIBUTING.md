@@ -54,13 +54,19 @@ pnpm build            # builds the public DB SDK, host adapter, and remaining pa
 cargo build --workspace
 ```
 
-Rust gates - run them before pushing:
+Rust gates - run them before pushing, from the `nix develop` shell:
 
 ```
 cargo clippy --workspace --all-targets --all-features
 cargo check --workspace
-cargo test --workspace
+cargo nextest run --workspace --profile ci   # the gate: every test, one process each
+cargo test --workspace --doc                 # nextest runs no doctests
 ```
+
+`cargo-nextest` comes from the development shell, and the `ci` profile is the
+one CI runs. A plain `cargo test --workspace` runs the same tests in-process and
+still works; nextest is what the gate uses because it runs one process per test
+and every suite in parallel against the shared servers.
 
 **Use the same Clippy invocation locally and in CI.** The root `Cargo.toml`
 sets lint severity. Preserve those levels; a blanket `-D warnings` would turn
@@ -72,7 +78,8 @@ rustfmt-clean, so `cargo fmt --all -- --check` fails. Enforcing it is a one-off
 tree-wide reformat plus a CI step, landed when nothing else is in flight.
 
 Per-crate iteration is faster; run the full per-crate suite (not just `--lib`) for the
-crate you touched, e.g. `cargo test -p zeroship-gateway`.
+crate you touched, e.g. `cargo nextest run -p zeroship-gateway` (or
+`cargo test -p zeroship-gateway`).
 
 Coverage-guided fuzzing for the `compio-postgres` wire decoders lives in
 `libs/compio-postgres/fuzz` (a cargo-fuzz crate, excluded from the Cargo

@@ -1,7 +1,6 @@
 //! Separate-process relay test. PostgreSQL is mandatory.
 
 use zeroship_data_testkit::data::platform as platform_fixture;
-use zeroship_testkit::postgres::server as postgres_fixture;
 
 /// The plain identity a creator binding carries, for the shared ladder.
 fn plain_binding(
@@ -158,8 +157,8 @@ async fn relay_process_authenticates_workers_and_streams_commits_without_worker_
     // The platform schema the corpus builds, and the two logins it creates:
     // the relay runs as `zeroship_cdc` and the worker as `zeroship_worker`,
     // each with exactly the reach `db/migrations-ts` grants it.
-    let postgres = postgres_fixture::Postgres::start();
-    let platform = platform_fixture::Platform::apply(postgres.url());
+    let database = zeroship_testkit::postgres::platform().fresh_database();
+    let platform = platform_fixture::Platform::at(database.admin_url().to_string());
     let db = Pool::connect(&platform.admin_url(), 2)
         .await
         .expect("required PostgreSQL");
@@ -446,8 +445,8 @@ async fn relay_process_authenticates_workers_and_streams_commits_without_worker_
 #[compio::test]
 async fn relay_refuses_to_boot_without_the_live_binding_grant() {
     use platform_fixture::{grant_relay, relay_columns, revoke_relay};
-    let postgres = postgres_fixture::Postgres::start();
-    let platform = platform_fixture::Platform::apply(postgres.url());
+    let database = zeroship_testkit::postgres::platform().fresh_database();
+    let platform = platform_fixture::Platform::at(database.admin_url().to_string());
     let db = Pool::connect(&platform.admin_url(), 2)
         .await
         .expect("required PostgreSQL");

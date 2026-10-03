@@ -1,26 +1,19 @@
-use crate::{cargo, checked, migrations, Result};
+use crate::{doctests, migrations, nextest, Result};
+
+const PACKAGES: &[&str] = &[
+    "zeroship-auth",
+    "zeroship-authn",
+    "zeroship-authz",
+    "zeroship-mailer",
+    "zeroship-gateway",
+];
 
 pub fn run() -> Result<()> {
     migrations::build_host()?;
-    checked(
-        cargo().args([
-            "test",
-            "--locked",
-            "--no-fail-fast",
-            "-p",
-            "zeroship-auth",
-            "-p",
-            "zeroship-authn",
-            "-p",
-            "zeroship-authz",
-            "-p",
-            "zeroship-mailer",
-            "-p",
-            "zeroship-gateway",
-            "--",
-            "--test-threads",
-            "4",
-        ]),
-        "auth package tests with owned backing services",
-    )
+    // Hold the worktree's migrated server for the whole run, so its first boot
+    // is paid once and every test process joins it rather than booting its own.
+    let _platform = zeroship_testkit::postgres::platform();
+    let tests = nextest(PACKAGES, "auth package tests with owned backing services");
+    let docs = doctests(PACKAGES, "auth package doctests");
+    tests.and(docs)
 }

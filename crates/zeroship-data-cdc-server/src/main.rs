@@ -15,9 +15,6 @@ mod transaction;
 #[cfg(test)]
 use zeroship_data_testkit::data::platform as platform_fixture;
 
-#[cfg(test)]
-use zeroship_testkit::postgres::server as postgres_fixture;
-
 #[compio::main]
 async fn main() {
     let (settings, boot) = bootstrap_or_exit::<CdcServerSettings>(

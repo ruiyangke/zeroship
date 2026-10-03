@@ -213,8 +213,15 @@ mod tests {
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     fn temp_dir() -> PathBuf {
+        // nextest runs one process per test, so the in-process counter alone
+        // hands every test the same directory and they overwrite each other's
+        // versions. The process id separates those runs; the counter separates
+        // the tests that share a process under plain `cargo test`.
         let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("zeroship-storage-test-{id}"));
+        let dir = std::env::temp_dir().join(format!(
+            "zeroship-storage-test-{}-{id}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         dir
     }

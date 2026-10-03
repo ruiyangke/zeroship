@@ -1,18 +1,16 @@
-[profile.data]
+nextest-version = { required = "0.9.136" }
+
+# One shared server per worktree serves every test process, so the run is not
+# bounded by container count. A case that stops making progress is reported
+# rather than allowed to hold the run open.
+[profile.default]
 fail-fast = false
-retries = 0
-test-threads = 8
-# Leave time for the testcontainers watchdog to stop and remove PostgreSQL.
-slow-timeout = { period = "60s", terminate-after = 5, grace-period = "30s" }
+slow-timeout = { period = "60s", terminate-after = 10, grace-period = "30s" }
 
-# Database tests own independent PostgreSQL containers. Bound concurrent server
-# startup and V8 memory use while pure SQL and wire tests run concurrently.
-[test-groups.data-database]
-max-threads = 4
+# CI carries the same bounds and records a JUnit report for the run.
+[profile.ci]
+fail-fast = false
+slow-timeout = { period = "60s", terminate-after = 10, grace-period = "30s" }
 
-[[profile.default.overrides]]
-filter = 'package(zeroship-data-orm) | package(zeroship-data-v8) | package(zeroship-data-cdc-server)'
-test-group = 'data-database'
-
-[profile.data.junit]
+[profile.ci.junit]
 path = "junit.xml"

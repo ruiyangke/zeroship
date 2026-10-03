@@ -1,21 +1,19 @@
-use crate::{cargo, checked, migrations, Result};
+use crate::{doctests, migrations, nextest, Result};
+
+const PACKAGES: &[&str] = &[
+    "zeroship-control",
+    "zeroship-migrate-server",
+    "zeroship-metering",
+    "zeroship-stream",
+];
 
 pub fn run() -> Result<()> {
     migrations::build_host()?;
-    checked(
-        cargo().args([
-            "test",
-            "--locked",
-            "--no-fail-fast",
-            "-p",
-            "zeroship-control",
-            "-p",
-            "zeroship-migrate-server",
-            "-p",
-            "zeroship-metering",
-            "-p",
-            "zeroship-stream",
-        ]),
+    let _platform = zeroship_testkit::postgres::platform();
+    let tests = nextest(
+        PACKAGES,
         "billing packages with owned PostgreSQL and Redpanda fixtures",
-    )
+    );
+    let docs = doctests(PACKAGES, "billing package doctests");
+    tests.and(docs)
 }

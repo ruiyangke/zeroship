@@ -21,7 +21,7 @@ fn token_iat(token: &str) -> i64 {
 
 #[compio::test]
 async fn identity_claim_projection_uses_the_mint_transaction_and_granted_scopes() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let fixture = MintFixture::seed(database).await;
         let pending_email = format!("pending-{}@example.test", Uuid::new_v4().simple());
         let observer = database.connect_as_auth().await;
@@ -107,7 +107,7 @@ async fn identity_claim_projection_uses_the_mint_transaction_and_granted_scopes(
 
 #[compio::test]
 async fn access_token_mint_holds_the_user_lock_until_the_transaction_ends() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let fixture = MintFixture::seed(database).await;
         let mut mint = database.connect_as_auth().await;
         let contender = database.connect_as_auth().await;
@@ -171,7 +171,7 @@ async fn access_token_mint_holds_the_user_lock_until_the_transaction_ends() {
 
 #[compio::test]
 async fn mint_persists_the_pairwise_identity_reactivates_it_and_refuses_rebinding() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let fixture = MintFixture::seed(database).await;
         let mut mint = database.connect_as_auth().await;
         let tx = mint.transaction().await.unwrap();
@@ -219,7 +219,7 @@ async fn inactive_principals_cannot_mint_with_a_previously_established_proof() {
         "UPDATE zeroship.users SET deletion_requested_at = NOW() WHERE id = $1",
         "UPDATE zeroship.users SET deletion_scheduled_for = NOW() WHERE id = $1",
     ] {
-        Database::run(async |database| {
+        Database::run_fresh(async |database| {
             let fixture = MintFixture::seed(database).await;
             let mut mint = database.connect_as_auth().await;
             let tx = mint.transaction().await.unwrap();
@@ -255,7 +255,7 @@ async fn inactive_principals_cannot_mint_with_a_previously_established_proof() {
 
 #[compio::test]
 async fn soft_password_lockout_does_not_invalidate_an_established_proof() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let fixture = MintFixture::seed(database).await;
         let mut mint = database.connect_as_auth().await;
         let tx = mint.transaction().await.unwrap();
@@ -284,7 +284,7 @@ async fn soft_password_lockout_does_not_invalidate_an_established_proof() {
 
 #[compio::test]
 async fn a_deleted_principal_cannot_establish_a_session() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let fixture = MintFixture::seed(database).await;
         let mut setup = database.connect_as_auth().await;
         users::request_deletion(
@@ -326,7 +326,7 @@ async fn a_deleted_principal_cannot_establish_a_session() {
 
 #[compio::test]
 async fn deletion_marker_uses_a_post_lock_timestamp() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let fixture = MintFixture::seed(database).await;
         let observer = database.connect().await;
         let mut mint = database.connect_as_auth().await;

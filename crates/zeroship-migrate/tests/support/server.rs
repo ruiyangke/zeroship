@@ -129,6 +129,14 @@ pub fn mysql_request() -> ContainerRequest<GenericImage> {
         ))
         .with_env_var("MYSQL_ROOT_PASSWORD", PASSWORD)
         .with_env_var("MYSQL_DATABASE", MYSQL_DATABASE)
+        // Native AIO is a per-server kernel resource, and nextest runs one
+        // process per test, so a suite that starts a server per test asks the
+        // host for one server's worth of contexts per test. `io_setup` returns
+        // EAGAIN once `fs.aio-max-nr` is reached and InnoDB aborts before the
+        // server ever listens. The engine's asynchronous I/O is not under test
+        // here, and simulated AIO is the documented fallback, so the fixture
+        // takes the server off that shared budget.
+        .with_cmd(["--innodb-use-native-aio=0"])
         .with_startup_timeout(STARTUP)
 }
 

@@ -34,6 +34,7 @@ const CONTAINER_DIR: &str = "/run/zeroship-testkit";
 const CHILD_REPORT: &str = "integration::testkit_shared_server::child_join_report";
 const CHILD_JOURNAL: &str = "integration::testkit_shared_server::child_join_journal";
 const CHILD_BLOCK: &str = "integration::testkit_shared_server::child_join_block";
+const CHILD_BARE: &str = "integration::testkit_shared_server::child_bare_server_report";
 
 /// A throwaway lease directory under the worktree's `target`, canonical so its
 /// path is the one the container labels carry.
@@ -282,6 +283,15 @@ fn child_join_block() {
             std::thread::sleep(Duration::from_secs(1));
         }
     });
+}
+
+/// Child side of the bare-server contract: start the fixture the data crates
+/// use and report the container it joined.
+#[test]
+#[ignore = "spawned by a contract test as a child process"]
+fn child_bare_server_report() {
+    let postgres = zeroship_testkit::postgres::server::Postgres::start();
+    println!("CONTAINER={}", postgres.container_id());
 }
 
 // --- identity ---------------------------------------------------------------------
@@ -627,6 +637,34 @@ fn two_scopes_boot_two_containers() {
     wait_removed(&id_b, REMOVAL_BOUND);
     cleanup(&a);
     cleanup(&b);
+}
+
+#[test]
+fn two_processes_using_the_bare_server_get_one_container() {
+    ensure_image();
+    let dir = scratch("bare-shared");
+
+    let (status, lines) = run_child(CHILD_BARE, &dir);
+    assert!(
+        status.success(),
+        "the first bare-server child failed:\n{}",
+        lines.join("\n")
+    );
+    let first = field(&lines, "CONTAINER=");
+
+    let (status, lines) = run_child(CHILD_BARE, &dir);
+    assert!(
+        status.success(),
+        "the second bare-server child failed:\n{}",
+        lines.join("\n")
+    );
+    let second = field(&lines, "CONTAINER=");
+
+    assert_eq!(
+        first, second,
+        "two processes of a worktree must join its one bare server"
+    );
+    cleanup(&dir);
 }
 
 #[test]

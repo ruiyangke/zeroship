@@ -129,21 +129,26 @@ jobs:
           set -o pipefail
           ZEROSHIP_MIGRATE_DSN='postgres://postgres:zeroship@127.0.0.1:5440/zeroship' \
             bash deploy/ops/db-migrate.sh
-      # `--no-fail-fast` because cargo otherwise stops at the FIRST failing
-      # target and never builds or runs the ones after it. Those targets do not
-      # report as failed, they report as nothing at all, so one known-failing
-      # unit test can hide every integration suite behind it. The verdict is
+      # nextest runs every test, not just every target: a failing test does not
+      # stop the targets after it, and the `ci` profile's `fail-fast = false`
+      # keeps a failure from hiding the suites behind it. The verdict is
       # unchanged either way - the job still fails if anything fails - but
       # without this the run only tells you about the first thing that broke.
       #
       # `set -o pipefail` stays on every such step, because GitHub's default
-      # shell is `bash -e` WITHOUT pipefail: the moment anyone pipes cargo into
-      # anything the status reported is the LAST command's - 0 whenever it could
-      # write - and every failing test in the workspace sails through as a pass.
-      # The billing gate hit that trap and solved it with PIPESTATUS.
+      # shell is `bash -e` WITHOUT pipefail: the moment anyone pipes a test
+      # command into anything the status reported is the LAST command's - 0
+      # whenever it could write - and every failing test in the workspace sails
+      # through as a pass. The billing gate hit that trap and solved it with
+      # PIPESTATUS.
       - run: |
           set -o pipefail
-          cargo test --workspace --no-fail-fast
+          cargo nextest run --workspace --profile ci
+      # nextest runs no doctests, so they are their own step.
+      - name: Rust doctests
+        run: |
+          set -o pipefail
+          cargo test --workspace --doc
       # EVERY STEP BELOW CARRIES `!cancelled()`, and the reason is the step
       # above. A step that fails skips the rest of the job, so an ordinary test
       # failure silently stops the architecture invariants from being measured -
@@ -294,7 +299,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: data-test-results
-          path: target/nextest/data/junit.xml
+          path: target/nextest/ci/junit.xml
 
   # Worker fixtures own their databases and apply the platform corpus.
   worker-tests:

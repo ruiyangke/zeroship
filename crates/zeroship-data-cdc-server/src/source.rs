@@ -505,8 +505,8 @@ mod tests {
     /// which is the liveness conjunct rather than the ownership one.
     #[compio::test]
     async fn a_named_database_resolves_among_an_app_s_several_live_bindings() {
-        let postgres = crate::postgres_fixture::Postgres::start();
-        let platform = Platform::apply(postgres.url());
+        let database = zeroship_testkit::postgres::platform().fresh_database();
+        let platform = Platform::at(database.admin_url().to_string());
         let admin = admin_pool(&platform, 2).await;
         let relay = relay_pool(&platform, 2).await;
         let app = zeroship_core::typed_id::generate(zeroship_core::typed_id::APP_PREFIX);
@@ -597,8 +597,8 @@ mod tests {
     /// refusal is `PostgreSQL`'s `42501` rather than a catalog function's word.
     #[compio::test]
     async fn the_relay_login_reads_what_its_lookups_name_and_nothing_else() {
-        let postgres = crate::postgres_fixture::Postgres::start();
-        let platform = Platform::apply(postgres.url());
+        let database = zeroship_testkit::postgres::platform().fresh_database();
+        let platform = Platform::at(database.admin_url().to_string());
         let admin = admin_pool(&platform, 2).await;
         let relay = relay_pool(&platform, 2).await;
         let login: String = answer(&relay, "SELECT current_user::text", &[]).await;
@@ -841,8 +841,8 @@ mod tests {
     /// over-grant, and withdrawing it refuses nothing, so this arm names it.
     #[compio::test]
     async fn every_column_the_relay_is_granted_is_one_its_lookups_read() {
-        let postgres = crate::postgres_fixture::Postgres::start();
-        let platform = Platform::apply(postgres.url());
+        let database = zeroship_testkit::postgres::platform().fresh_database();
+        let platform = Platform::at(database.admin_url().to_string());
         let admin = admin_pool(&platform, 2).await;
         let relay = relay_pool(&platform, 2).await;
         let app = zeroship_core::typed_id::generate(zeroship_core::typed_id::APP_PREFIX);
@@ -924,8 +924,8 @@ mod tests {
     #[compio::test]
     async fn a_refused_binding_lookup_stops_capture_with_its_cause_and_leaves_no_slot() {
         use crate::platform_fixture::{grant_relay, relay_columns, revoke_relay};
-        let postgres = crate::postgres_fixture::Postgres::start();
-        let platform = Platform::apply(postgres.url());
+        let database = zeroship_testkit::postgres::platform().fresh_database();
+        let platform = Platform::at(database.admin_url().to_string());
         let admin = admin_pool(&platform, 4).await;
         let relay = relay_pool(&platform, 4).await;
         let url = platform.relay_url();
@@ -1052,8 +1052,8 @@ mod tests {
     /// active, both under the prefix the relay's startup scan reclaims by.
     #[compio::test]
     async fn one_app_s_two_databases_capture_through_two_slots() {
-        let postgres = crate::postgres_fixture::Postgres::start();
-        let platform = Platform::apply(postgres.url());
+        let database = zeroship_testkit::postgres::platform().fresh_database();
+        let platform = Platform::at(database.admin_url().to_string());
         let pool = admin_pool(&platform, 8).await;
         let relay = relay_pool(&platform, 8).await;
         let url = platform.relay_url();
@@ -1258,8 +1258,9 @@ mod tests {
     async fn postgresql_bounds_a_slot_name_and_the_characters_it_may_carry() {
         use compio_postgres::error::SqlState;
         use zeroship_core::replication_names::POSTGRES_SLOT_NAME_MAX_BYTES as MAX;
-        let postgres = crate::postgres_fixture::Postgres::start();
-        let pool = Pool::connect(&postgres.url(), 2)
+        let database = zeroship_testkit::postgres::platform().fresh_database();
+        let url = database.admin_url().to_string();
+        let pool = Pool::connect(&url, 2)
             .await
             .expect("required PostgreSQL");
         let create = "SELECT slot_name::text FROM \
@@ -1341,8 +1342,8 @@ mod tests {
 
     #[compio::test]
     async fn committed_changes_fan_out_without_values_and_rollback_stays_silent() {
-        let postgres = crate::postgres_fixture::Postgres::start();
-        let platform = Platform::apply(postgres.url());
+        let database = zeroship_testkit::postgres::platform().fresh_database();
+        let platform = Platform::at(database.admin_url().to_string());
         let pool = admin_pool(&platform, 4).await;
         let relay = relay_pool(&platform, 4).await;
         let url = platform.relay_url();

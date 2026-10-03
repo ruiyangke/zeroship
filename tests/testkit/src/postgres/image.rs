@@ -1,5 +1,4 @@
-//! The PostgreSQL image the platform and the bare server share, and the readiness
-//! waits both owe it.
+//! The PostgreSQL image the platform and the bare server share.
 //!
 //! The image is tagged by the content of everything that builds it, so a worktree
 //! whose Dockerfile or watchdog moved never overwrites another worktree's image
@@ -7,13 +6,9 @@
 
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
-use std::time::Duration;
 
 use sha2::{Digest, Sha256};
-use testcontainers::core::WaitFor;
-use testcontainers::{
-    runners::SyncBuilder, ContainerRequest, GenericBuildableImage, GenericImage, ImageExt,
-};
+use testcontainers::{runners::SyncBuilder, GenericBuildableImage, GenericImage};
 
 /// The image name every worktree builds under; the tag carries the content hash.
 pub const NAME: &str = "zeroship-testkit-postgres";
@@ -82,22 +77,4 @@ fn image_exists(tag: &str) -> bool {
         .stderr(Stdio::null())
         .status()
         .is_ok_and(|status| status.success())
-}
-
-/// Add the readiness waits and the startup budget every `PostgreSQL` fixture owes.
-///
-/// `postgres` logs the init line once the entrypoint has finished and the ready line
-/// once the final server accepts connections; waiting on both means a mapped port is
-/// answered by the server the test talks to, not the temporary one the entrypoint
-/// runs. Call this on the image before the first [`ImageExt`] method converts it to a
-/// [`ContainerRequest`], then finish the request.
-pub fn await_ready(image: GenericImage) -> ContainerRequest<GenericImage> {
-    image
-        .with_wait_for(WaitFor::message_on_stdout(
-            "PostgreSQL init process complete; ready for start up.",
-        ))
-        .with_wait_for(WaitFor::message_on_stderr(
-            "database system is ready to accept connections",
-        ))
-        .with_startup_timeout(Duration::from_secs(120))
 }

@@ -27,10 +27,11 @@
 //! three grant shapes of which two must return the row, and the SQLSTATE arm
 //! runs the same two statements as a superuser, where the split disappears.
 //!
-//! **The server is a throwaway container, and that is not a convenience.**
-//! `pg_authid` and `pg_auth_members` are cluster-shared, so the role DDL below
-//! would be visible to every database on a shared instance. Each arm owns its
-//! own server through the repository's `PostgreSQL` fixture.
+//! **The role DDL is cluster-shared, and that is not a convenience.**
+//! `pg_authid` and `pg_auth_members` are shared by every database on a server,
+//! so each arm mints its role names apart and works in a database of its own
+//! cloned from the worktree's shared server by the repository's `PostgreSQL`
+//! fixture.
 
 use zeroship_testkit::postgres::server::Postgres;
 
@@ -52,9 +53,18 @@ use zeroship_data_orm::executor::ScopedExecutor;
 /// that ran on an older server would report that this design has no fence.
 const MINIMUM_SERVER_VERSION_NUM: i32 = 160_000;
 
-/// The password every fixture login carries. The container is thrown away with
-/// the test.
+/// The password every fixture login carries. The arm's database is dropped with
+/// the test; its minted role names stay unique on the shared server for the run.
 const FIXTURE_PASSWORD: &str = "fixture";
+
+/// A per-arm suffix for the cluster-global role names.
+///
+/// `pg_authid` and `pg_auth_members` are shared by every database on a server,
+/// so two arms running concurrently against the worktree's shared server must
+/// name their roles apart.
+fn role_suffix() -> String {
+    DatabaseId::mint().as_str().to_owned()
+}
 
 /// Connect as the fixture's superuser and refuse a server older than the pin.
 async fn superuser(postgres: &Postgres) -> Rc<Pool> {
@@ -151,38 +161,44 @@ async fn a_worker_login_reaches_a_shared_database_only_through_a_live_binding_ro
     let postgres = Postgres::start();
     let admin = superuser(&postgres).await;
 
+    let suffix = role_suffix();
+    let db_one_rw = format!("zs_db_one_rw_{suffix}");
+    let bind_a = format!("zs_bind_a_e1_{suffix}");
+    let bind_b = format!("zs_bind_b_e1_{suffix}");
+    let worker_login = format!("zeroship_worker_{suffix}");
+
     admin
-        .batch_execute(
-            "CREATE ROLE zs_db_one_rw NOLOGIN;
-             CREATE ROLE zs_bind_a_e1 NOLOGIN;
-             CREATE ROLE zs_bind_b_e1 NOLOGIN;
-             CREATE ROLE zeroship_worker LOGIN PASSWORD 'fixture'
+        .batch_execute(&format!(
+            "CREATE ROLE {db_one_rw} NOLOGIN;
+             CREATE ROLE {bind_a} NOLOGIN;
+             CREATE ROLE {bind_b} NOLOGIN;
+             CREATE ROLE {worker_login} LOGIN PASSWORD 'fixture'
                NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
              CREATE SCHEMA db_one;
              CREATE TABLE db_one.orders (id int PRIMARY KEY, total int NOT NULL);
              INSERT INTO db_one.orders VALUES (1, 42);
-             GRANT USAGE ON SCHEMA db_one TO zs_db_one_rw;
-             GRANT SELECT ON db_one.orders TO zs_db_one_rw;
-             GRANT zs_db_one_rw TO zs_bind_a_e1 WITH SET FALSE;
-             GRANT zs_db_one_rw TO zs_bind_b_e1 WITH SET FALSE;
-             GRANT zs_bind_a_e1 TO zeroship_worker WITH INHERIT FALSE;
-             GRANT zs_bind_b_e1 TO zeroship_worker WITH INHERIT FALSE",
-        )
+             GRANT USAGE ON SCHEMA db_one TO {db_one_rw};
+             GRANT SELECT ON db_one.orders TO {db_one_rw};
+             GRANT {db_one_rw} TO {bind_a} WITH SET FALSE;
+             GRANT {db_one_rw} TO {bind_b} WITH SET FALSE;
+             GRANT {bind_a} TO {worker_login} WITH INHERIT FALSE;
+             GRANT {bind_b} TO {worker_login} WITH INHERIT FALSE"
+        ))
         .await
         .expect("the binding ladder is legal DDL");
 
-    let worker = login(&postgres, "zeroship_worker").await;
+    let worker = login(&postgres, &worker_login).await;
 
     // The worker cannot assume the database role, so no statement it issues
     // can carry the privileges of every binding on that database at once.
-    let denied = read_total(&worker, "zs_db_one_rw")
+    let denied = read_total(&worker, &db_one_rw)
         .await
         .expect_err("the worker must not assume the database role");
     let denied = server_error(&denied);
     assert_eq!(denied.code(), &SqlState::INSUFFICIENT_PRIVILEGE);
     assert_eq!(
         denied.message(),
-        "permission denied to set role \"zs_db_one_rw\"",
+        format!("permission denied to set role \"{db_one_rw}\""),
         "the refusal must name the role that was refused"
     );
 
@@ -190,22 +206,22 @@ async fn a_worker_login_reaches_a_shared_database_only_through_a_live_binding_ro
     // revoked. Without this the denial above and the denial below would be
     // satisfied by a fixture that granted nothing at all.
     assert_eq!(
-        read_total(&worker, "zs_bind_a_e1").await.unwrap(),
+        read_total(&worker, &bind_a).await.unwrap(),
         42,
         "binding A reads its database"
     );
     assert_eq!(
-        read_total(&worker, "zs_bind_b_e1").await.unwrap(),
+        read_total(&worker, &bind_b).await.unwrap(),
         42,
         "co-tenant binding B reads the same database"
     );
 
     admin
-        .batch_execute("REVOKE zs_db_one_rw FROM zs_bind_a_e1")
+        .batch_execute(&format!("REVOKE {db_one_rw} FROM {bind_a}"))
         .await
         .expect("revoking one binding's database membership");
 
-    let revoked = read_total(&worker, "zs_bind_a_e1")
+    let revoked = read_total(&worker, &bind_a)
         .await
         .expect_err("binding A must lose the database when its membership is revoked");
     let revoked = server_error(&revoked);
@@ -220,7 +236,7 @@ async fn a_worker_login_reaches_a_shared_database_only_through_a_live_binding_ro
     // binding and only one, or it is a database-wide outage rather than a
     // fence.
     assert_eq!(
-        read_total(&worker, "zs_bind_b_e1").await.unwrap(),
+        read_total(&worker, &bind_b).await.unwrap(),
         42,
         "revoking binding A must not disturb co-tenant binding B"
     );
@@ -240,26 +256,33 @@ async fn only_a_noninheriting_membership_keeps_a_binding_out_of_ambient_login_pr
     let postgres = Postgres::start();
     let admin = superuser(&postgres).await;
 
+    let suffix = role_suffix();
+    let db_one_rw = format!("zs_db_one_rw_{suffix}");
+    let bind_a = format!("zs_bind_a_e1_{suffix}");
+    let plain_grant = format!("w_plain_grant_{suffix}");
+    let role_attribute = format!("w_role_attribute_{suffix}");
+    let inherit_false = format!("w_inherit_false_{suffix}");
+
     admin
-        .batch_execute(
-            "CREATE ROLE zs_db_one_rw NOLOGIN;
-             CREATE ROLE zs_bind_a_e1 NOLOGIN;
+        .batch_execute(&format!(
+            "CREATE ROLE {db_one_rw} NOLOGIN;
+             CREATE ROLE {bind_a} NOLOGIN;
              CREATE SCHEMA db_one;
              CREATE TABLE db_one.orders (id int PRIMARY KEY, total int NOT NULL);
              INSERT INTO db_one.orders VALUES (1, 42);
-             GRANT USAGE ON SCHEMA db_one TO zs_db_one_rw;
-             GRANT SELECT ON db_one.orders TO zs_db_one_rw;
-             GRANT zs_db_one_rw TO zs_bind_a_e1 WITH SET FALSE;
+             GRANT USAGE ON SCHEMA db_one TO {db_one_rw};
+             GRANT SELECT ON db_one.orders TO {db_one_rw};
+             GRANT {db_one_rw} TO {bind_a} WITH SET FALSE;
              -- One variable differs across the three logins: the shape of the
              -- worker-to-binding grant, and nothing else.
-             CREATE ROLE w_plain_grant LOGIN PASSWORD 'fixture' INHERIT NOSUPERUSER;
-             CREATE ROLE w_role_attribute LOGIN PASSWORD 'fixture' INHERIT NOSUPERUSER;
-             CREATE ROLE w_inherit_false LOGIN PASSWORD 'fixture' INHERIT NOSUPERUSER;
-             GRANT zs_bind_a_e1 TO w_plain_grant;
-             GRANT zs_bind_a_e1 TO w_role_attribute;
-             GRANT zs_bind_a_e1 TO w_inherit_false WITH INHERIT FALSE;
-             ALTER ROLE w_role_attribute NOINHERIT",
-        )
+             CREATE ROLE {plain_grant} LOGIN PASSWORD 'fixture' INHERIT NOSUPERUSER;
+             CREATE ROLE {role_attribute} LOGIN PASSWORD 'fixture' INHERIT NOSUPERUSER;
+             CREATE ROLE {inherit_false} LOGIN PASSWORD 'fixture' INHERIT NOSUPERUSER;
+             GRANT {bind_a} TO {plain_grant};
+             GRANT {bind_a} TO {role_attribute};
+             GRANT {bind_a} TO {inherit_false} WITH INHERIT FALSE;
+             ALTER ROLE {role_attribute} NOINHERIT"
+        ))
         .await
         .expect("the three grant shapes are legal DDL");
 
@@ -268,11 +291,13 @@ async fn only_a_noninheriting_membership_keeps_a_binding_out_of_ambient_login_pr
     // exists. That is the mechanism the next three reads observe.
     let catalog = admin
         .query(
-            "SELECT member.rolname AS login, member.rolinherit, grant_row.inherit_option
-               FROM pg_auth_members grant_row
-               JOIN pg_roles member ON member.oid = grant_row.member
-              WHERE grant_row.roleid = 'zs_bind_a_e1'::regrole
-              ORDER BY member.rolname",
+            &format!(
+                "SELECT member.rolname AS login, member.rolinherit, grant_row.inherit_option
+                   FROM pg_auth_members grant_row
+                   JOIN pg_roles member ON member.oid = grant_row.member
+                  WHERE grant_row.roleid = '{bind_a}'::regrole
+                  ORDER BY member.rolname"
+            ),
             &[],
         )
         .await
@@ -290,9 +315,9 @@ async fn only_a_noninheriting_membership_keeps_a_binding_out_of_ambient_login_pr
     assert_eq!(
         recorded,
         vec![
-            ("w_inherit_false".to_string(), true, false),
-            ("w_plain_grant".to_string(), true, true),
-            ("w_role_attribute".to_string(), false, true),
+            (inherit_false.clone(), true, false),
+            (plain_grant.clone(), true, true),
+            (role_attribute.clone(), false, true),
         ],
         "only the membership granted WITH INHERIT FALSE records inherit_option = false; \
          flipping the role attribute leaves the existing membership inheriting"
@@ -300,7 +325,7 @@ async fn only_a_noninheriting_membership_keeps_a_binding_out_of_ambient_login_pr
 
     // (a) A plain grant to an inheriting login: the privilege is ambient, so
     //     the row comes back with no SET ROLE at all. MUST SUCCEED.
-    let plain = login(&postgres, "w_plain_grant").await;
+    let plain = login(&postgres, &plain_grant).await;
     let rows = plain
         .query("SELECT total FROM db_one.orders WHERE id = 1", &[])
         .await
@@ -310,7 +335,7 @@ async fn only_a_noninheriting_membership_keeps_a_binding_out_of_ambient_login_pr
 
     // (b) The same grant, with the NOINHERIT attribute applied afterwards.
     //     MUST STILL SUCCEED - this is why the attribute is not a substitute.
-    let attribute = login(&postgres, "w_role_attribute").await;
+    let attribute = login(&postgres, &role_attribute).await;
     let rows = attribute
         .query("SELECT total FROM db_one.orders WHERE id = 1", &[])
         .await
@@ -323,7 +348,7 @@ async fn only_a_noninheriting_membership_keeps_a_binding_out_of_ambient_login_pr
     );
 
     // (c) The grant shape the design uses. The privilege is not ambient.
-    let fenced = login(&postgres, "w_inherit_false").await;
+    let fenced = login(&postgres, &inherit_false).await;
     let denied = fenced
         .query("SELECT total FROM db_one.orders WHERE id = 1", &[])
         .await
@@ -335,7 +360,7 @@ async fn only_a_noninheriting_membership_keeps_a_binding_out_of_ambient_login_pr
     // Control for (c): the membership exists and is assumable. Without this
     // the denial is indistinguishable from a login that was granted nothing.
     assert_eq!(
-        read_total(&fenced, "zs_bind_a_e1").await.unwrap(),
+        read_total(&fenced, &bind_a).await.unwrap(),
         42,
         "the fenced login must still reach the database by assuming the binding"
     );
@@ -355,27 +380,33 @@ async fn set_role_separates_a_missing_role_from_a_role_the_session_may_not_assum
     let postgres = Postgres::start();
     let admin = superuser(&postgres).await;
 
+    let suffix = role_suffix();
+    let stranger_role = format!("zs_stranger_{suffix}");
+    let bind_a = format!("zs_bind_a_e1_{suffix}");
+    let worker_login = format!("zeroship_worker_{suffix}");
+    let absent_role = format!("zs_absent_role_{suffix}");
+
     admin
-        .batch_execute(
-            "CREATE ROLE zs_stranger NOLOGIN;
-             CREATE ROLE zs_bind_a_e1 NOLOGIN;
-             CREATE ROLE zeroship_worker LOGIN PASSWORD 'fixture'
+        .batch_execute(&format!(
+            "CREATE ROLE {stranger_role} NOLOGIN;
+             CREATE ROLE {bind_a} NOLOGIN;
+             CREATE ROLE {worker_login} LOGIN PASSWORD 'fixture'
                NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
-             GRANT zs_bind_a_e1 TO zeroship_worker WITH INHERIT FALSE",
-        )
+             GRANT {bind_a} TO {worker_login} WITH INHERIT FALSE"
+        ))
         .await
         .expect("a stranger role and a role the worker may assume");
 
-    let worker = login(&postgres, "zeroship_worker").await;
+    let worker = login(&postgres, &worker_login).await;
 
     // Control: the worker can assume the role it is a member of, so a failure
     // below is about the named role and not about SET ROLE being unavailable.
-    let assumed = under_role(&worker, "zs_bind_a_e1", "SELECT current_user AS who")
+    let assumed = under_role(&worker, &bind_a, "SELECT current_user AS who")
         .await
         .expect("the worker assumes the binding it is a member of");
-    assert_eq!(assumed[0].get::<_, String>("who"), "zs_bind_a_e1");
+    assert_eq!(assumed[0].get::<_, String>("who"), bind_a);
 
-    let absent = under_role(&worker, "zs_absent_role", "SELECT 1")
+    let absent = under_role(&worker, &absent_role, "SELECT 1")
         .await
         .expect_err("a role that does not exist cannot be assumed");
     let absent = server_error(&absent);
@@ -384,9 +415,12 @@ async fn set_role_separates_a_missing_role_from_a_role_the_session_may_not_assum
         &SqlState::INVALID_PARAMETER_VALUE,
         "role-does-not-exist is the generic bad-GUC code 22023"
     );
-    assert_eq!(absent.message(), "role \"zs_absent_role\" does not exist");
+    assert_eq!(
+        absent.message(),
+        format!("role \"{absent_role}\" does not exist")
+    );
 
-    let stranger = under_role(&worker, "zs_stranger", "SELECT 1")
+    let stranger = under_role(&worker, &stranger_role, "SELECT 1")
         .await
         .expect_err("a role the session is not a member of cannot be assumed");
     let stranger = server_error(&stranger);
@@ -397,7 +431,7 @@ async fn set_role_separates_a_missing_role_from_a_role_the_session_may_not_assum
     );
     assert_eq!(
         stranger.message(),
-        "permission denied to set role \"zs_stranger\""
+        format!("permission denied to set role \"{stranger_role}\"")
     );
     assert_ne!(
         absent.code(),
@@ -408,19 +442,19 @@ async fn set_role_separates_a_missing_role_from_a_role_the_session_may_not_assum
     // The superuser control. The same two statements from a superuser session
     // report one failure and one success, so an arm that ran as a superuser
     // would never observe the split at all.
-    let absent_as_superuser = under_role(&admin, "zs_absent_role", "SELECT 1")
+    let absent_as_superuser = under_role(&admin, &absent_role, "SELECT 1")
         .await
         .expect_err("a missing role is missing for everyone");
     assert_eq!(
         server_error(&absent_as_superuser).code(),
         &SqlState::INVALID_PARAMETER_VALUE
     );
-    let stranger_as_superuser = under_role(&admin, "zs_stranger", "SELECT current_user AS who")
+    let stranger_as_superuser = under_role(&admin, &stranger_role, "SELECT current_user AS who")
         .await
         .expect("a superuser's SET ROLE permission is checked against session_user");
     assert_eq!(
         stranger_as_superuser[0].get::<_, String>("who"),
-        "zs_stranger",
+        stranger_role,
         "the non-membership failure disappears entirely for a superuser"
     );
 
@@ -439,19 +473,22 @@ async fn a_table_level_grant_returns_the_column_a_column_list_withheld() {
     let postgres = Postgres::start();
     let admin = superuser(&postgres).await;
 
+    let suffix = role_suffix();
+    let db_one_rw = format!("zs_db_one_rw_{suffix}");
+
     admin
-        .batch_execute(
-            "CREATE ROLE zs_db_one_rw LOGIN PASSWORD 'fixture' NOSUPERUSER;
+        .batch_execute(&format!(
+            "CREATE ROLE {db_one_rw} LOGIN PASSWORD 'fixture' NOSUPERUSER;
              CREATE SCHEMA db_one;
              CREATE TABLE db_one.people (id int PRIMARY KEY, email text, email_mask text);
              INSERT INTO db_one.people VALUES (1, 'plaintext@example.com', 'p***@example.com');
-             GRANT USAGE ON SCHEMA db_one TO zs_db_one_rw;
-             GRANT SELECT (id, email_mask) ON db_one.people TO zs_db_one_rw",
-        )
+             GRANT USAGE ON SCHEMA db_one TO {db_one_rw};
+             GRANT SELECT (id, email_mask) ON db_one.people TO {db_one_rw}"
+        ))
         .await
         .expect("a column list that withholds the classified column");
 
-    let reader = login(&postgres, "zs_db_one_rw").await;
+    let reader = login(&postgres, &db_one_rw).await;
 
     // Control: the column list is in force, and the granted columns read.
     let granted = reader
@@ -475,7 +512,7 @@ async fn a_table_level_grant_returns_the_column_a_column_list_withheld() {
 
     // The claim: a table-level grant alongside the column list is additive.
     admin
-        .batch_execute("GRANT SELECT ON db_one.people TO zs_db_one_rw")
+        .batch_execute(&format!("GRANT SELECT ON db_one.people TO {db_one_rw}"))
         .await
         .expect("a table-level grant beside a column list is accepted");
     let exposed = reader
@@ -493,10 +530,10 @@ async fn a_table_level_grant_returns_the_column_a_column_list_withheld() {
     // ALTER DEFAULT PRIVILEGES, so a prospective rule can only ever be the
     // widening shape.
     let prospective = admin
-        .batch_execute(
+        .batch_execute(&format!(
             "ALTER DEFAULT PRIVILEGES IN SCHEMA db_one \
-             GRANT SELECT (id) ON TABLES TO zs_db_one_rw",
-        )
+             GRANT SELECT (id) ON TABLES TO {db_one_rw}"
+        ))
         .await
         .expect_err("default privileges have no column-list form");
     let prospective = server_error(&prospective);
@@ -509,9 +546,9 @@ async fn a_table_level_grant_returns_the_column_a_column_list_withheld() {
     // is accepted, so the refusal is about columns and not about the syntax
     // around them.
     admin
-        .batch_execute(
-            "ALTER DEFAULT PRIVILEGES IN SCHEMA db_one GRANT SELECT ON TABLES TO zs_db_one_rw",
-        )
+        .batch_execute(&format!(
+            "ALTER DEFAULT PRIVILEGES IN SCHEMA db_one GRANT SELECT ON TABLES TO {db_one_rw}"
+        ))
         .await
         .expect("the table-wide prospective grant is the only form available");
 
@@ -531,22 +568,25 @@ async fn logical_decoding_ignores_the_column_acl_and_obeys_the_publication_colum
     let postgres = Postgres::start();
     let admin = superuser(&postgres).await;
 
+    let suffix = role_suffix();
+    let relay_role = format!("zs_relay_{suffix}");
+
     // The relay, not the worker, is the role that holds REPLICATION: the
     // worker's boot posture refuses that attribute outright.
     admin
-        .batch_execute(
-            "CREATE ROLE zs_relay LOGIN PASSWORD 'fixture' REPLICATION NOSUPERUSER NOBYPASSRLS;
+        .batch_execute(&format!(
+            "CREATE ROLE {relay_role} LOGIN PASSWORD 'fixture' REPLICATION NOSUPERUSER NOBYPASSRLS;
              CREATE SCHEMA db_one;
              CREATE TABLE db_one.events (id int PRIMARY KEY, secret text NOT NULL);
-             GRANT USAGE ON SCHEMA db_one TO zs_relay;
-             GRANT SELECT (id) ON db_one.events TO zs_relay;
+             GRANT USAGE ON SCHEMA db_one TO {relay_role};
+             GRANT SELECT (id) ON db_one.events TO {relay_role};
              CREATE PUBLICATION zs_pub_all FOR TABLE db_one.events;
-             CREATE PUBLICATION zs_pub_columns FOR TABLE db_one.events (id)",
-        )
+             CREATE PUBLICATION zs_pub_columns FOR TABLE db_one.events (id)"
+        ))
         .await
         .expect("a relay role refused the classified column, and two publications");
 
-    let relay = login(&postgres, "zs_relay").await;
+    let relay = login(&postgres, &relay_role).await;
 
     // Control: the granted column reads and the withheld column does not, so
     // the decoded plaintext below cannot be explained by an ACL that never
@@ -730,18 +770,24 @@ async fn the_driver_reports_the_setup_batch_s_first_failure_by_sqlstate() {
     let postgres = Postgres::start();
     let admin = superuser(&postgres).await;
 
+    let suffix = role_suffix();
+    let stranger_role = format!("zs_stranger_{suffix}");
+    let bind_a = format!("zs_bind_a_e1_{suffix}");
+    let worker_login = format!("zeroship_worker_{suffix}");
+    let absent_role = format!("zs_absent_role_{suffix}");
+
     admin
-        .batch_execute(
-            "CREATE ROLE zs_stranger NOLOGIN;
-             CREATE ROLE zs_bind_a_e1 NOLOGIN;
-             CREATE ROLE zeroship_worker LOGIN PASSWORD 'fixture'
+        .batch_execute(&format!(
+            "CREATE ROLE {stranger_role} NOLOGIN;
+             CREATE ROLE {bind_a} NOLOGIN;
+             CREATE ROLE {worker_login} LOGIN PASSWORD 'fixture'
                NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
-             GRANT zs_bind_a_e1 TO zeroship_worker WITH INHERIT FALSE",
-        )
+             GRANT {bind_a} TO {worker_login} WITH INHERIT FALSE"
+        ))
         .await
         .expect("one assumable role and one stranger");
 
-    let worker = login(&postgres, "zeroship_worker").await;
+    let worker = login(&postgres, &worker_login).await;
 
     // The shape `pg_session_sql::autocommit_local_session_setup_sql` composes:
     // the role first, then the budgets, in one simple-query batch.
@@ -760,7 +806,7 @@ async fn the_driver_reports_the_setup_batch_s_first_failure_by_sqlstate() {
         let mut connection = worker.acquire().await.expect("a pooled connection");
         let transaction = connection.transaction().await.expect("BEGIN");
         transaction
-            .simple_query(&setup_batch("zs_bind_a_e1"))
+            .simple_query(&setup_batch(&bind_a))
             .await
             .expect("the setup batch succeeds for an assumable role");
         let applied = transaction
@@ -778,7 +824,7 @@ async fn the_driver_reports_the_setup_batch_s_first_failure_by_sqlstate() {
             )
             .await
             .expect("reading the settings the batch applied");
-        assert_eq!(applied[0].get::<_, String>("who"), "zs_bind_a_e1");
+        assert_eq!(applied[0].get::<_, String>("who"), bind_a);
         assert!(
             applied[0].get::<_, bool>("statement_timeout_applied"),
             "the statement after the role must have run"
@@ -794,20 +840,20 @@ async fn the_driver_reports_the_setup_batch_s_first_failure_by_sqlstate() {
     // the batch, each inside an explicit transaction.
     for (role, expected, expected_message) in [
         (
-            "zs_stranger",
+            stranger_role.clone(),
             &SqlState::INSUFFICIENT_PRIVILEGE,
-            "permission denied to set role \"zs_stranger\"",
+            format!("permission denied to set role \"{stranger_role}\""),
         ),
         (
-            "zs_absent_role",
+            absent_role.clone(),
             &SqlState::INVALID_PARAMETER_VALUE,
-            "role \"zs_absent_role\" does not exist",
+            format!("role \"{absent_role}\" does not exist"),
         ),
     ] {
         let mut connection = worker.acquire().await.expect("a pooled connection");
         let transaction = connection.transaction().await.expect("BEGIN");
         let failure = transaction
-            .simple_query(&setup_batch(role))
+            .simple_query(&setup_batch(&role))
             .await
             .err()
             .unwrap_or_else(|| panic!("the setup batch naming {role} must fail"));
@@ -840,9 +886,6 @@ async fn the_driver_reports_the_setup_batch_s_first_failure_by_sqlstate() {
 
     drain(vec![worker, admin]).await;
 }
-
-/// The login every lease in the pooled-reset arm authenticates as.
-const POOLED_RESET_LOGIN: &str = "zeroship_worker";
 
 /// **Arm 8.** A lease abandoned mid-statement under a binding role hands the
 /// next checkout no reach into that binding's database.
@@ -922,20 +965,23 @@ async fn a_lease_abandoned_mid_statement_lends_the_next_checkout_no_database() {
     let role = binding.session_role().expect("a creator binding narrows");
     let schema = binding.schema().as_str();
     let orders = format!("SELECT total FROM \"{schema}\".orders WHERE id = 1");
+    let suffix = role_suffix();
+    let fence_db = format!("zs_fence_db_{suffix}");
+    let pooled_login = format!("zeroship_worker_{suffix}");
 
     admin
         .batch_execute(&format!(
-            "CREATE ROLE zs_fence_db NOLOGIN;
+            "CREATE ROLE {fence_db} NOLOGIN;
              CREATE ROLE \"{role}\" NOLOGIN;
-             CREATE ROLE {POOLED_RESET_LOGIN} LOGIN PASSWORD '{FIXTURE_PASSWORD}'
+             CREATE ROLE {pooled_login} LOGIN PASSWORD '{FIXTURE_PASSWORD}'
                NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
              CREATE SCHEMA \"{schema}\";
              CREATE TABLE \"{schema}\".orders (id int PRIMARY KEY, total int NOT NULL);
              INSERT INTO \"{schema}\".orders VALUES (1, 42);
-             GRANT USAGE ON SCHEMA \"{schema}\" TO zs_fence_db;
-             GRANT SELECT ON \"{schema}\".orders TO zs_fence_db;
-             GRANT zs_fence_db TO \"{role}\" WITH SET FALSE;
-             GRANT \"{role}\" TO {POOLED_RESET_LOGIN} WITH INHERIT FALSE;
+             GRANT USAGE ON SCHEMA \"{schema}\" TO {fence_db};
+             GRANT SELECT ON \"{schema}\".orders TO {fence_db};
+             GRANT {fence_db} TO \"{role}\" WITH SET FALSE;
+             GRANT \"{role}\" TO {pooled_login} WITH INHERIT FALSE;
              CREATE TABLE public.heartbeat (id int PRIMARY KEY);
              INSERT INTO public.heartbeat VALUES (1);
              GRANT SELECT ON public.heartbeat TO PUBLIC"
@@ -945,7 +991,7 @@ async fn a_lease_abandoned_mid_statement_lends_the_next_checkout_no_database() {
 
     let worker_url = {
         let mut url = url::Url::parse(&postgres.url()).expect("the fixture URL parses");
-        url.set_username(POOLED_RESET_LOGIN)
+        url.set_username(&pooled_login)
             .expect("the fixture URL accepts a username");
         url.set_password(Some(FIXTURE_PASSWORD))
             .expect("the fixture URL accepts a password");
@@ -1075,7 +1121,7 @@ async fn a_lease_abandoned_mid_statement_lends_the_next_checkout_no_database() {
         .expect("the recycled session answers");
     assert_eq!(
         identity[0].get::<_, String>("who"),
-        POOLED_RESET_LOGIN,
+        pooled_login.as_str(),
         "a narrowing that outlived its transaction would still be current_user here",
     );
     assert_eq!(
@@ -1154,7 +1200,7 @@ async fn a_lease_abandoned_mid_statement_lends_the_next_checkout_no_database() {
         .expect("the session recycled after a COMMIT answers");
     assert_eq!(
         after_identity[0].get::<_, String>("who"),
-        POOLED_RESET_LOGIN,
+        pooled_login.as_str(),
         "a role that was not transaction scoped would survive the COMMIT",
     );
     let refused_after_commit = after_commit
