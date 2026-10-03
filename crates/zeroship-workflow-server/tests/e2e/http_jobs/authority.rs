@@ -533,10 +533,7 @@ async fn a_caller_without_the_latest_delivery_never_reaches_the_journal() {
     ];
     assert!(!placement_probes.is_empty());
 
-    let admin_url = fixture
-        .platform
-        .runtime_url
-        .replacen("zeroship_workflow@", "postgres@", 1);
+    let admin_url = fixture.platform.admin_url.to_string();
     let mut blocker = platform::connect(&admin_url).await;
     let pid: i32 = blocker
         .query_one("SELECT pg_backend_pid()", &[])

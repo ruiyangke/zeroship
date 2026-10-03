@@ -90,9 +90,8 @@ async fn delete(platform: &platform::Platform, app: &AppId) {
 /// The facts source stands in for Control, so it reads with a credential that
 /// can. The workflow role holds no grant on the policy inputs, and the closing
 /// lane's deletion check crosses the same endpoint they do.
-async fn connect_lifecycle(url: &str) -> FactsLifecycle {
-    let control = url.replacen("zeroship_workflow@", "postgres@", 1);
-    FactsLifecycle::new(app_facts::DatabaseAppFacts::connect(&control).await)
+async fn connect_lifecycle(platform: &platform::Platform) -> FactsLifecycle {
+    FactsLifecycle::new(app_facts::DatabaseAppFacts::connect(&platform.admin_url.to_string()).await)
 }
 
 async fn queue(platform: &platform::Platform) -> Queue {
@@ -124,7 +123,7 @@ async fn only_a_recorded_deletion_abandons_and_an_unknown_app_does_not() {
     let gone = AppId::mint();
     seed(&platform, &live, "lifecycle-live").await;
     seed(&platform, &gone, "lifecycle-gone").await;
-    let source = connect_lifecycle(&platform.runtime_url).await;
+    let source = connect_lifecycle(&platform).await;
     let unknown = AppId::mint();
     let apps = [live.clone(), gone.clone(), unknown.clone()];
     assert!(
@@ -198,7 +197,7 @@ async fn the_driver_abandons_deleted_apps_over_the_canonical_schema() {
             recovery,
             ..DriverOptions::default()
         },
-        Rc::new(connect_lifecycle(&platform.runtime_url).await),
+        Rc::new(connect_lifecycle(&platform).await),
         Rc::new(LocalCapacity),
     )
     .unwrap();

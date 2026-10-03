@@ -134,7 +134,7 @@ async fn native_worker_client_uses_the_authenticated_coordinator_api() {
     // claims under an authority no placement expiry fences, so a running one
     // would answer those reads instead of the client.
     let mut server = server_process::ServerProcess::without_maintenance_sweeps(
-        &fixture.runtime_url,
+        &fixture,
         &peers,
         fixture.work.path(),
         "native-client",
@@ -446,7 +446,7 @@ async fn a_lapsed_instance_lease_refuses_a_worker_and_is_covered_by_readiness() 
     );
     let http = Client::new().await;
     let server = server_process::ServerProcess::start(
-        &fixture.runtime_url,
+        &fixture,
         &peers,
         fixture.work.path(),
         "lease-fence",
@@ -738,7 +738,7 @@ async fn replicas_authenticate_metadata_and_keep_customer_execution_off_the_prot
     // its own identity, and the settle route authorizes on the delivery's worker
     // id, so a running lane makes the delivery unavailable to the case at all.
     let mut first = server_process::ServerProcess::without_maintenance_sweeps(
-        &fixture.runtime_url,
+        &fixture,
         &peers,
         fixture.work.path(),
         "first",
@@ -746,7 +746,7 @@ async fn replicas_authenticate_metadata_and_keep_customer_execution_off_the_prot
     )
     .await;
     let mut second = server_process::ServerProcess::without_maintenance_sweeps(
-        &fixture.runtime_url,
+        &fixture,
         &peers,
         fixture.work.path(),
         "second",

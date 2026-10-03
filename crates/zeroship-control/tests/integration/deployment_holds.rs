@@ -13,8 +13,7 @@ mod publication;
 mod queue_holds;
 mod retention_executor;
 mod shared_catalog;
-#[path = "../../../zeroship-workflow-server/tests/support/journal.rs"]
-mod journal;
+use zeroship_workflow_testkit::journal;
 
 use ntex::{
     client::Client,
@@ -119,10 +118,7 @@ struct Fixture {
 impl Fixture {
     async fn new() -> Self {
         let platform = platform::Platform::new().await;
-        let control_url =
-            platform
-                .runtime_url
-                .replacen("zeroship_workflow@", "zeroship_control@", 1);
+        let control_url = platform.role_url("zeroship_control").to_string();
         let registry = Registry::new(&control_url).await.unwrap();
         let control_pg = Arc::new(platform::connect(&control_url).await);
         let worker_role = signer(
@@ -940,9 +936,7 @@ async fn failed_final_placement_authorization_rolls_back_hold_generations() {
         )
         .await
         .unwrap();
-    let probe_url = fixture
-        .control_url
-        .replacen("zeroship_control@", "postgres@", 1);
+    let probe_url = fixture.platform.admin_url.to_string();
     let gate = Arc::new(VerificationGate {
         verifier: ServiceAssertionVerifier::new(peers, Arc::new(InMemoryReplayStore::new())),
         expected,

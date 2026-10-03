@@ -26,9 +26,7 @@ pub async fn seed_app(platform: &platform::Platform, app: &AppId) -> String {
 /// policy inputs moved behind Control's endpoint, and `zeroship_control` cannot
 /// reach the `workflow_manager` schema.
 fn admin_url(platform: &platform::Platform) -> String {
-    platform
-        .runtime_url
-        .replacen("zeroship_workflow@", "postgres@", 1)
+    platform.admin_url.to_string()
 }
 
 /// Control's plan rows under the administrative credential. This is the

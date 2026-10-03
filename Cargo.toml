@@ -4,6 +4,7 @@ resolver = "3"
 exclude = [
     "crates/zeroship-runtime/benches/ntex-bench",
     "crates/zeroship-data-testkit",
+    "crates/zeroship-workflow-testkit",
     "libs/compio-postgres/fuzz",
     "libs/compio-postgres/testkit",
     "libs/compio-postgres/vendor/postgres-types",

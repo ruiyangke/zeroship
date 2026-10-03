@@ -34,13 +34,13 @@ impl Drop for ServerProcess {
 impl ServerProcess {
     /// A process configured as a deployment configures one, sweep lane included.
     pub async fn start(
-        database: &str,
+        platform: &super::platform::Platform,
         peers: &Path,
         directory: &Path,
         name: &str,
         client: &Client,
     ) -> Self {
-        Self::spawn_with(database, peers, directory, name, client, true).await
+        Self::spawn_with(platform, peers, directory, name, client, true).await
     }
 
     /// The same process with `workflow.maintenance_sweeps` off, so it composes no
@@ -54,13 +54,13 @@ impl ServerProcess {
     /// `crates/zeroship-workflow-server/tests/integration/maintenance_lane.rs`, which keeps
     /// it on.
     pub async fn without_maintenance_sweeps(
-        database: &str,
+        platform: &super::platform::Platform,
         peers: &Path,
         directory: &Path,
         name: &str,
         client: &Client,
     ) -> Self {
-        Self::spawn_with(database, peers, directory, name, client, false).await
+        Self::spawn_with(platform, peers, directory, name, client, false).await
     }
 
     /// How many app-facts observations the Control peer has answered.
@@ -69,7 +69,7 @@ impl ServerProcess {
     }
 
     async fn spawn_with(
-        database: &str,
+        platform: &super::platform::Platform,
         peers: &Path,
         directory: &Path,
         name: &str,
@@ -80,11 +80,12 @@ impl ServerProcess {
         let address = listener.local_addr().unwrap();
         drop(listener);
         let config = directory.join(format!("{name}.toml"));
-        let control = queue_control::Control::start(directory, name, database).await;
+        let control =
+            queue_control::Control::start(directory, name, platform.admin_url.as_str()).await;
         super::platform::write_private(
             &config,
             toml::to_string(&serde_json::json!({"workflow":{
-                "listen":address.to_string(),"database_url":database,"service_peers_file":peers,
+                "listen":address.to_string(),"database_url":platform.runtime_url,"service_peers_file":peers,
                 "control_url":control.url(),"service_key_file":control.key_file,
                 // The payload store this process stages and collects objects
                 // through. ONE root for every process this fixture starts,

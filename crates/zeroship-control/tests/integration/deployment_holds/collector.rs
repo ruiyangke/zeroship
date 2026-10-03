@@ -522,9 +522,7 @@ async fn activation_holds_app_lock_before_collector_rechecks_current_deployment(
          CREATE TRIGGER gate_collector_activation BEFORE UPDATE ON zeroship.app_deploys \
          FOR EACH ROW EXECUTE FUNCTION zeroship.gate_collector_activation();"
     ).await.unwrap();
-    let admin_url = fixture
-        .control_url
-        .replacen("zeroship_control@", "postgres@", 1);
+    let admin_url = fixture.platform.admin_url.to_string();
     let blocker = platform::connect(&admin_url).await;
     let blocker_pid: i32 = blocker
         .query_one("SELECT pg_backend_pid()", &[])

@@ -67,7 +67,7 @@ struct Fixture {
 
 impl Fixture {
     async fn new() -> Self {
-        let platform = platform::Platform::new().await;
+    let platform = platform::Platform::new().await;
 
         // Control's verification key, the one thing the service refuses to
         // start without. The peer itself is the shared fake in `queue_control`,
@@ -84,7 +84,7 @@ impl Fixture {
         );
         let http = Client::new().await;
         let server = server_process::ServerProcess::start(
-            &platform.runtime_url,
+            &platform,
             &peers,
             platform.work.path(),
             "run-wire",

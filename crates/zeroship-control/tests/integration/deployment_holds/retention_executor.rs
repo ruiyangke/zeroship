@@ -86,12 +86,7 @@ async fn gate_hold_inserts(fixture: &Fixture) -> (compio_postgres::Client, i32) 
         ))
         .await
         .unwrap();
-    let blocker = platform::connect(
-        &fixture
-            .control_url
-            .replacen("zeroship_control@", "postgres@", 1),
-    )
-    .await;
+    let blocker = platform::connect(fixture.platform.admin_url.as_str()).await;
     blocker
         .query_one("SELECT pg_advisory_lock($1)", &[&GATE])
         .await

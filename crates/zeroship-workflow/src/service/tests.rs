@@ -105,8 +105,7 @@ mod ingress_models;
 mod journal_models;
 mod job_door;
 mod management;
-#[path = "../../../../tests/fixtures/workflow_manager_queue.rs"]
-pub(super) mod manager_queue;
+pub(super) use zeroship_workflow_testkit::manager_queue;
 #[path = "../../../../tests/fixtures/workflow_journal.rs"]
 pub(super) mod journal_fixture;
 #[path = "../../../../tests/fixtures/workflow_service_binding.rs"]

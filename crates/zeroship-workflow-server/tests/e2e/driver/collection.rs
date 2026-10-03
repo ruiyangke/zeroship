@@ -242,7 +242,7 @@ async fn collection_contract(platform: &platform::Platform) {
     // take the very page this case has to be the claimant of and leave the
     // exactness unobservable.
     let mut server = server_process::ServerProcess::without_maintenance_sweeps(
-        &platform.runtime_url,
+        &platform,
         &peers,
         platform.work.path(),
         "collection",

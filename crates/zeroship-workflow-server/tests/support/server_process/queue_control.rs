@@ -62,10 +62,9 @@ impl Control {
                 Arc::new(InMemoryReplayStore::default()),
             ),
         });
-        // This peer IS Control here, so it reads the policy inputs with a
-        // credential that can. The workflow role no longer holds those grants,
-        // which is the point of the route existing.
-        let database = database.replacen("zeroship_workflow@", "postgres@", 1);
+        // This peer IS Control here, so it reads the policy inputs with the
+        // superuser credential that can.
+        let database = database.to_owned();
         let facts_requests = Arc::new(AtomicUsize::new(0));
         let server = test::server({
             let facts_requests = facts_requests.clone();

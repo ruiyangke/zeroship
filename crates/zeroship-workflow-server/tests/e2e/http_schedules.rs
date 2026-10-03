@@ -59,7 +59,7 @@ struct Fixture {
 }
 impl Fixture {
     async fn new() -> Self {
-        let platform = platform::Platform::new().await;
+    let platform = platform::Platform::new().await;
         let signer = Signer::new(service_issuer(CONTROL_SERVICE_NAME).unwrap());
         let rejected = [
             "spiffe://zeroship.ai/svc/worker",
@@ -82,7 +82,7 @@ impl Fixture {
         platform::write_private(&peers, serde_json::to_vec(&json!({"keys":keys})).unwrap());
         let http = Client::new().await;
         let server = server_process::ServerProcess::start(
-            &platform.runtime_url,
+            &platform,
             &peers,
             platform.work.path(),
             "schedules",

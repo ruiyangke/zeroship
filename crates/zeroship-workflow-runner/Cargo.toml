@@ -21,6 +21,7 @@ sha2 = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+zeroship-workflow-testkit = { path = "../zeroship-workflow-testkit" }
 zeroship-data-orm = { workspace = true }
 compio-postgres = { workspace = true, features = ["with-chrono-0_4", "with-serde_json-1", "with-uuid-1"] }
 zeroship-workflow-manager = { workspace = true }

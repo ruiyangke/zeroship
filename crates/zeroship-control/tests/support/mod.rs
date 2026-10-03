@@ -6,10 +6,7 @@ pub mod authz_fixture;
 pub mod deployments;
 pub mod isolated_case;
 pub mod live;
-#[path = "../../../zeroship-workflow-server/tests/support/platform.rs"]
-pub mod platform;
-#[path = "../../../zeroship-workflow-server/tests/support/placement.rs"]
-pub mod placement;
+pub use zeroship_workflow_testkit::platform;
 pub mod stripe_mock;
 pub mod workflow_fleet;
 pub mod workflow_postgres;

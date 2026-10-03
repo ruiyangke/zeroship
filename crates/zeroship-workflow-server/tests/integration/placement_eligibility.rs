@@ -276,12 +276,7 @@ async fn archived_apps_stay_placeable_and_deleted_apps_do_not() {
 #[ntex::test]
 async fn the_purge_cascade_during_the_lock_wait_refuses_placement() {
     let platform = platform::Platform::new().await;
-    let revoker = platform::connect(
-        &platform
-            .runtime_url
-            .replacen("zeroship_workflow@", "postgres@", 1),
-    )
-    .await;
+    let revoker = platform::connect(platform.admin_url.as_str()).await;
     for revoke in [true, false] {
         let service = service(&platform).await;
         let (declared, signer) = zone_with_signer(&platform).await;

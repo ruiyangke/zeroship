@@ -22,6 +22,8 @@ pub const DEFAULT_JOIN_SIGNER_ID: &str = "wjs_testfixturedefault0000000";
 pub struct Platform {
     _postgres: Container<GenericImage>,
     pub admin: compio_postgres::Client,
+    /// The server's URL as its superuser, `postgres`.
+    pub admin_url: url::Url,
     pub runtime_url: String,
     pub work: tempfile::TempDir,
 }
@@ -43,7 +45,8 @@ impl Platform {
             postgres.get_host().unwrap(),
             postgres.get_host_port_ipv4(5432).unwrap()
         );
-        let url = format!("postgres://postgres@{address}/postgres");
+        let admin_url =
+            url::Url::parse(&format!("postgres://postgres@{address}/postgres")).unwrap();
         let root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .canonicalize()
@@ -51,7 +54,7 @@ impl Platform {
         let work = tempfile::tempdir().unwrap();
         let config = work.path().join("migrate.toml");
         write_private(&config, toml::to_string(&serde_json::json!({"env":{"platform":{
-            "url":url,"dir":root.join("db/migrations-ts"),"schema":"zeroship","owner_app":"zeroship_platform",
+            "url":admin_url.as_str(),"dir":root.join("db/migrations-ts"),"schema":"zeroship","owner_app":"zeroship_platform",
             "registry":root.join("policies/platform-table-owners.json"),"policy":[root.join("policies/platform.policy.toml")],
         }}})).unwrap());
         let result = Command::new("node")
@@ -68,7 +71,7 @@ impl Platform {
             String::from_utf8_lossy(&result.stdout),
             String::from_utf8_lossy(&result.stderr)
         );
-        let admin = connect(&url).await;
+        let admin = connect(admin_url.as_str()).await;
         let default_join_signer_id = DEFAULT_JOIN_SIGNER_ID.to_owned();
         admin
             .execute(
@@ -89,9 +92,18 @@ impl Platform {
         Self {
             _postgres: postgres,
             admin,
+            admin_url,
             runtime_url: format!("postgres://zeroship_workflow@{address}/postgres"),
             work,
         }
+    }
+
+    /// The server's URL as `role`, whose login the trust authentication accepts.
+    pub fn role_url(&self, role: &str) -> url::Url {
+        let mut url = self.admin_url.clone();
+        url.set_username(role).unwrap();
+        url.set_password(None).unwrap();
+        url
     }
 }
 impl Platform {

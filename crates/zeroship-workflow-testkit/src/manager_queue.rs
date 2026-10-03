@@ -3,10 +3,6 @@
 //! Publication and delivery contracts need a real manager queue but not a real
 //! artifact catalog: the manager's retention suite owns deployment safety.
 
-#![allow(
-    dead_code,
-    reason = "fixture consumers exercise different queue contracts"
-)]
 #![expect(
     clippy::future_not_send,
     reason = "fixtures use their owning compio thread"
@@ -93,7 +89,7 @@ impl Manager {
             .unwrap();
         connection
             .execute_batch(include_str!(
-                "../../crates/zeroship-workflow-manager/schema/sqlite.sql"
+                "../../../crates/zeroship-workflow-manager/schema/sqlite.sql"
             ))
             .unwrap();
         let queue = Self::open_with_options(&path, options).await;

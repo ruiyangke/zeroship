@@ -39,7 +39,7 @@ impl Fixture {
             let platform = platform::Platform::new().await;
             let app = AppId::mint();
             let plan = policy_fixture::seed_app(&platform, &app).await;
-            let source = connect_store(&platform.runtime_url).await;
+            let source = connect_store(&platform).await;
             let operator = policy_fixture::operator(&platform).await;
             let plans = policy_fixture::plan_admin(&platform).await;
             Self {
@@ -75,9 +75,9 @@ impl Fixture {
 /// it stands in for Control: the workflow role holds no grant on the policy
 /// inputs at all now, which
 /// `source_role_cannot_write_inputs_or_read_customer_storage` asserts directly.
-async fn connect_store(url: &str) -> ControlPolicyStore {
-    let control = url.replacen("zeroship_workflow@", "postgres@", 1);
-    connect_store_with(url, app_facts::DatabaseAppFacts::connect(&control).await).await
+async fn connect_store(platform: &platform::Platform) -> ControlPolicyStore {
+    let facts = app_facts::DatabaseAppFacts::connect(&platform.admin_url.to_string()).await;
+    connect_store_with(&platform.runtime_url, facts).await
 }
 
 async fn connect_store_with(
@@ -104,7 +104,7 @@ async fn connect_store_with(
 #[compio::test]
 async fn readiness_checks_publication_grants_alone_with_an_empty_catalog() {
     let platform = platform::Platform::new().await;
-    let source = connect_store(&platform.runtime_url).await;
+    let source = connect_store(&platform).await;
     let apps: i64 = platform
         .admin
         .query_one("SELECT count(*) FROM zeroship.apps", &[])
@@ -177,7 +177,7 @@ async fn authoritative_policy_requires_complete_inputs_and_preserves_publication
     fixture.operator.set_rollout(rollout()).await.unwrap();
     let original = fixture.source.observe(&fixture.app).await.unwrap();
     assert_eq!(original.policy(), &policy);
-    let unchanged = connect_store(&fixture.platform.runtime_url)
+    let unchanged = connect_store(&fixture.platform)
         .await
         .observe(&fixture.app)
         .await
@@ -435,7 +435,7 @@ async fn publication_reads_after_lock_wait_and_charges_that_wait_to_source_valid
             <= blocked_at
                 + Duration::from_millis(rollout().source_validity_ms.try_into().unwrap())
     );
-    let peer = connect_store(&fixture.platform.runtime_url).await;
+    let peer = connect_store(&fixture.platform).await;
     let (left, right) = futures::join!(
         fixture.source.observe(&fixture.app),
         peer.observe(&fixture.app)

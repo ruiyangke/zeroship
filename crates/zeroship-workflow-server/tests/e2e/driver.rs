@@ -610,7 +610,7 @@ async fn server_drives_metadata_without_workers_and_resumes_after_restart() {
     assert_eq!(jobs(&platform, &seed.app).await.len(), 1);
 
     let server = server_process::ServerProcess::start(
-        &platform.runtime_url,
+        &platform,
         &peers,
         platform.work.path(),
         "driver",
@@ -624,7 +624,7 @@ async fn server_drives_metadata_without_workers_and_resumes_after_restart() {
     let snapshot = snapshot(&platform, &seed).await;
     replay_frontiers(&platform, &seed, &snapshot).await;
     let restarted = server_process::ServerProcess::start(
-        &platform.runtime_url,
+        &platform,
         &peers,
         platform.work.path(),
         "driver-restarted",
@@ -702,7 +702,7 @@ async fn a_default_host_claims_and_settles_the_maintenance_rows_of_its_own_queue
 
     let http = Client::new().await;
     let server = server_process::ServerProcess::start(
-        &platform.runtime_url,
+        &platform,
         &peers(&platform),
         platform.work.path(),
         "sweep-default",

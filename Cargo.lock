@@ -8030,6 +8030,7 @@ dependencies = [
  "zeroship-workflow-client",
  "zeroship-workflow-manager",
  "zeroship-workflow-server",
+ "zeroship-workflow-testkit",
  "zstd",
 ]
 
@@ -8782,6 +8783,7 @@ dependencies = [
  "zeroship-workflow-client",
  "zeroship-workflow-manager",
  "zeroship-workflow-schema",
+ "zeroship-workflow-testkit",
 ]
 
 [[package]]
@@ -8859,6 +8861,7 @@ dependencies = [
  "zeroship-workflow",
  "zeroship-workflow-client",
  "zeroship-workflow-manager",
+ "zeroship-workflow-testkit",
 ]
 
 [[package]]
@@ -8892,6 +8895,25 @@ dependencies = [
  "zeroship-workflow-client",
  "zeroship-workflow-manager",
  "zeroship-workflow-schema",
+ "zeroship-workflow-testkit",
+]
+
+[[package]]
+name = "zeroship-workflow-testkit"
+version = "0.1.0"
+dependencies = [
+ "compio",
+ "compio-postgres",
+ "rusqlite",
+ "serde_json",
+ "tempfile",
+ "testcontainers",
+ "toml 0.8.23",
+ "url",
+ "zeroship-bundle",
+ "zeroship-core",
+ "zeroship-data-orm",
+ "zeroship-workflow-manager",
 ]
 
 [[package]]

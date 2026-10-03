@@ -1,0 +1,28 @@
+[package]
+name = "zeroship-workflow-testkit"
+version = "0.1.0"
+edition = "2021"
+description = "Dev-only workflow fixtures: the platform database, journal seeding, placement and the manager queue"
+publish = false
+
+# This crate is excluded from the workspace on purpose. Consumers reach it only
+# through a `[dev-dependencies]` entry, so the testcontainers and database
+# fixtures it carries stay off every shipped normal edge. Because it is not a
+# member it cannot inherit `workspace = true`, so
+# `xtask/tests/repository/testkit_versions.rs` asserts each entry shared with
+# `[workspace.dependencies]` keeps that entry's version requirement, features
+# and path.
+
+[dependencies]
+compio = { version = "0.18", features = ["io", "net", "runtime", "macros", "time"] }
+compio-postgres = { path = "../../libs/compio-postgres" }
+rusqlite = { version = "0.39", features = ["bundled", "preupdate_hook"] }
+serde_json = { version = "1", features = ["raw_value", "preserve_order"] }
+tempfile = "3"
+testcontainers = { version = "0.28", default-features = false, features = ["blocking"] }
+toml = "0.8"
+url = "2"
+zeroship-bundle = { path = "../zeroship-bundle" }
+zeroship-core = { path = "../zeroship-core" }
+zeroship-data-orm = { path = "../zeroship-data-orm" }
+zeroship-workflow-manager = { path = "../zeroship-workflow-manager" }

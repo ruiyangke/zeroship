@@ -18,9 +18,7 @@ use zeroship_workflow_manager::policy::control::{self, PlanPolicyStore};
 #[compio::test(crate = "crate::support::live")]
 async fn startup_preserves_archived_plans_and_complete_workflow_policy() {
     let fixture = Box::pin(platform::Platform::new()).await;
-    let url = fixture
-        .runtime_url
-        .replacen("zeroship_workflow@", "zeroship_control@", 1);
+    let url = fixture.role_url("zeroship_control").to_string();
     let registry = Registry::new(&url).await.unwrap();
     seed_plans(&registry).await.unwrap();
     let catalog = PlanCatalog::new(registry.clone());
@@ -29,9 +27,7 @@ async fn startup_preserves_archived_plans_and_complete_workflow_policy() {
     // credential the runbook describes. No service login reaches it: the
     // workflow role lost its grant on `zeroship.plans` when the policy inputs
     // moved behind Control's app-facts endpoint.
-    let operator_url = fixture
-        .runtime_url
-        .replacen("zeroship_workflow@", "postgres@", 1);
+    let operator_url = fixture.admin_url.to_string();
     let inputs = Database::connect(
         DbBinding::platform(
             "platform",
@@ -79,9 +75,7 @@ async fn startup_preserves_archived_plans_and_complete_workflow_policy() {
 #[compio::test(crate = "crate::support::live")]
 async fn builtin_seed_gives_free_the_sixty_four_kibibyte_bound() {
     let fixture = Box::pin(platform::Platform::new()).await;
-    let url = fixture
-        .runtime_url
-        .replacen("zeroship_workflow@", "zeroship_control@", 1);
+    let url = fixture.role_url("zeroship_control").to_string();
     let registry = Registry::new(&url).await.unwrap();
     seed_plans(&registry).await.unwrap();
     let free: serde_json::Value = fixture

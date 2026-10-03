@@ -113,6 +113,7 @@ thiserror = { workspace = true }
 chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }
 
 [dev-dependencies]
+zeroship-workflow-testkit = { path = "../zeroship-workflow-testkit" }
 zeroship-workflow-server = { path = "../zeroship-workflow-server" }
 # The workflow lane holds a payload store, so composing one in a test names the
 # backend it is rooted at.

@@ -100,7 +100,7 @@ struct Fixture {
 }
 impl Fixture {
     async fn new() -> Self {
-        let platform = platform::Platform::new().await;
+    let platform = platform::Platform::new().await;
         let control = service_issuer(CONTROL_SERVICE_NAME).unwrap();
         let control_key = ServiceSigningKey::generate();
         let peers = platform.work.path().join("queue-peers.json");
@@ -119,7 +119,7 @@ impl Fixture {
         // placement expiry fences, so a running one would take that row first and
         // the route under test would never see it.
         let server = server_process::ServerProcess::without_maintenance_sweeps(
-            &platform.runtime_url,
+            &platform,
             &peers,
             platform.work.path(),
             "jobs",

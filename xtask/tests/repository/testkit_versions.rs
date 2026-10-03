@@ -129,6 +129,11 @@ fn data_testkit_dependencies_match_the_workspace_requirements() {
     assert_manifest_pins("crates/zeroship-data-testkit", 8);
 }
 
+#[test]
+fn workflow_testkit_dependencies_match_the_workspace_requirements() {
+    assert_manifest_pins("crates/zeroship-workflow-testkit", 10);
+}
+
 /// The data testkit speaks plain data and leaf crates, never a data-plane
 /// domain crate.
 ///
@@ -137,6 +142,30 @@ fn data_testkit_dependencies_match_the_workspace_requirements() {
 /// crate twice when its unit tests compile and the two copies' types would not
 /// unify. The dependency closure is the thing that has to stay clean; a domain
 /// type named inside the testkit is what would pull the edge back.
+#[test]
+fn workflow_testkit_depends_on_no_crate_whose_unit_tests_use_it() {
+    let root = repo::root();
+    let dir = root.join("crates/zeroship-workflow-testkit");
+    let source = std::fs::read_to_string(dir.join("Cargo.toml"))
+        .expect("read crates/zeroship-workflow-testkit/Cargo.toml");
+    let declared = dependencies(&source, "dependencies", &dir);
+    let forbidden = [
+        "zeroship-workflow",
+        "zeroship-workflow-runner",
+        "zeroship-worker",
+        "zeroship-workflow-v8",
+    ]
+    .into_iter()
+    .filter(|name| declared.contains_key(*name))
+    .collect::<Vec<_>>();
+    assert!(
+        forbidden.is_empty(),
+        "the workflow testkit must not depend on a crate whose own unit tests \
+         dev-depend on it; those tests would link the crate twice and its types \
+         would not unify: {forbidden:?}"
+    );
+}
+
 #[test]
 fn data_testkit_depends_on_no_data_plane_crate() {
     let root = repo::root();

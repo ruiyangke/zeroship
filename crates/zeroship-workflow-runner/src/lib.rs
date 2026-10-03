@@ -38,8 +38,7 @@ pub use outputs::{PreparedExecution, TaskPayloadLimits};
 #[path = "../../../tests/fixtures/workflow_deployments.rs"]
 mod deployment_fixture;
 #[cfg(test)]
-#[path = "../../../tests/fixtures/workflow_manager_queue.rs"]
-mod manager_queue;
+pub use zeroship_workflow_testkit::manager_queue;
 #[cfg(test)]
 #[path = "../../../tests/fixtures/workflow_journal.rs"]
 mod journal_fixture;

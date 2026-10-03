@@ -48,6 +48,7 @@ zeroship-workflow = { workspace = true }
 zeroship-storage = { workspace = true, features = ["s3"] }
 
 [dev-dependencies]
+zeroship-workflow-testkit = { path = "../zeroship-workflow-testkit" }
 tempfile = { workspace = true }
 toml = { workspace = true }
 testcontainers = { version = "0.28", default-features = false, features = ["blocking"] }
