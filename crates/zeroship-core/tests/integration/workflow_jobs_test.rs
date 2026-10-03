@@ -11,7 +11,7 @@ use zeroship_core::{
     },
     workflow_jobs::{
         BroadcastId, Delivery, DeliveryLease, DeploymentId, JobId, JobOperation, JobOutcome,
-        JobReceipt, JobSpec, ManagementCommand, PropagationId, SettlementReceipt, SubmitJob,
+        JobReceipt, JobSpec, ManagementCommand, PropagationId, SettlementReceipt,
     },
     workflow_schedules::ScheduleId,
 };
@@ -739,34 +739,8 @@ fn delivery_and_receipt_preserve_logical_and_attempt_identities() {
 }
 
 #[test]
-fn worker_publication_and_lease_replies_are_closed_and_carry_no_caller_expiry() {
+fn lease_replies_are_closed_and_carry_no_caller_expiry() {
     let value = delivery(JobOperation::Reconcile {});
-    let request = SubmitJob {
-        scope: AssignedScope {
-            app_id: value.job.app_id.clone(),
-            assignment_revision: value.assignment_revision,
-        },
-        job: value.job.clone(),
-    };
-    let wire = round_trip(&request);
-    assert_eq!(
-        wire,
-        json!({"scope":{
-        "appId":request.scope.app_id,"assignmentRevision":request.scope.assignment_revision,
-    },"job":request.job})
-    );
-    for path in ["", "/scope", "/job", "/job/operation"] {
-        for field in ["expiresAt", "input", "databaseUrl", "credentials"] {
-            let mut invalid = wire.clone();
-            invalid
-                .pointer_mut(path)
-                .unwrap()
-                .as_object_mut()
-                .unwrap()
-                .insert(field.into(), json!("untrusted"));
-            refuses::<SubmitJob>(invalid);
-        }
-    }
     let lease = DeliveryLease {
         delivery: value,
         remaining_ms: std::num::NonZeroU64::new(789).unwrap(),

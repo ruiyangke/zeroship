@@ -10,8 +10,8 @@ or V8. Remote origins require HTTPS, with two exceptions: literal loopback, and
 exact origins an operator lists in `plaintext_peers`, which is empty by default.
 Mutation callers retain their logical request identity across uncertain replies.
 
-`WorkerCoordinator` submits creator intents, claims jobs, heartbeats live grants
-and settles creator-committed outcomes. `LeasedJob` validates response identity
+`WorkerCoordinator` claims jobs, heartbeats live grants and settles
+creator-committed outcomes. `LeasedJob` validates response identity
 and holds a local monotonic deadline derived from remaining manager authority,
 charging the full request exchange. A late heartbeat cannot revive an expired
 grant. The executor must also enforce its original hard execution deadline.

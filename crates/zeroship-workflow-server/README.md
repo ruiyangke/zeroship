@@ -66,15 +66,16 @@ sequence. It records a historical receipt even before the app's first activation
 Delayed retries cannot disable a newer restore. Calendar disable preserves
 accepted jobs and recovery; it does not acknowledge worker policy changes.
 
-`POST /v1/jobs/{submit,claim,heartbeat,settle,release,receipt}` binds worker
+`POST /v1/jobs/{claim,heartbeat,settle,release,receipt}` binds worker
 identity to its enrolled signing key. Native callbacks recheck that exact key,
 and every callback that mutates an app's queue rechecks the stored app placement
 after the queue lock and before commit. Release is the deliberate exception the
 route records: a holder whose deployment was just parked must still be able to
-give work back, and the next dispatch rechecks availability. Workers cannot
-submit manager-owned cron or management commands. Claim and heartbeat replies
-transfer remaining lease duration after commit; worker wall clocks are not used
-to interpret the manager's absolute timestamps.
+give work back, and the next dispatch rechecks availability. Claim and heartbeat
+replies transfer remaining lease duration after commit; worker wall clocks are
+not used to interpret the manager's absolute timestamps. A committed creator
+intent reaches the queue through the manager's own `Queue::submit`, inside the
+process that owns the journal; no worker request path publishes one.
 
 A settlement carries the delivery and, when the holder has one, the execution to
 commit; it never carries an outcome or successors. The journal commits the

@@ -24,7 +24,7 @@ use zeroship_core::{
         AssignedScope, RegisterWorker, Revision, RunId, WorkerId, WorkerState,
     },
     workflow_jobs::{
-        BroadcastId, DeploymentId, JobId, JobOperation, JobOutcome, JobSpec, SubmitJob,
+        BroadcastId, DeploymentId, JobId, JobOperation, JobOutcome, JobSpec,
     },
     workflow_policy::{AppPolicy, EstablishIngress, PolicyLeaseRequest},
     workflow_schedules::DisableSchedules,
@@ -235,16 +235,7 @@ impl Host {
     }
 
     async fn publish(&self, job: &JobSpec) -> Result<JobSpec, Error> {
-        self.coordinator
-            .submit_job(
-                &self.worker,
-                &SubmitJob {
-                    scope: self.scope.clone(),
-                    job: job.clone(),
-                },
-                || ready(Ok(self.worker.clone())),
-            )
-            .await
+        self.queue.submit(job).await
     }
 
     async fn lease(&self, establish: Option<EstablishIngress>) -> Result<Option<Revision>, Error> {
@@ -381,7 +372,7 @@ async fn idleness(fixture: &Fixture) {
         Closing::Kept
     );
     assert_eq!(host.state().await.state, ScopeState::Open);
-    // Reported ingress and a worker publication each restart the idle window.
+    // Reported ingress restarts the idle window.
     let watchful = host.recovery(options(TICK * 5000, HOUR, HOUR, HOUR));
     rewind(fixture, &host.app, value!({"active_at":0})).await;
     watchful.note_ingress(&host.app).await.unwrap();
@@ -389,13 +380,6 @@ async fn idleness(fixture: &Fixture) {
         watchful.closing_turn(&host.app).await.unwrap(),
         Closing::Kept,
         "reported ingress restarts the idle window"
-    );
-    rewind(fixture, &host.app, value!({"active_at":0})).await;
-    host.publish(&fanout(&host.app, FUTURE)).await.unwrap();
-    assert_eq!(
-        watchful.closing_turn(&host.app).await.unwrap(),
-        Closing::Kept,
-        "a worker publication restarts the idle window"
     );
     // The same turn over the same aged row, with no activity, begins closing.
     rewind(fixture, &host.app, value!({"active_at":0})).await;

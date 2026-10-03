@@ -899,12 +899,6 @@ pub(crate) async fn claimed_in(tx: &Database, job: &JobSpec, now: i64) -> Result
     Ok(())
 }
 
-/// Publication re-arm, under the submission's app lock. A worker publication to
-/// a retired scope indicates stale evidence or a restored journal.
-pub(crate) async fn published_in(tx: &Database, app: &AppId, now: i64) -> Result<(), Error> {
-    Box::pin(activity_in(tx, app, now)).await
-}
-
 async fn activity_in(tx: &Database, app: &AppId, now: i64) -> Result<(), Error> {
     let Some(stored) = load(tx, app).await? else {
         return Ok(());

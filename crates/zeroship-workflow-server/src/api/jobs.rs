@@ -9,7 +9,7 @@ use zeroship_core::{
         AssignedScope, PayloadLocation, PayloadReservation, PinnedDeployment, ReadTaskPayload,
         ReservePayload, ResolveTaskExecutable, VerifyAssignment, WorkerId,
     },
-    workflow_jobs::{Delivery, JobSpec, JournalSettlement, SubmitJob},
+    workflow_jobs::{Delivery, JobSpec, JournalSettlement},
     workflow_policy::MAX_JOURNAL_BYTES_CEILING,
 };
 use zeroship_workflow::{
@@ -41,10 +41,6 @@ pub const SETTLE_BODY_BYTES: usize = MAX_JOURNAL_BYTES_CEILING + 8 * 1024;
 
 pub fn configure(config: &mut web::ServiceConfig) {
     config
-        .service(
-            web::resource(endpoints::WORKFLOW_JOB_SUBMIT.path_template())
-                .route(web::post().to(submit)),
-        )
         .service(
             web::resource(endpoints::WORKFLOW_JOB_CLAIM.path_template())
                 .route(web::post().to(claim)),
@@ -216,26 +212,6 @@ async fn ceiling(state: &SharedState, app: &AppId) -> Result<i64, NativeError> {
         .as_ref()
         .ok_or(NativeError::Unavailable)?;
     Ok(source.observe(app).await?.policy().max_delivery_attempts)
-}
-
-async fn submit(
-    request: web::HttpRequest,
-    state: State<SharedState>,
-    body: web::types::Payload,
-) -> web::HttpResponse {
-    respond(
-        async {
-            let actor = authenticate(&request, &state, endpoints::WORKFLOW_JOB_SUBMIT).await?;
-            let command: SubmitJob = read_json(&request, body).await?;
-            state
-                .service
-                .manager
-                .submit_job(actor.id(), &command, || revalidate(&state, &actor))
-                .await
-                .map_err(Error::from)
-        }
-        .await,
-    )
 }
 
 /// Claim a delivery and, for the one operation that hands out a task, accept it

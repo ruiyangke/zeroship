@@ -48,12 +48,15 @@ use zeroship_core::{
         Revision, RunScope, RunState, SignalOptions, SignalRun, StartRun, TransitionRun, WorkerId,
         WorkerState, WorkflowOutputRef,
     },
-    workflow_jobs::{DeploymentId, JobOperation, JobSpec, SubmitJob},
+    workflow_jobs::{DeploymentId, JobOperation, JobSpec},
     workflow_policy::AppPolicy,
 };
+use zeroship_data_orm::binding::DbBinding;
+use zeroship_core::schema_name::SchemaName;
 use zeroship_workflow_client::{Options as ClientOptions, RunError, WorkerCoordinator};
 use zeroship_workflow::service::delivery::{AcceptedJob, AppJournal, ClaimedTask};
 use zeroship_workflow_manager::recovery::Options as RecoveryOptions;
+use zeroship_workflow_manager::{Options as QueueOptions, Queue};
 use zeroship_workflow_server::coordinator::{connect_eligibility, Coordinator, Options};
 
 struct Fixture {
@@ -63,6 +66,9 @@ struct Fixture {
     client: WorkerCoordinator,
     scope: AssignedScope,
     app: AppId,
+    /// The service's queue, open in this process so a case can publish a
+    /// committed creator intent the way the service's own publication does.
+    queue: Queue,
 }
 
 impl Fixture {
@@ -131,6 +137,18 @@ impl Fixture {
         let assignment = platform
             .seed_placement(&app, &worker, Duration::from_mins(2))
             .await;
+        let queue = Queue::connect(
+            DbBinding::platform(
+                "workflow_manager",
+                "workflow_manager",
+                SchemaName::new("workflow_manager").unwrap(),
+            ),
+            &platform.runtime_url,
+            QueueOptions::default(),
+            holds::client(),
+        )
+        .await
+        .unwrap();
         Self {
             platform,
             _server: server,
@@ -140,6 +158,7 @@ impl Fixture {
                 assignment_revision: assignment.revision,
             },
             app,
+            queue,
         }
     }
 
@@ -664,11 +683,8 @@ async fn the_client_and_the_service_agree_on_a_release_and_a_receipt() {
     // submitted and claimed, which exercises the claim and its journal acceptance
     // on the way.
     let submitted = fixture
-        .client
-        .submit_job(&SubmitJob {
-            scope: fixture.scope.clone(),
-            job: job.clone(),
-        })
+        .queue
+        .submit(&job)
         .await
         .expect("the queue accepts a creator advance");
     assert_eq!(submitted, job);

@@ -22,7 +22,7 @@ use zeroship_core::{
     },
     workflow_jobs::{
         BroadcastId, DeploymentId, JobId, JobOperation, JobOutcome, JobSpec,
-        SettlementReceipt, SubmitJob,
+        SettlementReceipt,
     },
     workflow_policy::{AppPolicy, EstablishIngress, PolicyLeaseRequest},
 };
@@ -67,11 +67,6 @@ case!(
     claim_rearm
 );
 case!(
-    sqlite_worker_publication_reopens_a_retired_scope_once,
-    postgres_worker_publication_reopens_a_retired_scope_once,
-    publication_rearm
-);
-case!(
     sqlite_settlement_retires_only_drained_evidence,
     postgres_settlement_retires_only_drained_evidence,
     settlement
@@ -107,9 +102,9 @@ case!(
     activation
 );
 case!(
-    sqlite_workers_cannot_publish_closure_or_maintenance,
-    postgres_workers_cannot_publish_closure_or_maintenance,
-    worker_denial
+    sqlite_submission_refuses_closure,
+    postgres_submission_refuses_closure,
+    submission_refuses_closure
 );
 
 const KEY: &str = "verified-enrolled-key";
@@ -363,16 +358,7 @@ impl Host {
     }
 
     async fn publish(&self, job: &JobSpec) -> Result<JobSpec, Error> {
-        self.coordinator
-            .submit_job(
-                &self.worker,
-                &SubmitJob {
-                    scope: self.scope.clone(),
-                    job: job.clone(),
-                },
-                || ready(Ok(self.worker.clone())),
-            )
-            .await
+        self.queue.submit(job).await
     }
 
     /// Close the open scope with drained evidence and no competing work.
@@ -680,49 +666,6 @@ async fn claim_rearm(fixture: &Fixture) {
     assert_eq!(duties(fixture, &host.app).await.len(), 2);
 }
 
-/// Worker publication to a retired scope reopens it once; the exact retry and
-/// later publications find it open.
-async fn publication_rearm(fixture: &Fixture) {
-    let host = host(fixture).await;
-    assert_eq!(host.retire().await, revision(1));
-    let job = fanout(&host.app, FUTURE);
-    let checks = Cell::new(0);
-    let refused = host
-        .coordinator
-        .submit_job(
-            &host.worker,
-            &SubmitJob {
-                scope: host.scope.clone(),
-                job: job.clone(),
-            },
-            || {
-                checks.set(checks.get() + 1);
-                ready(if checks.get() >= 2 {
-                    Err(Error::Denied)
-                } else {
-                    Ok(host.worker.clone())
-                })
-            },
-        )
-        .await;
-    assert_eq!(refused.unwrap_err(), Error::Denied);
-    assert_eq!(host.state().await.state, ScopeState::Retired);
-    assert!(duties(fixture, &host.app).await.is_empty());
-
-    assert_eq!(host.publish(&job).await.unwrap(), job);
-    let reopened = host.state().await;
-    assert_eq!(reopened.state, ScopeState::Open);
-    assert_eq!(reopened.ingress_epoch, revision(2));
-    assert_eq!(duties(fixture, &host.app).await.len(), 2);
-    assert_eq!(host.publish(&job).await.unwrap(), job);
-    compio::time::sleep(Duration::from_millis(5)).await;
-    host.publish(&fanout(&host.app, FUTURE)).await.unwrap();
-    let later = host.state().await;
-    assert!(later.active_at > reopened.active_at, "publication is activity");
-    assert_eq!(Responsibility { active_at: reopened.active_at, ..later }, reopened);
-    assert_eq!(duties(fixture, &host.app).await.len(), 2);
-}
-
 /// Undrained evidence returns the attempt to open; drained evidence retires
 /// responsibility and keeps the scope row as the epoch's tombstone.
 async fn settlement(fixture: &Fixture) {
@@ -981,25 +924,12 @@ async fn no_starvation(fixture: &Fixture) {
     assert_eq!(host.state().await, reopened);
 }
 
-/// Workers cannot publish or name as a successor any closure or maintenance job.
-async fn worker_denial(fixture: &Fixture) {
+/// The general submission path refuses platform closure: a Close is published
+/// by the manager's recovery lane, never the path a committed creator intent
+/// takes. Creator work still settles with its own outcome, because closure and
+/// management alone are manager-owned.
+async fn submission_refuses_closure(fixture: &Fixture) {
     let host = host(fixture).await;
-    for operation in [
-        JobOperation::Close {
-            epoch: revision(1),
-        },
-        JobOperation::Reconcile {},
-        JobOperation::Collect {},
-    ] {
-        let job = JobSpec {
-            id: JobId::mint(),
-            app_id: host.app.clone(),
-            operation,
-            available_at: 0.try_into().unwrap(),
-        };
-        assert_eq!(host.publish(&job).await, Err(Error::Denied));
-        host.publish(&fanout(&host.app, FUTURE)).await.unwrap();
-    }
     let close = JobSpec {
         id: JobId::mint(),
         app_id: host.app.clone(),

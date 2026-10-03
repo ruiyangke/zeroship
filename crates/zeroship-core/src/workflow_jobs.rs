@@ -8,8 +8,8 @@ pub use zeroship_id::workflow::{BroadcastId, DeploymentId, JobId, PropagationId}
 use crate::{
     app_id::AppId,
     workflow_coordination::{
-        AssignedScope, ManagementOutcome, RequestId, RestartTarget, Revision, RunId, RunOperation,
-        UnixMillis, WorkerId,
+        ManagementOutcome, RequestId, RestartTarget, Revision, RunId, RunOperation, UnixMillis,
+        WorkerId,
     },
     workflow_schedules::ScheduleId,
 };
@@ -369,14 +369,6 @@ impl Identity {
         body.copy_from_slice(&digest[..16]);
         JobId::derived(body)
     }
-}
-
-/// Worker publication carries placement identity, never a caller-chosen expiry.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct SubmitJob {
-    pub scope: AssignedScope,
-    pub job: JobSpec,
 }
 
 /// A delivery lease does not replace the creator journal's execution fence.

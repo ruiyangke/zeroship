@@ -1,5 +1,4 @@
 use super::*;
-use std::future::ready;
 use zeroship_core::{
     service_peers::{service_issuer, CONTROL_SERVICE_NAME},
     workflow_coordination::{
@@ -115,15 +114,6 @@ async fn exercise_journal_job(fixture: &Fixture, queue: &Queue, operation: JobOp
     assert_eq!(spec.deployment_id(), None);
     assert_eq!(queue.submit(&spec).await.unwrap(), spec);
     assert_eq!(queue.submit(&spec).await.unwrap(), spec);
-    assert_eq!(
-        queue
-            .submit_authorized(&(&authority).into(), &spec, |_| ready(
-                Ok(authority.clone())
-            ))
-            .await
-            .unwrap(),
-        spec
-    );
     let granted = claim_for(queue, &authority, &spec).await.unwrap().unwrap();
     assert_eq!(granted.delivery().job, spec);
     let renewed = queue

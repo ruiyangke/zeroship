@@ -524,8 +524,6 @@ pub mod endpoints {
     );
     pub const WORKFLOW_POLICY_LEASE: ServiceEndpoint =
         ServiceEndpoint::new("workflow", "POST", "/v1/policy/lease");
-    pub const WORKFLOW_JOB_SUBMIT: ServiceEndpoint =
-        ServiceEndpoint::new("workflow", "POST", "/v1/jobs/submit");
     pub const WORKFLOW_JOB_CLAIM: ServiceEndpoint =
         ServiceEndpoint::new("workflow", "POST", "/v1/jobs/claim");
     pub const WORKFLOW_JOB_HEARTBEAT: ServiceEndpoint =
@@ -730,7 +728,6 @@ pub fn service_allowlist() -> &'static [ServiceAuthorization] {
                     endpoints::WORKFLOW_RENEW,
                     endpoints::WORKFLOW_RELEASE,
                     endpoints::WORKFLOW_POLICY_LEASE,
-                    endpoints::WORKFLOW_JOB_SUBMIT,
                     endpoints::WORKFLOW_JOB_CLAIM,
                     endpoints::WORKFLOW_JOB_HEARTBEAT,
                     endpoints::WORKFLOW_JOB_SETTLE,

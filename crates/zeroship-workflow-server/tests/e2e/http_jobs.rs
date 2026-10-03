@@ -36,10 +36,9 @@ use zeroship_core::{
     },
     workflow_jobs::{
         Delivery, DeploymentId, JobId, JobOperation, JobOutcome, JobSpec,
-        ManagementCommand, SettlementReceipt, SubmitJob,
+        ManagementCommand, SettlementReceipt,
     },
     workflow_policy::AppPolicy,
-    workflow_schedules::ScheduleId,
 };
 
 /// A renewal request naming no journal task: the caller holds a queue lease and
@@ -192,17 +191,10 @@ impl Fixture {
         .await
     }
     async fn submit(&self, job: &JobSpec) {
-        let (status, body) = self
-            .post(
-                endpoints::WORKFLOW_JOB_SUBMIT,
-                &SubmitJob {
-                    scope: self.scope(),
-                    job: job.clone(),
-                },
-            )
-            .await;
-        assert_eq!(status, StatusCode::OK, "{body}");
-        assert_eq!(serde_json::from_value::<JobSpec>(body).unwrap(), *job);
+        // A committed creator intent reaches the queue through the same trusted
+        // submission the service's own publication uses; no worker request path
+        // publishes any more.
+        assert_eq!(self.queue.submit(job).await.unwrap(), *job);
     }
     async fn claim(&self, job: &JobSpec) -> Delivery {
         self.claimed(job).await.0
@@ -468,6 +460,22 @@ async fn enroll(platform: &platform::Platform, http: &Client, url: &str, worker:
     assert_eq!(status, StatusCode::OK, "{body}");
 }
 
+/// A worker cannot publish a job over HTTP: a committed creator intent reaches
+/// the queue through `Queue::submit` inside the process that owns the journal,
+/// and no request path accepts a submission.
+#[ntex::test]
+async fn a_worker_cannot_submit_a_job() {
+    let fixture = Fixture::new().await;
+    let response = fixture
+        .http
+        .post(format!("{}/v1/jobs/submit", fixture.server.url))
+        .header("authorization", fixture.worker.assertion())
+        .send_json(&json!({}))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
 #[ntex::test]
 async fn delivery_and_receipts_remain_scoped_across_process_restart_and_placement_expiry() {
     let mut fixture = Fixture::new().await;
@@ -587,14 +595,6 @@ async fn assert_foreign_worker_denied(fixture: &Fixture, delivery: &Delivery) {
     .await;
     for (endpoint, body) in [
         (
-            endpoints::WORKFLOW_JOB_SUBMIT,
-            serde_json::to_value(SubmitJob {
-                scope: fixture.scope(),
-                job: fixture.job(),
-            })
-            .unwrap(),
-        ),
-        (
             endpoints::WORKFLOW_JOB_CLAIM,
             serde_json::to_value(fixture.scope()).unwrap(),
         ),
@@ -617,153 +617,12 @@ async fn assert_foreign_worker_denied(fixture: &Fixture, delivery: &Delivery) {
 }
 
 #[ntex::test]
-async fn queue_refuses_foreign_scope_and_platform_job_origins() {
-    let fixture = Fixture::new().await;
-    let job = fixture.job();
-    fixture.submit(&job).await;
-    let delivery = fixture.claim(&job).await;
-    let before = fixture.job_snapshot(&job).await;
-    let foreign = JobSpec {
-        app_id: AppId::mint(),
-        ..fixture.job()
-    };
-    let management = [
-        ManagementCommand::Transition {
-            operation: RunOperation::Pause,
-        },
-        ManagementCommand::RestartStarted { from: None },
-        ManagementCommand::RestartLatest {
-            deployment_id: DeploymentId::mint(),
-        },
-    ]
-    .into_iter()
-    .map(|command| JobSpec {
-        operation: JobOperation::Management {
-            request_id: RequestId::mint(),
-            run_id: RunId::mint(),
-            revision: 1.try_into().unwrap(),
-            command,
-        },
-        ..fixture.job()
-    });
-    let cron = JobSpec {
-        operation: JobOperation::Cron {
-            deployment_id: DeploymentId::mint(),
-            schedule_id: ScheduleId::mint(),
-            schedule_name: "daily-report".into(),
-            request_id: RequestId::mint(),
-            run_id: RunId::mint(),
-            revision: 1.try_into().unwrap(),
-            scheduled_at: 1.try_into().unwrap(),
-        },
-        ..fixture.job()
-    };
-    let activation = JobSpec {
-        operation: JobOperation::Activate {
-            deployment_id: DeploymentId::mint(),
-            revision: 1.try_into().unwrap(),
-        },
-        ..fixture.job()
-    };
-    for denied in [foreign, cron, activation].into_iter().chain(management) {
-        let submission = SubmitJob {
-            scope: fixture.scope(),
-            job: denied.clone(),
-        };
-        assert_eq!(
-            fixture
-                .post(endpoints::WORKFLOW_JOB_SUBMIT, &submission)
-                .await
-                .0,
-            StatusCode::FORBIDDEN
-        );
-        // A settlement has no successor field to carry one in.
-        assert_eq!(
-            fixture
-                .post(
-                    endpoints::WORKFLOW_JOB_SETTLE,
-                    &json!({"delivery": delivery, "successors": [denied]})
-                )
-                .await,
-            (StatusCode::BAD_REQUEST, json!({"code":"invalid"}))
-        );
-        assert!(fixture.job_snapshot(&denied).await.is_empty());
-        assert_eq!(fixture.job_snapshot(&job).await, before);
-    }
-    // The control: the same delivery without the field parses and is settled
-    // with the journal's own decision, which rejected an advance for a run it
-    // does not hold when the claim reached it.
-    let (status, body) = fixture
-        .post(endpoints::WORKFLOW_JOB_SETTLE, &committed(&delivery))
-        .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["outcome"], json!({"kind":"rejected"}));
-}
-
-async fn rejects_incomplete_job_envelopes(fixture: &Fixture) {
-    let candidate = fixture.job();
-    let submitted = serde_json::to_value(SubmitJob {
-        scope: fixture.scope(),
-        job: candidate.clone(),
-    })
-    .unwrap();
-    let mut bodies = Vec::new();
-    let mut missing = submitted.clone();
-    missing["job"]["operation"]
-        .as_object_mut()
-        .unwrap()
-        .remove("deploymentId");
-    bodies.push(missing);
-    let mut misplaced = submitted.clone();
-    misplaced["job"]["deploymentId"] = json!(candidate.deployment_id().unwrap());
-    bodies.push(misplaced);
-    for operation in [
-        json!({"kind":"activate", "revision":1}),
-        json!({"kind":"reconcile", "deploymentId":DeploymentId::mint()}),
-        json!({"kind":"collect", "deploymentId":DeploymentId::mint()}),
-        json!({"kind":"cron", "scheduleId":ScheduleId::mint(), "scheduleName":"daily-report",
-            "requestId":RequestId::mint(), "runId":RunId::mint(), "revision":1, "scheduledAt":0}),
-        json!({"kind":"management", "requestId":RequestId::mint(), "runId":RunId::mint(), "revision":1}),
-        json!({"kind":"management", "requestId":RequestId::mint(), "runId":RunId::mint(),
-            "command":{"kind":"transition","operation":"pause"}}),
-        json!({"kind":"management", "requestId":RequestId::mint(), "runId":RunId::mint(), "revision":1,
-            "command":{"kind":"restart_latest"}}),
-        json!({"kind":"management", "requestId":RequestId::mint(), "runId":RunId::mint(), "revision":1,
-            "command":{"kind":"transition","operation":"pause","input":"private"}}),
-        json!({"kind":"management", "requestId":RequestId::mint(), "runId":RunId::mint(), "revision":1,
-            "command":{"kind":"restart_started","deploymentId":DeploymentId::mint()}}),
-        json!({"kind":"management", "requestId":RequestId::mint(), "runId":RunId::mint(), "revision":1,
-            "command":{"kind":"restart_started","from":{"name":"step","input":"private"}}}),
-    ] {
-        let mut malformed = submitted.clone();
-        malformed["job"]["operation"] = operation;
-        bodies.push(malformed);
-    }
-    assert!(!bodies.is_empty());
-    for body in bodies {
-        let (status, failure) = fixture.post(endpoints::WORKFLOW_JOB_SUBMIT, &body).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "{failure}");
-        assert_eq!(failure, json!({"code":"invalid"}));
-    }
-    assert!(fixture.job_snapshot(&candidate).await.is_empty());
-}
-
-#[ntex::test]
 async fn queue_routes_authenticate_before_body_and_reject_open_metadata() {
     let fixture = Fixture::new().await;
     let job = fixture.job();
     fixture.submit(&job).await;
     let delivery = fixture.claim(&job).await;
-    rejects_incomplete_job_envelopes(&fixture).await;
     for (endpoint, mut body) in [
-        (
-            endpoints::WORKFLOW_JOB_SUBMIT,
-            serde_json::to_value(SubmitJob {
-                scope: fixture.scope(),
-                job: fixture.job(),
-            })
-            .unwrap(),
-        ),
         (
             endpoints::WORKFLOW_JOB_CLAIM,
             serde_json::to_value(fixture.scope()).unwrap(),
@@ -900,7 +759,6 @@ async fn enrollment_revocation_and_key_replacement_fence_blocked_queue_operation
     let fixture = Fixture::new().await;
     for replace_key in [false, true] {
         for operation in [
-            RequestKind::Submit,
             RequestKind::Claim,
             RequestKind::Heartbeat,
             RequestKind::Settle,
@@ -1009,7 +867,7 @@ async fn revoking_a_join_signer_denies_its_worker_while_a_sibling_signer_stays_a
         available_at: 1.try_into().unwrap(),
     };
 
-    // BEFORE: both workers can submit and claim from their own scope.
+    // BEFORE: both workers can claim from their own scope.
     let job_e = fixture.job();
     fixture.submit(&job_e).await;
     let claimed_e_before = fixture.claim(&job_e).await;
@@ -1018,18 +876,7 @@ async fn revoking_a_join_signer_denies_its_worker_while_a_sibling_signer_stays_a
         .await;
     assert_eq!(renew_e_before.0, StatusCode::OK, "{:?}", renew_e_before.1);
 
-    let (submit_g_status, body) = post(
-        &fixture.http,
-        &fixture.server.url,
-        endpoints::WORKFLOW_JOB_SUBMIT,
-        &worker_g.assertion(),
-        &SubmitJob {
-            scope: scope_g.clone(),
-            job: job_g.clone(),
-        },
-    )
-    .await;
-    assert_eq!(submit_g_status, StatusCode::OK, "{body}");
+    fixture.queue.submit(&job_g).await.unwrap();
     let (claim_g_before_status, _) = post(
         &fixture.http,
         &fixture.server.url,
@@ -1052,20 +899,16 @@ async fn revoking_a_join_signer_denies_its_worker_while_a_sibling_signer_stays_a
         .unwrap();
 
     // AFTER: E's worker is refused at the manager; F's worker is unaffected.
-    let job_e_after = fixture.job();
-    let (submit_e_after_status, _) = post(
+    let (claim_e_after_status, _) = post(
         &fixture.http,
         &fixture.server.url,
-        endpoints::WORKFLOW_JOB_SUBMIT,
+        endpoints::WORKFLOW_JOB_CLAIM,
         &fixture.worker.assertion(),
-        &SubmitJob {
-            scope: fixture.scope(),
-            job: job_e_after,
-        },
+        &fixture.scope(),
     )
     .await;
     assert_eq!(
-        submit_e_after_status,
+        claim_e_after_status,
         StatusCode::UNAUTHORIZED,
         "a revoked signer's worker must lose manager access"
     );
@@ -1081,19 +924,17 @@ async fn revoking_a_join_signer_denies_its_worker_while_a_sibling_signer_stays_a
         },
         available_at: 1.try_into().unwrap(),
     };
-    let (submit_g_after_status, body) = post(
+    fixture.queue.submit(&job_g_2).await.unwrap();
+    let (claim_g_after_status, body) = post(
         &fixture.http,
         &fixture.server.url,
-        endpoints::WORKFLOW_JOB_SUBMIT,
+        endpoints::WORKFLOW_JOB_CLAIM,
         &worker_g.assertion(),
-        &SubmitJob {
-            scope: scope_g.clone(),
-            job: job_g_2,
-        },
+        &scope_g,
     )
     .await;
     assert_eq!(
-        submit_g_after_status,
+        claim_g_after_status,
         StatusCode::OK,
         "an untouched signer's worker must be unaffected by a sibling's revocation: {body}"
     );
@@ -1181,7 +1022,6 @@ async fn management_snapshot(fixture: &Fixture) -> Vec<(String, String)> {
 
 #[derive(Clone, Copy)]
 enum RequestKind {
-    Submit,
     Claim,
     Heartbeat,
     Settle,
@@ -1191,7 +1031,6 @@ enum RequestKind {
 impl RequestKind {
     const fn endpoint(self) -> ServiceEndpoint {
         match self {
-            Self::Submit => endpoints::WORKFLOW_JOB_SUBMIT,
             Self::Claim => endpoints::WORKFLOW_JOB_CLAIM,
             Self::Heartbeat => endpoints::WORKFLOW_JOB_HEARTBEAT,
             Self::Settle | Self::Replay => endpoints::WORKFLOW_JOB_SETTLE,
@@ -1200,13 +1039,6 @@ impl RequestKind {
 }
 
 async fn blocked_request(fixture: &Fixture, job: &JobSpec, kind: RequestKind) -> Value {
-    if matches!(kind, RequestKind::Submit) {
-        return serde_json::to_value(SubmitJob {
-            scope: fixture.scope(),
-            job: job.clone(),
-        })
-        .unwrap();
-    }
     if matches!(kind, RequestKind::Settle | RequestKind::Replay) {
         // A settlement reaches the queue only with an outcome the journal decided:
         // the execution it commits first, or, for a replay, the receipt that

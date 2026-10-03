@@ -27,7 +27,6 @@ const CATALOG: &[ServiceEndpoint] = &[
     endpoints::WORKFLOW_RENEW,
     endpoints::WORKFLOW_RELEASE,
     endpoints::WORKFLOW_POLICY_LEASE,
-    endpoints::WORKFLOW_JOB_SUBMIT,
     endpoints::WORKFLOW_JOB_CLAIM,
     endpoints::WORKFLOW_JOB_HEARTBEAT,
     endpoints::WORKFLOW_JOB_SETTLE,
@@ -179,12 +178,6 @@ fn endpoint_catalog_records_exact_measured_operations() {
             "workflow",
             "POST",
             "/v1/assignments/release",
-        ),
-        (
-            endpoints::WORKFLOW_JOB_SUBMIT,
-            "workflow",
-            "POST",
-            "/v1/jobs/submit",
         ),
         (
             endpoints::WORKFLOW_POLICY_LEASE,
@@ -493,7 +486,6 @@ fn measured_allowlist_is_encoded_and_enforced_row_by_row() {
             endpoints::WORKFLOW_RENEW,
             endpoints::WORKFLOW_RELEASE,
             endpoints::WORKFLOW_POLICY_LEASE,
-            endpoints::WORKFLOW_JOB_SUBMIT,
             endpoints::WORKFLOW_JOB_CLAIM,
             endpoints::WORKFLOW_JOB_HEARTBEAT,
             endpoints::WORKFLOW_JOB_SETTLE,

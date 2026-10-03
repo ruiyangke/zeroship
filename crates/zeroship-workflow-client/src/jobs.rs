@@ -14,7 +14,7 @@ use zeroship_core::{
         ReadTaskPayload, ReservePayload, ResolveTaskExecutable,
     },
     workflow_jobs::{
-        Delivery, DeliveryLease, JobLease, JobOperation, JobSpec, SettlementReceipt, SubmitJob,
+        Delivery, DeliveryLease, JobLease, JobSpec, SettlementReceipt,
     },
 };
 
@@ -71,26 +71,6 @@ impl LeasedJob {
 }
 
 impl WorkerCoordinator {
-    /// Publish an app's durable intent under its current assignment.
-    ///
-    /// # Errors
-    /// Refuses foreign scope, manager-owned operations, failed exchanges and
-    /// receipts that change the submitted specification.
-    pub async fn submit_job(&self, request: &SubmitJob) -> Result<JobSpec, Error> {
-        if request.scope.app_id != request.job.app_id {
-            return Err(denied());
-        }
-        worker_publication(&request.job)?;
-        let submitted: JobSpec = self
-            .transport
-            .post(endpoints::WORKFLOW_JOB_SUBMIT, request)
-            .await?;
-        if submitted != request.job {
-            return Err(Error::InvalidResponse);
-        }
-        Ok(submitted)
-    }
-
     /// Claim an eligible job, capture its remaining delivery authority, and
     /// take the journal acceptance that came with it.
     ///
@@ -439,25 +419,6 @@ pub struct RenewedJob<R> {
     pub renewal: Option<R>,
     /// When this exchange began; see [`ClaimedJob::started`].
     pub started: Instant,
-}
-
-/// Workers publish only creator intents. Activation, calendar, management,
-/// closure and maintenance jobs are manager-origin.
-const fn worker_publication(job: &JobSpec) -> Result<(), Error> {
-    match job.operation {
-        // Retention decisions are the manager's; a worker never asks for a
-        // deployment to be given back.
-        JobOperation::Activate { .. }
-        | JobOperation::Cron { .. }
-        | JobOperation::ReleaseHold { .. }
-        | JobOperation::Management { .. }
-        | JobOperation::Close { .. }
-        | JobOperation::Reconcile {}
-        | JobOperation::Collect {} => Err(denied()),
-        JobOperation::Advance { .. }
-        | JobOperation::Fanout { .. }
-        | JobOperation::Propagate { .. } => Ok(()),
-    }
 }
 
 const fn denied() -> Error {

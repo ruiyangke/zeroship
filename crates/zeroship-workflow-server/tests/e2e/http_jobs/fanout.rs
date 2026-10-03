@@ -1,5 +1,6 @@
 use super::*;
 use zeroship_core::workflow_jobs::BroadcastId;
+use zeroship_workflow_manager::Error as ManagerError;
 
 fn fanout(fixture: &Fixture, broadcast: &BroadcastId, revision: i64) -> JobSpec {
     JobSpec {
@@ -69,64 +70,35 @@ async fn assert_fanout_substitution_refused(
         fanout(fixture, &BroadcastId::mint(), 1).operation,
         fanout(fixture, broadcast, 2).operation,
     ] {
-        let changed = SubmitJob {
-            scope: fixture.scope(),
-            job: JobSpec {
-                operation,
-                ..job.clone()
-            },
+        let changed = JobSpec {
+            operation,
+            ..job.clone()
         };
         assert_eq!(
-            fixture
-                .post(endpoints::WORKFLOW_JOB_SUBMIT, &changed)
-                .await
-                .0,
-            StatusCode::CONFLICT
+            fixture.queue.submit(&changed).await,
+            Err(ManagerError::Conflict)
         );
         assert_eq!(fixture.job_snapshot(job).await, before);
     }
-    let foreign = SubmitJob {
-        scope: fixture.scope(),
-        job: JobSpec {
-            app_id: AppId::mint(),
-            ..job.clone()
-        },
-    };
-    assert_eq!(
-        fixture
-            .post(endpoints::WORKFLOW_JOB_SUBMIT, &foreign)
-            .await
-            .0,
-        StatusCode::FORBIDDEN
-    );
-    assert!(fixture.job_snapshot(&foreign.job).await.is_empty());
 }
 
 #[ntex::test]
-async fn fanout_http_rejects_open_nested_metadata_and_invalid_identity() {
+async fn fanout_settlement_rejects_open_nested_metadata() {
     let fixture = Fixture::new().await;
     let broadcast = BroadcastId::mint();
     let job = fanout(&fixture, &broadcast, 1);
     fixture.submit(&job).await;
     let delivery = fixture.sweep(&job).await;
     let successor = fanout(&fixture, &broadcast, 2);
-    let submit = serde_json::to_value(SubmitJob {
-        scope: fixture.scope(),
-        job: successor.clone(),
-    })
-    .unwrap();
     let settled = committed(&delivery);
     let before = fixture.job_snapshot(&job).await;
-    for (endpoint, wire, path) in [
-        (endpoints::WORKFLOW_JOB_SUBMIT, &submit, "/job/operation"),
-        (
-            endpoints::WORKFLOW_JOB_SETTLE,
-            &settled,
-            "/delivery/job/operation",
-        ),
-    ] {
-        assert_invalid_fanout_fields(&fixture, endpoint, wire, path).await;
-    }
+    assert_invalid_fanout_fields(
+        &fixture,
+        endpoints::WORKFLOW_JOB_SETTLE,
+        &settled,
+        "/delivery/job/operation",
+    )
+    .await;
     assert_eq!(fixture.job_snapshot(&job).await, before);
     assert!(fixture.job_snapshot(&successor).await.is_empty());
     // The control: the unaltered settlement parses and is decided on what it

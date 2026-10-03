@@ -17,9 +17,8 @@ use zeroship_core::{
     },
     workflow_jobs::{
         BroadcastId, DeploymentId, JobId, JobOperation, JobOutcome, JobReceipt, JobSpec,
-        JournalSettlement, PropagationId, SettlementRefusal, SubmitJob,
+        JournalSettlement, PropagationId, SettlementRefusal,
     },
-    workflow_schedules::ScheduleId,
 };
 use zeroship_data_orm::{
     orm::{Database, Operation, Output},
@@ -668,11 +667,6 @@ async fn claim_authority(fixture: &Fixture) {
 }
 
 case!(
-    sqlite_worker_publication_restricts_manager_operations,
-    postgres_worker_publication_restricts_manager_operations,
-    worker_publication
-);
-case!(
     sqlite_delivery_revalidates_enrollment_and_replays_after_reassignment,
     postgres_delivery_revalidates_enrollment_and_replays_after_reassignment,
     delivery_enrollment
@@ -692,158 +686,18 @@ fn job(app: &AppId) -> JobSpec {
     }
 }
 
-fn publication(assignment: &Assignment, job: JobSpec) -> SubmitJob {
-    SubmitJob {
-        scope: scope(assignment),
-        job,
-    }
-}
-
-fn manager_operations() -> [JobOperation; 4] {
-    [
-        JobOperation::Activate {
-            deployment_id: DeploymentId::mint(),
-            revision: 1.try_into().unwrap(),
-        },
-        // Retention is the manager's decision; a worker cannot ask itself to
-        // give a deployment back.
-        JobOperation::ReleaseHold {
-            deployment_id: DeploymentId::mint(),
-        },
-        JobOperation::Cron {
-            deployment_id: DeploymentId::mint(),
-            schedule_id: ScheduleId::mint(),
-            schedule_name: "daily-report".into(),
-            request_id: RequestId::mint(),
-            run_id: RunId::mint(),
-            revision: 1.try_into().unwrap(),
-            scheduled_at: 0.try_into().unwrap(),
-        },
-        JobOperation::Management {
-            request_id: RequestId::mint(),
-            run_id: RunId::mint(),
-            revision: 1.try_into().unwrap(),
-            command: zeroship_core::workflow_jobs::ManagementCommand::Transition {
-                operation: RunOperation::Pause,
-            },
-        },
-    ]
-}
-
-#[expect(
-    clippy::too_many_lines,
-    reason = "publication rejection controls share the same scoped queue"
-)]
-async fn worker_publication(fixture: &Fixture) {
-    let (coordinator, queue) = host(fixture, Options::default()).await;
-    let worker = WorkerId::mint();
-    register(&coordinator, &worker, 1).await;
-    let assigned = place(&coordinator, &AppId::mint()).await;
-    let database = fixture.database().await;
-    for operation in manager_operations() {
-        let mut spec = job(&assigned.app_id);
-        spec.operation = operation;
-        let request = publication(&assigned, spec.clone());
-        assert_eq!(
-            coordinator
-                .submit_job(&worker, &request, || ready(Ok(worker.clone())))
-                .await,
-            Err(Error::Denied)
-        );
-        assert!(rows(&database, "jobs", value!({"id":spec.id.as_str()}))
-            .await
-            .is_empty());
-    }
-    let foreign = AppId::mint();
-    queue.register_scope(&foreign).await.unwrap();
-    let spec = job(&assigned.app_id);
-    for request in [
-        publication(&assigned, job(&foreign)),
-        SubmitJob {
-            scope: AssignedScope {
-                app_id: foreign,
-                ..scope(&assigned)
-            },
-            job: spec.clone(),
-        },
-        SubmitJob {
-            scope: AssignedScope {
-                assignment_revision: (assigned.revision.get() + 1).try_into().unwrap(),
-                ..scope(&assigned)
-            },
-            job: spec.clone(),
-        },
-    ] {
-        assert_eq!(
-            coordinator
-                .submit_job(&worker, &request, || ready(Ok(worker.clone())))
-                .await,
-            Err(Error::Denied)
-        );
-        assert!(
-            rows(&database, "jobs", value!({"id":request.job.id.as_str()}))
-                .await
-                .is_empty()
-        );
-    }
-    let request = publication(&assigned, spec.clone());
-    assert_eq!(
-        coordinator
-            .submit_job(&worker, &request, || ready(Ok(WorkerId::mint())))
-            .await,
-        Err(Error::Denied)
-    );
-    for _ in 0..2 {
-        assert_eq!(
-            coordinator
-                .submit_job(&worker, &request, || ready(Ok(worker.clone())))
-                .await
-                .unwrap(),
-            spec
-        );
-    }
-    assert_eq!(
-        rows(
-            &database,
-            "jobs",
-            value!({"app_id":assigned.app_id.as_str()})
-        )
-        .await
-        .len(),
-        1
-    );
-    let grant = coordinator
-        .claim_job(&worker, &scope(&assigned), Ok(support::delivery_ceiling()), || ready(Ok(worker.clone())))
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(&grant.lease().unwrap().delivery, grant.delivery());
-    // A settlement carries no successor, so a worker cannot name a
-    // manager-owned operation through one at all; the delivery settles with the
-    // outcome the journal decides.
-    let command = support::settlement_from(grant.delivery().clone(), JobOutcome::Completed {});
-    assert_eq!(
-        coordinator
-            .settle_job(&worker, &command, || ready(Ok(worker.clone())))
-            .await
-            .unwrap()
-            .outcome,
-        JobOutcome::Completed {}
-    );
-}
-
 #[expect(
     clippy::too_many_lines,
     reason = "enrollment failures and receipt replay share one delivery"
 )]
 async fn delivery_enrollment(fixture: &Fixture) {
-    let (coordinator, _) = host(fixture, Options::default()).await;
+    let (coordinator, queue) = host(fixture, Options::default()).await;
     let worker = WorkerId::mint();
     register(&coordinator, &worker, 1).await;
     let assigned = place(&coordinator, &AppId::mint()).await;
     let database = fixture.database().await;
     let spec = job(&assigned.app_id);
-    let request = publication(&assigned, spec.clone());
+    queue.submit(&spec).await.unwrap();
     let checks = Cell::new(0);
     let enrollment = || {
         checks.set(checks.get() + 1);
@@ -853,18 +707,6 @@ async fn delivery_enrollment(fixture: &Fixture) {
             Ok(worker.clone())
         })
     };
-    assert_eq!(
-        coordinator.submit_job(&worker, &request, enrollment).await,
-        Err(Error::Denied)
-    );
-    assert_eq!(checks.get(), 2);
-    assert!(rows(&database, "jobs", value!({"id":spec.id.as_str()}))
-        .await
-        .is_empty());
-    coordinator
-        .submit_job(&worker, &request, || ready(Ok(worker.clone())))
-        .await
-        .unwrap();
     checks.set(0);
     assert!(matches!(
         coordinator
@@ -1011,70 +853,6 @@ async fn delivery_enrollment(fixture: &Fixture) {
     );
 }
 
-#[compio::test]
-async fn postgres_job_enrollment_is_checked_after_waiting_for_scope_lock() {
-    let fixture = Fixture::new(Backend::Postgres).await;
-    let (coordinator, _) = host(&fixture, Options::default()).await;
-    let worker = WorkerId::mint();
-    register(&coordinator, &worker, 1).await;
-    let assigned = place(&coordinator, &AppId::mint()).await;
-    let request = publication(&assigned, job(&assigned.app_id));
-    let Admin::Postgres(admin) = &fixture.admin else {
-        unreachable!()
-    };
-    admin.batch_execute("BEGIN").await.unwrap();
-    assert_eq!(
-        admin
-            .query(
-                "SELECT id FROM workflow_manager.queue_scopes WHERE id=$1 FOR UPDATE",
-                &[&assigned.app_id.as_str()]
-            )
-            .await
-            .unwrap()
-            .len(),
-        1
-    );
-    let revoked = Cell::new(false);
-    let checks = Cell::new(0);
-    let release = async {
-        compio::time::timeout(Duration::from_secs(3), async {
-            loop {
-                admin.query_one("SELECT pg_stat_clear_snapshot()", &[]).await.unwrap();
-                let blocked: bool = admin.query_one(
-                    "SELECT EXISTS(SELECT 1 FROM pg_locks l JOIN pg_stat_activity a ON a.pid=l.pid WHERE a.usename='workflow_manager_test' AND NOT l.granted AND l.locktype='transactionid' AND a.query LIKE '%queue_scopes%' AND pg_backend_pid()=ANY(pg_blocking_pids(a.pid)))", &[],
-                ).await.unwrap().get(0);
-                if blocked { break; }
-                compio::time::sleep(Duration::from_millis(10)).await;
-            }
-        }).await.expect("job publication must reach the locked manager scope");
-        assert_eq!(checks.get(), 0);
-        revoked.set(true);
-        admin.batch_execute("ROLLBACK").await.unwrap();
-    };
-    let publication = coordinator.submit_job(&worker, &request, || {
-        checks.set(checks.get() + 1);
-        assert!(
-            revoked.get(),
-            "enrollment must be loaded after the scope wait"
-        );
-        ready(Err(Error::Denied))
-    });
-    let (result, ()) = futures::join!(publication, release);
-    assert_eq!(result, Err(Error::Denied));
-    assert_eq!(checks.get(), 1);
-    assert!(rows(
-        &fixture.database().await,
-        "jobs",
-        value!({"id":request.job.id.as_str()})
-    )
-    .await
-    .is_empty());
-    coordinator
-        .submit_job(&worker, &request, || ready(Ok(worker.clone())))
-        .await
-        .unwrap();
-}
-
 case!(
     sqlite_worker_publishes_scoped_fanout,
     postgres_worker_publishes_scoped_fanout,
@@ -1113,14 +891,15 @@ async fn propagation_publication(fixture: &Fixture) {
     journal_pages(fixture, "propagate", [page(1), page(2)], [foreign, page(2)]).await;
 }
 
-/// A code-free page operation is worker-published, then delivered to the lane
-/// and settled with its own scheduling outcome, without holds or executable and
-/// run projections.
+/// A code-free page operation is published by the service, then delivered to the
+/// lane and settled with its own scheduling outcome, without holds or executable
+/// and run projections.
 ///
-/// Publication and delivery part company here: a worker may publish a page,
-/// because the page is a creator intent it produced, and may not run one,
-/// because the page is a sweep of the journal. A page publishes its next page
-/// through the journal's frontier, never through the queue's settlement.
+/// Publication and delivery part company here: the page is published as a
+/// creator intent the journal produced, and the worker that holds the placement
+/// never runs it, because the page is a sweep of the journal. A page publishes
+/// its next page through the journal's frontier, never through the queue's
+/// settlement.
 async fn journal_pages(
     fixture: &Fixture,
     _kind: &str,
@@ -1135,7 +914,7 @@ async fn journal_pages(
         operation: first,
         ..job(&assigned.app_id)
     };
-    assert_publication_identity(&coordinator, &worker, &assigned, &spec, substitutes).await;
+    assert_publication_identity(&queue, &spec, substitutes).await;
     assert!(
         coordinator
             .claim_job(&worker, &scope(&assigned), Ok(support::delivery_ceiling()), || ready(Ok(worker.clone())))
@@ -1180,48 +959,18 @@ async fn journal_pages(
 }
 
 async fn assert_publication_identity(
-    coordinator: &Coordinator,
-    worker: &WorkerId,
-    assigned: &Assignment,
+    queue: &Queue,
     spec: &JobSpec,
     substitutes: [JobOperation; 2],
 ) {
-    let request = publication(assigned, spec.clone());
     for _ in 0..2 {
-        assert_eq!(
-            coordinator
-                .submit_job(worker, &request, || ready(Ok(worker.clone())))
-                .await
-                .unwrap(),
-            *spec
-        );
+        assert_eq!(queue.submit(spec).await.unwrap(), *spec);
     }
     for operation in substitutes {
-        let changed = publication(
-            assigned,
-            JobSpec {
-                operation,
-                ..spec.clone()
-            },
-        );
-        assert_eq!(
-            coordinator
-                .submit_job(worker, &changed, || ready(Ok(worker.clone())))
-                .await,
-            Err(Error::Conflict)
-        );
-    }
-    let foreign = publication(
-        assigned,
-        JobSpec {
-            app_id: AppId::mint(),
+        let changed = JobSpec {
+            operation,
             ..spec.clone()
-        },
-    );
-    assert_eq!(
-        coordinator
-            .submit_job(worker, &foreign, || ready(Ok(worker.clone())))
-            .await,
-        Err(Error::Denied)
-    );
+        };
+        assert_eq!(queue.submit(&changed).await, Err(Error::Conflict));
+    }
 }

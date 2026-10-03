@@ -26,7 +26,7 @@ use zeroship_core::{
     workflow_coordination::{AssignedScope, RegisterWorker, Revision, WorkerId, WorkerState},
     workflow_deployments::{HoldGeneration, HoldReceipt, HoldScope, HoldState},
     workflow_jobs::{
-        Delivery, DeploymentId, JobSpec, JournalSettlement, SettlementReceipt, SubmitJob,
+        Delivery, DeploymentId, JobSpec, JournalSettlement, SettlementReceipt,
     },
     workflow_schedules::{ActivateSchedules, RegisterSchedules, ScheduleDescriptor},
     zone_id::ZoneId,
@@ -348,20 +348,16 @@ impl LocalManager {
         })
     }
 
-    async fn submit(
-        &self,
-        scope: &AssignedScope,
-        job: &JobSpec,
-    ) -> Result<JobSpec, WorkflowServiceError> {
+    /// Publish a creator intent through the same trusted queue submission the
+    /// workflow service uses. The local host is its app's platform authority,
+    /// so nothing rechecks placement here; the publisher asserts the app.
+    ///
+    /// # Errors
+    /// Refuses reused identities with different content and unavailable storage.
+    async fn submit(&self, job: &JobSpec) -> Result<JobSpec, WorkflowServiceError> {
         self.coordinator
-            .submit_job(
-                &self.worker,
-                &SubmitJob {
-                    scope: scope.clone(),
-                    job: job.clone(),
-                },
-                || ready(Ok(self.worker.clone())),
-            )
+            .queue()
+            .submit(job)
             .await
             .map_err(manager_error)
     }
@@ -633,13 +629,9 @@ impl ManagerClient {
         .await
     }
 
-    async fn submit(
-        &self,
-        scope: &AssignedScope,
-        job: &JobSpec,
-    ) -> Result<JobSpec, WorkflowServiceError> {
-        let (scope, job) = (scope.clone(), job.clone());
-        self.call(move |manager| async move { manager.submit(&scope, &job).await }.boxed_local())
+    async fn submit(&self, job: &JobSpec) -> Result<JobSpec, WorkflowServiceError> {
+        let job = job.clone();
+        self.call(move |manager| async move { manager.submit(&job).await }.boxed_local())
             .await
     }
 
@@ -929,7 +921,7 @@ impl JobPublisher for LocalPublisher<'_> {
     }
 
     async fn submit(&self, job: &JobSpec) -> Result<JobSpec, WorkflowServiceError> {
-        self.client.submit(&self.scope, job).await
+        self.client.submit(job).await
     }
 }
 

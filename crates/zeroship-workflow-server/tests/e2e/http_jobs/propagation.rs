@@ -1,5 +1,6 @@
 use super::*;
 use zeroship_core::workflow_jobs::PropagationId;
+use zeroship_workflow_manager::Error as ManagerError;
 
 fn page(fixture: &Fixture, obligation: &PropagationId, revision: i64) -> JobSpec {
     JobSpec {
@@ -27,19 +28,13 @@ async fn propagation_delivery_preserves_scope_without_holds_and_publishes_nothin
         page(&fixture, &PropagationId::mint(), 1).operation,
         page(&fixture, &obligation, 2).operation,
     ] {
-        let changed = SubmitJob {
-            scope: fixture.scope(),
-            job: JobSpec {
-                operation,
-                ..job.clone()
-            },
+        let changed = JobSpec {
+            operation,
+            ..job.clone()
         };
         assert_eq!(
-            fixture
-                .post(endpoints::WORKFLOW_JOB_SUBMIT, &changed)
-                .await
-                .0,
-            StatusCode::CONFLICT
+            fixture.queue.submit(&changed).await,
+            Err(ManagerError::Conflict)
         );
         assert_eq!(fixture.job_snapshot(&job).await, before);
     }
@@ -77,40 +72,4 @@ async fn propagation_delivery_preserves_scope_without_holds_and_publishes_nothin
         .unwrap();
     assert_eq!(held.get::<_, i64>(0), 0);
     assert_foreign_worker_denied(&fixture, &delivery).await;
-}
-
-#[ntex::test]
-async fn propagation_http_rejects_customer_routing_state() {
-    let fixture = Fixture::new().await;
-    let obligation = PropagationId::mint();
-    let job = page(&fixture, &obligation, 1);
-    let submit = serde_json::to_value(SubmitJob {
-        scope: fixture.scope(),
-        job: job.clone(),
-    })
-    .unwrap();
-    for (field, value) in [
-        ("cursor", json!("private")),
-        ("runId", json!(RunId::mint())),
-        ("generation", json!(0)),
-        ("parents", json!(["private"])),
-        ("deploymentId", json!(DeploymentId::mint())),
-        ("propagationId", json!(RunId::mint())),
-        ("propagationId", Value::Null),
-        ("revision", json!(0)),
-        ("revision", Value::Null),
-    ] {
-        let mut invalid = submit.clone();
-        invalid.pointer_mut("/job/operation").unwrap()[field] = value;
-        assert_eq!(
-            fixture
-                .post(endpoints::WORKFLOW_JOB_SUBMIT, &invalid)
-                .await
-                .0,
-            StatusCode::BAD_REQUEST,
-            "{field}: {invalid}"
-        );
-    }
-    assert!(fixture.job_snapshot(&job).await.is_empty());
-    fixture.submit(&job).await;
 }

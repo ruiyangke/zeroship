@@ -5,37 +5,11 @@ use crate::{Claimant, DeliveryGrant, Error};
 use std::future::Future;
 use zeroship_core::{
     workflow_coordination::{AssignedScope, Assignment, VerifyAssignment, WorkerId},
-    workflow_jobs::{
-        Delivery, JobOperation, JobSpec, JournalSettlement, SettlementReceipt, SubmitJob,
-    },
+    workflow_jobs::{Delivery, JournalSettlement, SettlementReceipt},
 };
 use zeroship_data_orm::orm::Database;
 
 impl Coordinator {
-    /// Publish a creator intent while its enrolled worker still owns the app scope.
-    /// The host callback revalidates the originally authenticated instance key.
-    ///
-    /// # Errors
-    /// Rejects foreign scopes, manager-origin operations, revoked authority and storage failures.
-    pub async fn submit_job<F, Fut>(
-        &self,
-        worker: &WorkerId,
-        request: &SubmitJob,
-        authorize: F,
-    ) -> Result<JobSpec, Error>
-    where
-        F: Fn() -> Fut,
-        Fut: Future<Output = Result<WorkerId, Error>>,
-    {
-        let scope = selector(worker, &request.scope);
-        worker_operation(&request.job.operation)?;
-        self.queue
-            .submit_authorized(&scope, &request.job, |tx| {
-                self.delivery_authority(tx, &scope, &authorize)
-            })
-            .await
-    }
-
     /// Claim using current placement and enrollment, without accepting a caller expiry.
     ///
     /// The caller supplies the app's delivery ceiling from its own policy
@@ -150,26 +124,6 @@ fn delivery_selector(worker: &WorkerId, delivery: &Delivery) -> Result<VerifyAss
         worker_id: worker.clone(),
         assignment_revision: delivery.assignment_revision,
     })
-}
-
-/// Workers publish only creator intents. Activation, calendar, management,
-/// closure and maintenance jobs are manager-origin, so a worker can neither
-/// forge closure evidence nor postpone closing with self-published duties.
-const fn worker_operation(operation: &JobOperation) -> Result<(), Error> {
-    match operation {
-        JobOperation::Advance { .. } | JobOperation::Fanout { .. } | JobOperation::Propagate { .. } => {
-            Ok(())
-        }
-        // A worker that could publish a release would be asking itself to give
-        // code back, so retention stays the manager's decision.
-        JobOperation::Activate { .. }
-        | JobOperation::Cron { .. }
-        | JobOperation::ReleaseHold { .. }
-        | JobOperation::Management { .. }
-        | JobOperation::Close { .. }
-        | JobOperation::Reconcile {}
-        | JobOperation::Collect {} => Err(Error::Denied),
-    }
 }
 
 async fn enrolled<F, Fut>(worker: &WorkerId, authorize: &F) -> Result<WorkerId, Error>

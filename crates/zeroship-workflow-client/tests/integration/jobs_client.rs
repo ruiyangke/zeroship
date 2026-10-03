@@ -25,7 +25,7 @@ use zeroship_core::{
     },
     workflow_jobs::{
         BroadcastId, Delivery, DeploymentId, JobId, JobOperation, JobOutcome, JobSpec,
-        ManagementCommand, PropagationId, SettlementReceipt, SubmitJob,
+        ManagementCommand, PropagationId, SettlementReceipt,
     },
     workflow_schedules::ScheduleId,
 };
@@ -104,13 +104,6 @@ impl Fixture {
         };
         fixture.delivery.job = fixture.spec.clone();
         fixture
-    }
-
-    fn submission(&self) -> SubmitJob {
-        SubmitJob {
-            scope: self.scope.clone(),
-            job: self.spec.clone(),
-        }
     }
 
     /// An outcome the service's journal could have committed for this job.
@@ -361,14 +354,12 @@ async fn job_methods_preserve_identity_and_use_remaining_authority() {
 }
 
 async fn exercise_job_methods(fixture: &Fixture) {
-    let submit = fixture.submission();
     let mut renewed = fixture.delivery.clone();
     renewed.deadline = 0.try_into().unwrap();
     let settled = receipt(&renewed, fixture.outcome());
     peer(
         fixture,
         vec![
-            Exchange::new(endpoints::WORKFLOW_JOB_SUBMIT, &submit, json!(fixture.spec)),
             Exchange::claimed(&fixture.scope, lease(&fixture.delivery, 60_000)),
             Exchange::granted(endpoints::WORKFLOW_JOB_HEARTBEAT, &renewal(&fixture.delivery), lease(&renewed, 60_000)),
             Exchange::settled(&committed(&renewed), json!(settled)),
@@ -376,7 +367,6 @@ async fn exercise_job_methods(fixture: &Fixture) {
             Exchange::new(endpoints::WORKFLOW_JOB_CLAIM, &fixture.scope, Value::Null),
         ],
         async |client| {
-            assert_eq!(client.submit_job(&submit).await.unwrap(), fixture.spec);
             let claimed = client.claim_job::<AnyJournal>(&fixture.scope).await.unwrap().unwrap();
             assert_eq!(claimed.lease.delivery(), &fixture.delivery);
             assert!(claimed.lease.remaining().unwrap() <= Duration::from_secs(60));
@@ -467,26 +457,8 @@ async fn manager_dispatched_jobs_can_be_claimed_and_settled() {
 }
 
 #[compio::test]
-async fn submission_and_settlement_receipts_cannot_substitute_metadata() {
+async fn settlement_receipts_cannot_substitute_metadata() {
     let fixture = Fixture::new();
-    let submit = fixture.submission();
-    let mut altered_job = json!(fixture.spec);
-    altered_job["operation"]["deploymentId"] = json!(DeploymentId::mint());
-    peer(
-        &fixture,
-        vec![Exchange::new(
-            endpoints::WORKFLOW_JOB_SUBMIT,
-            &submit,
-            altered_job,
-        )],
-        async |client| {
-            assert_eq!(
-                client.submit_job(&submit).await.unwrap_err(),
-                Error::InvalidResponse
-            );
-        },
-    )
-    .await;
     let settled = fixture.receipt();
     for (field, value) in [
         ("jobId", json!(JobId::mint())),
@@ -799,21 +771,15 @@ async fn heartbeat_preserves_the_full_immutable_delivery() {
 }
 
 #[compio::test]
-async fn forbidden_publication_is_rejected_without_http() {
+async fn a_foreign_worker_delivery_is_rejected_without_http() {
     let fixture = Fixture::new();
     peer(&fixture, Vec::new(), async |client| {
-        let denied = Error::Refused(FailureCode::Denied);
-        let mut foreign = fixture.submission();
-        foreign.scope.app_id = AppId::mint();
-        assert_eq!(client.submit_job(&foreign).await.unwrap_err(), denied);
-        for operation in manager_operations() {
-            let mut command = fixture.submission();
-            command.job.operation = operation;
-            assert_eq!(client.submit_job(&command).await.unwrap_err(), denied);
-        }
         let mut delivery = fixture.delivery.clone();
         delivery.worker_id = WorkerId::mint();
-        assert_eq!(client.settle_committed(&delivery).await.unwrap_err(), denied);
+        assert_eq!(
+            client.settle_committed(&delivery).await.unwrap_err(),
+            Error::Refused(FailureCode::Denied)
+        );
     })
     .await;
 }
@@ -929,18 +895,7 @@ async fn fanout_replies_cannot_substitute_broadcast_or_revision() {
             revision: 2.try_into().unwrap(),
         },
     ];
-    let submit = fixture.submission();
     let mut exchanges = Vec::new();
-    for operation in &changes {
-        exchanges.push(Exchange::new(
-            endpoints::WORKFLOW_JOB_SUBMIT,
-            &submit,
-            json!(JobSpec {
-                operation: operation.clone(),
-                ..fixture.spec.clone()
-            }),
-        ));
-    }
     exchanges.push(Exchange::claimed(&fixture.scope, lease(&fixture.delivery, 60_000)));
     for operation in &changes {
         let changed = Delivery {
@@ -953,12 +908,6 @@ async fn fanout_replies_cannot_substitute_broadcast_or_revision() {
         exchanges.push(Exchange::granted(endpoints::WORKFLOW_JOB_HEARTBEAT, &renewal(&fixture.delivery), lease(&changed, 60_000)));
     }
     peer(&fixture, exchanges, async |client| {
-        for _ in &changes {
-            assert_eq!(
-                client.submit_job(&submit).await,
-                Err(Error::InvalidResponse)
-            );
-        }
         let job = client.claim_job::<AnyJournal>(&fixture.scope).await.unwrap().unwrap();
         for _ in &changes {
             assert_eq!(

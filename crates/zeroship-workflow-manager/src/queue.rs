@@ -258,8 +258,9 @@ impl Queue {
             .await
     }
 
-    /// Submit immutable metadata from a trusted manager operation.
-    /// Worker publication uses [`Self::submit_authorized`] to fence its outbox retry.
+    /// Submit immutable metadata from a trusted manager operation. A creator
+    /// journal's committed intents reach the queue through this path, with the
+    /// publication seam asserting the app before it calls here.
     ///
     /// # Errors
     /// Refuses unknown apps, reused identities with different content and storage failures.
@@ -286,74 +287,6 @@ impl Queue {
                     }
                     self.insert(&tx, job, self.clock.now().await?).await?;
                     Ok(Retention::Ready(job.clone()))
-                })
-                .await?;
-            match result {
-                Retention::Ready(job) => return Ok(job),
-                Retention::Acquire(deployment) => {
-                    self.ensure_deployment_for(&job.app_id, &deployment, budget.clone())
-                        .await?;
-                }
-            }
-        }
-    }
-
-    /// Publish an app's immutable job under its current host-authenticated assignment.
-    /// Invoke the host's enrollment and placement checks after the app lock and
-    /// before commit, including exact publication retries. The callback receives the active
-    /// transaction so placement reads share the queue's serialization boundary.
-    /// The host must separately authorize the requested operation's provenance.
-    ///
-    /// # Errors
-    /// Refuses foreign apps, revoked authority, changed job identities and failed transactions.
-    pub async fn submit_authorized<F, Fut>(
-        &self,
-        assignment: &VerifyAssignment,
-        job: &JobSpec,
-        mut authorize: F,
-    ) -> Result<JobSpec, Error>
-    where
-        F: FnMut(Database) -> Fut,
-        Fut: Future<Output = Result<Assignment, Error>>,
-    {
-        if job.app_id != assignment.app_id {
-            return Err(Error::Denied);
-        }
-        if matches!(
-            job.operation,
-            zeroship_core::workflow_jobs::JobOperation::Management { .. }
-                | zeroship_core::workflow_jobs::JobOperation::Close { .. }
-        ) {
-            return Err(Error::Invalid);
-        }
-        self.encode(job)?;
-        let budget = Budget::new(self.options.transaction_timeout);
-        loop {
-            let result = self
-                .transact_for(budget.clone(), |tx| {
-                    let authorize = &mut authorize;
-                    let budget = &budget;
-                    async move {
-                        lock_scope(&tx, &assignment.app_id).await?;
-                        let observed = authorize(tx.clone()).await?;
-                        let sample = self.clock.sample().await?;
-                        let authority = current(assignment, observed, sample.millis)?;
-                        budget.cap(sample, authority.expires_at.get())?;
-                        if !self.existing(&tx, job).await? {
-                            if let Some(deployment) = job.deployment_id() {
-                                if !retention::prepared(&tx, &job.app_id, deployment).await? {
-                                    return Ok(Retention::Acquire(deployment.clone()));
-                                }
-                            }
-                        }
-                        self.insert(&tx, job, sample.millis).await?;
-                        Box::pin(crate::recovery::published_in(&tx, &job.app_id, sample.millis)).await?;
-                        let observed = authorize(tx.clone()).await?;
-                        let sample = self.clock.sample().await?;
-                        let authority = current(assignment, observed, sample.millis)?;
-                        budget.cap(sample, authority.expires_at.get())?;
-                        Ok(Retention::Ready(job.clone()))
-                    }
                 })
                 .await?;
             match result {

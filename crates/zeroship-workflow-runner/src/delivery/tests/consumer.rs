@@ -964,14 +964,8 @@ impl zeroship_workflow::service::publication::JobPublisher for NativeManager {
     }
     async fn submit(&self, job: &JobSpec) -> Result<JobSpec, WorkflowServiceError> {
         self.coordinator
-            .submit_job(
-                &self.worker,
-                &zeroship_core::workflow_jobs::SubmitJob {
-                    scope: self.scope.clone(),
-                    job: job.clone(),
-                },
-                || async { Ok(self.worker.clone()) },
-            )
+            .queue()
+            .submit(job)
             .await
             .map_err(manager_error)
     }
