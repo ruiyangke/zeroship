@@ -32,50 +32,11 @@ use std::{
     pin::Pin,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use zeroship_core::{app_id::AppId, typed_id, workflow_coordination::WorkerId};
+use zeroship_core::{app_id::AppId, workflow_coordination::WorkerId, zone_id::ZoneId};
 use zeroship_data_orm::{
     orm::{Database, FromRow, UtcInstant},
     schema::Schema,
 };
-
-/// The typed id prefix of `zeroship.execution_zones`.
-const ZONE_PREFIX: &str = "ezn";
-
-/// The fixed identity of the single seeded zone row.
-const DEFAULT_ZONE: &str = "ezn_default000000000000000000";
-
-/// An operator-declared execution zone: worker deployment units that share
-/// creator-side connectivity.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ZoneId(String);
-
-impl ZoneId {
-    /// # Errors
-    /// Refuses text that is not a canonical execution zone id.
-    pub fn parse(text: &str) -> Result<Self, Error> {
-        typed_id::parse_with_prefix(text, ZONE_PREFIX).map_err(|_| Error::Storage)?;
-        Ok(Self(text.to_owned()))
-    }
-
-    /// A fresh zone identity, for hosts that provision their own zone rows.
-    #[must_use]
-    pub fn mint() -> Self {
-        Self(typed_id::generate(ZONE_PREFIX))
-    }
-
-    /// The zone a single-zone deployment seeds
-    /// (`db/migrations-ts/20260914000450_execution_zones_default_zone.ts`).
-    /// The local host composes its in-process worker into it.
-    #[must_use]
-    pub fn default_zone() -> Self {
-        Self(DEFAULT_ZONE.to_owned())
-    }
-
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
 
 /// Control's placement facts for one app.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -265,7 +226,7 @@ impl EligibilitySource for ControlEligibility {
                 .map_err(|_| Error::Unavailable)?;
             row.map(|row| {
                 Ok(AppFacts {
-                    zone: ZoneId::parse(&row.execution_zone_id)?,
+                    zone: ZoneId::parse(&row.execution_zone_id).map_err(|_| Error::Storage)?,
                     deleted: row.deleted_at.is_some(),
                 })
             })
@@ -290,7 +251,7 @@ impl EligibilitySource for ControlEligibility {
                 .map_err(|_| Error::Unavailable)?;
             row.map(|row| {
                 Ok(WorkerFacts {
-                    zone: ZoneId::parse(&row.execution_zone_id)?,
+                    zone: ZoneId::parse(&row.execution_zone_id).map_err(|_| Error::Storage)?,
                     active: row.status == "active"
                         && within_lease(row.expires_at, wall_clock_micros()),
                 })

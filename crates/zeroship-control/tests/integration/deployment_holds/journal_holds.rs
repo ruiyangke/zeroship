@@ -239,7 +239,7 @@ async fn the_lane_settles_a_hold_release_control_accepted() {
         )),
         Rc::new(
             zeroship_workflow_manager::eligibility::LocalEligibility::new(
-                zeroship_workflow_manager::eligibility::ZoneId::default_zone(),
+                zeroship_core::ZoneId::default_zone(),
             ),
         ),
     )
@@ -288,6 +288,8 @@ async fn the_lane_settles_a_hold_release_control_accepted() {
             app.clone(),
             7.try_into().unwrap(),
             AppPolicy::default(),
+            zeroship_core::ZoneId::default_zone(),
+            false,
             Instant::now() + Duration::from_secs(600),
         )
         .unwrap(),
@@ -413,7 +415,7 @@ async fn the_activation_sweep_records_controls_asserted_registration() {
         )),
         Rc::new(
             zeroship_workflow_manager::eligibility::LocalEligibility::new(
-                zeroship_workflow_manager::eligibility::ZoneId::default_zone(),
+                zeroship_core::ZoneId::default_zone(),
             ),
         ),
     )
@@ -441,6 +443,8 @@ async fn the_activation_sweep_records_controls_asserted_registration() {
             app.clone(),
             7.try_into().unwrap(),
             AppPolicy::default(),
+            zeroship_core::ZoneId::default_zone(),
+            false,
             Instant::now() + Duration::from_secs(600),
         )
         .unwrap(),

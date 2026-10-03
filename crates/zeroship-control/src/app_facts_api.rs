@@ -32,6 +32,7 @@ use zeroship_core::{
         SourceWatermark,
     },
     workflow_coordination::{Failure, FailureCode},
+    zone_id::ZoneId,
 };
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -121,6 +122,7 @@ async fn read(state: &AppState, apps: &[AppId]) -> Result<AppFactsResponse, Fail
     let rows = connection
         .query(
             "SELECT a.id, a.plan_id, a.workflows_enabled, \
+                    a.execution_zone_id, \
                     a.archived_at IS NOT NULL AS archived, \
                     a.deleted_at IS NOT NULL AS deleted, \
                     p.workflows_allowed, p.archived AS plan_archived, \
@@ -161,6 +163,11 @@ async fn read(state: &AppState, apps: &[AppId]) -> Result<AppFactsResponse, Fail
                 .map_err(unavailable)?
                 .to_owned(),
             workflows_enabled: row.try_get("workflows_enabled").map_err(unavailable)?,
+            execution_zone_id: ZoneId::parse(
+                row.try_get::<_, &str>("execution_zone_id")
+                    .map_err(unavailable)?,
+            )
+            .map_err(|_| FailureCode::Unavailable)?,
             archived: row.try_get("archived").map_err(unavailable)?,
             deleted: row.try_get("deleted").map_err(unavailable)?,
             plan: PlanSourceFacts {

@@ -253,6 +253,8 @@ impl Host {
                 self.app.clone(),
                 revision(1),
                 AppPolicy::default(),
+                zeroship_core::ZoneId::default_zone(),
+                false,
                 Instant::now() + HOUR,
             )
             .unwrap(),

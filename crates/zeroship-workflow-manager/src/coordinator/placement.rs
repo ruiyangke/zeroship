@@ -11,7 +11,6 @@
 use super::{count, deadline, one, revision, rows, timestamp, update, Coordinator, Error};
 use crate::{
     clock::Sample,
-    eligibility::ZoneId,
     models::{assignments, placement_receipts, workers, Placement, PlacementReceipt, Worker},
 };
 use zeroship_core::{
@@ -21,6 +20,7 @@ use zeroship_core::{
         AssignedScope, Assignment, ReleaseReason, ReleaseScope, RequestId, Revision,
         VerifyAssignment, WorkerId,
     },
+    zone_id::ZoneId,
 };
 use zeroship_data_orm::{
     orm::{Database, Entity},

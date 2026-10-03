@@ -707,6 +707,12 @@ pub fn new_worker_instance_id() -> String {
     generate(WORKER_INSTANCE_PREFIX)
 }
 
+/// Execution-zone typed-id prefix: one operator-declared set of worker
+/// deployment units that share creator-side connectivity. An app and a worker
+/// instance each belong to exactly one, and the two rows are frozen once
+/// written. Minted only by [`crate::zone_id::ZoneId::mint`].
+pub const EXECUTION_ZONE_PREFIX: &str = "ezn";
+
 /// Join-signer typed-id prefix: one row in `zeroship.worker_join_signers` per
 /// trusted signer, each permitted to mint join tokens for a declared set of
 /// execution zones.
@@ -998,6 +1004,7 @@ mod tests {
             ("payout_failure", PAYOUT_FAILURE_PREFIX),
             ("checkout_failure", CHECKOUT_FAILURE_PREFIX),
             ("reconcile_finding", RECONCILE_FINDING_PREFIX),
+            ("execution_zone", EXECUTION_ZONE_PREFIX),
         ];
         for (index, (name_a, prefix_a)) in prefixes.iter().enumerate() {
             for (name_b, prefix_b) in &prefixes[index + 1..] {

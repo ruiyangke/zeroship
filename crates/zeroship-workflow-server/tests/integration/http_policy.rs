@@ -185,10 +185,24 @@ impl Fixture {
         let expires = Instant::now() + Duration::from_secs(60);
         let source = Rc::new(Source {
             observations: [
-                PolicyObservation::new(app, 7.try_into().unwrap(), policy.clone(), expires)
-                    .unwrap(),
-                PolicyObservation::new(AppId::mint(), 7.try_into().unwrap(), policy, expires)
-                    .unwrap(),
+                PolicyObservation::new(
+                    app,
+                    7.try_into().unwrap(),
+                    policy.clone(),
+                    zeroship_core::ZoneId::default_zone(),
+                    false,
+                    expires,
+                )
+                .unwrap(),
+                PolicyObservation::new(
+                    AppId::mint(),
+                    7.try_into().unwrap(),
+                    policy,
+                    zeroship_core::ZoneId::default_zone(),
+                    false,
+                    expires,
+                )
+                .unwrap(),
             ],
             available: Cell::new(true),
             observed: Cell::new(0),

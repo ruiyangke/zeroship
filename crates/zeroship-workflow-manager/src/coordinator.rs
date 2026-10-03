@@ -12,7 +12,7 @@ mod policy;
 pub use placement::Placed;
 
 use crate::{
-    eligibility::{EligibilitySource, ZoneId},
+    eligibility::EligibilitySource,
     models::{
         assignments, management as management_records, placement_receipts, workers, Worker,
     },
@@ -25,6 +25,7 @@ use zeroship_core::{
     workflow_coordination::{
         RegisterWorker, RegisteredWorker, Revision, UnixMillis, WorkerId, WorkerState,
     },
+    zone_id::ZoneId,
 };
 use zeroship_data_orm::{
     orm::{

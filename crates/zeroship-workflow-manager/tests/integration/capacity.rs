@@ -18,6 +18,7 @@ use zeroship_core::{
     app_id::AppId,
     workflow_coordination::{AssignedScope, ReleaseReason, ReleaseScope, RequestId, WorkerId},
     workflow_jobs::JobSpec,
+    zone_id::ZoneId,
 };
 use zeroship_data_orm::{
     orm::{Operation, Output},
@@ -27,7 +28,6 @@ use zeroship_workflow_manager::{
     capacity::{
         self, Capacity, CapacityProvider, Exchange, Refusal, StaticPool, TargetState, Visit,
     },
-    eligibility::ZoneId,
     maintenance::MaintenanceAuthority,
 };
 

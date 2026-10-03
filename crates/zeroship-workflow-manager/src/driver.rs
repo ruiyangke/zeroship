@@ -7,7 +7,6 @@
 use crate::{
     capacity::{self, Capacity, CapacityProvider},
     coordinator::Coordinator,
-    eligibility::ZoneId,
     lifecycle::AppLifecycle,
     models::{
         capacity_demands, capacity_targets, jobs, recovery_duties,
@@ -24,7 +23,9 @@ use std::{
     rc::Rc,
     time::{Duration, Instant},
 };
-use zeroship_core::{app_id::AppId, workflow_jobs::DeploymentId, workflow_schedules::ScheduleId};
+use zeroship_core::{
+    app_id::AppId, workflow_jobs::DeploymentId, workflow_schedules::ScheduleId, zone_id::ZoneId,
+};
 use zeroship_data_orm::orm::{sql_types::Text, Field, Filter, FilterableColumn, FromRow};
 
 #[derive(Clone, Copy, Debug)]
@@ -413,7 +414,9 @@ impl Driver {
                 self.capacity.visit(&app).await?;
             }
             Candidate::Zone(zone) => {
-                self.capacity.reconcile(&ZoneId::parse(zone)?).await?;
+                self.capacity
+                    .reconcile(&ZoneId::parse(zone).map_err(|_| Error::Storage)?)
+                    .await?;
             }
         }
         Ok(())

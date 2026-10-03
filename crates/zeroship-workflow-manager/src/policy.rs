@@ -6,6 +6,7 @@ use zeroship_core::{
     app_id::AppId,
     workflow_coordination::{AssignedScope, Revision, WorkerId},
     workflow_policy::{AppPolicy, PolicyLease},
+    zone_id::ZoneId,
 };
 
 pub mod control;
@@ -18,6 +19,14 @@ pub struct PolicyObservation {
     app_id: AppId,
     revision: Revision,
     policy: AppPolicy,
+    /// The app's execution zone, frozen when Control created it. Retained from
+    /// the same source read that produced the policy; it does not move a
+    /// revision because it cannot change.
+    execution_zone_id: ZoneId,
+    /// `deleted_at` is set. Retained from the same source read; a deletion
+    /// follows an archive, which already advanced the revision, so it moves no
+    /// revision either.
+    deleted: bool,
     expires_at: Instant,
 }
 
@@ -31,6 +40,8 @@ impl PolicyObservation {
         app_id: AppId,
         revision: Revision,
         policy: AppPolicy,
+        execution_zone_id: ZoneId,
+        deleted: bool,
         expires_at: Instant,
     ) -> Result<Self, Error> {
         policy.validate().map_err(|_| Error::Unavailable)?;
@@ -42,6 +53,8 @@ impl PolicyObservation {
             app_id,
             revision,
             policy,
+            execution_zone_id,
+            deleted,
             expires_at,
         })
     }
@@ -59,6 +72,18 @@ impl PolicyObservation {
     #[must_use]
     pub const fn policy(&self) -> &AppPolicy {
         &self.policy
+    }
+
+    /// The app's frozen execution zone.
+    #[must_use]
+    pub const fn execution_zone_id(&self) -> &ZoneId {
+        &self.execution_zone_id
+    }
+
+    /// Terminal deletion, read beside the policy it does not change.
+    #[must_use]
+    pub const fn deleted(&self) -> bool {
+        self.deleted
     }
 
     #[must_use]

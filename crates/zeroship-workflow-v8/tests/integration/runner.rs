@@ -1487,7 +1487,7 @@ impl Manager {
             queue,
             Options::default(),
             std::rc::Rc::new(zeroship_workflow_manager::eligibility::LocalEligibility::new(
-                zeroship_workflow_manager::eligibility::ZoneId::default_zone(),
+                zeroship_core::ZoneId::default_zone(),
             )),
         )
         .unwrap();

@@ -814,7 +814,7 @@ impl NativeManager {
             database.queue.clone(),
             zeroship_workflow_manager::coordinator::Options::default(),
             Rc::new(zeroship_workflow_manager::eligibility::LocalEligibility::new(
-                zeroship_workflow_manager::eligibility::ZoneId::default_zone(),
+                zeroship_core::ZoneId::default_zone(),
             )),
         )
         .unwrap();
@@ -1330,6 +1330,8 @@ impl Policies {
                 app.clone(),
                 Revision::try_from(1).unwrap(),
                 AppPolicy::default(),
+                zeroship_core::ZoneId::default_zone(),
+                false,
                 Instant::now() + Duration::from_secs(600),
             )
             .unwrap(),
@@ -1628,6 +1630,8 @@ async fn the_lane_delivers_close_under_archived_policy_and_the_scope_retires() {
             app.clone(),
             Revision::try_from(2).unwrap(),
             archived.clone(),
+            zeroship_core::ZoneId::default_zone(),
+            false,
             Instant::now() + Duration::from_secs(600),
         )
         .unwrap(),

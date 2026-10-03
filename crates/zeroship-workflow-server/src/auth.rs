@@ -16,7 +16,7 @@ use zeroship_core::{
     service_peers::{service_issuer, WORKER_SERVICE_NAME},
     workflow_coordination::{WorkerId, AUDIENCE},
 };
-use zeroship_workflow_manager::eligibility::ZoneId;
+use zeroship_core::ZoneId;
 
 /// One live enrolled worker instance.
 ///

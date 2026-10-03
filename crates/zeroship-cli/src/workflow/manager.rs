@@ -29,6 +29,7 @@ use zeroship_core::{
         Delivery, DeploymentId, JobSpec, JournalSettlement, SettlementReceipt, SubmitJob,
     },
     workflow_schedules::{ActivateSchedules, RegisterSchedules, ScheduleDescriptor},
+    zone_id::ZoneId,
 };
 use zeroship_workflow::{
     deployment_holds::DeploymentHoldClient,
@@ -43,7 +44,7 @@ use zeroship_workflow_manager::{
     coordinator::{Coordinator, Options as CoordinatorOptions, Placed},
     deployments,
     driver::{Driver, Options as DriverOptions},
-    eligibility::{SoleWorker, ZoneId},
+    eligibility::SoleWorker,
     lifecycle::Undeletable,
     local::LocalPlatform,
     maintenance::MaintenanceAuthority,

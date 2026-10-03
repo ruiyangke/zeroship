@@ -17,12 +17,13 @@ use zeroship_core::{
     app_id::AppId,
     workflow_coordination::{RegisterWorker, Revision, RunId, WorkerId, WorkerState},
     workflow_jobs::{BroadcastId, DeploymentId, JobId, JobOperation, JobSpec},
+    zone_id::ZoneId,
 };
 use zeroship_workflow_manager::{
     capacity::{self, CapacityFuture, CapacityProvider, CapacityReply, CapacityRequest, Refusal},
     coordinator::{self, Coordinator},
     driver::{self, Driver},
-    eligibility::{AppFacts, EligibilityFuture, EligibilitySource, WorkerFacts, ZoneId},
+    eligibility::{AppFacts, EligibilityFuture, EligibilitySource, WorkerFacts},
     lifecycle::Undeletable,
     recovery, Error, Queue,
 };

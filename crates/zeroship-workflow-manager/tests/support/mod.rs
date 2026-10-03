@@ -15,6 +15,7 @@ use zeroship_core::{
     workflow_deployments::{HoldGeneration, HoldReceipt, HoldScope, HoldState},
     workflow_jobs::{Delivery, DeploymentId, JobOutcome, JobReceipt, JournalSettlement},
     workflow_policy::AppPolicy,
+    zone_id::ZoneId,
 };
 use zeroship_data_orm::{
     binding::DbBinding, encryption::ProjectKeySource, orm::Database, ConnectOptions,
@@ -23,7 +24,7 @@ use zeroship_workflow_manager::{
     capacity::LocalCapacity,
     coordinator::{self, Coordinator},
     driver::{self, Driver},
-    eligibility::{EligibilitySource, LocalEligibility, ZoneId},
+    eligibility::{EligibilitySource, LocalEligibility},
     lifecycle::{AppLifecycle, Undeletable},
     retention::HoldClient,
     Error, Queue,

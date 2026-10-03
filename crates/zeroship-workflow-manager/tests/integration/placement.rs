@@ -18,11 +18,12 @@ use zeroship_core::{
     workflow_coordination::{
         AssignedScope, ReleaseReason, ReleaseScope, RequestId, WorkerId,
     },
+    zone_id::ZoneId,
 };
 use zeroship_workflow_manager::{
     capacity::StaticPool,
     coordinator::{self, Coordinator, Placed},
-    eligibility::{SoleWorker, ZoneId},
+    eligibility::SoleWorker,
     Error,
 };
 

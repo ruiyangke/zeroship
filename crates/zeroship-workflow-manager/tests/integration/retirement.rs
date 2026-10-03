@@ -129,8 +129,15 @@ impl Source {
     fn new(app: &AppId, policy: AppPolicy) -> Self {
         Self {
             observation: RefCell::new(
-                PolicyObservation::new(app.clone(), revision(1), policy, Instant::now() + LONG)
-                    .unwrap(),
+                PolicyObservation::new(
+                    app.clone(),
+                    revision(1),
+                    policy,
+                    zeroship_core::ZoneId::default_zone(),
+                    false,
+                    Instant::now() + LONG,
+                )
+                .unwrap(),
             ),
         }
     }
@@ -141,6 +148,8 @@ impl Source {
             previous.app_id().clone(),
             revision(previous.revision().get() + 1),
             policy,
+            previous.execution_zone_id().clone(),
+            previous.deleted(),
             Instant::now() + LONG,
         )
         .unwrap();

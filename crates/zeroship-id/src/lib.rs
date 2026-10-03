@@ -49,6 +49,7 @@ pub mod project_id;
 pub mod typed_id;
 pub mod user_id;
 pub mod workflow;
+pub mod zone_id;
 
 pub use app_id::AppId;
 pub use binding_id::BindingId;
@@ -59,3 +60,4 @@ pub use invite_id::InviteId;
 pub use organization_id::OrganizationId;
 pub use project_id::ProjectId;
 pub use user_id::UserId;
+pub use zone_id::ZoneId;

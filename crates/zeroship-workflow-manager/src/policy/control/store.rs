@@ -12,7 +12,7 @@ use std::{
     time::{Duration, Instant},
 };
 use zeroship_core::{
-    app_id::AppId, workflow_coordination::Revision, workflow_policy::AppPolicy,
+    app_id::AppId, workflow_coordination::Revision, workflow_policy::AppPolicy, zone_id::ZoneId,
 };
 use zeroship_data_orm::{
     error::DbError,
@@ -132,7 +132,7 @@ impl ControlPolicyStore {
     pub async fn observe(&self, app: &AppId) -> Result<PolicyObservation, Error> {
         let started = Instant::now();
         let facts = self.facts.as_ref();
-        let (revision, policy, expires_at) = self
+        let (revision, policy, execution_zone_id, deleted, expires_at) = self
             .publication
             .transaction_with_options(
                 TransactionOptions::default().isolation_level(IsolationLevel::ReadCommitted),
@@ -140,7 +140,14 @@ impl ControlPolicyStore {
             )
             .await
             .map_err(|_| Error::Unavailable)?;
-        PolicyObservation::new(app.clone(), revision, policy, expires_at)
+        PolicyObservation::new(
+            app.clone(),
+            revision,
+            policy,
+            execution_zone_id,
+            deleted,
+            expires_at,
+        )
     }
 
     /// Publish operator switches and their finite source validity together.
@@ -300,7 +307,7 @@ async fn publish(
     facts: &dyn AppFactsSource,
     app: &AppId,
     started: Instant,
-) -> Result<(Revision, AppPolicy, Instant), DbError> {
+) -> Result<(Revision, AppPolicy, ZoneId, bool, Instant), DbError> {
     // An ID-only upsert leaves existing publication fields unchanged while
     // holding its write lock. Every contributor is read only after that wait
     // completes, including the ones behind Control's endpoint: the order of
@@ -415,6 +422,8 @@ async fn publish(
     Ok((
         Revision::try_from(revision).map_err(|_| unavailable())?,
         policy,
+        source.execution_zone_id.clone(),
+        source.deleted,
         expires_at,
     ))
 }

@@ -117,8 +117,15 @@ impl Source {
     fn new(app: &AppId, policy: AppPolicy, deadline: Instant) -> Self {
         Self {
             versions: RefCell::new(vec![Version {
-                observation: PolicyObservation::new(app.clone(), revision(7), policy, deadline)
-                    .unwrap(),
+                observation: PolicyObservation::new(
+                    app.clone(),
+                    revision(7),
+                    policy,
+                    zeroship_core::ZoneId::default_zone(),
+                    false,
+                    deadline,
+                )
+                .unwrap(),
                 current_deadline: deadline,
                 invalidated: false,
             }]),
@@ -181,6 +188,8 @@ impl Source {
                 previous.app_id().clone(),
                 next_revision,
                 policy,
+                previous.execution_zone_id().clone(),
+                previous.deleted(),
                 expires,
             )
             .unwrap(),
@@ -204,6 +213,8 @@ impl Source {
                 previous.app_id().clone(),
                 previous.revision(),
                 previous.policy().clone(),
+                previous.execution_zone_id().clone(),
+                previous.deleted(),
                 expires,
             )
             .unwrap(),
@@ -813,14 +824,22 @@ async fn retained_grants(fixture: &Fixture) {
 #[test]
 fn observations_reject_invalid_or_expired_raw_authority() {
     let app = AppId::mint();
-    let original =
-        PolicyObservation::new(app.clone(), revision(1), AppPolicy::default(), until(LONG))
-            .unwrap();
+    let original = PolicyObservation::new(
+        app.clone(),
+        revision(1),
+        AppPolicy::default(),
+        zeroship_core::ZoneId::default_zone(),
+        false,
+        until(LONG),
+    )
+    .unwrap();
     let cloned = original.clone();
     let replacement = PolicyObservation::new(
         app.clone(),
         original.revision(),
         original.policy().clone(),
+        original.execution_zone_id().clone(),
+        original.deleted(),
         original.expires_at(),
     )
     .unwrap();
@@ -832,6 +851,8 @@ fn observations_reject_invalid_or_expired_raw_authority() {
             app.clone(),
             revision(1),
             AppPolicy::default(),
+            zeroship_core::ZoneId::default_zone(),
+            false,
             Instant::now()
         ),
         Err(Error::Unavailable)
@@ -844,6 +865,8 @@ fn observations_reject_invalid_or_expired_raw_authority() {
                 lease_ms: 0,
                 ..AppPolicy::default()
             },
+            zeroship_core::ZoneId::default_zone(),
+            false,
             until(LONG)
         ),
         Err(Error::Unavailable)

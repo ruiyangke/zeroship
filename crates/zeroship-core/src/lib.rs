@@ -62,8 +62,8 @@ pub mod workflow_signal_token;
 // is the property being bought.
 pub use zeroship_id::{
     app_id, binding_id, database_id, deploy_command, entity_id, invite_id, organization_id,
-    project_id, typed_id, user_id, AppId, BindingId, DatabaseId, DeployCommandId, InviteId,
-    OrganizationId, ProjectId, UserId,
+    project_id, typed_id, user_id, zone_id, AppId, BindingId, DatabaseId, DeployCommandId,
+    InviteId, OrganizationId, ProjectId, UserId, ZoneId,
 };
 
 pub use superjson::Envelope;

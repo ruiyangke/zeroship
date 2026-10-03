@@ -152,6 +152,59 @@ async fn app_facts_answer_the_policy_inputs_and_the_deletion_marker() {
     );
 }
 
+/// The frozen execution zone crosses the app-facts contract, with a second app
+/// in another zone as the control: a handler that answered one constant would
+/// pass a single-app check and fail here.
+#[compio::test(crate = "crate::support::live::system")]
+async fn app_facts_answer_the_apps_frozen_zone_with_a_second_zone_control() {
+    let fixture = Fixture::new().await;
+    let home = zeroship_core::AppId::mint();
+    let away = zeroship_core::AppId::mint();
+    fixture.platform.seed_app(&home).await;
+    let away_zone = zeroship_core::ZoneId::mint();
+    fixture
+        .platform
+        .admin
+        .execute(
+            "INSERT INTO zeroship.execution_zones(id,name,status) VALUES($1,$2,'active')",
+            &[&away_zone.as_str(), &away_zone.as_str()],
+        )
+        .await
+        .unwrap();
+    fixture
+        .platform
+        .seed_app_in(&away, Some(away_zone.as_str()))
+        .await;
+    let control_server = fixture.control("http://127.0.0.1:1/".into()).await;
+    let client = ControlAppFacts::new(
+        &origin(&control_server),
+        fixture.workflow_role.clone(),
+        Options::default(),
+    )
+    .unwrap();
+
+    let response = client.observe(&[home.clone(), away.clone()]).await.unwrap();
+    let zone = |app: &zeroship_core::AppId| {
+        response
+            .apps
+            .iter()
+            .find(|facts| facts.app_id == *app)
+            .map(|facts| facts.execution_zone_id.clone())
+            .expect("the requested app is in the answer")
+    };
+    assert_eq!(
+        zone(&home),
+        zeroship_core::ZoneId::default_zone(),
+        "the app seeded without a zone carries the deployment's seeded zone"
+    );
+    assert_eq!(zone(&away), away_zone, "the second app carries its own zone");
+    assert_ne!(
+        zone(&home),
+        zone(&away),
+        "each app's own zone crosses, not one constant"
+    );
+}
+
 /// The client refuses a request it should never send, before any exchange.
 #[compio::test(crate = "crate::support::live::system")]
 async fn the_client_refuses_an_empty_or_oversized_request() {

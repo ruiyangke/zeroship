@@ -20,6 +20,7 @@
 //! that bounds it; nothing here expires.
 
 use crate::app_id::AppId;
+use crate::zone_id::ZoneId;
 use serde::{Deserialize, Serialize};
 
 /// How many apps one request may name.
@@ -86,6 +87,9 @@ pub struct AppSourceFacts {
     pub app_id: AppId,
     pub plan_id: String,
     pub workflows_enabled: bool,
+    /// The app's execution zone, fixed when Control created it. The workflow
+    /// service admits a worker to this app's work only in the same zone.
+    pub execution_zone_id: ZoneId,
     /// `archived_at` is set. Archived apps stay placeable for maintenance
     /// jobs; they do not admit new work.
     pub archived: bool,

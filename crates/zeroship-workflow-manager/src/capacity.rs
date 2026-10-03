@@ -27,7 +27,6 @@
 
 use crate::{
     coordinator::{Coordinator, Placed},
-    eligibility::ZoneId,
     models::{
         assignments, capacity_demands as demands, capacity_targets as targets, workers, Claimant,
         Worker,
@@ -45,6 +44,7 @@ use std::{
 use zeroship_core::{
     app_id::AppId,
     workflow_coordination::{Assignment, Revision, WorkerId},
+    zone_id::ZoneId,
 };
 use zeroship_data_orm::orm::{
     count_rows, ConflictTarget, Database, FromRow, Insertable, Patch,
@@ -330,7 +330,7 @@ impl TargetRow {
             return Err(Error::Storage);
         }
         Ok(Target {
-            zone: ZoneId::parse(&self.id)?,
+            zone: ZoneId::parse(&self.id).map_err(|_| Error::Storage)?,
             revision: self.revision,
             desired: self.desired,
             state: TargetState::parse(&self.state)?,

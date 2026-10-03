@@ -12,7 +12,7 @@ use zeroship_core::{
     service_assertion::{InMemoryReplayStore, ServiceAssertionVerifier, ServiceTrustBundle},
     service_identity::endpoints,
 };
-use zeroship_workflow_manager::eligibility::ZoneId;
+use zeroship_core::ZoneId;
 use zeroship_workflow_server::{
     auth::{PostgresWorkerRegistry, WorkflowAuth},
     coordinator::Error as HostError,

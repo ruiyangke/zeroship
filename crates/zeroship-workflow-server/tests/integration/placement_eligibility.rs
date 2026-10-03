@@ -14,8 +14,9 @@ use zeroship_core::{
     service_assertion::ServiceSigningKey,
     typed_id,
     workflow_coordination::{RegisterWorker, WorkerId, WorkerState},
+    zone_id::ZoneId,
 };
-use zeroship_workflow_manager::{coordinator::Placed, eligibility::ZoneId, Error};
+use zeroship_workflow_manager::{coordinator::Placed, Error};
 use zeroship_workflow_server::coordinator::{
     connect_eligibility, Coordinator, Error as HostError, Options,
 };

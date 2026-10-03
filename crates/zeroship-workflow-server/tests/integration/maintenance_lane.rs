@@ -67,6 +67,8 @@ impl Source {
                 app.clone(),
                 7.try_into().unwrap(),
                 AppPolicy::default(),
+                zeroship_core::ZoneId::default_zone(),
+                false,
                 Instant::now() + Duration::from_mins(10),
             )
             .unwrap(),

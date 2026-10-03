@@ -60,6 +60,7 @@ impl AppFactsSource for DatabaseAppFacts {
                 .client
                 .query(
                     "SELECT a.id, a.plan_id, a.workflows_enabled, \
+                            a.execution_zone_id, \
                             a.archived_at IS NOT NULL AS archived, \
                             a.deleted_at IS NOT NULL AS deleted, \
                             p.workflows_allowed, p.archived AS plan_archived, \
@@ -90,6 +91,10 @@ impl AppFactsSource for DatabaseAppFacts {
                     app_id: AppId::parse(row.get::<_, &str>("id")).unwrap(),
                     plan_id: row.get::<_, &str>("plan_id").to_owned(),
                     workflows_enabled: row.get("workflows_enabled"),
+                    execution_zone_id: zeroship_core::ZoneId::parse(
+                        row.get::<_, &str>("execution_zone_id"),
+                    )
+                    .expect("a seeded app carries a canonical zone id"),
                     archived: row.get("archived"),
                     deleted: row.get("deleted"),
                     plan: PlanSourceFacts {

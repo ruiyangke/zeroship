@@ -10,6 +10,8 @@ fn observation(app: &AppId) -> PolicyObservation {
         app.clone(),
         1.try_into().unwrap(),
         AppPolicy::default(),
+        zeroship_core::ZoneId::default_zone(),
+        false,
         Instant::now() + Duration::from_secs(30),
     )
     .unwrap()
@@ -150,6 +152,8 @@ fn equal_policy_restoration_never_revives_retired_observation() {
         app.clone(),
         retired.revision(),
         retired.policy().clone(),
+        retired.execution_zone_id().clone(),
+        retired.deleted(),
         retired.expires_at(),
     )
     .unwrap();
@@ -197,6 +201,8 @@ async fn expiration_requires_new_authoritative_values_and_never_revalidates_old_
         app.clone(),
         1.try_into().unwrap(),
         AppPolicy::default(),
+        zeroship_core::ZoneId::default_zone(),
+        false,
         deadline,
     )
     .unwrap();

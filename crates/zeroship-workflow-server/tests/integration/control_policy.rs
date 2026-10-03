@@ -12,7 +12,7 @@ use std::{
     num::NonZeroUsize,
     time::{Duration, Instant},
 };
-use zeroship_core::{AppId, schema_name::SchemaName, workflow_policy::AppPolicy};
+use zeroship_core::{AppId, ZoneId, schema_name::SchemaName, workflow_policy::AppPolicy};
 use zeroship_data_orm::{
     ConnectOptions, binding::DbBinding, encryption::ProjectKeySource, orm::Database,
 };
@@ -154,6 +154,89 @@ async fn readiness_checks_publication_grants_alone_with_an_empty_catalog() {
         .await
         .unwrap();
     source.ready().await.unwrap();
+}
+
+/// The app's frozen execution zone is retained from the same source read that
+/// publishes its policy. The app is seeded OUTSIDE the deployment's zone, so a
+/// path that carried the default rather than the app's own zone is caught.
+#[compio::test]
+async fn an_observation_carries_the_apps_frozen_zone() {
+    let fixture = Fixture::new().await;
+    let zone = ZoneId::mint();
+    fixture
+        .platform
+        .admin
+        .execute(
+            "INSERT INTO zeroship.execution_zones(id,name,status) VALUES($1,$2,'active')",
+            &[&zone.as_str(), &zone.as_str()],
+        )
+        .await
+        .unwrap();
+    let app = AppId::mint();
+    let plan = fixture
+        .platform
+        .seed_app_in(&app, Some(zone.as_str()))
+        .await;
+    fixture
+        .plans
+        .set_plan_policy(&plan, &AppPolicy::default())
+        .await
+        .unwrap();
+    fixture.operator.set_rollout(rollout()).await.unwrap();
+    let observed = fixture.source.observe(&app).await.unwrap();
+    assert_eq!(observed.execution_zone_id(), &zone);
+    assert_ne!(
+        observed.execution_zone_id(),
+        &ZoneId::default_zone(),
+        "the app is outside the seeded zone, so the observation is not defaulting"
+    );
+}
+
+/// A deletion is visible beside the policy, but it moves no revision: Control's
+/// `delete_app` requires the app to be archived first, and archive already
+/// masked admission and advanced the revision.
+#[compio::test]
+async fn an_archived_then_deleted_app_reports_deleted_at_its_archived_revision() {
+    let fixture = Fixture::new().await;
+    fixture.provision(&AppPolicy::default()).await;
+    fixture
+        .execute("UPDATE zeroship.apps SET archived_at=now() WHERE id=$1")
+        .await;
+    let archived = fixture.source.observe(&fixture.app).await.unwrap();
+    assert!(!archived.deleted(), "archive alone is not a deletion");
+    assert!(
+        !archived.policy().admission,
+        "archive masks admission in the same observation"
+    );
+
+    fixture
+        .execute(
+            "UPDATE zeroship.apps SET archived_at=now(), deleted_at=now(), project_id=NULL \
+             WHERE id=$1",
+        )
+        .await;
+    let deleted = fixture.source.observe(&fixture.app).await.unwrap();
+    assert!(deleted.deleted(), "the terminal deletion is visible");
+    assert_eq!(
+        deleted.revision(),
+        archived.revision(),
+        "deletion is not a policy input, so it does not move the revision"
+    );
+    assert_eq!(deleted.policy(), archived.policy());
+}
+
+/// The control for the deletion marker: an app archived but not deleted reports
+/// `deleted = false`, so the `deleted` assertion above is about `deleted_at`.
+#[compio::test]
+async fn an_archived_undeleted_app_reports_not_deleted() {
+    let fixture = Fixture::new().await;
+    fixture.provision(&AppPolicy::default()).await;
+    fixture
+        .execute("UPDATE zeroship.apps SET archived_at=now() WHERE id=$1")
+        .await;
+    let archived = fixture.source.observe(&fixture.app).await.unwrap();
+    assert!(!archived.policy().admission, "archive masks admission");
+    assert!(!archived.deleted(), "archived is not deleted");
 }
 
 #[compio::test]
@@ -607,6 +690,7 @@ async fn a_regressed_watermark_refuses_and_publishes_nothing() {
                 app_id: fixture.app.clone(),
                 plan_id: fixture.plan.clone(),
                 workflows_enabled: enabled,
+                execution_zone_id: zeroship_core::ZoneId::default_zone(),
                 archived: false,
                 deleted: false,
                 plan: zeroship_core::workflow_app_facts::PlanSourceFacts {

@@ -4,8 +4,9 @@ use zeroship_core::{
     service_assertion::{ServiceAssertionMinter, ServiceIssuer, ServiceSigningKey},
     typed_id,
     workflow_coordination::{WorkerId, AUDIENCE},
+    ZoneId,
 };
-use zeroship_workflow_manager::eligibility::{EligibilitySource, LocalEligibility, ZoneId};
+use zeroship_workflow_manager::eligibility::{EligibilitySource, LocalEligibility};
 
 /// Trusted single-zone facts for contracts that do not exercise eligibility:
 /// every app and worker is in the seeded zone and active.
