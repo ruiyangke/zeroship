@@ -1,11 +1,13 @@
-//! One migrated server shared by every test process of a worktree.
+//! One server shared by every test process of a worktree.
 //!
 //! Every test binary of a run - nextest's process-per-test, several `cargo test`
 //! binaries, an xtask-held run - joins the same server through this module. The
 //! processes elect one booter with an exclusive `flock` on a per-worktree
 //! directory under `target/`, then every process holds a shared lock on the same
 //! directory as its lease. A container-side watchdog watches that lease and
-//! removes the container once no process has held it for the idle grace.
+//! removes the container once no process has held it for the idle grace. The
+//! server is whatever [`Spec`] describes: the platform database, a bare
+//! PostgreSQL server, or a Redpanda broker.
 //!
 //! There is no environment variable anywhere in the protocol: a process learns
 //! the directory from the repository it was compiled in and the scope it is
@@ -142,23 +144,75 @@ impl Scope {
     }
 }
 
-/// How to run one kind of server and what database it serves.
+/// One published port in a [`Spec`].
+#[derive(Debug, Clone)]
+pub struct Port {
+    /// The port inside the container.
+    pub container: u16,
+    /// How the host port is chosen.
+    pub host: HostPort,
+}
+
+/// How a published port's host side is chosen.
+#[derive(Debug, Clone, Copy)]
+pub enum HostPort {
+    /// The daemon assigns an ephemeral host port once the container is running.
+    Assigned,
+    /// The shared mechanism reserves a free host port before the container runs
+    /// and substitutes it for [`HOST_PORT_TOKEN`] in [`Spec::args`]. A server
+    /// that advertises its host port to clients, such as Redpanda, needs this;
+    /// at most one port may reserve one.
+    Reserved,
+}
+
+/// The argument token a [`HostPort::Reserved`] port is substituted for.
+pub const HOST_PORT_TOKEN: &str = "{host_port}";
+
+/// Whether the image's entrypoint runs, or the watchdog replaces it.
+#[derive(Debug, Clone, Copy)]
+pub enum Entrypoint {
+    /// The image's own entrypoint runs and is handed the watchdog as its first
+    /// argument; the PostgreSQL entrypoint execs a non-`postgres` first
+    /// argument, which is what makes the watchdog PID 1.
+    Image,
+    /// The watchdog replaces the image's entrypoint. The image entrypoint must
+    /// not run, because the Redpanda entrypoint would exec `rpk` with the
+    /// watchdog as an argument.
+    Watchdog,
+}
+
+/// How to tell a server is ready and still answers.
+#[derive(Debug, Clone)]
+pub struct Readiness {
+    /// A substring the container's logs carry once the server has initialised.
+    pub log_marker: String,
+    /// Run in the container; exit 0 means the server is ready.
+    pub probe: Vec<String>,
+    /// Run in the container; exit 0 means a running server still answers.
+    pub answer: Vec<String>,
+}
+
+/// How to run one kind of server.
 #[derive(Debug, Clone)]
 pub struct Spec {
     /// The inputs the server is keyed to, part of the lease directory name.
     pub inputs: String,
     /// The image reference to run.
     pub image: String,
-    /// The database a ready server serves.
-    pub database: String,
-    /// The port the server listens on inside the container.
-    pub port: u16,
     /// The environment the container is started with.
     pub environment: Vec<(String, String)>,
+    /// The ports to publish. The first is the server's primary port, exposed on
+    /// [`Lease::port`] and [`Boot::port`].
+    pub ports: Vec<Port>,
     /// The program inside the image that runs the server and watches the lease.
     pub watchdog: String,
-    /// The arguments handed to the server after the watchdog and idle grace.
-    pub postgres_args: Vec<String>,
+    /// Whether the image's entrypoint runs, or the watchdog replaces it.
+    pub entrypoint: Entrypoint,
+    /// The server command, handed to the watchdog after the idle grace and
+    /// nonce.
+    pub args: Vec<String>,
+    /// How to tell the server is ready and still answers.
+    pub ready: Readiness,
 }
 
 /// A boot's view of the container it started, handed to the boot closure.
@@ -170,27 +224,13 @@ pub struct Boot {
     pub container_id: String,
     /// The container's deterministic name.
     pub name: String,
-    /// The host port mapped to the server's port.
+    /// The host port mapped to the server's primary port.
     pub port: u16,
-    /// The database a ready server serves.
-    pub database: String,
     /// The nonce naming this boot.
     pub nonce: String,
 }
 
 impl Boot {
-    /// The server's URL as its superuser, `postgres`.
-    #[must_use]
-    pub fn admin_url(&self) -> url::Url {
-        let mut url = url::Url::parse(&format!(
-            "postgresql://postgres:fixture@127.0.0.1/{}/",
-            self.database
-        ))
-        .expect("fixture database URL");
-        url.set_port(Some(self.port)).expect("fixture database port");
-        url
-    }
-
     /// Run one statement as the superuser through the container's `psql`.
     ///
     /// # Errors
@@ -340,7 +380,7 @@ fn ready(docker: &DockerCli, dir: &Path, spec: &Spec, session: &Arc<File>) -> Re
         }
     }
 
-    if answers(docker, container_id, &spec.database) {
+    if answers(docker, container_id, &spec.ready.answer) {
         return Ok(Ready::Joined(Lease {
             container_id: container_id.to_owned(),
             port: port as u16,
@@ -355,20 +395,15 @@ fn ready(docker: &DockerCli, dir: &Path, spec: &Spec, session: &Arc<File>) -> Re
     )))
 }
 
-/// Whether the container accepts a connection to `database`.
+/// Whether the container answers through the recipe's answer command.
 ///
 /// The probe stops as soon as the daemon says the container is gone, so a dead
 /// server costs one `docker exec` rather than the whole probe budget.
-fn answers(docker: &DockerCli, container_id: &str, database: &str) -> bool {
+fn answers(docker: &DockerCli, container_id: &str, answer: &[String]) -> bool {
     let deadline = Instant::now() + ANSWER_DEADLINE;
     loop {
         let mut command = docker.command();
-        command.args(["exec", container_id, "psql", "-U", "postgres"]).args([
-            "-d",
-            database,
-            "-tAc",
-            "SELECT 1",
-        ]);
+        command.args(["exec", container_id]).args(answer);
         if let Ok(output) = output_with_timeout(command, ANSWER_PROBE_TIMEOUT) {
             if output.status.success() {
                 return true;
@@ -438,7 +473,7 @@ fn boot_server(
     let outcome = catch_unwind(AssertUnwindSafe(|| -> Result<Lease, String> {
         remove_by_name(docker, &name);
         let container_id = run(docker, dir, spec, scope, &name, &nonce)?;
-        let port = mapped_port(docker, &container_id, spec.port)?;
+        let port = mapped_port(docker, &container_id, primary_container_port(spec)?)?;
 
         write_state(
             dir,
@@ -454,7 +489,6 @@ fn boot_server(
             container_id: container_id.clone(),
             name: name.clone(),
             port,
-            database: spec.database.clone(),
             nonce: nonce.clone(),
         };
         boot(&context)?;
@@ -540,6 +574,65 @@ fn panic_text(payload: Box<dyn Any + Send>) -> String {
     }
 }
 
+/// The container port of the server's primary published port.
+fn primary_container_port(spec: &Spec) -> Result<u16, String> {
+    spec.ports
+        .first()
+        .map(|port| port.container)
+        .ok_or_else(|| "the server recipe publishes no port".to_owned())
+}
+
+/// Reserve a free host port when the recipe asks for one.
+///
+/// # Errors
+/// When the recipe reserves more than one host port, because
+/// [`HOST_PORT_TOKEN`] names a single port, or no free port can be bound.
+fn reserve_host_port(spec: &Spec) -> Result<Option<u16>, String> {
+    let mut reserved = None;
+    for port in &spec.ports {
+        if matches!(port.host, HostPort::Reserved) {
+            if reserved.is_some() {
+                return Err(
+                    "the server recipe reserves more than one host port, but the arguments \
+                     name only one"
+                        .to_owned(),
+                );
+            }
+            reserved = Some(free_host_port()?);
+        }
+    }
+    Ok(reserved)
+}
+
+/// A free host port, bound and released so the daemon can bind it.
+fn free_host_port() -> Result<u16, String> {
+    let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .map_err(|error| format!("could not reserve a host port: {error}"))?;
+    listener
+        .local_addr()
+        .map(|address| address.port())
+        .map_err(|error| format!("could not read the reserved host port: {error}"))
+}
+
+/// Replace [`HOST_PORT_TOKEN`] in `args` with the reserved host port.
+///
+/// # Errors
+/// When an argument names the token but the recipe reserves no port.
+fn substitute_host_port(args: &[String], reserved: Option<u16>) -> Result<Vec<String>, String> {
+    let mut substituted = Vec::with_capacity(args.len());
+    for arg in args {
+        if arg.contains(HOST_PORT_TOKEN) {
+            let port = reserved.ok_or_else(|| {
+                format!("the argument {arg:?} names {HOST_PORT_TOKEN}, but no port reserves one")
+            })?;
+            substituted.push(arg.replace(HOST_PORT_TOKEN, &port.to_string()));
+        } else {
+            substituted.push(arg.clone());
+        }
+    }
+    Ok(substituted)
+}
+
 /// Start the container `spec` describes.
 fn run(
     docker: &DockerCli,
@@ -550,11 +643,25 @@ fn run(
     nonce: &str,
 ) -> Result<String, String> {
     let uid = uid();
+    let reserved = reserve_host_port(spec)?;
+    let args = substitute_host_port(&spec.args, reserved)?;
     let mut command = docker.command();
+    command.args(["run", "--detach", "--rm", "--name", name, "--hostname", name]);
+    for port in &spec.ports {
+        let host = match port.host {
+            HostPort::Assigned => None,
+            HostPort::Reserved => reserved,
+        };
+        let publish = match host {
+            Some(host) => format!("127.0.0.1:{host}:{}", port.container),
+            None => format!("127.0.0.1::{}", port.container),
+        };
+        command.arg("--publish").arg(publish);
+    }
+    if matches!(spec.entrypoint, Entrypoint::Watchdog) {
+        command.arg("--entrypoint").arg(&spec.watchdog);
+    }
     command
-        .args(["run", "--detach", "--rm", "--name", name, "--hostname", name])
-        .arg("--publish")
-        .arg(format!("127.0.0.1::{}", spec.port))
         .arg("--mount")
         .arg(format!(
             "type=bind,src={},dst={CONTAINER_DIR}",
@@ -569,12 +676,14 @@ fn run(
     for (key, value) in &spec.environment {
         command.arg("--env").arg(format!("{key}={value}"));
     }
+    command.arg(&spec.image);
+    if matches!(spec.entrypoint, Entrypoint::Image) {
+        command.arg(&spec.watchdog);
+    }
     command
-        .arg(&spec.image)
-        .arg(&spec.watchdog)
         .arg(scope.idle_grace.as_secs().to_string())
         .arg(nonce)
-        .args(&spec.postgres_args)
+        .args(&args)
         .stdin(Stdio::null());
 
     let output = command
@@ -688,24 +797,12 @@ fn wait_ready(docker: &DockerCli, container_id: &str, spec: &Spec) -> Result<(),
                 String::from_utf8_lossy(&logs.stdout),
                 String::from_utf8_lossy(&logs.stderr)
             );
-            initialised = text.contains("PostgreSQL init process complete");
+            initialised = text.contains(&spec.ready.log_marker);
         }
         if initialised {
-            let ready = docker
-                .command()
-                .args([
-                    "exec",
-                    container_id,
-                    "pg_isready",
-                    "-U",
-                    "postgres",
-                    "-h",
-                    "127.0.0.1",
-                    "-p",
-                    &spec.port.to_string(),
-                ])
-                .output();
-            if let Ok(ready) = ready {
+            let mut command = docker.command();
+            command.args(["exec", container_id]).args(&spec.ready.probe);
+            if let Ok(ready) = output_with_timeout(command, ANSWER_PROBE_TIMEOUT) {
                 if ready.status.success() {
                     return Ok(());
                 }

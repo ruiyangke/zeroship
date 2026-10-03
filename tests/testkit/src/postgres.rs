@@ -30,6 +30,12 @@ pub use image::{build, reference as image_ref};
 /// The database the shared platform migration is applied to.
 const DATABASE: &str = "zeroship_testkit";
 
+/// The watchdog baked into the PostgreSQL image.
+const WATCHDOG: &str = "/usr/local/bin/zeroship-watchdog";
+
+/// The port PostgreSQL listens on in the image.
+const POSTGRES_PORT: u16 = 5432;
+
 /// The pristine migrated database a fresh-database case is cloned from.
 ///
 /// It is created once by the elected booter, migrated, and then sealed with
@@ -207,16 +213,62 @@ fn spec() -> Result<shared::Spec, String> {
     .iter()
     .map(|argument| (*argument).to_owned())
     .collect();
-    let inputs = server_inputs(&root(), &image, &environment, &postgres_args)?;
+    let args = server_args(&postgres_args);
+    let inputs = server_inputs(&root(), &image, &environment, &args)?;
     Ok(shared::Spec {
         inputs,
         image,
-        database: DATABASE.to_owned(),
-        port: 5432,
         environment,
-        watchdog: "/usr/local/bin/zeroship-watchdog".to_owned(),
-        postgres_args,
+        ports: vec![port()],
+        watchdog: WATCHDOG.to_owned(),
+        entrypoint: shared::Entrypoint::Image,
+        args,
+        ready: readiness(DATABASE),
     })
+}
+
+/// The published port every PostgreSQL server from the image exposes.
+fn port() -> shared::Port {
+    shared::Port {
+        container: POSTGRES_PORT,
+        host: shared::HostPort::Assigned,
+    }
+}
+
+/// The server command handed to the watchdog after its grace and nonce.
+fn server_args(postgres_args: &[String]) -> Vec<String> {
+    let mut args = vec!["docker-entrypoint.sh".to_owned(), "postgres".to_owned()];
+    args.extend_from_slice(postgres_args);
+    args
+}
+
+/// How to tell a PostgreSQL server is ready and still answers.
+///
+/// The ready probe only needs the server up; the answer probe connects to the
+/// served database, so a database that was dropped makes a live server report
+/// unreachable rather than replaced.
+fn readiness(database: &str) -> shared::Readiness {
+    shared::Readiness {
+        log_marker: "PostgreSQL init process complete".to_owned(),
+        probe: vec![
+            "pg_isready".to_owned(),
+            "-U".to_owned(),
+            "postgres".to_owned(),
+            "-h".to_owned(),
+            "127.0.0.1".to_owned(),
+            "-p".to_owned(),
+            POSTGRES_PORT.to_string(),
+        ],
+        answer: vec![
+            "psql".to_owned(),
+            "-U".to_owned(),
+            "postgres".to_owned(),
+            "-d".to_owned(),
+            database.to_owned(),
+            "-tAc".to_owned(),
+            "SELECT 1".to_owned(),
+        ],
+    }
 }
 
 /// The 12-hex identity of a shared platform server built from `root`: every
@@ -225,7 +277,7 @@ fn spec() -> Result<shared::Spec, String> {
 /// The platform migration is applied by the CLI's compiled JavaScript over the
 /// native addon and the `@zeroship/migrate` dist, so all three are hashed: a
 /// changed addon or dist changes what the migration does without changing the
-/// corpus. The server's own environment and `postgres` arguments decide the
+/// corpus. The server's own environment and command arguments decide the
 /// running instance, so they are hashed too rather than described in prose.
 ///
 /// Public so a contract test can show that changing any hashed input moves it.
@@ -236,7 +288,7 @@ pub fn server_inputs(
     root: &Path,
     image: &str,
     environment: &[(String, String)],
-    postgres_args: &[String],
+    args: &[String],
 ) -> Result<String, String> {
     let mut parts: Vec<Vec<u8>> = vec![
         fingerprint::of_dir(root)?.into_bytes(),
@@ -244,7 +296,7 @@ pub fn server_inputs(
         SEED_PLAN.as_bytes().to_vec(),
     ];
 
-    for argument in postgres_args {
+    for argument in args {
         parts.push(argument.as_bytes().to_vec());
     }
     for (key, value) in environment {
@@ -311,8 +363,7 @@ fn hashed_files(dir: &Path, extensions: &[&str]) -> Result<Vec<Vec<u8>>, String>
 /// Run the platform migration into the pristine template and clone the working
 /// database from it.
 fn boot_platform(boot: &shared::Boot) -> Result<(), String> {
-    let mut template = boot.admin_url();
-    template.set_path(TEMPLATE_DATABASE);
+    let template = admin_url(boot, TEMPLATE_DATABASE);
     apply_migrations(template.as_str())?;
     boot.psql(TEMPLATE_DATABASE, SEED_PLAN)?;
     boot.psql(
@@ -331,6 +382,16 @@ fn role_url(base: &url::Url, role: &str) -> url::Url {
     let mut url = base.clone();
     url.set_username(role).unwrap();
     url.set_password(Some(role)).unwrap();
+    url
+}
+
+/// The URL of a database on `boot`'s server as the superuser, `postgres`.
+fn admin_url(boot: &shared::Boot, database: &str) -> url::Url {
+    let mut url = url::Url::parse(&format!(
+        "postgresql://postgres:fixture@127.0.0.1/{database}"
+    ))
+    .expect("fixture database URL");
+    url.set_port(Some(boot.port)).expect("fixture database port");
     url
 }
 

@@ -1,8 +1,11 @@
-//! The PostgreSQL image the platform and the bare server share.
+//! The Redpanda image the shared broker runs.
 //!
-//! The image is tagged by the content of everything that builds it, so a worktree
-//! whose Dockerfile or watchdog moved never overwrites another worktree's image
-//! and never runs a server built from the wrong recipe.
+//! It is the upstream broker image plus the shared shell watchdog, tagged by the
+//! content of everything that builds it, so a worktree whose Dockerfile or
+//! watchdog moved never overwrites another worktree's image and never runs a
+//! broker built from the wrong recipe. The Redpanda entrypoint execs `rpk`, so
+//! `shared::Entrypoint::Watchdog` makes the watchdog the container's entrypoint
+//! rather than passing it through the image's.
 
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
@@ -11,7 +14,7 @@ use sha2::{Digest, Sha256};
 use testcontainers::{runners::SyncBuilder, GenericBuildableImage, GenericImage};
 
 /// The image name every worktree builds under; the tag carries the content hash.
-pub const NAME: &str = "zeroship-testkit-postgres";
+pub const NAME: &str = "zeroship-testkit-redpanda";
 
 /// The tag the image is built and run under.
 ///
@@ -31,20 +34,17 @@ pub fn tag() -> String {
     digest[..12].to_string()
 }
 
-/// The image reference (`name:tag`) a shared server is run from.
+/// The image reference (`name:tag`) a shared broker is run from.
 #[must_use]
 pub fn reference() -> String {
     format!("{NAME}:{}", tag())
 }
 
-/// The pgvector + PostGIS image the bare server and the platform server run.
+/// The upstream Redpanda image plus the shared watchdog the broker runs under.
 ///
-/// Both fixtures start from one server build, so a test that passes on the bare
-/// server describes the same server the platform migration runs against. The
-/// build is keyed to the content tag: when the daemon already carries that tag
-/// the build is skipped, so every process of a run shares one build rather than
-/// rebuilding it. Later calls in this process return the same tag without asking
-/// the daemon again.
+/// The build is keyed to the content tag: when the daemon already carries that
+/// tag the build is skipped, so every process of a run shares one build rather
+/// than rebuilding it.
 ///
 /// # Errors
 /// When the Docker daemon cannot build the image.

@@ -1,17 +1,18 @@
 #!/bin/sh
-# PID 1 of a shared PostgreSQL container.
+# PID 1 of a shared test-server container.
 #
-# It starts the server the image's entrypoint would, then watches the host's
-# lease through the bind-mounted `session.lock`. A host test process holds a
-# shared lock on that file for as long as it uses the server; the probe here
-# takes the lock exclusively, which only succeeds once no host holds it. After
-# the idle grace passes with the lease free the container deletes the state file
-# naming it, stops the server and exits, and the `--rm` on the run removes the
+# It starts the server command it is handed, then watches the host's lease
+# through the bind-mounted `session.lock`. A host test process holds a shared
+# lock on that file for as long as it uses the server; the probe here takes the
+# lock exclusively, which only succeeds once no host holds it. After the idle
+# grace passes with the lease free the container deletes the state file naming
+# it, stops the server and exits, and the `--rm` on the run removes the
 # container.
 #
 # `$1` is the idle grace in seconds and `$2` the session nonce naming this boot;
-# the rest is handed to the image's entrypoint as the `postgres` server
-# arguments.
+# the rest is the server command, started as a child and supervised here. The
+# PostgreSQL image's entrypoint execs this watchdog, while the Redpanda image
+# runs it directly through `--entrypoint`; either way it is PID 1.
 set -u
 
 GRACE="${1:?the idle grace in seconds}"
@@ -29,12 +30,12 @@ STOP_BOUND=10
 # probe locks, so a host lock is what each probe competes with.
 exec 9<>"$LEASE"
 
-docker-entrypoint.sh postgres "$@" &
-postgres_pid=$!
+"$@" &
+server_pid=$!
 
 idle=0
 while :; do
-    if ! kill -0 "$postgres_pid" 2>/dev/null; then
+    if ! kill -0 "$server_pid" 2>/dev/null; then
         exit 1
     fi
     if flock -n -x 9; then
@@ -65,10 +66,10 @@ fi
 # Fast shutdown: SIGINT aborts the clients a smart shutdown would wait for, so a
 # stray connection cannot hold teardown open. SIGQUIT is immediate, SIGKILL the
 # last resort.
-kill -INT "$postgres_pid" 2>/dev/null
+kill -INT "$server_pid" 2>/dev/null
 stop_within() {
     waited=0
-    while kill -0 "$postgres_pid" 2>/dev/null; do
+    while kill -0 "$server_pid" 2>/dev/null; do
         [ "$waited" -ge "$1" ] && return 1
         waited=$((waited + 1))
         sleep 1
@@ -76,10 +77,10 @@ stop_within() {
     return 0
 }
 if ! stop_within "$STOP_BOUND"; then
-    kill -QUIT "$postgres_pid" 2>/dev/null
+    kill -QUIT "$server_pid" 2>/dev/null
     if ! stop_within "$STOP_BOUND"; then
-        kill -KILL "$postgres_pid" 2>/dev/null
+        kill -KILL "$server_pid" 2>/dev/null
     fi
 fi
-wait "$postgres_pid" 2>/dev/null
+wait "$server_pid" 2>/dev/null
 exit 0

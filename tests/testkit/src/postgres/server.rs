@@ -144,29 +144,31 @@ fn spec() -> Result<shared::Spec, String> {
     .iter()
     .map(|argument| (*argument).to_owned())
     .collect();
-    let inputs = inputs(&image, &environment, &postgres_args);
+    let args = super::server_args(&postgres_args);
+    let inputs = inputs(&image, &environment, &args);
     Ok(shared::Spec {
         inputs,
         image,
-        database: PROBE_DATABASE.to_owned(),
-        port: 5432,
         environment,
-        watchdog: "/usr/local/bin/zeroship-watchdog".to_owned(),
-        postgres_args,
+        ports: vec![super::port()],
+        watchdog: super::WATCHDOG.to_owned(),
+        entrypoint: shared::Entrypoint::Image,
+        args,
+        ready: super::readiness(PROBE_DATABASE),
     })
 }
 
 /// The 12-hex identity of a bare server built from the image, environment and
-/// `postgres` arguments, plus the extensions it installs and the template it
+/// command arguments, plus the extensions it installs and the template it
 /// seals.
-fn inputs(image: &str, environment: &[(String, String)], postgres_args: &[String]) -> String {
+fn inputs(image: &str, environment: &[(String, String)], args: &[String]) -> String {
     let mut parts: Vec<Vec<u8>> = vec![
         image.as_bytes().to_vec(),
         include_bytes!("extensions.sql").to_vec(),
         TEMPLATE.as_bytes().to_vec(),
         PROBE_DATABASE.as_bytes().to_vec(),
     ];
-    for argument in postgres_args {
+    for argument in args {
         parts.push(argument.as_bytes().to_vec());
     }
     for (key, value) in environment {

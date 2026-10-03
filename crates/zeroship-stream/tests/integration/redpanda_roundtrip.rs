@@ -1,109 +1,69 @@
-//! The Redpanda adapter against a real broker owned by this test binary.
+//! The Redpanda adapter against the one broker a worktree shares.
 //!
-//! The broker lives in a `static`, which libtest never drops, so it is started through
-//! the shared container reaper, which removes it once this process has ended.
+//! Every case joins [`zeroship_testkit::redpanda::broker()`] rather than
+//! starting a broker of its own: several brokers starting at once exhaust the
+//! host's global `fs.aio-max-nr`, and Seastar refuses to start under that
+//! condition. Each case mints its own topic and consumer group, so cases share
+//! the broker without sharing data. The broker's own lifetime is measured in
+//! `redpanda_lifetime`, which starts a private broker on purpose.
 
-use std::collections::BTreeMap;use std::net::{Ipv4Addr, TcpListener};
-use std::sync::OnceLock;
+use std::collections::BTreeMap;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures::executor::block_on;
 use serde_json::json;
-use testcontainers::core::{IntoContainerPort, WaitFor};
-use testcontainers::{GenericImage, ImageExt};
 use zeroship_stream::adapters;
 use zeroship_stream::{StreamConfig, StreamOffset, StreamRegistry};
 
-use zeroship_testkit::lifetime;
-use zeroship_testkit::{start_owned, DockerCli, OwnedContainer, Ownership};
-
-struct Redpanda {
-    owned: OwnedContainer,
-    brokers: String,
-}
-
-impl Redpanda {
-    fn start() -> Self {
-        let port = available_port();
-        let advertised = format!("external://127.0.0.1:{port}");
-        let request = GenericImage::new("docker.redpanda.com/redpandadata/redpanda", "v26.2.2")
-            .with_wait_for(WaitFor::message_on_stderr("Successfully started Redpanda!"))
-            .with_mapped_port(port, 19092.tcp())
-            .with_cmd([
-                "redpanda".to_owned(),
-                "start".to_owned(),
-                "--overprovisioned".to_owned(),
-                "--smp".to_owned(),
-                "1".to_owned(),
-                "--memory".to_owned(),
-                "512M".to_owned(),
-                "--reserve-memory".to_owned(),
-                "0M".to_owned(),
-                "--node-id".to_owned(),
-                "0".to_owned(),
-                "--check=false".to_owned(),
-                "--kafka-addr".to_owned(),
-                "external://0.0.0.0:19092".to_owned(),
-                "--advertise-kafka-addr".to_owned(),
-                advertised,
-                "--set".to_owned(),
-                "redpanda.auto_create_topics_enabled=true".to_owned(),
-            ])
-            .with_startup_timeout(Duration::from_secs(120));
-        let owned = start_owned(&DockerCli::system(), &Ownership::mint(), request)
-            .unwrap_or_else(|error| panic!("stream tests require Docker and Redpanda: {error}"));
-        Self {
-            owned,
-            brokers: format!("127.0.0.1:{port}"),
-        }
-    }
-}
-
-fn available_port() -> u16 {
-    TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-        .expect("bind an available Redpanda port")
-        .local_addr()
-        .expect("Redpanda listener address")
-        .port()
-}
-
-static REDPANDA: OnceLock<Redpanda> = OnceLock::new();
-
+/// The brokers string of the worktree's shared broker.
 fn brokers() -> String {
-    REDPANDA.get_or_init(Redpanda::start).brokers.to_owned()
+    zeroship_testkit::redpanda::broker().brokers()
 }
 
-/// The child test the broker's lifetime measurements run, by its full path in this
-/// binary.
+/// The transport settings for `group` against `topic`.
+fn config(brokers: &str, topic: &str, group: &str, client: &str) -> StreamConfig {
+    StreamConfig::from(json!({
+        "brokers": brokers,
+        "topic": topic,
+        "group.id": group,
+        "client_id": client,
+        "message_timeout_ms": 10000,
+        "publish_timeout_ms": 10000,
+        "poll_timeout_ms": 250,
+        "auto_offset_reset": "earliest"
+    }))
+}
+
+/// Publish `events` under a throwaway consumer group and drop the transport.
 ///
-/// `module_path!()` prefixes the crate name; libtest names a case by its module
-/// path without that prefix, so the first segment is dropped.
-fn child_test() -> String {
-    let module = module_path!();
-    let module = module.split_once("::").map_or(module, |(_, path)| path);
-    format!("{module}::the_redpanda_broker_reports_its_container")
-}
-
-#[test]
-fn the_redpanda_broker_reports_its_container() {
-    lifetime::report_owner();
-    let broker = REDPANDA.get_or_init(Redpanda::start);
-    assert!(
-        broker.brokers.starts_with("127.0.0.1:"),
-        "{}",
-        broker.brokers
-    );
-    lifetime::report_container(broker.owned.container().id());
-}
-
-#[test]
-fn the_redpanda_broker_is_removed_when_its_process_ends() {
-    lifetime::assert_removed_after_the_child_exits(&child_test());
-}
-
-#[test]
-fn the_redpanda_broker_is_removed_when_its_process_is_killed_while_starting() {
-    lifetime::assert_removed_after_a_kill_during_startup(&child_test());
+/// The broker auto-creates the topic on the first produce. A consumer that
+/// subscribed before that fetched metadata for a topic that did not exist yet
+/// and reports it unknown on its first poll, so the reader is built afterwards
+/// and subscribes to the topic that now exists. The publisher's own group is
+/// discarded so its consumer never competes with the reader's, because a
+/// transport builds a consumer alongside its producer.
+async fn publish(
+    registry: &StreamRegistry,
+    brokers: &str,
+    topic: &str,
+    group: &str,
+    client: &str,
+    events: &[(&str, u32)],
+) {
+    let publisher = registry
+        .build(
+            "redpanda",
+            &config(brokers, topic, &format!("{group}-publisher"), client),
+        )
+        .expect("redpanda publisher builds");
+    for (key, seq) in events {
+        let payload = format!("{key}:{seq}");
+        publisher
+            .publish(topic, key.as_bytes(), payload.as_bytes())
+            .await
+            .expect("publish test event");
+    }
+    drop(publisher);
 }
 
 #[test]
@@ -114,23 +74,10 @@ fn redpanda_roundtrip_preserves_per_key_order_and_commits_offsets() {
         let suffix = unique_suffix();
         let topic = format!("zeroship-stream-roundtrip-{suffix}");
         let group = format!("zeroship-stream-roundtrip-group-{suffix}");
+        let client = format!("zeroship-stream-test-{suffix}");
 
         let mut registry = StreamRegistry::default();
         adapters::register_builtin(&mut registry);
-        let config = StreamConfig::from(json!({
-            "brokers": brokers,
-            "topic": topic,
-            "group.id": group,
-            "client_id": format!("zeroship-stream-test-{suffix}"),
-            "message_timeout_ms": 10000,
-            "publish_timeout_ms": 10000,
-            "poll_timeout_ms": 250,
-            "auto_offset_reset": "earliest"
-        }));
-
-        let transport = registry
-            .build("redpanda", &config)
-            .expect("redpanda transport builds");
 
         let events = [
             ("subject-a", 0),
@@ -146,13 +93,20 @@ fn redpanda_roundtrip_preserves_per_key_order_and_commits_offsets() {
         let mut expected = BTreeMap::<String, Vec<u32>>::new();
         for (key, seq) in events {
             expected.entry(key.to_string()).or_default().push(seq);
-            let payload = format!("{key}:{seq}");
-            transport
-                .publish(&topic, key.as_bytes(), payload.as_bytes())
-                .await
-                .expect("publish test event");
         }
+        publish(
+            &registry,
+            &brokers,
+            &topic,
+            &group,
+            &client,
+            &events,
+        )
+        .await;
 
+        let transport = registry
+            .build("redpanda", &config(&brokers, &topic, &group, &client))
+            .expect("redpanda transport builds");
         let mut received = Vec::new();
         let deadline = Instant::now() + Duration::from_secs(20);
         while received.len() < events.len() && Instant::now() < deadline {
@@ -184,7 +138,7 @@ fn redpanda_roundtrip_preserves_per_key_order_and_commits_offsets() {
         drop(transport);
 
         let verifier = registry
-            .build("redpanda", &config)
+            .build("redpanda", &config(&brokers, &topic, &group, &client))
             .expect("redpanda verifier transport builds");
         let after_commit = verifier
             .poll(events.len())
@@ -205,31 +159,27 @@ fn redpanda_rewind_replays_from_retained_beginning_after_commit() {
         let suffix = unique_suffix();
         let topic = format!("zeroship-stream-rewind-{suffix}");
         let group = format!("zeroship-stream-rewind-group-{suffix}");
+        let client = format!("zeroship-stream-rewind-test-{suffix}");
 
         let mut registry = StreamRegistry::default();
         adapters::register_builtin(&mut registry);
-        let config = StreamConfig::from(json!({
-            "brokers": brokers,
-            "topic": topic.clone(),
-            "group.id": group,
-            "client_id": format!("zeroship-stream-rewind-test-{suffix}"),
-            "message_timeout_ms": 10000,
-            "publish_timeout_ms": 10000,
-            "poll_timeout_ms": 250,
-            "auto_offset_reset": "earliest"
-        }));
+
+        // The rewind case cares about offsets, so publish three records with
+        // explicit sequence payloads rather than the keyed events above.
+        let events = [("subject-a", 0), ("subject-a", 1), ("subject-a", 2)];
+        publish(
+            &registry,
+            &brokers,
+            &topic,
+            &group,
+            &client,
+            &events,
+        )
+        .await;
 
         let transport = registry
-            .build("redpanda", &config)
+            .build("redpanda", &config(&brokers, &topic, &group, &client))
             .expect("redpanda transport builds");
-        for seq in 0..3 {
-            let payload = format!("payload-{seq}");
-            transport
-                .publish(&topic, b"subject-a", payload.as_bytes())
-                .await
-                .expect("publish redpanda rewind event");
-        }
-
         let mut first = Vec::new();
         let deadline = Instant::now() + Duration::from_secs(20);
         while first.len() < 3 && Instant::now() < deadline {
@@ -241,7 +191,7 @@ fn redpanda_rewind_replays_from_retained_beginning_after_commit() {
         drop(transport);
 
         let verifier = registry
-            .build("redpanda", &config)
+            .build("redpanda", &config(&brokers, &topic, &group, &client))
             .expect("redpanda verifier transport builds");
         assert!(
             verifier

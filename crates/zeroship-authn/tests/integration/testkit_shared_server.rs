@@ -35,6 +35,7 @@ const CHILD_REPORT: &str = "integration::testkit_shared_server::child_join_repor
 const CHILD_JOURNAL: &str = "integration::testkit_shared_server::child_join_journal";
 const CHILD_BLOCK: &str = "integration::testkit_shared_server::child_join_block";
 const CHILD_BARE: &str = "integration::testkit_shared_server::child_bare_server_report";
+const CHILD_REDPANDA: &str = "integration::testkit_shared_server::child_join_redpanda_report";
 
 /// A throwaway lease directory under the worktree's `target`, canonical so its
 /// path is the one the container labels carry.
@@ -60,20 +61,39 @@ fn ensure_image() {
     let _ = zeroship_testkit::postgres::build().expect("build the shared PostgreSQL image");
 }
 
+/// The readiness of a throwaway PostgreSQL server for `database`.
+fn readiness(database: &str) -> shared::Readiness {
+    let list = |values: &[&str]| values.iter().map(|value| (*value).to_owned()).collect();
+    shared::Readiness {
+        log_marker: "PostgreSQL init process complete".to_owned(),
+        probe: list(&["pg_isready", "-U", "postgres", "-h", "127.0.0.1", "-p", "5432"]),
+        answer: list(&["psql", "-U", "postgres", "-d", database, "-tAc", "SELECT 1"]),
+    }
+}
+
 /// A throwaway server: the shared image, a database that always exists, and no
 /// migration.
 fn test_spec(inputs: &str) -> shared::Spec {
     shared::Spec {
         inputs: inputs.to_owned(),
         image: zeroship_testkit::postgres::image_ref(),
-        database: "postgres".to_owned(),
-        port: 5432,
         environment: vec![
             ("POSTGRES_PASSWORD".to_owned(), "fixture".to_owned()),
             ("POSTGRES_DB".to_owned(), "postgres".to_owned()),
         ],
+        ports: vec![shared::Port {
+            container: 5432,
+            host: shared::HostPort::Assigned,
+        }],
         watchdog: "/usr/local/bin/zeroship-watchdog".to_owned(),
-        postgres_args: vec!["-c".to_owned(), "max_connections=100".to_owned()],
+        entrypoint: shared::Entrypoint::Image,
+        args: vec![
+            "docker-entrypoint.sh".to_owned(),
+            "postgres".to_owned(),
+            "-c".to_owned(),
+            "max_connections=100".to_owned(),
+        ],
+        ready: readiness("postgres"),
     }
 }
 
@@ -81,11 +101,11 @@ fn test_spec(inputs: &str) -> shared::Spec {
 /// stop answering.
 fn victim_spec(inputs: &str) -> shared::Spec {
     let mut spec = test_spec(inputs);
-    spec.database = "victim".to_owned();
     spec.environment = vec![
         ("POSTGRES_PASSWORD".to_owned(), "fixture".to_owned()),
         ("POSTGRES_DB".to_owned(), "victim".to_owned()),
     ];
+    spec.ready = readiness("victim");
     spec
 }
 
@@ -292,6 +312,19 @@ fn child_join_block() {
 fn child_bare_server_report() {
     let postgres = zeroship_testkit::postgres::server::Postgres::start();
     println!("CONTAINER={}", postgres.container_id());
+}
+
+/// Child side of the broker contract: join a throwaway Redpanda broker and
+/// report what this process saw.
+#[test]
+#[ignore = "spawned by a contract test as a child process, with its scope on stdin"]
+fn child_join_redpanda_report() {
+    let dir = read_scope();
+    let spec = zeroship_testkit::redpanda::spec().expect("the Redpanda broker recipe");
+    let lease = shared::join(&Scope::at(&dir, GRACE), &spec, |_| Ok(())).expect("join the broker");
+    println!("CONTAINER={}", lease.container_id);
+    println!("NONCE={}", lease.nonce);
+    println!("BOOTED={}", lease.booted);
 }
 
 // --- identity ---------------------------------------------------------------------
@@ -664,6 +697,48 @@ fn two_processes_using_the_bare_server_get_one_container() {
         first, second,
         "two processes of a worktree must join its one bare server"
     );
+    cleanup(&dir);
+}
+
+/// Two processes join one Redpanda broker, and the watchdog removes it once the
+/// last lease is released.
+///
+/// The parent holds its own lease across both sequential children; without it
+/// the watchdog would remove the broker after the grace between them and the
+/// second child would boot a new one.
+#[test]
+fn two_processes_share_one_redpanda_broker() {
+    let dir = scratch("redpanda-shared");
+    let spec = zeroship_testkit::redpanda::spec().expect("the Redpanda broker recipe");
+    let held = shared::join(&Scope::at(&dir, GRACE), &spec, |_| Ok(())).expect("boot the broker");
+    let id = held.container_id.clone();
+
+    let (status, lines) = run_child(CHILD_REDPANDA, &dir);
+    assert!(
+        status.success(),
+        "the first broker child failed:\n{}",
+        lines.join("\n")
+    );
+    let first = field(&lines, "CONTAINER=");
+    assert_eq!(
+        field(&lines, "BOOTED="),
+        "false",
+        "a child must join the broker the parent booted"
+    );
+
+    let (status, lines) = run_child(CHILD_REDPANDA, &dir);
+    assert!(
+        status.success(),
+        "the second broker child failed:\n{}",
+        lines.join("\n")
+    );
+    let second = field(&lines, "CONTAINER=");
+
+    assert_eq!(first, id, "a child must join the broker the parent booted");
+    assert_eq!(second, id, "both children must join the one broker");
+
+    drop(held);
+    wait_removed(&id, REMOVAL_BOUND);
     cleanup(&dir);
 }
 

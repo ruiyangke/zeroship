@@ -17,6 +17,7 @@
 //!   process is killed while the container is still starting.
 //! - [`postgres`] is the platform and bare servers every test process of a
 //!   worktree shares, and the case databases cloned from them.
+//! - [`redpanda`] is the broker every stream test process of a worktree shares.
 //! - [`redis`] owns the Redis and Dragonfly servers the driver, KV and binding
 //!   suites share.
 //! - [`tenant`] mints the scoped org/project/app/user ids a case owns.
@@ -28,6 +29,7 @@ pub mod docker;
 pub mod fingerprint;
 pub mod nested_cargo;
 pub mod postgres;
+pub mod redpanda;
 pub mod redis;
 pub mod s3;
 pub mod session_keys;

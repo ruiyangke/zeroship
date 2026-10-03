@@ -4,5 +4,6 @@
 //! nothing until it is declared here.
 
 mod memory_roundtrip;
+mod redpanda_lifetime;
 mod redpanda_roundtrip;
 mod registry;
