@@ -21,3 +21,4 @@ mod lifecycle;
 mod maintenance_lane;
 mod placement_eligibility;
 mod platform_schema;
+mod worker_zone;

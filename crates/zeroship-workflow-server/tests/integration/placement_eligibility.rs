@@ -6,7 +6,7 @@
     reason = "platform fixtures stay on their compio runtime"
 )]
 
-use crate::support::{holds, platform};
+use crate::support::{holds, platform, zone};
 
 use std::{num::NonZeroU32, rc::Rc, time::Duration};
 use zeroship_core::{
@@ -38,38 +38,7 @@ async fn service(platform: &platform::Platform) -> Coordinator {
 
 /// An operator-declared zone and a join signer trusted for it.
 async fn zone_with_signer(platform: &platform::Platform) -> (ZoneId, String) {
-    let zone = ZoneId::mint();
-    platform
-        .admin
-        .execute(
-            "INSERT INTO zeroship.execution_zones(id,name,status) VALUES($1,$2,'active')",
-            &[&zone.as_str(), &zone.as_str()],
-        )
-        .await
-        .unwrap();
-    let signer = typed_id::generate("wjs");
-    platform
-        .admin
-        .execute(
-            "INSERT INTO zeroship.worker_join_signers(id,public_key,status) \
-             VALUES($1,$2,'active')",
-            &[
-                &signer,
-                &ServiceSigningKey::generate().verifying_key_bytes().to_vec(),
-            ],
-        )
-        .await
-        .unwrap();
-    platform
-        .admin
-        .execute(
-            "INSERT INTO zeroship.worker_join_signer_zones(signer_id,execution_zone_id) \
-             VALUES($1,$2)",
-            &[&signer, &zone.as_str()],
-        )
-        .await
-        .unwrap();
-    (zone, signer)
+    zone::declare_zone(platform).await
 }
 
 /// An instance Control admitted through `signer` into `zone`, registered with

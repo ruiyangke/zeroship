@@ -919,7 +919,7 @@ async fn enrollment_revocation_and_key_replacement_fence_blocked_queue_operation
 /// (crates/zeroship-workflow-server/src/auth.rs) refusing E's instance, while
 /// a DIFFERENT signer F's instance is unaffected.
 ///
-/// `WorkflowAuth::worker` and `PostgresWorkerRegistry::active_key` read
+/// `WorkflowAuth::worker` and `PostgresWorkerRegistry::active_instance` read
 /// `zeroship.worker_instances.status = 'active'`, and the purge writes
 /// exactly that column for every instance the signer admitted - see the
 /// module header of `crates/zeroship-control/src/worker_join.rs`. This

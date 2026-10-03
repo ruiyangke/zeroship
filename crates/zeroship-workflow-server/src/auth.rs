@@ -16,13 +16,25 @@ use zeroship_core::{
     service_peers::{service_issuer, WORKER_SERVICE_NAME},
     workflow_coordination::{WorkerId, AUDIENCE},
 };
+use zeroship_workflow_manager::eligibility::ZoneId;
 
-/// The host resolves enrolled worker keys from trusted registry state.
+/// One live enrolled worker instance.
+///
+/// It carries the key its assertions verify under and the execution zone
+/// Control froze on its row at join. Both live on the instance row, so neither
+/// can be supplied by the instance itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveInstance {
+    pub public_key: [u8; 32],
+    pub zone: ZoneId,
+}
+
+/// The host resolves enrolled worker keys and zones from trusted registry state.
 #[async_trait(?Send)]
 pub trait WorkerRegistry: Send + Sync + std::fmt::Debug {
     /// # Errors
     /// Returns `Unavailable` when the trusted registry cannot be read.
-    async fn active_key(&self, instance: &str) -> Result<Option<[u8; 32]>, Error>;
+    async fn active_instance(&self, instance: &str) -> Result<Option<ActiveInstance>, Error>;
     /// # Errors
     /// Returns `Unavailable` when registry access is not ready.
     async fn ready(&self) -> Result<(), Error>;
@@ -41,19 +53,20 @@ impl PostgresWorkerRegistry {
 #[async_trait(?Send)]
 impl WorkerRegistry for PostgresWorkerRegistry {
     /// Prove the registry is reachable and readable for EXACTLY the columns
-    /// [`Self::active_key`] projects and filters on. A probe narrower than the
-    /// authentication query reports ready while every worker call fails.
+    /// [`Self::active_instance`] projects and filters on. A probe narrower than
+    /// the authentication query reports ready while every worker call fails.
     async fn ready(&self) -> Result<(), Error> {
         self.client
             .query(
-                "SELECT id,status,public_key,expires_at FROM zeroship.worker_instances LIMIT 0",
+                "SELECT id,status,public_key,execution_zone_id,expires_at FROM zeroship.worker_instances LIMIT 0",
                 &[],
             )
             .await
             .map(|_| ())
             .map_err(|_| Error::Unavailable)
     }
-    /// The key a LIVE instance's assertions verify under, or nothing.
+    /// The key and frozen zone a LIVE instance's assertions verify under, or
+    /// nothing.
     ///
     /// TWO FILTERS, AND EACH IS A DIFFERENT WAY A CREDENTIAL STOPS WORKING.
     /// `status` is retirement and purge. `expires_at` is the LEASE Control
@@ -64,11 +77,16 @@ impl WorkerRegistry for PostgresWorkerRegistry {
     /// differ answer the same. This is the predicate
     /// `zeroship_control::worker_join::active_instance_public_key` resolves
     /// the same table with: one identity is live for both hosts or neither.
-    async fn active_key(&self, instance: &str) -> Result<Option<[u8; 32]>, Error> {
+    ///
+    /// `execution_zone_id` is the zone the join token claimed, resolved by
+    /// Control and frozen on the row. It is read beside the key so the zone a
+    /// request is authorised for comes from the same trusted row as the key
+    /// that verified it.
+    async fn active_instance(&self, instance: &str) -> Result<Option<ActiveInstance>, Error> {
         let rows = self
             .client
             .query(
-                "SELECT public_key FROM zeroship.worker_instances \
+                "SELECT public_key,execution_zone_id FROM zeroship.worker_instances \
                    WHERE id=$1 AND status='active' AND expires_at > now()",
                 &[&instance],
             )
@@ -79,7 +97,12 @@ impl WorkerRegistry for PostgresWorkerRegistry {
         };
         let key: &[u8] = row.try_get(0).map_err(|_| Error::Unavailable)?;
         let key = key.try_into().map_err(|_| Error::Unavailable)?;
-        Ok(Some(key))
+        let zone: &str = row.try_get(1).map_err(|_| Error::Unavailable)?;
+        let zone = ZoneId::parse(zone).map_err(|_| Error::Unavailable)?;
+        Ok(Some(ActiveInstance {
+            public_key: key,
+            zone,
+        }))
     }
 }
 
@@ -94,12 +117,20 @@ pub struct WorkflowAuth {
 pub struct VerifiedWorker {
     id: WorkerId,
     public_key: [u8; 32],
+    zone: ZoneId,
 }
 
 impl VerifiedWorker {
     #[must_use]
     pub const fn id(&self) -> &WorkerId {
         &self.id
+    }
+
+    /// The frozen execution zone the instance enrolled in. Read from the same
+    /// trusted row as [`Self::signing_key_id`], never from the request body.
+    #[must_use]
+    pub const fn zone(&self) -> &ZoneId {
+        &self.zone
     }
 
     #[must_use]
@@ -118,8 +149,8 @@ impl WorkflowAuth {
     /// # Errors
     /// Refuses revocation, lapse, key replacement and unavailable registry storage.
     pub async fn revalidate_worker(&self, worker: &VerifiedWorker) -> Result<WorkerId, Error> {
-        match self.workers.active_key(worker.id.as_str()).await? {
-            Some(public_key) if public_key == worker.public_key => Ok(worker.id.clone()),
+        match self.workers.active_instance(worker.id.as_str()).await? {
+            Some(instance) if instance.public_key == worker.public_key => Ok(worker.id.clone()),
             _ => Err(Error::Denied),
         }
     }
@@ -131,7 +162,7 @@ impl WorkflowAuth {
     /// Refuses revoked, lapsed or missing workers and unavailable registry storage.
     pub async fn active_worker(&self, worker: &WorkerId) -> Result<(), Error> {
         self.workers
-            .active_key(worker.as_str())
+            .active_instance(worker.as_str())
             .await?
             .map(|_| ())
             .ok_or(Error::Denied)
@@ -181,14 +212,18 @@ impl WorkflowAuth {
         }
         let instance = issuer.instance().ok_or(Error::Unauthenticated)?;
         let worker = WorkerId::parse(instance).map_err(|_| Error::Unauthenticated)?;
-        let public = self
+        let active = self
             .workers
-            .active_key(instance)
+            .active_instance(instance)
             .await?
             .ok_or(Error::Unauthenticated)?;
         let mut keys = ServiceTrustBundle::new();
-        keys.trust(&issuer, thumbprint_key_id(&public), public)
-            .map_err(|_| Error::Unauthenticated)?;
+        keys.trust(
+            &issuer,
+            thumbprint_key_id(&active.public_key),
+            active.public_key,
+        )
+        .map_err(|_| Error::Unauthenticated)?;
         let verifier = ServiceAssertionVerifier::new(keys, self.replay.clone());
         // The selector is untrusted until verification succeeds against the
         // registry key bound to that exact issuer. Role keys are never a fallback.
@@ -197,7 +232,8 @@ impl WorkflowAuth {
             .map_err(|error| auth_error(&error))?;
         Ok(VerifiedWorker {
             id: worker,
-            public_key: public,
+            public_key: active.public_key,
+            zone: active.zone,
         })
     }
 }

@@ -420,7 +420,7 @@ async fn native_worker_client_uses_the_authenticated_coordinator_api() {
 /// moved with Control's own column while `status` stays `active` and the
 /// registration and assignment rows stay live, so restoring it must bring the
 /// same placements back. The grant is then revoked on the lease column alone:
-/// `WorkflowAuth::ready` projects exactly what `active_key` reads, so a
+/// `WorkflowAuth::ready` projects exactly what `active_instance` reads, so a
 /// revoked column grant must fail readiness rather than pass it and refuse
 /// every authenticated worker afterwards.
 #[ntex::test]
