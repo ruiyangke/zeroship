@@ -58,24 +58,7 @@ pub fn worker_dispatch_authorization() -> String {
 
 fn binaries() -> &'static BTreeMap<String, PathBuf> {
     static BINARIES: OnceLock<BTreeMap<String, PathBuf>> = OnceLock::new();
-    BINARIES.get_or_init(|| {
-        workflow_postgres::build(
-            "workflow services",
-            &[
-                "--bins",
-                "-p",
-                "zeroship-control",
-                "-p",
-                "zeroship-worker",
-                "-p",
-                "zeroship-gateway",
-                "-p",
-                "zeroship-data-cdc-server",
-                "-p",
-                "zeroship-workflow-server",
-            ],
-        )
-    })
+    BINARIES.get_or_init(zeroship_testkit::prebuilt::resolve_all)
 }
 
 /// Run one fixture statement on the fleet's platform database.

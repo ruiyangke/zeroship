@@ -1,5 +1,6 @@
 use crate::{cargo, checked, script, Result};
 use xtask::build_chain::BUILD_CHAIN;
+use zeroship_testkit::prebuilt;
 
 pub fn run() -> Result<()> {
     build_host()?;
@@ -15,6 +16,7 @@ pub fn run() -> Result<()> {
     )
 }
 
+/// Run the ordered package chain that produces the generated build inputs.
 pub fn build_host() -> Result<()> {
     for step in BUILD_CHAIN {
         checked(
@@ -23,6 +25,18 @@ pub fn build_host() -> Result<()> {
         )?;
     }
     Ok(())
+}
+
+/// Build the workspace executables the control workflow process suites run.
+///
+/// This is its own step rather than an entry in `BUILD_CHAIN`: the package
+/// chain is JavaScript, and a test area that runs neither Control's workflow
+/// suites nor the gate that owns them does not need the service binaries.
+pub fn build_services() -> Result<()> {
+    checked(
+        cargo().args(prebuilt::BUILD_ARGS),
+        "build the workflow process executables",
+    )
 }
 
 #[cfg(test)]
@@ -38,5 +52,25 @@ mod tests {
                 step.script,
             );
         }
+    }
+
+    /// The service step names a runnable cargo build, so a test that cannot
+    /// find an executable points at a command that produces one.
+    #[test]
+    fn the_service_step_builds_workspace_targets() {
+        let args = super::prebuilt::BUILD_ARGS;
+        assert_eq!(
+            args.first(),
+            Some(&"build"),
+            "the service step must run `cargo build`"
+        );
+        assert!(
+            args.contains(&"--locked"),
+            "the service step must build against the lockfile"
+        );
+        assert!(
+            !super::prebuilt::ARTIFACTS.is_empty(),
+            "the service step declares no artifacts"
+        );
     }
 }

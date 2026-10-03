@@ -1,4 +1,4 @@
-use crate::{cargo, checked, root, script, Result};
+use crate::{cargo, checked, migrations, root, script, Result};
 use std::process::Command;
 
 /// The SDK packages whose own suites this area runs, as (directory, package name).
@@ -20,6 +20,8 @@ const EXAMPLE_SUITES: [(&str, &str); 2] = [
 ];
 
 pub fn run() -> Result<()> {
+    migrations::build_host()?;
+    migrations::build_services()?;
     for schema in [
         "crates/zeroship-workflow-schema/schema",
         "crates/zeroship-workflow-manager/schema",

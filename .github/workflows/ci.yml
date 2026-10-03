@@ -129,6 +129,12 @@ jobs:
           set -o pipefail
           ZEROSHIP_MIGRATE_DSN='postgres://postgres:zeroship@127.0.0.1:5440/zeroship' \
             bash deploy/ops/db-migrate.sh
+      # The control workflow process suites start the real service binaries and
+      # the workflow-test-environment example. Build them here, once, so each
+      # nextest process locates a fresh artifact instead of running a nested
+      # cargo build of its own on the shared target directory.
+      - name: Build the workflow process executables
+        run: pnpm build:workflow-artifacts
       # nextest runs every test, not just every target: a failing test does not
       # stop the targets after it, and the `ci` profile's `fail-fast = false`
       # keeps a failure from hiding the suites behind it. The verdict is

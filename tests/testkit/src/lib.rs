@@ -24,10 +24,13 @@
 //! - [`s3`] owns an S3-compatible server with Docker-assigned ports.
 //! - [`session_keys`] writes the key files in-process auth servers read.
 //! - [`nested_cargo`] starts a cargo from inside a process cargo started.
+//! - [`prebuilt`] locates the service executables the workflow process suites
+//!   run, refusing when one is absent or older than its build record.
 
 pub mod docker;
 pub mod fingerprint;
 pub mod nested_cargo;
+pub mod prebuilt;
 pub mod postgres;
 pub mod redpanda;
 pub mod redis;

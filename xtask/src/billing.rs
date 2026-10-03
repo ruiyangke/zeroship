@@ -9,6 +9,7 @@ const PACKAGES: &[&str] = &[
 
 pub fn run() -> Result<()> {
     migrations::build_host()?;
+    migrations::build_services()?;
     let _platform = zeroship_testkit::postgres::platform();
     let tests = nextest(
         PACKAGES,

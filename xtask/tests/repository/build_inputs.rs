@@ -18,6 +18,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use xtask::build_chain::BUILD_CHAIN;
+use zeroship_testkit::prebuilt;
 
 /// The ordered chain that rebuilds every artifact below in one command.
 const WHOLE_CHAIN: &str = "pnpm build";
@@ -147,6 +148,53 @@ fn migration_compiler_sources() -> Vec<String> {
     sources
 }
 
+/// The Rust the workflow process executables are compiled from: every
+/// workspace crate in the normal closure of the packages the service build
+/// selects, plus the lockfile and the root manifest.
+fn workflow_executable_sources() -> Vec<String> {
+    let workspace: BTreeSet<String> = repo::workspace()
+        .iter()
+        .map(|package| {
+            package["name"]
+                .as_str()
+                .expect("workspace package name")
+                .to_owned()
+        })
+        .collect();
+    let mut names = BTreeSet::new();
+    for package in [
+        "zeroship-control",
+        "zeroship-worker",
+        "zeroship-gateway",
+        "zeroship-data-cdc-server",
+        "zeroship-workflow-server",
+    ] {
+        names.extend(
+            repo::normal_closure(package)
+                .into_iter()
+                .filter(|name| workspace.contains(name)),
+        );
+    }
+    assert!(
+        names.contains("zeroship-control"),
+        "the executable closure lost the control package"
+    );
+    let mut sources = vec!["Cargo.lock".to_owned(), "Cargo.toml".to_owned()];
+    for name in names {
+        let directory = crate_directory(&name);
+        sources.push(format!("{directory}/Cargo.toml"));
+        let src = format!("{directory}/src");
+        if repo::root().join(&src).is_dir() {
+            sources.extend(tree(&src, &["rs"]));
+        }
+        let build_script = format!("{directory}/build.rs");
+        if repo::root().join(&build_script).is_file() {
+            sources.push(build_script);
+        }
+    }
+    sources
+}
+
 fn build_inputs() -> Vec<BuildInput> {
     vec![
         // The shared lexicon. Both the migration DSL and the DB adapter inline
@@ -225,6 +273,21 @@ fn build_inputs() -> Vec<BuildInput> {
                 &["packages/db/tsup.config.ts", "packages/schema/dist/index.js"],
             ),
             rebuild: "pnpm --filter @zeroship/db build",
+        },
+        // The workspace executables the control workflow process suites run.
+        // They are generated under the target directory the same way the
+        // bundles above are generated under the repository, and a stale one
+        // answers from sources that have moved. The suites locate them and
+        // refuse on a missing or stale artifact; this rule is the
+        // repository-side twin for a checkout whose target directory is in the
+        // repository.
+        BuildInput {
+            artifacts: prebuilt::ARTIFACTS
+                .iter()
+                .map(|path| (*path).to_owned())
+                .collect(),
+            sources: workflow_executable_sources(),
+            rebuild: prebuilt::REBUILD,
         },
     ]
 }
@@ -534,4 +597,21 @@ fn embedded_package_bundles() -> BTreeSet<String> {
         }
     }
     found
+}
+
+/// The root `build:workflow-artifacts` script must run the same cargo
+/// invocation the control workflow test areas run, so the build-input gate's
+/// rebuild command and the test-side failure both name one command.
+#[test]
+fn the_root_build_script_runs_the_workflow_executable_build() {
+    let manifest: Value =
+        serde_json::from_str(&repo::read("package.json")).expect("parse package.json");
+    let script = manifest["scripts"]["build:workflow-artifacts"]
+        .as_str()
+        .expect("the root package declares build:workflow-artifacts");
+    assert_eq!(
+        script,
+        prebuilt::build_command(),
+        "the root script and the test areas must name one cargo invocation"
+    );
 }

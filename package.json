@@ -21,6 +21,7 @@
     "preinstall": "npx only-allow pnpm",
     "build": "pnpm --filter zeroship-migrate-node build && pnpm --filter @zeroship/schema build && pnpm --filter @zeroship/migrate build && pnpm --filter zero-migrate-cli build && pnpm --filter @zeroship/db build && pnpm typecheck:data-v8-js && pnpm build:data-v8-adapter && pnpm -r --filter './packages/*' --filter '!./packages/zero-migrate*' --filter '!@zeroship/db' --filter '!@zeroship/schema' build",
     "build:data-v8-adapter": "pnpm --dir packages/db run build:adapter",
+    "build:workflow-artifacts": "cargo build --locked --bins -p zeroship-control -p zeroship-worker -p zeroship-gateway -p zeroship-data-cdc-server -p zeroship-workflow-server --example workflow-test-environment",
     "typecheck:data-v8-js": "pnpm --dir packages/db exec tsc -p ../../crates/zeroship-data-v8/js/tsconfig.json",
     "publish:packages": "deploy/scripts/publish-packages.sh",
     "test": "pnpm -r --filter './packages/*' --filter '!./packages/zero-migrate*' test",
