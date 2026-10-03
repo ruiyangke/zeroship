@@ -205,11 +205,9 @@ pub enum AlgorithmFn {
     /// Native (Rust trait method) — used by `from_native_source`. The
     /// future is driven by the runtime loop; this dispatch sets up the
     /// type surface but defers wiring to the next chunk.
-    #[allow(dead_code)]
     Native(NativePullFn),
     /// Native (Rust closure) for cancel — accepts the reason as
     /// Option<Global>.
-    #[allow(dead_code)]
     NativeReason(NativeCancelFn),
 }
 

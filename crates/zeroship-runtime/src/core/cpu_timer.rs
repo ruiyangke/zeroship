@@ -88,12 +88,7 @@ extern "C" fn cpu_timeout_handler(
 /// Created once via `get_or_init()`. Owns the pipe and watchdog thread.
 /// Isolate actors register/unregister their V8 handles here.
 pub struct CpuTimerSystem {
-    #[allow(dead_code)]
-    pipe_read: RawFd,
-    #[allow(dead_code)]
-    pipe_write: RawFd,
     handles: IsolateHandles,
-    #[allow(dead_code)]
     _watchdog: std::thread::JoinHandle<()>,
 }
 
@@ -158,8 +153,6 @@ impl CpuTimerSystem {
             .expect("Failed to spawn CPU timer watchdog thread");
 
         Self {
-            pipe_read,
-            pipe_write,
             handles,
             _watchdog: watchdog,
         }

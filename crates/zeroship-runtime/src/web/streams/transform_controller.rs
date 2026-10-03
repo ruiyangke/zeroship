@@ -36,7 +36,7 @@
 //! - `TransformStreamDefaultSinkAbortAlgorithm`             → `transform_stream_default_sink_abort`
 //! - `TransformStreamDefaultSourceCancelAlgorithm`          → `transform_stream_default_source_cancel`
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 
 use crate::streams::algorithms;
 use crate::streams::promise_resolve;
@@ -1346,13 +1346,4 @@ pub fn install(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
     let class_fn = tmpl.get_function(scope).unwrap();
     let key = v8::String::new(scope, "TransformStreamDefaultController").unwrap();
     global.set(scope, key.into(), class_fn.into());
-}
-
-// Suppress dead-code warnings on the native trait machinery. The Native
-// driver lands with the runtime-loop wiring; the trait shape exists today
-// so compression can compile against `from_native_transformer` once the
-// runtime loop is in place.
-#[allow(dead_code)]
-fn _touch_native_machinery() -> Cell<bool> {
-    Cell::new(false)
 }

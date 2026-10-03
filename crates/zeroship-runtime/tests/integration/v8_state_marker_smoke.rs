@@ -45,11 +45,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use zeroship_runtime::init_v8;
 use zeroship_runtime::state::OpError;
-#[allow(unused_imports)]
-use zeroship_runtime_macros::{
-    v8_async_method, v8_class, v8_constructor, v8_getter, v8_inherit, v8_iterable, v8_method,
-    v8_name, v8_setter, v8_state_marker,
-};
+use zeroship_runtime_macros::v8_class;
 
 // ---------------------------------------------------------------------------
 // Test harness — minimal isolate setup (mirrors v8_class_smoke.rs)

@@ -50,8 +50,6 @@ use encoding_rs::{DecoderResult, Encoding};
 // outer expansion. The `v8_class` proc macro removes them before
 // quoting the impl block back out.
 use zeroship_runtime_macros::{v8_class, WebIdlDict};
-#[allow(unused_imports)]
-use zeroship_runtime_macros::{v8_constructor, v8_getter, v8_method};
 
 use crate::state::OpError;
 

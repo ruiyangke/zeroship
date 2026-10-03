@@ -44,9 +44,9 @@ use crate::streams::queue::{ByteQueue, ByteQueueEntry};
 use crate::streams::readable::{with_rs_state, StreamState};
 use crate::streams::readable_default_controller::AlgorithmFn;
 use crate::streams::readable_default_reader::{
-    fulfill_read_request_chunk, ReadRequest, ReadRequestKind, ReadRequestNative,
+    fulfill_read_request_chunk, ReadRequest,
 };
-use crate::streams::slots::{self, BYOB_REQUEST, CONTROLLER, STORED_ERROR};
+use crate::streams::slots::{self, BYOB_REQUEST, CONTROLLER};
 
 const STREAM_OBJ_SLOT: &str = "[[bc.streamObj]]";
 
@@ -2161,20 +2161,6 @@ fn make_range_error_g<'s>(
     let exc = v8::Exception::range_error(scope, msg_v);
     v8::Global::new(scope, exc)
 }
-
-#[allow(dead_code)]
-fn _unused_marker(_: &v8::Global<v8::Value>) {}
-
-#[allow(dead_code)]
-fn _unused_stored_error_marker() {
-    let _ = STORED_ERROR;
-}
-
-#[allow(dead_code)]
-fn _unused_native_marker(_: ReadRequestKind) {}
-
-#[allow(dead_code)]
-fn _unused_native_trait<T: ReadRequestNative>(_: T) {}
 
 // ---------------------------------------------------------------------------
 // Public install

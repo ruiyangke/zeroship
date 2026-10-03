@@ -7,7 +7,6 @@ use compio_postgres::{Client, Error, Pool, PoolConfig};
 use futures_util::{SinkExt, StreamExt};
 use std::time::Duration;
 
-#[allow(unused_imports)]
 use crate::support;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(20);

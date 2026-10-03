@@ -9,7 +9,6 @@ use std::net::TcpListener;
 use std::rc::Rc;
 use std::time::Duration;
 
-#[allow(unused_imports)]
 use crate::support;
 
 fn test_url() -> String {

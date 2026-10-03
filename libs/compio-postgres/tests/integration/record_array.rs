@@ -12,7 +12,6 @@ use std::error::Error;
 use compio_postgres::Client;
 use compio_postgres::types::{FromSql, Kind, Type};
 
-#[allow(unused_imports)]
 use crate::support;
 
 #[derive(Debug, PartialEq, Eq)]

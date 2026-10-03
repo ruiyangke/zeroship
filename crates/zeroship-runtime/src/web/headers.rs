@@ -37,11 +37,7 @@
 use crate::byte_string::{read_byte_string, ByteString};
 use crate::state::OpError;
 
-#[allow(unused_imports)]
-use zeroship_runtime_macros::{
-    v8_class, v8_constructor, v8_getter, v8_inherit_intrinsic, v8_iterable, v8_method, v8_name,
-    v8_setter, v8_to_string_tag,
-};
+use zeroship_runtime_macros::v8_class;
 
 // ---------------------------------------------------------------------------
 // Headers struct
@@ -187,7 +183,6 @@ impl Headers {
     /// internal callers (response builders) that need to populate
     /// headers from network data even on guarded instances. The data
     /// must already be validated (e.g., parsed from cyper response).
-    #[allow(dead_code)]
     pub fn list_append_unchecked(&mut self, name: Vec<u8>, value: Vec<u8>) {
         self.list_append(name, value);
         self.invalidate_sort_cache();

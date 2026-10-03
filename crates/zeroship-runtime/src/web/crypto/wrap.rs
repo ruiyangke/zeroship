@@ -1,6 +1,5 @@
 //! `wrapKey` / `unwrapKey` orchestration.
 
-#![allow(dead_code)]
 
 use super::crypto_key;
 use super::helpers::read_buffer_source;

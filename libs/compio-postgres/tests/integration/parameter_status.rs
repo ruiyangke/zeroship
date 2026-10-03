@@ -24,7 +24,6 @@
 
 use compio_postgres::{Client, Error};
 
-#[allow(unused_imports)]
 use crate::support;
 
 fn test_url() -> String {

@@ -23,7 +23,6 @@ use compio_postgres::{Pool, PoolConfig};
 use futures_util::FutureExt;
 use std::time::Duration;
 
-#[allow(unused_imports)]
 use crate::support;
 
 fn test_url() -> String {

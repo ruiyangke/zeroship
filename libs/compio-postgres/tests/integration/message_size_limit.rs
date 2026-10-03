@@ -13,7 +13,6 @@
 //! reads exactly like an unexplained disconnect, and the first thing a user
 //! does about an unexplained disconnect is retry it.
 
-#[allow(unused_imports)]
 use crate::support;
 
 use support::{suite_tls, test_url};

@@ -1,6 +1,5 @@
 //! Ed25519 + X25519. Per spec §§25, 26.
 
-#![allow(dead_code)]
 
 use super::crypto_key;
 use super::helpers::{read_buffer_source, vec_to_arraybuffer};

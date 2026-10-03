@@ -11,10 +11,10 @@
 //!     `SubtleCrypto` method to wrap as a Promise.
 
 use super::crypto_key;
-use super::helpers::{read_buffer_source, read_optional_buffer_source};
+use super::helpers::read_buffer_source;
 use super::key_material::{
-    AesKeyAlgorithm, CryptoKeyState, EcKeyAlgorithm, HmacKeyAlgorithm, KeyAlgorithm,
-    KeyFormat, KeyMaterial, KeyType, KeyUsage, NamedCurve, RsaHashedKeyAlgorithm,
+    CryptoKeyState, KeyAlgorithm,
+    KeyFormat, KeyUsage,
 };
 use super::registry::{self, AlgorithmName, Operation};
 use crate::enforce_range::read_enforce_range_u32;
@@ -461,22 +461,4 @@ pub fn unwrap_key<'s>(
 /// equal to `normalizedAlgorithm.name`, throw `InvalidAccessError`."
 fn alg_matches_key(name: AlgorithmName, key_state: &CryptoKeyState) -> bool {
     name.canonical() == key_state.algorithm.name()
-}
-
-// Suppress dead-code warnings for unused enum variants and imports.
-// The 8-argument shape is deliberate: a type-anchor stub enumerating
-// unused variant types, not a real call site to slim down.
-#[allow(dead_code)]
-#[allow(clippy::too_many_arguments)]
-fn _unused(
-    _: AesKeyAlgorithm,
-    _: HmacKeyAlgorithm,
-    _: RsaHashedKeyAlgorithm,
-    _: EcKeyAlgorithm,
-    _: NamedCurve,
-    _: KeyType,
-    _: KeyMaterial,
-    _: &dyn Fn(v8::Local<v8::Value>) -> Option<Vec<u8>>,
-) {
-    let _ = read_optional_buffer_source;
 }

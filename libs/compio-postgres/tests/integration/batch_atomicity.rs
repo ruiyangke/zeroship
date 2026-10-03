@@ -13,7 +13,6 @@
 //! `simple_query.rs` was among the lowest-covered non-TLS files when this was
 //! written.
 
-#[allow(unused_imports)]
 use crate::support;
 use support::{suite_tls, test_object_name, test_url};
 use compio_postgres::Client;

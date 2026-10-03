@@ -7,7 +7,7 @@
 //! (NameValue):
 //!   "#[v8_constructor]: unknown flag — expected `callable_no_new` or
 //!    `post_init = \"...\"`"
-#![allow(unused_imports)]
+#![expect(unused_imports, reason = "the fixture imports the inner v8 attribute macros that `#[v8_class]` consumes during expansion, so rustc cannot see them used; the stderr snapshot pins only the intended rejection")]
 
 use zeroship_runtime_macros::{v8_class, v8_constructor};
 

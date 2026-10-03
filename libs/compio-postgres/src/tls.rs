@@ -26,7 +26,13 @@ pub(crate) mod private {
     // Read only by the TLS connectors, so the field is genuinely dead when the
     // `tls` feature is off. Targeted rather than a crate-wide allow.
     #[derive(Debug)]
-    #[cfg_attr(not(feature = "tls"), allow(dead_code))]
+    #[cfg_attr(
+        not(feature = "tls"),
+        expect(
+            dead_code,
+            reason = "read only by the TLS connectors, which the tls feature gates in"
+        )
+    )]
     pub struct ReleaseConfig<'a>(&'a mut crate::release::ConnectionRelease);
 
     impl<'a> ReleaseConfig<'a> {

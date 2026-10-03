@@ -15,8 +15,7 @@ use crate::crypto_ops::digest::{DigestContext, KernelHashAlgo};
 use crate::crypto_ops::error::KernelError;
 use crate::state::OpError;
 
-#[allow(unused_imports)]
-use zeroship_runtime_macros::{v8_class, v8_constructor, v8_method, v8_name, v8_to_string_tag};
+use zeroship_runtime_macros::v8_class;
 
 /// Public Hash struct — wraps a kernel `DigestContext`.
 pub struct Hash {

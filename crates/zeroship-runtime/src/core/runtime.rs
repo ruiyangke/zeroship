@@ -958,8 +958,6 @@ enum PendingReply {
 
 /// Tracking info for an in-flight request whose dispatch returned a Promise.
 struct PendingRequest {
-    #[allow(dead_code)]
-    id: u64,
     promise: v8::Global<v8::Promise>,
     /// Reply slot for the pending path. Fetch/RPC requests settle to
     /// `SettledFetch`; durable-workflow replay settles to `SettledWorkflow`.
@@ -2577,7 +2575,6 @@ impl RuntimeInner {
         let (tx, rx) = channel::result_slot();
 
         self.pending_requests.insert(request_id, PendingRequest {
-            id: request_id,
             promise,
             reply: PendingReply::Fetch(tx),
             cpu_accumulated,
@@ -2606,7 +2603,6 @@ impl RuntimeInner {
         let (tx, rx) = channel::result_slot();
 
         self.pending_requests.insert(request_id, PendingRequest {
-            id: request_id,
             promise,
             reply: PendingReply::Workflow(tx),
             cpu_accumulated,
@@ -3483,7 +3479,6 @@ impl RuntimeInner {
     }
 
     /// Returns true if there are pending async requests.
-    #[allow(dead_code)]
     pub fn has_pending_requests(&self) -> bool {
         self.startup.is_pending()
             || self

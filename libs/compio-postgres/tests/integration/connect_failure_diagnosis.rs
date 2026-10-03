@@ -11,7 +11,6 @@
 //! Every case therefore asserts both: the cause chain names the real problem,
 //! AND the password does not appear anywhere in it.
 
-#[allow(unused_imports)]
 use crate::support;
 use support::test_url;
 use compio_postgres::{Config, Error, NoTls};

@@ -11,7 +11,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
 
-#[allow(unused_imports)]
 use crate::support;
 
 fn test_url() -> String {

@@ -42,8 +42,7 @@ use std::sync::Arc;
 
 use zeroship_runtime::init_v8;
 use zeroship_runtime::state::OpError;
-#[allow(unused_imports)]
-use zeroship_runtime_macros::{v8_class, v8_constructor, v8_inherit, v8_method};
+use zeroship_runtime_macros::v8_class;
 
 // ---------------------------------------------------------------------------
 // Test harness — local copy (matches v8_must_new_smoke.rs).

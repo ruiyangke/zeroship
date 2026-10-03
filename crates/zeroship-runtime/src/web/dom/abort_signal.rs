@@ -40,10 +40,6 @@
 use std::cell::{Cell, RefCell};
 
 use zeroship_runtime_macros::v8_class;
-#[allow(unused_imports)]
-use zeroship_runtime_macros::{
-    v8_constructor, v8_getter, v8_inherit, v8_method, v8_name, v8_static_method,
-};
 
 use crate::state::{OpError, SharedState, TimerCallback};
 

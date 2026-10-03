@@ -2,7 +2,6 @@
 //! `[[extractable]]`, `[[algorithm]]`, `[[usages]]`, `[[handle]]`
 //! internal slots, modelled as Rust enums and plain fields.
 
-#![allow(dead_code)]
 
 use zeroship_runtime_macros::WebIdlEnum;
 

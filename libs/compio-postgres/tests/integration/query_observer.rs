@@ -7,7 +7,6 @@ use std::future::Future;
 use std::task::{Context, Waker};
 use std::time::{Duration, Instant};
 
-#[allow(unused_imports)]
 use crate::support;
 
 const EVENT_TIMEOUT: Duration = Duration::from_secs(5);

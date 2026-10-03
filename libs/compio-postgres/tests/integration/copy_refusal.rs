@@ -5,7 +5,6 @@ use bytes::Bytes;
 use compio_postgres::{Client, Error};
 use std::time::Duration;
 
-#[allow(unused_imports)]
 use crate::support;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(20);

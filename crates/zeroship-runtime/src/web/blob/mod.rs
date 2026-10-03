@@ -38,8 +38,7 @@ use std::rc::Rc;
 
 use crate::state::OpError;
 
-#[allow(unused_imports)]
-use zeroship_runtime_macros::{v8_class, v8_constructor, v8_getter, v8_method, WebIdlDict};
+use zeroship_runtime_macros::{v8_class, WebIdlDict};
 
 // ---------------------------------------------------------------------------
 // Blob struct
@@ -415,7 +414,10 @@ fn is_blob_instance(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>) -> boo
 pub(crate) struct BlobPropertyBag {
     // Parsed for WebIDL dictionary member access order; Blob construction
     // currently preserves transparent/native line endings identically.
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "the WebIDL dictionary converter reads and stores `endings` in member order; Blob normalizes transparent/native line endings identically, so the value is never consulted"
+    )]
     pub endings: Option<String>,
     #[webidl_name = "type"]
     pub type_: Option<String>,

@@ -10,8 +10,6 @@ use std::sync::Arc;
 use super::abort::RequestSignal;
 
 use zeroship_runtime_macros::v8_class;
-#[allow(unused_imports)]
-use zeroship_runtime_macros::{v8_constructor, v8_getter};
 
 use crate::state::OpError;
 

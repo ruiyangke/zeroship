@@ -27,8 +27,7 @@ use zeroship_runtime::{
     init_v8, EnvSnapshot, FetchOutcome, ModuleEntry, NativePlugin, NativeRegistrar, RequestCtx,
     SettledFetch,
 };
-#[allow(unused_imports)]
-use zeroship_runtime_macros::{v8_async_method, v8_class, v8_constructor, v8_getter, v8_method};
+use zeroship_runtime_macros::v8_class;
 
 // ---------------------------------------------------------------------------
 // Test class — every async return shape we care about

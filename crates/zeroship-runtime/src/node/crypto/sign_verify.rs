@@ -23,8 +23,7 @@ use crate::web::crypto::key_material::{
 };
 use crate::state::OpError;
 
-#[allow(unused_imports)]
-use zeroship_runtime_macros::{v8_class, v8_constructor, v8_method, v8_name, v8_to_string_tag};
+use zeroship_runtime_macros::v8_class;
 
 // ---------------------------------------------------------------------------
 // Sign class

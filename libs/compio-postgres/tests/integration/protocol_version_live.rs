@@ -11,7 +11,6 @@
 //! from the server's own version rather than being hardcoded. That is what
 //! lets one test body assert the fallback on 15/16 and the negotiation on 18.
 
-#[allow(unused_imports)]
 use crate::support;
 use support::{suite_tls, test_url};
 use compio_postgres::Config;

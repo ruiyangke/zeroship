@@ -24,7 +24,6 @@
 use compio_postgres::{Client, SimpleQueryMessage};
 use std::time::Duration;
 
-#[allow(unused_imports)]
 use crate::support;
 
 const WATCHDOG: Duration = Duration::from_secs(30);

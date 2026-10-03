@@ -31,8 +31,7 @@
 #![allow(unsafe_code)]
 
 use zeroship_runtime::init_v8;
-#[allow(unused_imports)]
-use zeroship_runtime_macros::{v8_class, v8_constructor, v8_getter, v8_method};
+use zeroship_runtime_macros::v8_class;
 
 // ---------------------------------------------------------------------------
 // Test harness — minimal isolate setup with --allow-natives-syntax so we can

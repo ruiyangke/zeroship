@@ -15,7 +15,6 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::thread;
 use std::time::{Duration, Instant};
 
-#[allow(unused_imports)]
 use crate::support;
 
 const READ_TIMEOUT: Duration = Duration::from_millis(75);

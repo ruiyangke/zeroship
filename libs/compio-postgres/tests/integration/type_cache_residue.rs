@@ -4,7 +4,6 @@ use std::future::Future;
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
-#[allow(unused_imports)]
 use crate::support;
 
 fn test_url() -> String {

@@ -35,7 +35,6 @@ use compio_postgres::error::Severity;
 use futures_util::StreamExt;
 use std::time::Duration;
 
-#[allow(unused_imports)]
 use crate::support;
 
 const DELIVERY_TIMEOUT: Duration = Duration::from_secs(10);

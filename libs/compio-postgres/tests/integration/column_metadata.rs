@@ -23,7 +23,6 @@ use compio_postgres::SimpleQueryMessage;
 use compio_postgres::types::Type;
 use std::num::NonZeroUsize;
 
-#[allow(unused_imports)]
 use crate::support;
 
 fn test_url() -> String {

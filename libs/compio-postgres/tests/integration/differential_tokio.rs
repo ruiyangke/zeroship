@@ -44,7 +44,6 @@
 //! current-thread tokio runtime and returns plain data over a channel, so no
 //! tokio reactor is ever installed on a compio thread.
 
-#[allow(unused_imports)]
 use crate::support;
 
 /// What both drivers are asked to report for one statement.

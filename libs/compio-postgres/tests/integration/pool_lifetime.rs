@@ -14,7 +14,6 @@
 //! would be half right, with no signal about which half. These tests pin both
 //! sides so the documentation cannot drift away from the behaviour.
 
-#[allow(unused_imports)]
 use crate::support;
 use support::test_url;
 use compio_postgres::{Config, Pool, PoolConfig, PoolConnection};

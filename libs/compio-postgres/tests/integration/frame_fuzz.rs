@@ -57,7 +57,6 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::thread;
 use std::time::{Duration, Instant};
 
-#[allow(unused_imports)]
 use crate::support;
 
 const ASYNC_WATCHDOG: Duration = Duration::from_secs(30);

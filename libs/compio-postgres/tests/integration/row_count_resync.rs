@@ -27,7 +27,6 @@ use compio_postgres::types::{ToSql, Type};
 use compio_postgres::{Client, error::SqlState};
 use std::time::Duration;
 
-#[allow(unused_imports)]
 use crate::support;
 
 fn test_url() -> String {

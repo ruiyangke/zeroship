@@ -10,7 +10,6 @@
 //! recognisable answer. Checking that the abandoned operation "failed cleanly"
 //! would not catch this; only the NEXT operation can.
 
-#[allow(unused_imports)]
 use crate::support;
 use support::{suite_tls, test_url};
 use compio_postgres::Client;

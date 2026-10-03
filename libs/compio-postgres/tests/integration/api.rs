@@ -28,7 +28,6 @@ use std::ops::Deref;
 use std::sync::mpsc;
 use std::time::Duration;
 
-#[allow(unused_imports)]
 use crate::support;
 
 fn test_url() -> String {

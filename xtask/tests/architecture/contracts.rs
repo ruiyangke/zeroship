@@ -120,7 +120,7 @@ fn contract_check_ignores_documentation_test_modules_and_non_gating_attributes()
     let result = inspect(
         r##"
         // #[cfg(feature = "driver")] pub trait Imaginary {}
-        #[cfg_attr(feature = "driver", allow(dead_code))]
+        #[cfg_attr(feature = "driver", allow(non_camel_case_types))]
         pub trait Driver {
             #[allow(async_fn_in_trait)]
             async fn run(&self) { let _ = r#"#[cfg(feature = "driver")]"#; }

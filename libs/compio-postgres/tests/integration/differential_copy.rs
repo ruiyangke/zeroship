@@ -29,7 +29,6 @@ use bytes::{BufMut as _, Bytes, BytesMut};
 use compio_postgres::config::ProtocolVersion;
 use futures_util::{SinkExt as _, StreamExt as _};
 
-#[allow(unused_imports)]
 use crate::support;
 
 const SESSION_SQL: &str = "SET client_encoding = 'UTF8';

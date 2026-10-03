@@ -7,7 +7,7 @@
 //! Converted from a raw ```compile_fail doctest in `src/lib.rs`. The
 //! `.stderr` snapshot beside this file pins the reason, which a raw
 //! `compile_fail` could not.
-#![allow(unused_imports)]
+#![expect(unused_imports, reason = "the fixture imports the inner v8 attribute macros that `#[v8_class]` consumes during expansion, so rustc cannot see them used; the stderr snapshot pins only the intended rejection")]
 
 use zeroship_runtime::state::OpError;
 use zeroship_runtime_macros::{v8_async_method, v8_class, v8_constructor};

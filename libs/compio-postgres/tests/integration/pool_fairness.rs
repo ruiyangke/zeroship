@@ -6,7 +6,6 @@ use std::pin::Pin;
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
-#[allow(unused_imports)]
 use crate::support;
 
 const CALLERS: usize = 8;

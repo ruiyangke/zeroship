@@ -24,6 +24,7 @@ impl InvocationContext {
         }
     }
 
+    #[cfg(feature = "runtime_native_websocket")]
     pub(crate) fn connection(user_json: Option<String>) -> Self {
         Self {
             request_id: None,

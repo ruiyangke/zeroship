@@ -258,6 +258,7 @@ impl MessageEventState {
 ///
 /// Sets `is_trusted = true` (platform-emitted), `bubbles = false`,
 /// `cancelable = false` per HTML §9.4.2 + WebSockets §3.2.
+#[cfg(feature = "runtime_native_websocket")]
 pub(crate) fn build_message_event<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     data: v8::Local<v8::Value>,

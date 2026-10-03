@@ -11,7 +11,6 @@
 //! MEASURED: it does not. The server's own SQLSTATE and message come back, and
 //! the connection is still usable afterwards. These tests hold that.
 
-#[allow(unused_imports)]
 use crate::support;
 use bytes::Bytes;
 use support::{suite_tls, test_object_name, test_url};

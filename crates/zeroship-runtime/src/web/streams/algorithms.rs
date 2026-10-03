@@ -14,7 +14,7 @@ use crate::streams::readable::StreamState;
 use crate::streams::readable_default_reader::{ReadRequest, ReadRequestKind};
 use crate::streams::slots::{self, READER, STORED_ERROR, WRITER};
 use crate::streams::writable::{
-    PendingAbortRequest, PromisePair, WSState, WSStreamState,
+    PendingAbortRequest, PromisePair, WSState,
 };
 
 // ---------------------------------------------------------------------------
@@ -935,10 +935,6 @@ pub fn writable_stream_close<'s>(
     promise
 }
 
-// Suppress unused warnings (the WSStreamState is used via with_ws_state).
-#[allow(dead_code)]
-fn _unused_ws_state(_s: &WSStreamState) {}
-
 // ===========================================================================
 // Pipe + Tee — re-exports of the cross-class algorithms (§3.5)
 // ===========================================================================
@@ -1146,7 +1142,6 @@ pub fn initialize_transform_stream<'s>(
     readable_hwm: f64,
     readable_size: crate::streams::readable_default_controller::SizeAlgorithm,
 ) {
-    use crate::streams::readable_default_controller::AlgorithmFn;
 
     // Build the readable (read side of the TS) — pull = waits on
     // backpressureChangePromise; cancel = TransformStreamSourceCancel.
@@ -1175,9 +1170,4 @@ pub fn initialize_transform_stream<'s>(
     // Initialize backpressure pair — None initially; SetBackpressure(true)
     // creates the first pair.
     transform_stream_set_backpressure(scope, stream, true);
-
-    // Suppress unused warnings on the AlgorithmFn import — it's referenced
-    // by the helpers above.
-    #[allow(dead_code)]
-    fn _touch(_a: AlgorithmFn) {}
 }

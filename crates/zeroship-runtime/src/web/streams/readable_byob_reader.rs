@@ -168,7 +168,6 @@ pub enum ReadIntoRequestKind {
     /// Internal Rust callback — analogous to ReadRequestKind::Native.
     /// Currently unused but reserved for byte-tee and future internal
     /// users (compression-stream, fetch body bridge).
-    #[allow(dead_code)]
     Native(Box<dyn ReadIntoRequestNative + 'static>),
 }
 

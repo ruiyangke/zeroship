@@ -6,7 +6,6 @@
 //! hashes in WebCrypto), plus the broader Node hash family
 //! (SHA-224, SHA-512/256, SHA-3-256/384/512) for `createHash()`.
 
-#![allow(dead_code)]
 
 use super::error::KernelError;
 use aws_lc_rs::digest as lc_digest;

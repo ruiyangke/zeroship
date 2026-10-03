@@ -23,11 +23,7 @@ use crate::state::OpError;
 use crate::url_native::helpers::read_usv_string;
 use crate::url_native::search_params::URLSearchParams;
 
-#[allow(unused_imports)]
-use zeroship_runtime_macros::{
-    v8_class, v8_constructor, v8_getter, v8_method, v8_name, v8_setter, v8_static_method,
-    v8_to_string_tag,
-};
+use zeroship_runtime_macros::v8_class;
 
 // ---------------------------------------------------------------------------
 // URL struct

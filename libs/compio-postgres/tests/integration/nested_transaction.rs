@@ -11,7 +11,6 @@
 //! other tests mentioning savepoints are about decoding them from the
 //! replication stream, which is a different question entirely.
 
-#[allow(unused_imports)]
 use crate::support;
 use support::{suite_tls, test_object_name, test_url};
 use compio_postgres::Client;

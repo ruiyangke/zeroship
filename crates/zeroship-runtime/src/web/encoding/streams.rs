@@ -52,8 +52,6 @@ use std::rc::Rc;
 use encoding_rs::{DecoderResult, Encoding};
 
 use zeroship_runtime_macros::v8_class;
-#[allow(unused_imports)]
-use zeroship_runtime_macros::{v8_constructor, v8_getter, v8_method};
 
 use crate::state::OpError;
 use crate::streams::slots;

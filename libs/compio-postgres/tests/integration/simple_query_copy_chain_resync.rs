@@ -16,7 +16,6 @@ use compio_postgres::{Client, SimpleQueryMessage, SimpleQueryStream};
 use futures_util::TryStreamExt;
 use std::time::Duration;
 
-#[allow(unused_imports)]
 use crate::support;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(20);

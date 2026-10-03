@@ -6,7 +6,6 @@ use compio_postgres::{Client, Pool};
 use futures_util::{SinkExt, TryStreamExt};
 use std::time::Duration;
 
-#[allow(unused_imports)]
 use crate::support;
 
 const TEST_WATCHDOG: Duration = Duration::from_secs(10);

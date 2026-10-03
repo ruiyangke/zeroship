@@ -15,8 +15,6 @@
 //! Per design §XIII.3 / spec §3.3.
 
 use zeroship_runtime_macros::v8_class;
-#[allow(unused_imports)]
-use zeroship_runtime_macros::{v8_constructor, v8_getter, v8_method};
 
 // ---------------------------------------------------------------------------
 // AbortController state

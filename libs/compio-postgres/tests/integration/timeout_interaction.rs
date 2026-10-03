@@ -20,7 +20,6 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-#[allow(unused_imports)]
 use crate::support;
 
 /// Bounds a connect that must SUCCEED -- every scripted peer in this file

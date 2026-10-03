@@ -42,7 +42,7 @@ use std::rc::Rc;
 
 use crate::streams::algorithms;
 use crate::streams::promise_resolve;
-use crate::streams::queue::{is_non_negative_number, ValueQueue, ValueQueueEntry};
+use crate::streams::queue::is_non_negative_number;
 use crate::streams::readable_default_controller::{AlgorithmFn, SizeAlgorithm};
 use crate::streams::writable::{NativeSink, WSState};
 
@@ -674,7 +674,10 @@ enum AlgorithmSnapshot {
     /// becomes drivable. Closure shape preserved for type-checking; actual
     /// invocation defers to AlgorithmSnapshot::Noop until the runtime-loop
     /// driver lands (§VII.5).
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "reserved for the native one-shot writable algorithm; the runtime-loop driver constructs only Noop and Js today"
+    )]
     Native(Rc<RefCell<Option<NativeWritableOnceFn>>>),
 }
 
@@ -1103,14 +1106,3 @@ pub fn install(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
     let key = v8::String::new(scope, "WritableStreamDefaultController").unwrap();
     global.set(scope, key.into(), class_fn.into());
 }
-
-// ---------------------------------------------------------------------------
-// Suppress unused-variable lint for ValueQueueEntry (re-exported as
-// part of the queue module API). The WS controller uses its own bespoke
-// queue entry shape (with close-sentinel marker) instead.
-// ---------------------------------------------------------------------------
-
-#[allow(dead_code)]
-fn _unused_value_queue_entry(_e: &ValueQueueEntry) {}
-#[allow(dead_code)]
-fn _unused_value_queue(_q: &ValueQueue) {}

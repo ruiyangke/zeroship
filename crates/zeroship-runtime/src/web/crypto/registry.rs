@@ -1,7 +1,6 @@
 //! Algorithm registry — which algorithms support which operations,
 //! plus spec §18.4.4 algorithm-name normalization.
 
-#![allow(dead_code)]
 
 use super::key_material::HashAlgo;
 use crate::state::OpError;

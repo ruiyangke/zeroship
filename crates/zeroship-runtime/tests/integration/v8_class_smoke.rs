@@ -23,8 +23,7 @@ use std::sync::Arc;
 
 use zeroship_runtime::init_v8;
 use zeroship_runtime::state::OpError;
-#[allow(unused_imports)]
-use zeroship_runtime_macros::{v8_class, v8_constructor, v8_getter, v8_method, v8_setter};
+use zeroship_runtime_macros::v8_class;
 
 // ---------------------------------------------------------------------------
 // Test harness — minimal isolate setup
@@ -441,8 +440,6 @@ fn option_none_returns_null() {
 // keyword. The macro must accept `#[v8_name = "delete"]` on a method
 // like `delete_` and install it under the JS-visible name "delete".
 
-#[allow(unused_imports)]
-use zeroship_runtime_macros::v8_name;
 
 mod renamed_method {
     use super::*;
@@ -500,8 +497,6 @@ fn v8_name_renames_method_on_js_surface() {
 // spec wants the parent interface name + " Iterator" — e.g. "Headers
 // Iterator". Verify the impl-level attribute overrides the default.
 
-#[allow(unused_imports)]
-use zeroship_runtime_macros::v8_to_string_tag;
 
 mod string_tag_override {
     use super::*;
@@ -543,8 +538,6 @@ fn v8_to_string_tag_override_changes_default() {
 // chain prototype to %Iterator.prototype% per WebIDL §3.7.10.2
 // ---------------------------------------------------------------------------
 
-#[allow(unused_imports)]
-use zeroship_runtime_macros::v8_inherit_intrinsic;
 
 mod intrinsic_iter {
     use super::*;
@@ -573,8 +566,6 @@ mod intrinsic_iter {
 // inherits Animal, calling .speak() (Dog's own method) and .breathe()
 // (Animal's inherited method) both work; `dog instanceof Animal === true`.
 
-#[allow(unused_imports)]
-use zeroship_runtime_macros::v8_inherit;
 
 mod inherit_base {
     use super::*;
@@ -1335,8 +1326,6 @@ fn heavy_payload_instances_all_finalize() {
 //   - normal Uint8Array (over a regular ArrayBuffer) is accepted;
 //   - Uint8Array over a SharedArrayBuffer throws TypeError.
 
-#[allow(unused_imports)]
-use zeroship_runtime_macros::reject_shared;
 
 mod sab_rejection {
     use super::*;

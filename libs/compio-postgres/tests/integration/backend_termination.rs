@@ -32,7 +32,6 @@ use compio_postgres::{Client, Config, Pool, PoolConfig};
 use futures_util::{SinkExt, TryStreamExt};
 use std::time::{Duration, Instant};
 
-#[allow(unused_imports)]
 use crate::support;
 
 /// Long enough that a loaded machine cannot trip it, short enough that a real

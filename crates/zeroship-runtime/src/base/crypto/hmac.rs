@@ -11,7 +11,6 @@
 //! node:crypto's surface (a zeroship-vs-Node divergence we
 //! deliberately avoid in the node:crypto path for npm parity).
 
-#![allow(dead_code)]
 
 use super::digest::KernelHashAlgo;
 use super::error::KernelError;

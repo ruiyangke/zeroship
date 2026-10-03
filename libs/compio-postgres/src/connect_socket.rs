@@ -27,7 +27,14 @@ pub(crate) async fn connect_socket(
     port: u16,
     tcp_user_timeout: Option<Duration>,
     keepalive_config: Option<&KeepaliveConfig>,
-    #[cfg_attr(not(unix), allow(unused_variables))] require_peer: Option<&str>,
+    #[cfg_attr(
+        not(unix),
+        expect(
+            unused_variables,
+            reason = "peer-credential pinning runs only on the Unix-socket dial path"
+        )
+    )]
+    require_peer: Option<&str>,
 ) -> Result<Socket, Error> {
     match addr {
         Addr::Tcp { ip, scope_id } => {

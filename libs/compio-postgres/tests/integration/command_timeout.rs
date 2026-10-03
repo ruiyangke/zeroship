@@ -8,7 +8,6 @@ use compio_postgres::error::SqlState;
 use compio_postgres::{Config, Pool, PoolConfig};
 use std::time::{Duration, Instant};
 
-#[allow(unused_imports)]
 use crate::support;
 
 const OUTER_WATCHDOG: Duration = Duration::from_secs(5);

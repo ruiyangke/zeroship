@@ -18,8 +18,7 @@
 #![allow(unsafe_code)]
 
 use zeroship_runtime::init_v8;
-#[allow(unused_imports)]
-use zeroship_runtime_macros::{v8_class, v8_constructor, v8_getter, v8_method};
+use zeroship_runtime_macros::v8_class;
 
 // ---------------------------------------------------------------------------
 // Test harness — copied from v8_class_smoke.rs to keep tests independent.

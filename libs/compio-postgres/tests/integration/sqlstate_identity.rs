@@ -18,7 +18,6 @@
 use compio_postgres::Client;
 use compio_postgres::error::SqlState;
 
-#[allow(unused_imports)]
 use crate::support;
 
 fn test_url() -> String {

@@ -10,8 +10,6 @@
 //! temporary path exceeds the limit easily. The fixture this crate ships for
 //! Unix-socket testing lives at such a path, which is how the case was found.
 
-#[allow(unused_imports)]
-use crate::support;
 use compio_postgres::{Config, NoTls};
 
 /// Longer than `sun_path` on every platform that has one, and made of a

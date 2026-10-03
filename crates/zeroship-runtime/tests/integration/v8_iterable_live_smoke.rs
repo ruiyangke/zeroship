@@ -32,8 +32,7 @@ use std::cell::RefCell;
 
 use zeroship_runtime::byte_string::ByteString;
 use zeroship_runtime::init_v8;
-#[allow(unused_imports)]
-use zeroship_runtime_macros::{v8_class, v8_constructor, v8_iterable, v8_method};
+use zeroship_runtime_macros::v8_class;
 
 // ---------------------------------------------------------------------------
 // Test harness — local copy.

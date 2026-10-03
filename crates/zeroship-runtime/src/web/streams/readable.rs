@@ -15,7 +15,7 @@
 //!   readonly attribute boolean locked;
 //!   Promise<undefined> cancel(optional any reason);
 //!   ReadableStreamReader getReader(optional ReadableStreamGetReaderOptions options = {});
-//!   /* pipeTo / pipeThrough / tee / values — stubbed (next dispatch) */
+//!   /* pipeTo / pipeThrough / tee / values / Symbol.asyncIterator */
 //! }
 //! ```
 //!
@@ -627,16 +627,9 @@ fn get_reader_method_callback(
 }
 
 // ---------------------------------------------------------------------------
-// pipeTo / pipeThrough / tee — wired to crate::streams::{pipe, tee}.
-// values / asyncIterator — still stubbed (lands with the iteration support).
+// pipeTo / pipeThrough / tee wired to crate::streams::{pipe, tee};
+// values / Symbol.asyncIterator wired to crate::streams::async_iter.
 // ---------------------------------------------------------------------------
-
-fn throw_not_implemented(scope: &mut v8::PinScope, name: &str) {
-    let msg = format!("ReadableStream.{name}: not implemented in this landing — see next dispatch");
-    let v8_msg = v8::String::new(scope, &msg).unwrap();
-    let exc = v8::Exception::error(scope, v8_msg);
-    scope.throw_exception(exc);
-}
 
 /// `pipeTo(dest, options)` per spec §3.2.5.7.
 ///
@@ -932,15 +925,6 @@ fn values_method_callback<'s>(
             scope.throw_exception(exc);
         }
     }
-}
-
-#[allow(dead_code)]
-fn stub_values_callback(
-    scope: &mut v8::PinScope,
-    _args: v8::FunctionCallbackArguments,
-    _rv: v8::ReturnValue,
-) {
-    throw_not_implemented(scope, "values");
 }
 
 // ---------------------------------------------------------------------------

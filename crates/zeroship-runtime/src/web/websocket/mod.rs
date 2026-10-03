@@ -848,7 +848,13 @@ impl WebSocketImpl {
     /// native feature is off (the polyfill drains via `__wsSend`) or
     /// when there is no `SharedState` in the isolate slot (test
     /// isolates that don't run a compio runtime).
-    #[allow(unused_variables)]
+    #[cfg_attr(
+        not(feature = "runtime_native_websocket"),
+        expect(
+            unused_variables,
+            reason = "the send pump consults scope only when the native WebSocket feature is on; the polyfill path drains via __wsSend"
+        )
+    )]
     pub(crate) fn flush_to_network(&self, scope: &mut v8::PinScope) {
         #[cfg(feature = "runtime_native_websocket")]
         {

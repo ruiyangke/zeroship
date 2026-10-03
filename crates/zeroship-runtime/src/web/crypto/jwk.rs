@@ -4,7 +4,6 @@
 //! V8 object's JWK fields, validate, and produce / consume a
 //! `CryptoKeyState`. base64url decode/encode lives in `helpers`.
 
-#![allow(dead_code)]
 #![allow(clippy::too_many_arguments)]
 
 use super::crypto_key;

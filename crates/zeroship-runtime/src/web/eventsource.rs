@@ -29,10 +29,6 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use zeroship_runtime_macros::v8_class;
-#[allow(unused_imports)]
-use zeroship_runtime_macros::{
-    v8_constructor, v8_getter, v8_inherit, v8_method, v8_name, v8_setter,
-};
 
 use crate::dom::event_target::{self, EventTarget};
 use crate::dom::message_event::MessageEventState;

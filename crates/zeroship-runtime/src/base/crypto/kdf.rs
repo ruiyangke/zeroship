@@ -3,7 +3,7 @@
 //! scrypt drops to aws-lc-sys raw FFI (`EVP_PBE_scrypt`) because the
 //! high-level aws-lc-rs surface does not expose it.
 
-#![allow(dead_code, unsafe_code)]
+#![allow(unsafe_code)]
 
 use super::digest::KernelHashAlgo;
 use super::error::KernelError;

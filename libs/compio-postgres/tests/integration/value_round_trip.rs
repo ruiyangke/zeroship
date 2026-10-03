@@ -14,7 +14,6 @@
 //! case pass for any returned NaN payload and, worse, make a returned `0.0`
 //! indistinguishable from the `-0.0` that was sent.
 
-#[allow(unused_imports)]
 use crate::support;
 use support::{suite_tls, test_url};
 use compio_postgres::Client;

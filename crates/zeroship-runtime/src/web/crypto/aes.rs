@@ -1,6 +1,5 @@
 //! AES-CTR / AES-CBC / AES-GCM / AES-KW.
 
-#![allow(dead_code)]
 
 use super::crypto_key;
 use super::helpers::{
@@ -213,33 +212,22 @@ fn gcm_decrypt_any_iv(
 
 struct GcmState {
     h: [u8; 16],
-    ecb_key: aws_lc_rs::cipher::UnboundCipherKey,
     key_bytes: Vec<u8>,
 }
 
 impl GcmState {
     fn new(key_bytes: &[u8]) -> Result<Self, OpError> {
-        use aws_lc_rs::cipher::{UnboundCipherKey, AES_128, AES_192, AES_256};
-        let alg = match key_bytes.len() {
-            16 => &AES_128,
-            24 => &AES_192,
-            32 => &AES_256,
+        match key_bytes.len() {
+            16 | 24 | 32 => {}
             _ => return Err(OpError::dom("OperationError", "Invalid AES-GCM key length")),
-        };
-        let _ = UnboundCipherKey::new(alg, key_bytes)
-            .map_err(|_| OpError::dom("OperationError", "AES-GCM ECB init"))?;
+        }
         // Compute H = AES_K(0^128) for GHASH. aws-lc-rs's high-level aead
         // API does not expose raw single-block ECB, so the zero block goes
         // through the lower-level `aws_lc_rs::cipher::EncryptingKey::ecb`
         // (no padding).
         let h = aes_ecb_encrypt_block(key_bytes, &[0u8; 16])?;
-        // Construct an unused UnboundCipherKey solely as a token (we
-        // never use it past the fact-of-construction here).
-        let ecb_key = UnboundCipherKey::new(alg, key_bytes)
-            .map_err(|_| OpError::dom("OperationError", "AES-GCM ECB init"))?;
         Ok(GcmState {
             h,
-            ecb_key,
             key_bytes: key_bytes.to_vec(),
         })
     }
@@ -614,14 +602,6 @@ pub fn aes_kw_unwrap(key_bytes: &[u8], wrapped: &[u8]) -> Result<Vec<u8>, OpErro
 
 fn aes_kw_alg(_len: usize) -> Result<(), OpError> {
     Ok(())
-}
-
-// Marker to keep aws_lc_rs::aead::Aad imported (the wrap path doesn't
-// use it directly because we hand-roll RFC 3394, but the comment
-// noted the alternative path).
-#[allow(dead_code)]
-fn _aad_marker() -> aws_lc_rs::aead::Aad<&'static [u8]> {
-    aws_lc_rs::aead::Aad::from(&[][..])
 }
 
 /// RFC 3394 §2.2.1 Key Wrap algorithm.

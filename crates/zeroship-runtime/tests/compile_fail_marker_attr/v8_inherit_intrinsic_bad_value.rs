@@ -10,7 +10,7 @@
 //! the impl block. This fixture pins the post-fix shape: ONE error,
 //! attached to the impl item type, naming the bad value and the
 //! supported set.
-#![allow(unused_imports)]
+#![expect(unused_imports, reason = "the fixture imports the inner v8 attribute macros that `#[v8_class]` consumes during expansion, so rustc cannot see them used; the stderr snapshot pins only the intended rejection")]
 
 use zeroship_runtime_macros::{v8_class, v8_constructor, v8_inherit_intrinsic};
 

@@ -18,7 +18,6 @@ use std::rc::Rc;
 use std::task::Poll;
 use std::time::Duration;
 
-#[allow(unused_imports)]
 use crate::support;
 
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(5);

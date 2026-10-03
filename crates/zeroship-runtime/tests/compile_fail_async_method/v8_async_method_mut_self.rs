@@ -9,7 +9,7 @@
 //! the intended rejection from a typo. The `.stderr` snapshot beside this
 //! file is the control: a different error is a different snapshot, and
 //! trybuild fails.
-#![allow(unused_imports)]
+#![expect(unused_imports, reason = "the fixture imports the inner v8 attribute macros that `#[v8_class]` consumes during expansion, so rustc cannot see them used; the stderr snapshot pins only the intended rejection")]
 
 use zeroship_runtime::state::OpError;
 use zeroship_runtime_macros::{v8_async_method, v8_class, v8_constructor};

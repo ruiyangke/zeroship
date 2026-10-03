@@ -1,6 +1,5 @@
 //! PostgreSQL's allowed SIMPLE `Query` reply sequences.
 
-#[allow(unused_imports)]
 use crate::support;
 use compio_postgres::error::SqlState;
 use compio_postgres::types::Type;

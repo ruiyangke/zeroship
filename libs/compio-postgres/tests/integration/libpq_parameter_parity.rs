@@ -16,7 +16,6 @@
 use compio_postgres::config::{Host, ProtocolVersion};
 use compio_postgres::{Config, NoTls};
 
-#[allow(unused_imports)]
 use crate::support;
 
 /// What this driver is expected to do with a libpq parameter.

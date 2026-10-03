@@ -13,7 +13,6 @@ use compio_postgres::Client;
 use compio_postgres::error::SqlState;
 use std::time::Duration;
 
-#[allow(unused_imports)]
 use crate::support;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(20);

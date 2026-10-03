@@ -10,7 +10,6 @@
 //! So every case ends by asking an unrelated question with a recognisable
 //! answer. "The drop did not panic" would not catch this.
 
-#[allow(unused_imports)]
 use crate::support;
 use support::{suite_tls, test_url};
 use compio_postgres::Client;

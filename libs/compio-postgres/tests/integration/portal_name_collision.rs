@@ -5,7 +5,6 @@ use std::fmt::Write;
 use compio_postgres::error::SqlState;
 use compio_postgres::{Client, SimpleQueryMessage};
 
-#[allow(unused_imports)]
 use crate::support;
 
 async fn connected() -> Client {

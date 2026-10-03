@@ -30,7 +30,6 @@
 //! these DSNs fell back, which is why it reads as a regression rather than a
 //! tightening.
 
-#[allow(unused_imports)]
 use crate::support;
 
 fn test_url() -> String {

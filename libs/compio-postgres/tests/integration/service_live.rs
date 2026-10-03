@@ -5,7 +5,6 @@
 //! write a file and name it with `Config::service_file`, which is exactly what
 //! an application does.
 
-#[allow(unused_imports)]
 use crate::support;
 use support::{suite_tls, test_url};
 use compio_postgres::Config;

@@ -5,7 +5,6 @@ use compio_postgres::{Client, Config, Error, SimpleQueryMessage};
 use std::error::Error as _;
 use std::io;
 
-#[allow(unused_imports)]
 use crate::support;
 
 fn test_url() -> String {

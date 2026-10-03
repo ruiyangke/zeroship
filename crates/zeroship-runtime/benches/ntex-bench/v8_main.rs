@@ -58,12 +58,9 @@ fn ensure_v8_initialized(modules: &[ModuleEntry]) {
 
 #[derive(Deserialize)]
 struct RpcRequest {
-    #[allow(dead_code)]
     jsonrpc: Option<String>,
     method: String,
-    #[allow(dead_code)]
     params: Option<serde_json::Value>,
-    #[allow(dead_code)]
     id: Option<serde_json::Value>,
 }
 

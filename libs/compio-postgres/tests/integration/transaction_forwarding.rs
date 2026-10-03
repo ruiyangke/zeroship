@@ -29,7 +29,6 @@ use compio_postgres::types::Type;
 use futures_util::TryStreamExt;
 use std::time::Duration;
 
-#[allow(unused_imports)]
 use crate::support;
 
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(20);

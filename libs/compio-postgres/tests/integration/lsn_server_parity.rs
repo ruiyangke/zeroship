@@ -17,7 +17,6 @@
 //! zero-padded would round-trip through itself perfectly and still disagree
 //! with every LSN the server ever prints.
 
-#[allow(unused_imports)]
 use crate::support;
 use support::{suite_tls, test_url};
 use compio_postgres::Client;

@@ -7,7 +7,7 @@
 //! a SEPARATE fixture from the `String` case on purpose: one snapshot per
 //! rejected type is what proves the macro rejects each of them, rather
 //! than one of them plus a generic failure.
-#![allow(unused_imports)]
+#![expect(unused_imports, reason = "the fixture imports the inner v8 attribute macros that `#[v8_class]` consumes during expansion, so rustc cannot see them used; the stderr snapshot pins only the intended rejection")]
 
 use zeroship_runtime_macros::{v8_class, v8_constructor, v8_method};
 

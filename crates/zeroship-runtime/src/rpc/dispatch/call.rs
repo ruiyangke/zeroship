@@ -45,6 +45,7 @@ pub(crate) struct RpcCall {
 }
 
 impl RpcCall {
+    #[cfg(any(test, feature = "runtime_native_websocket"))]
     pub(crate) fn new<'s>(
         scope: &mut v8::PinScope<'s, '_>,
         registry: ProcedureRegistry,

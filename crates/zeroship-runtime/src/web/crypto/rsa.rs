@@ -1,7 +1,6 @@
 //! RSA-OAEP / RSASSA-PKCS1-v1_5 / RSA-PSS — sign/verify/encrypt/decrypt
 //! plus key generation, import/export, and variable PSS salt lengths.
 
-#![allow(dead_code)]
 
 use super::crypto_key;
 use super::helpers::{read_buffer_source, vec_to_arraybuffer};

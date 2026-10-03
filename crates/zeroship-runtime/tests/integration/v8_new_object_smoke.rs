@@ -25,8 +25,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use zeroship_runtime::init_v8;
-#[allow(unused_imports)]
-use zeroship_runtime_macros::{v8_class, v8_constructor, v8_getter, v8_method};
+use zeroship_runtime_macros::v8_class;
 
 /// Process-wide mutex to serialise tests in this file. The MINTS counter
 /// is shared, so cargo's parallel test runner would interleave reads

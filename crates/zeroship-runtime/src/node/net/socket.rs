@@ -8,10 +8,7 @@ use crate::state::{OpError, SharedState};
 use super::connect::{authorize_connect, capability_violation, ConnectKind};
 #[cfg(feature = "runtime_tls")]
 use super::connect::{authorize_start_tls, validate_tls_policy};
-#[allow(unused_imports)]
-use zeroship_runtime_macros::{
-    v8_class, v8_constructor, v8_getter, v8_method, v8_name, v8_to_string_tag,
-};
+use zeroship_runtime_macros::v8_class;
 
 pub struct NativeSocket {
     socket_id: u32,

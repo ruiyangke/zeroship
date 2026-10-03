@@ -40,7 +40,6 @@ use compio_postgres::replication::pgoutput::{self, PgOutputMessage};
 use compio_postgres::replication::{ReplicationMessage, StartReplicationOptions};
 use std::time::Duration;
 
-#[allow(unused_imports)]
 use crate::support;
 
 /// Bounds the whole publish-then-stream exchange. A live walsender that never

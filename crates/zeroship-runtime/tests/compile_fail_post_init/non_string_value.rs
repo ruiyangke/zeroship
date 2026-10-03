@@ -6,7 +6,7 @@
 //!    impl, e.g. post_init = \"after_install\""
 //! (design §5.7 case 3). Strict by design — silent no-op would be
 //! a debugging nightmare for a semantically load-bearing attribute.
-#![allow(unused_imports)]
+#![expect(unused_imports, reason = "the fixture imports the inner v8 attribute macros that `#[v8_class]` consumes during expansion, so rustc cannot see them used; the stderr snapshot pins only the intended rejection")]
 
 use zeroship_runtime::state::OpError;
 use zeroship_runtime_macros::{v8_class, v8_constructor};

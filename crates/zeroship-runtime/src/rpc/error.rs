@@ -38,9 +38,8 @@
 
 use std::cell::RefCell;
 
-#[allow(unused_imports)]
 use zeroship_runtime_macros::{
-    v8_class, v8_constructor, v8_getter, v8_inherit_intrinsic, v8_name, v8_to_string_tag,
+    v8_class,
     WebIdlDict, WebIdlEnum,
 };
 

@@ -11,7 +11,6 @@ use compio_postgres::replication::{ReplicationMessage, StartReplicationOptions, 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-#[allow(unused_imports)]
 use crate::support;
 
 const WATCHDOG: Duration = Duration::from_secs(60);

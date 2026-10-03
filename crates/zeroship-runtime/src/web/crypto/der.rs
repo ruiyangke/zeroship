@@ -33,7 +33,6 @@
 //! that doesn't match the expected shape so we don't accidentally
 //! interpret garbage as a seed.
 
-#![allow(dead_code)]
 
 /// Walk a PKCS#8 PrivateKeyInfo and return (algorithm-identifier-OID-bytes,
 /// privateKey-OCTET-STRING-contents). The OID bytes returned are the

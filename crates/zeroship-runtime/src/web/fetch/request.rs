@@ -31,9 +31,8 @@ use super::enums::{
 // strip in `mod.rs::strip_marker_attrs`. Allow the unused-imports lint
 // since proc-macro attribute usage isn't visible to the compiler's
 // usage tracker.
-#[allow(unused_imports)]
 use zeroship_runtime_macros::{
-    v8_class, v8_constructor, v8_getter, v8_method, v8_name, v8_state_marker, WebIdlDict,
+    v8_class, WebIdlDict,
 };
 
 /// Synthetic base URL used when `new Request(input)` receives a

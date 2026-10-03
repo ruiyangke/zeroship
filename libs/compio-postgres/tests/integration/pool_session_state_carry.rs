@@ -53,7 +53,6 @@
 use compio_postgres::{Pool, PoolConfig};
 use std::time::Duration;
 
-#[allow(unused_imports)]
 use crate::support;
 
 const POOL_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);

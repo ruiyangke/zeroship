@@ -38,8 +38,6 @@
 //! `Error.prototype` directly.
 
 use zeroship_runtime_macros::v8_class;
-#[allow(unused_imports)]
-use zeroship_runtime_macros::{v8_constructor, v8_getter, v8_name, v8_to_string_tag};
 
 use crate::state::OpError;
 

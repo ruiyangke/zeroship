@@ -38,8 +38,7 @@ use crate::blob_native::Blob;
 use crate::state::OpError;
 
 
-#[allow(unused_imports)]
-use zeroship_runtime_macros::{v8_class, v8_constructor, v8_getter, v8_method, WebIdlDict};
+use zeroship_runtime_macros::{v8_class, WebIdlDict};
 
 // ---------------------------------------------------------------------------
 // File struct — Blob prefix + extra fields
@@ -92,7 +91,10 @@ pub struct File {
 #[derive(Default, Debug, WebIdlDict)]
 pub(crate) struct FilePropertyBag {
     // Parsed for WebIDL dictionary member access order inherited from Blob.
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "the WebIDL dictionary converter reads and stores `endings` in member order inherited from Blob; File does not consult it"
+    )]
     pub endings: Option<String>,
     #[webidl_name = "lastModified"]
     pub last_modified: Option<f64>,

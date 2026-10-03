@@ -27,8 +27,6 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use zeroship_runtime_macros::v8_class;
-#[allow(unused_imports)]
-use zeroship_runtime_macros::{v8_constructor, v8_getter};
 
 use crate::codec::{make_codec, Codec, CodecError, CodecMode, CompressionFormat};
 use crate::state::OpError;

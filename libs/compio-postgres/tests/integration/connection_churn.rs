@@ -7,7 +7,6 @@ use std::future::Future;
 use std::task::{Context, Waker};
 use std::time::{Duration, Instant};
 
-#[allow(unused_imports)]
 use crate::support;
 
 const CLEAN_CONNECTION_ITERATIONS: usize = 50;

@@ -30,8 +30,7 @@
 
 use zeroship_runtime::init_v8;
 use zeroship_runtime::state::OpError;
-#[allow(unused_imports)]
-use zeroship_runtime_macros::{v8_class, v8_constructor, v8_getter, v8_method, v8_setter};
+use zeroship_runtime_macros::v8_class;
 
 // ---------------------------------------------------------------------------
 // Test harness — local copy to keep tests self-contained.

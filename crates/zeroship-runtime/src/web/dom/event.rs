@@ -21,8 +21,6 @@
 use std::cell::{Cell, RefCell};
 
 use zeroship_runtime_macros::{v8_class, WebIdlDict};
-#[allow(unused_imports)]
-use zeroship_runtime_macros::{v8_constructor, v8_getter, v8_method, v8_name};
 
 use crate::state::OpError;
 

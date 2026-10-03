@@ -14,7 +14,6 @@
 //! what makes these assertions mean anything. `a_wrong_password_in_the_file_
 //! still_fails` is the standing check that this is still true.
 
-#[allow(unused_imports)]
 use crate::support;
 use support::{suite_tls, test_url};
 use compio_postgres::Config;

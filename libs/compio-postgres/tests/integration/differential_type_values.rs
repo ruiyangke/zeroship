@@ -30,7 +30,6 @@ use compio_postgres::types as compio_types;
 use futures_util::FutureExt;
 use tokio_postgres::types as tokio_types;
 
-#[allow(unused_imports)]
 use crate::support;
 
 const POSTGRES_EPOCH_FROM_UNIX_SECS: u64 = 946_684_800;

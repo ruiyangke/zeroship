@@ -527,8 +527,7 @@ where
     }
 
     /// Append data to the write buffer (no I/O until flush).
-    // Used by `buf_stream::tests` to exercise serialized flush behavior.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn write(&mut self, data: &[u8]) {
         self.write_buf.extend_from_slice(data);
     }

@@ -13,10 +13,8 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 #[derive(Deserialize)]
 struct RpcRequest {
-    #[allow(dead_code)]
     jsonrpc: Option<String>,
     method: String,
-    #[allow(dead_code)]
     params: Option<serde_json::Value>,
     id: Option<serde_json::Value>,
 }

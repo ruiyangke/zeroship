@@ -26,7 +26,6 @@ use bytes::Bytes;
 use compio_postgres::config::ProtocolVersion;
 use futures_util::SinkExt;
 
-#[allow(unused_imports)]
 use crate::support;
 
 const SESSION_TIMEOUT: &str = "SET statement_timeout = '50ms'";

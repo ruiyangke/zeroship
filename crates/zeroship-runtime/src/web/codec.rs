@@ -910,7 +910,6 @@ impl Codec for IdentityCodec {
 /// This is a one-shot whole-buffer decoder for the fetch layer's
 /// Content-Encoding path (see `web::fetch::content_encoding`). Returns
 /// the decompressed bytes or an error.
-#[allow(dead_code)]
 pub(crate) fn try_zlib_then_raw_decode(input: &[u8]) -> Result<Vec<u8>, CodecError> {
     // Strict zlib first. On any error, fall back to raw.
     let mut zlib_dec = make_codec(CompressionFormat::Deflate, CodecMode::Decompress);

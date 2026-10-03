@@ -28,8 +28,7 @@
 
 use zeroship_runtime::clamp::{ClampI32, ClampI64, ClampU16, ClampU32, ClampU64};
 use zeroship_runtime::init_v8;
-#[allow(unused_imports)]
-use zeroship_runtime_macros::{v8_class, v8_constructor, v8_method};
+use zeroship_runtime_macros::v8_class;
 
 // ---------------------------------------------------------------------------
 // Test harness — copy of the v8_class_smoke harness so this test stays

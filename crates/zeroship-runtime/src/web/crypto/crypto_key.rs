@@ -12,8 +12,7 @@
 use super::key_material::{CryptoKeyState, KeyAlgorithm, KeyUsage, CRYPTO_KEY_TAG};
 use crate::state::OpError;
 
-#[allow(unused_imports)]
-use zeroship_runtime_macros::{v8_class, v8_constructor, v8_getter, v8_method, v8_to_string_tag};
+use zeroship_runtime_macros::v8_class;
 
 // ---------------------------------------------------------------------------
 // CryptoKey IDL surface

@@ -14,8 +14,6 @@ use std::rc::Rc;
 use serde_json::{Map, Value};
 use zeroship_runtime::state::{NativeValue, OpError, OpResult, ResolveValue, SharedState};
 use zeroship_runtime_macros::v8_class;
-#[allow(unused_imports)]
-use zeroship_runtime_macros::{v8_constructor, v8_getter, v8_method, v8_name};
 
 use zeroship_workflow::backend::SharedWorkflowBackend;
 use zeroship_workflow::operations::{RestartOptions, RunOperation, SignalOptions, StartOptions};
@@ -447,7 +445,6 @@ fn dispatch_run_handle<'s>(
 // ---------------------------------------------------------------------------
 
 #[v8_class]
-#[allow(dead_code)]
 impl Workflows {
     #[v8_constructor]
     fn new() -> Result<Workflows, OpError> {
@@ -456,7 +453,6 @@ impl Workflows {
 }
 
 #[v8_class]
-#[allow(dead_code)]
 impl WorkflowHandle {
     #[v8_constructor]
     fn new() -> Result<WorkflowHandle, OpError> {
@@ -499,7 +495,6 @@ impl WorkflowHandle {
 }
 
 #[v8_class]
-#[allow(dead_code)]
 impl WorkflowRun {
     #[v8_constructor]
     fn new() -> Result<WorkflowRun, OpError> {

@@ -2,7 +2,6 @@ use compio_postgres::Client;
 use compio_postgres::types::Type;
 use std::time::Duration;
 
-#[allow(unused_imports)]
 use crate::support;
 
 const QUERY_START_TIMEOUT: Duration = Duration::from_secs(5);

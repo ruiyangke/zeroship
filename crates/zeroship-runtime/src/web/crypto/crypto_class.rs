@@ -6,10 +6,7 @@
 use super::helpers::fill_random;
 use crate::state::OpError;
 
-#[allow(unused_imports)]
-use zeroship_runtime_macros::{
-    v8_class, v8_constructor, v8_getter, v8_method, v8_name, v8_to_string_tag,
-};
+use zeroship_runtime_macros::v8_class;
 
 const HEX: &[u8; 16] = b"0123456789abcdef";
 

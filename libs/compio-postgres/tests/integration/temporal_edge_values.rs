@@ -10,7 +10,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use compio_postgres::Client;
 
-#[allow(unused_imports)]
 use crate::support;
 
 const POSTGRES_EPOCH_FROM_UNIX_SECS: u64 = 946_684_800;
