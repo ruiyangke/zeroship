@@ -182,6 +182,23 @@ impl AuthServer {
         })
         .await;
         assert_eq!(auth_base, format!("http://{}", server.addr()));
+        // The test server registers its worker asynchronously, after the
+        // listener is bound. A stop that arrives before that registration finds
+        // an empty worker set, so the worker - and the app state holding the
+        // fixture's `Arc<Client>` - outlives the case and the connection never
+        // closes. Serving one request proves the worker is registered, so the
+        // fixture's teardown can release the connection it owns.
+        let health = cyper::Client::new()
+            .request(http::Method::GET, format!("{auth_base}/healthz"))
+            .expect("build the fixture health probe")
+            .send()
+            .await
+            .expect("the auth fixture server accepts a request");
+        assert_eq!(
+            health.status().as_u16(),
+            200,
+            "the auth fixture server serves requests"
+        );
         Self {
             _server: server,
             auth_base,

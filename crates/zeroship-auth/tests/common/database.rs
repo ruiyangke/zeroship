@@ -473,6 +473,20 @@ async fn a_failed_case_reports_its_own_failure_over_the_teardown_it_broke() {
     assert_eq!(leaked.borrow().len(), 2, "both cases leaked their client");
 }
 
+/// An HTTP fixture the case never exercises still releases the connection its
+/// app state holds before the case ends.
+///
+/// The server registers its worker after the listener is bound. A case that
+/// ends first leaves that worker outside the stop, and the app state it owns
+/// keeps the fixture's client alive past the case and its teardown.
+#[ntex::test]
+async fn an_unexercised_auth_server_releases_its_connection_before_the_case_ends() {
+    Database::run(async |database| {
+        let _server = super::auth_server::AuthServer::start(database).await;
+    })
+    .await;
+}
+
 fn container_ids() -> Vec<String> {
     let output = Command::new("docker")
         .args(["ps", "--all", "--quiet", "--no-trunc"])
