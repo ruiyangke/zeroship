@@ -431,29 +431,43 @@ async fn native_runner_hydrates_continuation_input_before_entering_v8() {
 
 #[compio::test]
 async fn oversized_input_never_initializes_the_creator_module() {
-    assert!(!payload_bounded_initialization(1).await);
+    // A refused input leaves no positive event to wait on, so the case waits for
+    // the host to conclude the attempt by handing its claim back. Only once an
+    // attempt has been made is an empty `probes` evidence that the budget
+    // refused the input rather than that nothing was ever delivered.
+    let (fixture, manager, mut consumer) = payload_bounded_consumer(1).await;
+    assert!(
+        drive_until_attempted(&fixture, &manager, &mut consumer, Duration::from_secs(20)).await,
+        "the host never concluded an attempt for an input it should have refused"
+    );
+    assert!(fixture.loader.probes.borrow().is_empty());
 }
 
 #[compio::test]
 async fn an_input_inside_the_payload_budget_initializes_the_creator_module() {
-    // The control for the case above: the same staged input and the same drive,
-    // differing only in whether it clears the budget. Without it, an empty
-    // `probes` would prove the budget refused the input OR that nothing was
-    // ever delivered to refuse.
-    assert!(payload_bounded_initialization(1024 * 1024).await);
+    // The control for the case above: the same staged input, differing only in
+    // whether it clears the budget. Without it, the empty `probes` above would
+    // prove the budget refused the input OR that nothing was ever delivered to
+    // refuse. An admitted input builds an isolate, so this case waits for that
+    // event rather than sampling a fixed window.
+    let built = payload_bounded_admission(1024 * 1024).await;
+    assert!(built);
 }
 
-/// Drive a staged continuation input through delivery under `max_payload_bytes`
-/// and answer whether the host built a creator isolate for it.
-///
-/// The creator module throws on evaluation, so a constructed isolate is proof
-/// the input cleared the budget and nothing beyond that.
-async fn payload_bounded_initialization(max_payload_bytes: usize) -> bool {
+/// A staged continuation input and the consumer bound by `max_payload_bytes`,
+/// as the payload-budget cases drive them.
+async fn payload_bounded_consumer(
+    max_payload_bytes: usize,
+) -> (
+    Fixture,
+    Rc<Manager>,
+    zeroship_workflow_runner::consumer::JobConsumer<Manager>,
+) {
     let fixture =
         Fixture::new("throw new Error('must not evaluate'); export class Example {}").await;
     prepare_payload(&fixture, true).await;
     let manager = Manager::new(&fixture).await;
-    let mut consumer = manager.consumer_with_limits(
+    let consumer = manager.consumer_with_limits(
         &fixture,
         1,
         TaskPayloadLimits {
@@ -462,9 +476,14 @@ async fn payload_bounded_initialization(max_payload_bytes: usize) -> bool {
             ..TaskPayloadLimits::default()
         },
     );
-    drive_for(&fixture, &manager, &mut consumer, DRIVE_WINDOW).await;
-    let built = !fixture.loader.probes.borrow().is_empty();
-    built
+    (fixture, manager, consumer)
+}
+
+/// Drive the admitted input until the host builds a creator isolate, and answer
+/// whether it did inside the bound.
+async fn payload_bounded_admission(max_payload_bytes: usize) -> bool {
+    let (fixture, manager, mut consumer) = payload_bounded_consumer(max_payload_bytes).await;
+    drive_until_built(&fixture, &manager, &mut consumer, Duration::from_secs(20)).await
 }
 
 struct UnavailablePayloads(Rc<WorkerTasks>);
@@ -1091,13 +1110,63 @@ async fn drive_until_disposed(
     .is_ok()
 }
 
-/// How long a case drives delivery when what it asserts is what the host did
-/// while it could not finish.
+/// Drive delivery until the host builds a creator isolate, and answer whether it
+/// did inside `bound`.
 ///
-/// Long enough for a claim to be delivered and attempted, and well inside the
-/// manager's lease, so a case counting what happened once sees one attempt
-/// rather than a redelivery.
-const DRIVE_WINDOW: Duration = Duration::from_secs(1);
+/// The isolate appearing is the event a positive case is about, so waiting for
+/// it is deterministic; a fixed drive window only samples whether the host
+/// happened to finish building it in time.
+async fn drive_until_built(
+    fixture: &Fixture,
+    manager: &Rc<Manager>,
+    consumer: &mut zeroship_workflow_runner::consumer::JobConsumer<Manager>,
+    bound: Duration,
+) -> bool {
+    compio::time::timeout(
+        bound,
+        consumer.run_until(async {
+            loop {
+                manager.publish(&fixture.app).await;
+                if !fixture.loader.probes.borrow().is_empty() {
+                    return;
+                }
+                compio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }),
+    )
+    .await
+    .is_ok()
+}
+
+/// Drive delivery until the host has concluded one attempt by giving its claim
+/// back, and answer whether it did inside `bound`.
+///
+/// A case that asserts what did NOT happen needs proof an attempt happened at
+/// all, or its empty observation is a check over zero input. `release` is the
+/// event both a missing executable and a refused oversized input end on: the
+/// host cannot finish the task, so it hands the logical job back rather than
+/// settling the run.
+async fn drive_until_attempted(
+    fixture: &Fixture,
+    manager: &Rc<Manager>,
+    consumer: &mut zeroship_workflow_runner::consumer::JobConsumer<Manager>,
+    bound: Duration,
+) -> bool {
+    compio::time::timeout(
+        bound,
+        consumer.run_until(async {
+            loop {
+                manager.publish(&fixture.app).await;
+                if manager.released.get() > 0 {
+                    return;
+                }
+                compio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }),
+    )
+    .await
+    .is_ok()
+}
 
 /// Drive delivery for a fixed window, for the cases whose run never settles.
 ///
@@ -1335,7 +1404,14 @@ async fn missing_executable_never_constructs_an_app_isolate() {
         .unwrap());
     let manager = Manager::new(&fixture).await;
     let mut consumer = manager.consumer(&fixture, 1);
-    drive_for(&fixture, &manager, &mut consumer, DRIVE_WINDOW).await;
+    // A missing executable leaves no positive event to wait on, so the case
+    // waits for the host to conclude the attempt by handing its claim back.
+    // Only once an attempt has been made is an empty `probes` evidence that the
+    // host refused to build an isolate rather than that nothing was delivered.
+    assert!(
+        drive_until_attempted(&fixture, &manager, &mut consumer, Duration::from_secs(20)).await,
+        "the host never concluded an attempt for an executable it cannot load"
+    );
     assert!(fixture.loader.probes.borrow().is_empty());
     // An executable the host cannot load is not the creator's failure, so the
     // frontier stays retryable rather than settling the run.
@@ -1350,10 +1426,11 @@ async fn missing_executable_never_constructs_an_app_isolate() {
 
 #[compio::test]
 async fn an_available_executable_constructs_an_app_isolate() {
-    // The control for the case above: the same drive over the same run and the
-    // same window, differing only in whether the manifest the assignment names
-    // is still there. Without it, an empty `probes` would prove the host built
-    // no isolate OR that nothing was ever delivered to it.
+    // The control for the case above: the same run, differing only in whether the
+    // manifest the assignment names is still there. Without it, the empty `probes`
+    // above would prove the host built no isolate OR that nothing was ever
+    // delivered to it. The isolate appearing is what this case is about, so it
+    // waits for that event instead of sampling a fixed window.
     let fixture =
         Fixture::new("throw new Error('must not evaluate'); export class Example {}").await;
     fixture
@@ -1363,8 +1440,11 @@ async fn an_available_executable_constructs_an_app_isolate() {
         .unwrap();
     let manager = Manager::new(&fixture).await;
     let mut consumer = manager.consumer(&fixture, 1);
-    drive_for(&fixture, &manager, &mut consumer, DRIVE_WINDOW).await;
-    assert!(!fixture.loader.probes.borrow().is_empty());
+    let built = drive_until_built(&fixture, &manager, &mut consumer, Duration::from_secs(20)).await;
+    assert!(
+        built,
+        "the host never constructed an isolate for an executable it can load"
+    );
 }
 
 /// A native manager queue delivering to one trusted worker, as the CLI host
@@ -1373,6 +1453,9 @@ struct Manager {
     coordinator: zeroship_workflow_manager::coordinator::Coordinator,
     worker: zeroship_core::workflow_coordination::WorkerId,
     scope: zeroship_core::workflow_coordination::AssignedScope,
+    /// How many delivery attempts this transport has concluded by handing the
+    /// claim back, so a case can wait for an attempt rather than sample a window.
+    released: Cell<usize>,
 }
 
 impl Manager {
@@ -1430,6 +1513,7 @@ impl Manager {
                 app_id: assignment.app_id,
                 assignment_revision: assignment.revision,
             },
+            released: Cell::new(0),
         })
     }
 
@@ -1591,7 +1675,9 @@ impl zeroship_workflow_runner::delivery::JobTransport for Manager {
         lease: &Self::Lease,
         task: &zeroship_workflow::service::delivery::DeliveredTask,
     ) -> Result<(), WorkflowServiceError> {
-        journal.release_job(task, lease).await
+        let released = journal.release_job(task, lease).await;
+        self.released.set(self.released.get() + 1);
+        released
     }
     async fn receipt(
         &self,
