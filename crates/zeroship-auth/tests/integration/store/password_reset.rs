@@ -6,7 +6,7 @@ use zeroship_auth::store::users;
 
 #[compio::test]
 async fn concurrent_issue_leaves_one_active_reset_token() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let orm = database.orm().await;
         let client = database.connect_as_auth().await;
         let email = "reset@example.test";
@@ -81,7 +81,7 @@ async fn concurrent_issue_leaves_one_active_reset_token() {
 
 #[compio::test]
 async fn issue_then_redeem_roundtrip() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let orm = database.orm().await;
         let client = database.connect_as_auth().await;
         let email = "reset@example.test";
@@ -103,7 +103,7 @@ async fn issue_then_redeem_roundtrip() {
 
 #[compio::test]
 async fn completion_obeys_transaction_rollback_and_commit() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let orm = database.orm().await;
         let mut client = database.connect_as_auth().await;
         let old_hash = password::hash("old reset password phrase").await.unwrap();
@@ -178,7 +178,7 @@ async fn completion_obeys_transaction_rollback_and_commit() {
 
 #[compio::test]
 async fn completion_binds_the_user_at_issue_time_after_email_reassignment() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let orm = database.orm().await;
         let client = database.connect_as_auth().await;
         let old_hash = password::hash("old reset password phrase").await.unwrap();
@@ -248,7 +248,7 @@ async fn completion_binds_the_user_at_issue_time_after_email_reassignment() {
 
 #[compio::test]
 async fn new_issue_supersedes_previous_reset_token() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let orm = database.orm().await;
         let client = database.connect_as_auth().await;
         let email = "reset@example.test";

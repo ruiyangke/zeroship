@@ -4,7 +4,7 @@ use zeroship_auth::store::relay;
 
 #[compio::test]
 async fn probing_is_read_only_and_terminal_commit_is_idempotent() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let pg = database.connect_as_auth().await;
         let message_id = "incoming-message";
         assert!(!relay::already_seen(&pg, message_id).await.unwrap());
@@ -20,7 +20,7 @@ async fn probing_is_read_only_and_terminal_commit_is_idempotent() {
 
 #[compio::test]
 async fn local_revocation_disables_the_alias_and_preserves_the_grant() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let admin = database.connect().await;
         let alias = Alias::seed(&admin).await;
         let pg = database.connect_as_auth().await;

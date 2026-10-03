@@ -9,7 +9,7 @@ use zeroship_core::UserId;
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn disabled_account_cannot_redeem_but_the_link_survives_for_an_eligible_retry() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let mailer = Arc::new(CapturingMailer::default());
         let server = AuthServer::with_mailer(database, mailer.clone()).await;
         let user = users::create(&server.orm, "disabled@example.test", "Disabled", None)
@@ -45,7 +45,7 @@ async fn disabled_account_cannot_redeem_but_the_link_survives_for_an_eligible_re
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn disabled_account_cannot_complete_but_the_code_survives_for_an_eligible_retry() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let mailer = Arc::new(CapturingMailer::default());
         let server = AuthServer::with_mailer(database, mailer.clone()).await;
         let user = users::create(&server.orm, "disabled@example.test", "Disabled", None)

@@ -64,7 +64,7 @@ async fn require_confirmation(
 
 #[compio::test]
 async fn a_password_requires_confirmation_and_preserves_the_native_continuation() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let pg = database.connect_as_auth().await;
         let orm = database.orm().await;
         let hash = password::hash("existing-password").await.unwrap();
@@ -89,7 +89,7 @@ async fn a_password_requires_confirmation_and_preserves_the_native_continuation(
 
 #[compio::test]
 async fn untrusted_email_requires_confirmation_for_an_account_without_a_password() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let pg = database.connect_as_auth().await;
         let orm = database.orm().await;
         let user = users::create(&orm, "recipient@example.test", "Local name", None)
@@ -102,7 +102,7 @@ async fn untrusted_email_requires_confirmation_for_an_account_without_a_password
 
 #[compio::test]
 async fn trusted_email_links_an_existing_account_without_overwriting_its_profile() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let pg = database.connect_as_auth().await;
         let orm = database.orm().await;
         let user = users::create(&orm, "recipient@example.test", "Local name", None)
@@ -179,7 +179,7 @@ async fn trusted_email_links_an_existing_account_without_overwriting_its_profile
 
 #[compio::test]
 async fn untrusted_email_creates_no_account_or_identity_and_trusted_retry_can_succeed() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let pg = database.connect_as_auth().await;
         let orm = database.orm().await;
         let profile = profile("google", false);

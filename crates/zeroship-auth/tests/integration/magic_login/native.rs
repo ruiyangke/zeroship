@@ -8,7 +8,7 @@ use zeroship_auth::store::users;
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn same_device_login_requires_csrf_and_recovers_a_soft_locked_account() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let mailer = Arc::new(CapturingMailer::default());
         let server = AuthServer::with_mailer(database, mailer.clone()).await;
         let email = "same-device@example.test";
@@ -74,7 +74,7 @@ async fn same_device_login_requires_csrf_and_recovers_a_soft_locked_account() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn cross_device_login_binds_the_completion_to_its_target_and_consumes_it() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let mailer = Arc::new(CapturingMailer::default());
         let server = AuthServer::with_mailer(database, mailer.clone()).await;
         let email = "cross-device@example.test";
@@ -123,7 +123,7 @@ async fn cross_device_login_binds_the_completion_to_its_target_and_consumes_it()
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn invalid_return_targets_issue_no_state_or_mail_while_native_authorize_works() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let mailer = Arc::new(CapturingMailer::default());
         let server = AuthServer::with_mailer(database, mailer.clone()).await;
         let email = "target-validation@example.test";

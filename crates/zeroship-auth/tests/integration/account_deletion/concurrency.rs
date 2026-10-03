@@ -55,7 +55,7 @@ async fn wait_until_blocked(observer: &Client, reaper_pid: i32, blocker_pid: i32
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn a_departure_after_the_preflight_cannot_leave_the_organization_ownerless() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let orm = database.orm().await;
         let mut db = database.connect().await;
         let as_auth = database.connect_as_auth().await;
@@ -241,7 +241,7 @@ async fn a_departure_after_the_preflight_cannot_leave_the_organization_ownerless
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn a_promotion_after_the_preflight_cannot_leave_the_organization_ownerless() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let orm = database.orm().await;
         let mut db = database.connect().await;
         let as_auth = database.connect_as_auth().await;

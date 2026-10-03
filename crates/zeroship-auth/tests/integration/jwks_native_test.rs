@@ -12,6 +12,7 @@ use crate::support::{
 use compio_postgres::Client;
 use serde_json::{json, Value};
 use std::collections::HashSet;
+use uuid::Uuid;
 use zeroship_auth::oidc::metadata::jwks_document;
 use zeroship_data_orm::sql::{MAX_ROW_LIMIT, MAX_ROW_OFFSET};
 
@@ -21,24 +22,30 @@ const PAGE_GATE: i64 = 41_002;
 /// Make the auth role's registry reads wait while the fixture holds the page gate.
 ///
 /// The policy runs while a page scans, after the page took its snapshot. The
-/// platform grants the auth role `BYPASSRLS`, so the case withdraws it for the
-/// policy to apply; the policy admits every row, so the rows each read sees are
-/// unchanged. The superuser fixture connections bypass it.
-async fn install_page_gate(admin: &Client) {
+/// page gate must apply to the ORM reader, so the case mints a role that
+/// inherits the auth role's privileges but NOT its `BYPASSRLS` attribute, and
+/// connects the ORM through it. The shared auth role's attributes are cluster
+/// state and are never changed. Returns the role name so the case can drop it.
+async fn install_page_gate(admin: &Client) -> String {
+    let role = format!("jwks_reader_{}", Uuid::new_v4().simple());
     admin
         .batch_execute(&format!(
-            "CREATE SCHEMA fixture; \
+            "CREATE ROLE \"{role}\" LOGIN PASSWORD '{role}' NOBYPASSRLS; \
+             GRANT USAGE ON SCHEMA zeroship TO \"{role}\"; \
+             GRANT SELECT ON zeroship.signing_keys TO \"{role}\"; \
+             ALTER ROLE \"{role}\" SET search_path TO zeroship, public; \
+             CREATE SCHEMA fixture; \
              CREATE FUNCTION fixture.pass_page_gate() RETURNS boolean \
              LANGUAGE plpgsql VOLATILE AS $$ \
              BEGIN PERFORM pg_advisory_xact_lock_shared({PAGE_GATE}); RETURN true; END $$; \
              ALTER TABLE zeroship.signing_keys ENABLE ROW LEVEL SECURITY; \
              ALTER TABLE zeroship.signing_keys FORCE ROW LEVEL SECURITY; \
              CREATE POLICY page_gate ON zeroship.signing_keys FOR SELECT \
-             USING (fixture.pass_page_gate()); \
-             ALTER ROLE zeroship_auth NOBYPASSRLS"
+             USING (fixture.pass_page_gate())"
         ))
         .await
         .unwrap();
+    role
 }
 
 /// Insert published keys whose creation times rise with their suffix, starting
@@ -112,6 +119,7 @@ impl GatedRead {
 async fn read_across_change(
     database: &Database,
     orm: &zeroship_data_orm::Database,
+    reader_role: &str,
     change: &str,
     kid: &str,
 ) -> GatedRead {
@@ -125,9 +133,9 @@ async fn read_across_change(
             writer
                 .query_one(
                     "SELECT count(*) = 1 FROM pg_stat_activity \
-                     WHERE datname = current_database() AND usename = 'zeroship_auth' \
+                     WHERE datname = current_database() AND usename = $1 \
                        AND wait_event_type = 'Lock' AND wait_event = 'advisory'",
-                    &[],
+                    &[&reader_role],
                 )
                 .await
                 .unwrap()
@@ -177,9 +185,8 @@ fn assert_snapshot(document: &[String], snapshot: &[String]) {
 
 #[compio::test]
 async fn native_jwks_keeps_a_key_promoted_while_the_reader_is_between_pages() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let admin = database.connect().await;
-        let orm = database.orm().await;
         let page = usize::try_from(MAX_ROW_LIMIT).unwrap();
         insert_keys(&admin, "active-", "active", MAX_ROW_LIMIT, 0).await;
         insert_keys(&admin, "retiring-", "retiring", 2, 0).await;
@@ -196,11 +203,13 @@ async fn native_jwks_keeps_a_key_promoted_while_the_reader_is_between_pages() {
             snapshot.iter().position(|kid| kid == promoted).unwrap() >= page,
             "the promoted key starts beyond the first page"
         );
-        install_page_gate(&admin).await;
+        let reader = install_page_gate(&admin).await;
+        let orm = database.orm_as(&reader).await;
 
         let read = read_across_change(
             database,
             &orm,
+            &reader,
             "UPDATE zeroship.signing_keys SET status = 'active', activated_at = clock_timestamp() \
              WHERE kid = $1",
             promoted,
@@ -220,15 +229,21 @@ async fn native_jwks_keeps_a_key_promoted_while_the_reader_is_between_pages() {
             "a read that starts after the promotion publishes it"
         );
         assert_snapshot(&document_kids(&read.document), &snapshot);
+        drop(orm);
+        admin
+            .batch_execute(&format!(
+                "DROP OWNED BY \"{reader}\"; DROP ROLE \"{reader}\""
+            ))
+            .await
+            .unwrap();
     })
     .await;
 }
 
 #[compio::test]
 async fn native_jwks_does_not_repeat_keys_when_the_cursor_key_retires_between_pages() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let admin = database.connect().await;
-        let orm = database.orm().await;
         let page = usize::try_from(MAX_ROW_LIMIT).unwrap();
         insert_keys(&admin, "active-", "active", 1, 0).await;
         insert_keys(&admin, "retiring-", "retiring", MAX_ROW_LIMIT + 1, 0).await;
@@ -242,11 +257,13 @@ async fn native_jwks_does_not_repeat_keys_when_the_cursor_key_retires_between_pa
             cursor.starts_with("retiring-") && snapshot[page - 2].starts_with("retiring-"),
             "the first page ends inside the retiring keys"
         );
-        install_page_gate(&admin).await;
+        let reader = install_page_gate(&admin).await;
+        let orm = database.orm_as(&reader).await;
 
         let read = read_across_change(
             database,
             &orm,
+            &reader,
             "UPDATE zeroship.signing_keys SET status = 'retired', retired_at = clock_timestamp() \
              WHERE kid = $1",
             &cursor,
@@ -265,13 +282,20 @@ async fn native_jwks_does_not_repeat_keys_when_the_cursor_key_retires_between_pa
             "a read that starts after the retirement omits the key"
         );
         assert_snapshot(&document_kids(&read.document), &snapshot);
+        drop(orm);
+        admin
+            .batch_execute(&format!(
+                "DROP OWNED BY \"{reader}\"; DROP ROLE \"{reader}\""
+            ))
+            .await
+            .unwrap();
     })
     .await;
 }
 
 #[compio::test]
 async fn native_jwks_preserves_complete_sql_order_and_public_fields() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let db = database.connect_as_auth().await;
         let orm = database.orm().await;
         assert_eq!(jwks_document(&orm).await.unwrap(), json!({ "keys": [] }));
@@ -333,7 +357,7 @@ async fn native_jwks_preserves_complete_sql_order_and_public_fields() {
 
 #[compio::test]
 async fn native_jwks_rejects_malformed_published_keys() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let db = database.connect_as_auth().await;
         let orm = database.orm().await;
         db.execute(
@@ -366,7 +390,7 @@ async fn native_jwks_rejects_malformed_published_keys() {
 
 #[ntex::test]
 async fn native_jwks_failure_is_uncacheable() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let server = AuthServer::start(database).await;
         server
             .pg

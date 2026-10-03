@@ -4,7 +4,7 @@ use zeroship_auth::store::relay;
 
 #[ntex::test]
 async fn rejected_credentials_cannot_consume_budget_or_deliver_mail() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let server = RelayServer::start(database).await;
         let message = server.message("credential-refusal");
         for (body, credentials) in [
@@ -41,7 +41,7 @@ async fn rejected_credentials_cannot_consume_budget_or_deliver_mail() {
 
 #[ntex::test]
 async fn transport_failure_retries_the_same_message_and_deduplicates_after_delivery() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let server = RelayServer::start(database).await;
         let message = server.message("retryable-delivery");
         server.mailer.set_unavailable(true);

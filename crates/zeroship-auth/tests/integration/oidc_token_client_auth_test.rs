@@ -124,7 +124,7 @@ impl Fixture {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn confidential_client_code_exchange_without_client_auth_is_rejected() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let fx = Fixture::boot(database, ClientKind::ConfidentialNonBrokered).await;
         let verifier = pkce_verifier();
         let code = authorize_code(&fx, &verifier).await;
@@ -150,7 +150,7 @@ async fn confidential_client_code_exchange_without_client_auth_is_rejected() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn confidential_client_code_exchange_with_basic_credentials_succeeds() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let fx = Fixture::boot(database, ClientKind::ConfidentialNonBrokered).await;
         let verifier = pkce_verifier();
         let code = authorize_code(&fx, &verifier).await;
@@ -182,7 +182,7 @@ async fn confidential_client_code_exchange_with_basic_credentials_succeeds() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn confidential_client_bad_secret_is_401_with_www_authenticate() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let fx = Fixture::boot(database, ClientKind::ConfidentialNonBrokered).await;
         let verifier = pkce_verifier();
         let code = authorize_code(&fx, &verifier).await;
@@ -212,7 +212,7 @@ async fn confidential_client_bad_secret_is_401_with_www_authenticate() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn public_client_code_exchange_without_client_auth_succeeds() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let fx = Fixture::boot(database, ClientKind::Public).await;
         let verifier = pkce_verifier();
         let code = authorize_code(&fx, &verifier).await;
@@ -237,7 +237,7 @@ async fn public_client_code_exchange_without_client_auth_succeeds() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn brokered_client_still_authenticates_by_broker_secret() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let fx = Fixture::boot(database, ClientKind::Brokered).await;
 
         let verifier = pkce_verifier();

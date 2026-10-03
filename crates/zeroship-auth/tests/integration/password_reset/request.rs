@@ -98,7 +98,7 @@ fn latest_token(server: &AuthServer, mailer: &CapturingMailer, email: &str) -> S
 
 #[ntex::test]
 async fn reset_email_budget_is_shared_across_ips_without_changing_the_public_confirmation() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let mailer = Arc::new(CapturingMailer::default());
         let server = AuthServer::with_mailer(database, mailer.clone()).await;
         let email = "creator@example.test";

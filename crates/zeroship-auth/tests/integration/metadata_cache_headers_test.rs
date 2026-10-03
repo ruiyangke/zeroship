@@ -47,7 +47,7 @@ async fn cache_control(server: &AuthServer, path: &str) -> String {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn jwks_reaches_the_wire_cacheable() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let server = boot(database).await;
         let value = cache_control(&server, "/oauth2/.well-known/jwks.json").await;
         assert!(
@@ -71,7 +71,7 @@ async fn jwks_reaches_the_wire_cacheable() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn discovery_reaches_the_wire_cacheable_on_every_mounted_path() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let server = boot(database).await;
         for path in [
             "/oauth2/.well-known/openid-configuration",
@@ -104,7 +104,7 @@ async fn discovery_reaches_the_wire_cacheable_on_every_mounted_path() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn routes_without_an_explicit_value_still_default_to_no_store() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let server = boot(database).await;
         let resp = server
             .http

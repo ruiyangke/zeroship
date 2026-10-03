@@ -10,7 +10,7 @@ use zeroship_auth::identity::magic_link;
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn cookie_less_get_preserves_the_link_until_explicit_redemption() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let server = AuthServer::start(database).await;
         fixtures::register_magic_client(&server).await;
         let email = "magic@example.test";
@@ -98,7 +98,7 @@ async fn cookie_less_get_preserves_the_link_until_explicit_redemption() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn form_action_names_only_a_registered_callback() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let server = AuthServer::with_mailer(
             database,
             std::sync::Arc::new(support::CapturingMailer::default()),

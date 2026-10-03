@@ -10,7 +10,7 @@ use zeroship_data_orm::orm::{Entity, Insertable, UtcInstant};
 
 #[compio::test]
 async fn user_repository_uses_native_ids_and_case_insensitive_email() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let orm = zeroship_auth::store::native::connect(database.auth_url().as_str())
             .await
             .unwrap();
@@ -55,7 +55,7 @@ fn native_user_insert_preserves_the_owned_id_buffer() {
 
 #[compio::test]
 async fn native_user_rows_apply_the_callers_identity_conversion() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let native = zeroship_auth::store::native::connect(database.auth_url().as_str())
             .await
             .unwrap();
@@ -116,7 +116,7 @@ async fn native_user_rows_apply_the_callers_identity_conversion() {
 /// millisecond would disagree with the oracle on every row here.
 #[compio::test]
 async fn native_user_rows_keep_the_microseconds_the_server_stored() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let pg = database.connect_as_auth().await;
         let orm = database.orm().await;
         use zeroship_auth::store::native::models::users as model;
@@ -183,7 +183,7 @@ async fn native_user_rows_keep_the_microseconds_the_server_stored() {
 
 #[compio::test]
 async fn duplicate_email_preserves_the_existing_user_and_reports_unique_violation() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let pg = database.connect_as_auth().await;
         let orm = database.orm().await;
         let first = users::create(&orm, "creator@example.test", "Original creator", None)
@@ -248,7 +248,7 @@ async fn database_now(pg: &compio_postgres::Client) -> chrono::DateTime<chrono::
 
 #[compio::test]
 async fn native_profile_initialization_preserves_existing_verification_and_avatar() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let orm = database.orm().await;
         let pg = database.connect_as_auth().await;
         let user = users::create(&orm, "profile@example.test", "Profile", None)
@@ -296,7 +296,7 @@ async fn native_profile_initialization_preserves_existing_verification_and_avata
 
 #[compio::test]
 async fn native_login_failures_increment_apply_backoff_and_cap_the_lock() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let orm = database.orm().await;
         let pg = database.connect_as_auth().await;
         let user = users::create(&orm, "lockout@example.test", "Lockout", None)
@@ -357,7 +357,7 @@ async fn native_login_failures_increment_apply_backoff_and_cap_the_lock() {
 
 #[compio::test]
 async fn native_login_failure_rolls_back_the_counter_when_the_deadline_write_fails() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let orm = database.orm().await;
         let admin = database.connect().await;
         let user = users::create(&orm, "rollback-lock@example.test", "Rollback lock", None)
@@ -379,7 +379,7 @@ async fn native_login_failure_rolls_back_the_counter_when_the_deadline_write_fai
 
 #[compio::test]
 async fn native_login_reset_clears_dirty_state_and_clean_or_absent_accounts_are_untouched() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let orm = database.orm().await;
         let pg = database.connect_as_auth().await;
         let user = users::create(&orm, "reset-state@example.test", "Reset state", None)
@@ -421,7 +421,7 @@ async fn native_login_reset_clears_dirty_state_and_clean_or_absent_accounts_are_
 
 #[compio::test]
 async fn native_last_login_uses_the_database_clock_without_changing_lockout_state() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let orm = database.orm().await;
         let pg = database.connect_as_auth().await;
         let user = users::create(&orm, "last-login@example.test", "Last login", None)
@@ -451,7 +451,7 @@ async fn native_last_login_uses_the_database_clock_without_changing_lockout_stat
 
 #[compio::test]
 async fn native_dummy_login_failure_issues_the_update_of_a_real_failure() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let orm = database.orm().await;
         let admin = database.connect().await;
         let user = users::create(&orm, "dummy-failure@example.test", "Dummy failure", None)
@@ -625,7 +625,7 @@ async fn deadline_pause(observer: &compio_postgres::Client) -> (bool, usize) {
 
 #[compio::test]
 async fn concurrent_native_login_failures_preserve_increments_and_the_longest_lock() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let orm = database.orm().await;
         let admin = database.connect().await;
         let user = users::create(

@@ -13,7 +13,7 @@ use zeroship_auth::store::users;
 
 #[ntex::test]
 async fn the_login_pages_signup_link_creates_an_account_with_a_usable_verification_email() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let mailer = Arc::new(CapturingMailer::default());
         let server = AuthServer::with_mailer(database, mailer.clone()).await;
         let href = signup_href(&server, "/login").await;
@@ -78,7 +78,7 @@ async fn the_login_pages_signup_link_creates_an_account_with_a_usable_verificati
 
 #[ntex::test]
 async fn signup_preserves_the_native_authorization_target_rendered_by_login() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let mailer = Arc::new(CapturingMailer::default());
         let server = AuthServer::with_mailer(database, mailer.clone()).await;
         let target = AuthServer::fresh_challenge();
@@ -97,7 +97,7 @@ async fn signup_preserves_the_native_authorization_target_rendered_by_login() {
 
 #[ntex::test]
 async fn bare_signup_is_usable_and_off_origin_targets_cannot_escape_the_safe_continuation() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let mailer = Arc::new(CapturingMailer::default());
         let server = AuthServer::with_mailer(database, mailer.clone()).await;
         let bare = Form::get(&server, "/signup").await;

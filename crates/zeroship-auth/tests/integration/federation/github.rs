@@ -9,7 +9,7 @@ use zeroship_auth::{identity::password, store::users};
 
 #[ntex::test]
 async fn verified_primary_email_creates_a_session_and_redeemed_code_cannot_replay() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let fixture = Fixture::new(
             database,
             Provider::GitHub,
@@ -43,7 +43,7 @@ async fn verified_primary_email_creates_a_session_and_redeemed_code_cannot_repla
 
 #[ntex::test]
 async fn existing_password_account_requires_confirmation_before_identity_and_session() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let fixture = Fixture::new(
             database,
             Provider::GitHub,
@@ -77,7 +77,7 @@ async fn existing_password_account_requires_confirmation_before_identity_and_ses
 
 #[ntex::test]
 async fn noreply_primary_and_ineligible_alternatives_cannot_create_an_account() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let mut user = User::github("creator@users.noreply.github.com");
         user.additional_emails = vec![
             GitHubEmail {
@@ -121,7 +121,7 @@ async fn noreply_primary_and_ineligible_alternatives_cannot_create_an_account() 
 
 #[ntex::test]
 async fn unverified_primary_email_cannot_create_an_account() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let mut user = User::github("creator@example.test");
         user.verified = false;
         let fixture = Fixture::new(database, Provider::GitHub, user).await;

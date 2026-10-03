@@ -17,7 +17,7 @@ use zeroship_auth::store::sessions;
 
 #[ntex::test]
 async fn reset_revokes_the_users_sessions_and_audits_the_effects() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let orm = database.orm().await;
         let pg = Arc::new(database.connect_as_auth().await);
         let user = fixtures::user(&orm, "reset@example.test").await;
@@ -87,7 +87,7 @@ async fn reset_revokes_the_users_sessions_and_audits_the_effects() {
 
 #[ntex::test]
 async fn reset_consumes_only_the_users_pending_magic_login_state() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let orm = database.orm().await;
         let pg = Arc::new(database.connect_as_auth().await);
         let user = fixtures::user(&orm, "reset@example.test").await;
@@ -128,7 +128,7 @@ async fn reset_consumes_only_the_users_pending_magic_login_state() {
 
 #[ntex::test]
 async fn reset_revokes_app_anchors_and_marks_each_pairwise_family() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let orm = database.orm().await;
         let pg = Arc::new(database.connect_as_auth().await);
         let user = fixtures::user(&orm, "reset@example.test").await;
@@ -203,7 +203,7 @@ async fn reset_revokes_app_anchors_and_marks_each_pairwise_family() {
 /// Reset must complete when both sources contribute that family marker.
 #[ntex::test]
 async fn reset_completes_with_an_identity_and_refresh_grant_for_the_same_family() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let orm = database.orm().await;
         let pg = Arc::new(database.connect_as_auth().await);
         let user = fixtures::user(&orm, "reset@example.test").await;

@@ -160,7 +160,7 @@ async fn jwks_contains(database: &Database, kid: &str) -> bool {
 #[allow(clippy::future_not_send)]
 #[compio::test]
 async fn retiring_key_inside_horizon_remains_published() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let db = database.connect().await;
 
         let kid = format!("retiring-fresh-{}", Uuid::new_v4());
@@ -182,7 +182,7 @@ async fn retiring_key_inside_horizon_remains_published() {
 #[allow(clippy::future_not_send)]
 #[compio::test]
 async fn key_past_horizon_leaves_jwks_with_reason_and_idempotently_keeps_audit_row() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let db = database.connect().await;
 
         let kid = format!("retiring-stale-{}", Uuid::new_v4());
@@ -243,7 +243,7 @@ async fn key_past_horizon_leaves_jwks_with_reason_and_idempotently_keeps_audit_r
 #[allow(clippy::future_not_send)]
 #[compio::test]
 async fn active_and_next_keys_are_never_pruned_regardless_of_age() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let db = database.connect().await;
 
         let active_kid = format!("active-old-{}", Uuid::new_v4());
@@ -277,7 +277,7 @@ async fn active_and_next_keys_are_never_pruned_regardless_of_age() {
 #[allow(clippy::future_not_send)]
 #[compio::test]
 async fn missing_watermark_uses_full_horizon_from_retiring_at() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let db = database.connect().await;
 
         let inside_kid = format!("retiring-null-fresh-{}", Uuid::new_v4());
@@ -317,7 +317,7 @@ async fn missing_watermark_uses_full_horizon_from_retiring_at() {
 #[allow(clippy::future_not_send)]
 #[compio::test]
 async fn issuance_and_prune_never_return_a_token_without_its_published_key() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let db = database.connect().await;
         let issue_db = database.connect().await;
         let prune_db = database.connect().await;
@@ -385,7 +385,7 @@ async fn issuance_and_prune_never_return_a_token_without_its_published_key() {
 #[allow(clippy::future_not_send)]
 #[compio::test]
 async fn every_production_token_kind_advances_the_key_watermark() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let db = database.connect().await;
 
         let random = *Uuid::new_v4().as_bytes();
@@ -567,7 +567,7 @@ async fn every_production_token_kind_advances_the_key_watermark() {
 #[allow(clippy::future_not_send)]
 #[compio::test]
 async fn concurrent_retirement_cannot_be_undone_by_signer_startup() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let db = database.connect().await;
         let publish_db = database.connect().await;
         let prune_db = database.connect().await;

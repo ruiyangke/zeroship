@@ -11,7 +11,7 @@ enum Device {
 }
 
 async fn magic_login_requires_second_factor(device: Device) {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let mailer = Arc::new(CapturingMailer::default());
         let server = AuthServer::with_mailer(database, mailer.clone()).await;
         let user = users::create(&server.orm, "creator@example.test", "Magic account", None).await.unwrap();

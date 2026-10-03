@@ -44,7 +44,7 @@ async fn state(client: &(impl GenericClient + ?Sized)) -> State {
 
 #[compio::test]
 async fn wrong_code_does_not_mutate_a_concurrent_reservation() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let mut winner = database.connect_as_auth().await;
         create(&winner).await;
         let transaction = winner.transaction().await.unwrap();
@@ -96,7 +96,7 @@ async fn wrong_code_does_not_mutate_a_concurrent_reservation() {
 
 #[compio::test]
 async fn wrong_codes_exhaust_the_completion() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let client = database.connect_as_auth().await;
         create(&client).await;
         for attempt in 1..=5 {
@@ -130,7 +130,7 @@ async fn wrong_codes_exhaust_the_completion() {
 
 #[compio::test]
 async fn concurrent_correct_codes_reserve_once_without_wrong_attempts() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let client = database.connect_as_auth().await;
         create(&client).await;
         let mut locker = database.connect().await;
@@ -190,7 +190,7 @@ async fn concurrent_correct_codes_reserve_once_without_wrong_attempts() {
 
 #[compio::test]
 async fn stale_completion_owner_cannot_finalize_or_clear_a_newer_reservation() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let client = database.connect_as_auth().await;
         create(&client).await;
         let first = magic_completions::consume_pending(&client, NONCE, CODE).await.unwrap();
@@ -220,7 +220,7 @@ async fn stale_completion_owner_cannot_finalize_or_clear_a_newer_reservation() {
 
 #[compio::test]
 async fn expired_completion_cannot_be_reserved() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let client = database.connect_as_auth().await;
         magic_completions::create(&client, NONCE, CODE, EMAIL, TARGET, -1)
             .await

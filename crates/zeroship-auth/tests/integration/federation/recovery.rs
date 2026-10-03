@@ -15,7 +15,7 @@ fn user(provider: Provider) -> User {
 }
 
 async fn rejected_state_preserves_the_original_flow(provider: Provider) {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let fixture = Fixture::new(database, provider, user(provider)).await;
         let attempt = fixture.begin().await;
         let missing = attempt.send(&fixture, &attempt.callback, None).await;
@@ -52,7 +52,7 @@ async fn rejected_state_preserves_the_original_flow(provider: Provider) {
 }
 
 async fn callback_recovers_soft_lock(provider: Provider) {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let fixture = Fixture::new(database, provider, user(provider)).await;
         let initial = fixture.begin().await;
         let id = fixture
@@ -99,7 +99,7 @@ async fn callback_recovers_soft_lock(provider: Provider) {
 }
 
 async fn callback_cannot_reenable_disabled_account(provider: Provider) {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let fixture = Fixture::new(database, provider, user(provider)).await;
         let initial = fixture.begin().await;
         let id = fixture

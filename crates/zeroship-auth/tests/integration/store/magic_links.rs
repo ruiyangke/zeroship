@@ -7,7 +7,7 @@ const EMAIL: &str = "magic@example.test";
 
 #[compio::test]
 async fn issue_then_redeem_happy_path() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let client = database.connect_as_auth().await;
 
         let email = EMAIL;
@@ -41,7 +41,7 @@ async fn issue_then_redeem_happy_path() {
 
 #[compio::test]
 async fn second_redeem_returns_none() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let client = database.connect_as_auth().await;
 
         let email = EMAIL;
@@ -73,7 +73,7 @@ async fn second_redeem_returns_none() {
 
 #[compio::test]
 async fn pending_consume_can_be_cleared_and_retried_before_finalize() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let client = database.connect_as_auth().await;
 
         let email = EMAIL;
@@ -133,7 +133,7 @@ async fn pending_consume_can_be_cleared_and_retried_before_finalize() {
 
 #[compio::test]
 async fn stale_reservation_cannot_finalize_or_clear_a_retried_link() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let client = database.connect_as_auth().await;
         let issued = magic_link::issue(&client, EMAIL, "login").await.unwrap();
         let first = magic_link::redeem_pending(&client, &issued.raw)
@@ -184,7 +184,7 @@ async fn stale_reservation_cannot_finalize_or_clear_a_retried_link() {
 
 #[compio::test]
 async fn second_redeem_while_pending_returns_in_flight() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let client = database.connect_as_auth().await;
 
         let email = EMAIL;
@@ -214,7 +214,7 @@ async fn second_redeem_while_pending_returns_in_flight() {
 
 #[compio::test]
 async fn stale_pending_redeem_burns_link_as_consumed() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let client = database.connect_as_auth().await;
 
         let email = EMAIL;
@@ -263,7 +263,7 @@ async fn stale_pending_redeem_burns_link_as_consumed() {
 
 #[compio::test]
 async fn redeem_rejects_reset_purpose_without_consuming_its_token() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let orm = database.orm().await;
         let client = database.connect_as_auth().await;
         zeroship_auth::store::users::create(&orm, EMAIL, "Magic", None)
@@ -286,7 +286,7 @@ async fn redeem_rejects_reset_purpose_without_consuming_its_token() {
 
 #[compio::test]
 async fn expired_token_returns_none() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let client = database.connect_as_auth().await;
 
         let email = EMAIL;
@@ -314,7 +314,7 @@ async fn expired_token_returns_none() {
 
 #[compio::test]
 async fn new_issue_supersedes_previous_unconsumed() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let client = database.connect_as_auth().await;
 
         let email = EMAIL;
@@ -344,7 +344,7 @@ async fn new_issue_supersedes_previous_unconsumed() {
 
 #[compio::test]
 async fn login_issue_does_not_supersede_reset_token() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let orm = database.orm().await;
         let client = database.connect_as_auth().await;
 
@@ -379,7 +379,7 @@ async fn login_issue_does_not_supersede_reset_token() {
 
 #[compio::test]
 async fn concurrent_issue_leaves_one_active_token() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let client = database.connect_as_auth().await;
         let original = magic_link::issue(&client, EMAIL, "login").await.unwrap();
         let mut locker = database.connect().await;

@@ -116,7 +116,7 @@ impl Fixture {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn brokered_code_exchange_without_broker_secret_is_invalid_client() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let fx = Fixture::boot(database, ClientKind::Brokered, None).await;
 
         let verifier = pkce_verifier();
@@ -140,7 +140,7 @@ async fn brokered_code_exchange_without_broker_secret_is_invalid_client() {
 #[allow(clippy::future_not_send)]
 async fn brokered_code_exchange_with_derived_secret_yields_global_sub_id_token_and_pairwise_access()
 {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let fx = Fixture::boot(database, ClientKind::Brokered, None).await;
         let verifier = pkce_verifier();
         let code = authorize_code(&fx, REDIRECT_URI, &verifier).await;
@@ -177,7 +177,7 @@ async fn brokered_code_exchange_with_derived_secret_yields_global_sub_id_token_a
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn brokered_rotation_previous_master_secret_still_accepted() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let fx = Fixture::boot(database, ClientKind::Brokered, Some(BROKER_PREVIOUS)).await;
         let verifier = pkce_verifier();
         let code = authorize_code(&fx, REDIRECT_URI, &verifier).await;
@@ -196,7 +196,7 @@ async fn brokered_rotation_previous_master_secret_still_accepted() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn non_brokered_client_unchanged_pairwise_and_no_secret_required() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let fx = Fixture::boot(database, ClientKind::NonBrokered, None).await;
         let verifier = pkce_verifier();
         let code = authorize_code(&fx, REDIRECT_URI, &verifier).await;
@@ -221,7 +221,7 @@ async fn non_brokered_client_unchanged_pairwise_and_no_secret_required() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn brokered_client_still_enforces_exact_redirect_match() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let fx = Fixture::boot(database, ClientKind::Brokered, None).await;
         let verifier = pkce_verifier();
 
@@ -245,7 +245,7 @@ async fn brokered_client_still_enforces_exact_redirect_match() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn brokered_refresh_grant_requires_broker_secret() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let fx = Fixture::boot(database, ClientKind::Brokered, None).await;
         let verifier = pkce_verifier();
         let secret = zeroship_core::auth::derive_broker_secret(BROKER_CURRENT, &fx.client_id);

@@ -6,7 +6,7 @@ use zeroship_auth::identity::password_reset;
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn get_is_uncacheable_and_leaves_the_reset_token_live() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let server = AuthServer::start(database).await;
         let user = super::fixtures::user(&server.orm, "reset-landing@example.test").await;
         let token = password_reset::issue(&server.pg, &user.email)

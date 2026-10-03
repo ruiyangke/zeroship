@@ -76,7 +76,7 @@ async fn an_operation_error_is_preserved_and_releases_the_lock() {
     Database::run(async |database| {
         let holder = database.connect_as_auth().await;
         let peer = database.connect_as_auth().await;
-        let key = 0x0042_B007_A071_2001_i64;
+        let key = 0x0042_B007_A071_2002_i64;
         let result = with_advisory_lock(&holder, key, || async {
             Err::<(), _>(AuthError::Internal("operation refused".to_owned()))
         })

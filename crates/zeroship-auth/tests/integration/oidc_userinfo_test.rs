@@ -102,7 +102,7 @@ impl Fixture {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn userinfo_returns_scope_gated_claims_for_valid_token() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let fx = Fixture::boot(database).await;
         let token = issue_token(&fx, "openid email profile").await;
         let jwks = jwks_document(&fx.server.orm).await.expect("jwks");
@@ -151,7 +151,7 @@ async fn userinfo_returns_scope_gated_claims_for_valid_token() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn userinfo_omits_identity_claims_without_scopes() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let fx = Fixture::boot(database).await;
         let token = issue_token(&fx, "openid").await;
         let jwks = jwks_document(&fx.server.orm).await.expect("jwks");
@@ -178,7 +178,7 @@ async fn userinfo_omits_identity_claims_without_scopes() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn userinfo_rejects_missing_and_bad_tokens() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let fx = Fixture::boot(database).await;
 
         let missing = userinfo_get(&fx, None).await.expect("missing bearer");
@@ -219,7 +219,7 @@ async fn userinfo_rejects_missing_and_bad_tokens() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn userinfo_rejects_id_token_used_as_access_token() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let fx = Fixture::boot(database).await;
         let token = issue_token(&fx, "openid email profile").await;
 
@@ -234,7 +234,7 @@ async fn userinfo_rejects_id_token_used_as_access_token() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn userinfo_rejects_token_without_openid_scope() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let fx = Fixture::boot(database).await;
         // A validly-signed OP access token minted for the app resource audience but
         // WITHOUT `openid` must not be usable as an identity oracle (OIDC Core §5.3).
@@ -252,7 +252,7 @@ async fn userinfo_rejects_token_without_openid_scope() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn userinfo_rejects_disabled_user() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let fx = Fixture::boot(database).await;
         let token = issue_token(&fx, "openid email profile").await;
 

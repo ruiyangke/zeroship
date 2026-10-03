@@ -84,7 +84,7 @@ fn bounce(email: &str, kind: &str) -> Value {
 
 #[ntex::test]
 async fn permanent_failures_suppress_recipients_and_complaints_replace_the_reason() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let hook = Webhook::start(database, Some("webhook-user"), Some("webhook-password")).await;
         let event = bounce("Recipient@Example.Test", "HardBounce");
         for _ in 0..2 {
@@ -119,7 +119,7 @@ async fn permanent_failures_suppress_recipients_and_complaints_replace_the_reaso
 
 #[ntex::test]
 async fn transient_and_unrelated_events_leave_delivery_enabled() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let hook = Webhook::start(database, Some("webhook-user"), Some("webhook-password")).await;
         for event in [
             bounce("recipient@example.test", "SoftBounce"),
@@ -145,7 +145,7 @@ async fn transient_and_unrelated_events_leave_delivery_enabled() {
 
 #[ntex::test]
 async fn rejected_credentials_cannot_suppress_an_address() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let hook = Webhook::start(database, Some("webhook-user"), Some("webhook-password")).await;
         let event = bounce("recipient@example.test", "HardBounce");
         for credentials in [
@@ -178,7 +178,7 @@ async fn rejected_credentials_cannot_suppress_an_address() {
 
 #[ntex::test]
 async fn incomplete_configuration_rejects_even_matching_credentials() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         for (user, password) in [
             (None, None),
             (Some("webhook-user"), None),
@@ -203,7 +203,7 @@ async fn incomplete_configuration_rejects_even_matching_credentials() {
 
 #[ntex::test]
 async fn database_failure_is_retryable_and_never_audited_as_success() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let hook = Webhook::start(database, Some("webhook-user"), Some("webhook-password")).await;
         let admin = database.connect().await;
         admin.batch_execute(

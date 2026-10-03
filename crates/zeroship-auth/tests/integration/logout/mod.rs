@@ -10,7 +10,7 @@ use fixtures::{BrowserSession, account, assert_logged_out, issuer, post};
 
 #[ntex::test]
 async fn confirmation_preserves_sessions_and_logout_revokes_only_the_submitting_browser() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let server = AuthServer::with_issuer(database, issuer()).await;
         let creator = account(&server, "creator@example.test").await;
         let other = account(&server, "other@example.test").await;
@@ -43,7 +43,7 @@ async fn confirmation_preserves_sessions_and_logout_revokes_only_the_submitting_
 
 #[ntex::test]
 async fn missing_or_mismatched_csrf_cannot_revoke_a_live_session() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let server = AuthServer::with_issuer(database, issuer()).await;
         let user = account(&server, "creator@example.test").await;
         let mut browser = BrowserSession::login(&server, &user).await;

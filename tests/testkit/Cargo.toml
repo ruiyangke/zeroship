@@ -17,6 +17,7 @@ compio = { version = "0.18", features = ["io", "net", "runtime", "macros", "time
 compio-postgres = { path = "../../libs/compio-postgres" }
 compio-redis = { path = "../../libs/compio-redis" }
 compio-s3 = { path = "../../libs/compio-s3" }
+futures = "0.3"
 serde_json = { version = "1", features = ["raw_value", "preserve_order"] }
 tempfile = "3"
 testcontainers = { version = "0.28", default-features = false, features = ["blocking", "watchdog"] }

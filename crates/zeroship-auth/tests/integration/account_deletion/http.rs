@@ -11,7 +11,7 @@ use zeroship_core::service_peers::ServiceKeyring;
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn the_emailed_link_cancels_deletion_without_a_session() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
     let orm = database.orm().await;
     let db = database.connect().await;
     let control = MockControl::start(Answer::Clear).await;
@@ -94,7 +94,7 @@ async fn the_emailed_link_cancels_deletion_without_a_session() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn the_cancel_route_refuses_a_token_it_never_issued() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let orm = database.orm().await;
         let mut db = database.connect().await;
         let control = MockControl::start(Answer::Clear).await;
@@ -131,7 +131,7 @@ async fn the_cancel_route_refuses_a_token_it_never_issued() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn a_refused_preflight_leaves_the_account_and_session_active() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
     let orm = database.orm().await;
     let db = database.connect().await;
     for (answer, trusted, status) in [

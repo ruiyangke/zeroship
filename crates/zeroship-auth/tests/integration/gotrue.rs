@@ -102,7 +102,7 @@ fn payload(email: &str) -> Vec<u8> {
 
 #[ntex::test]
 async fn signature_refusals_cannot_send_mail_and_the_authentic_request_succeeds() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let hook = Hook::start(database, true).await;
         let body = payload("recipient@example.test");
         let timestamp = chrono::Utc::now().timestamp();
@@ -143,7 +143,7 @@ async fn signature_refusals_cannot_send_mail_and_the_authentic_request_succeeds(
 
 #[ntex::test]
 async fn an_unconfigured_hook_cannot_send_even_a_correctly_signed_request() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let hook = Hook::start(database, false).await;
         assert_eq!(
             hook.signed_post(&payload("recipient@example.test"))
@@ -159,7 +159,7 @@ async fn an_unconfigured_hook_cannot_send_even_a_correctly_signed_request() {
 
 #[ntex::test]
 async fn suppression_acknowledges_without_delivery_and_leaves_other_recipients_usable() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let hook = Hook::start(database, true).await;
         suppressions::add(&hook.auth.pg, "recipient@example.test", "complaint", None)
             .await
@@ -180,7 +180,7 @@ async fn suppression_acknowledges_without_delivery_and_leaves_other_recipients_u
 
 #[ntex::test]
 async fn an_unavailable_suppression_lookup_refuses_delivery_and_a_retry_can_recover() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let hook = Hook::start(database, true).await;
         let admin = database.connect().await;
         admin.batch_execute("ALTER TABLE zeroship.email_suppressions RENAME TO fixture_unavailable_suppressions").await.unwrap();

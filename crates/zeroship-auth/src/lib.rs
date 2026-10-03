@@ -35,9 +35,4 @@ pub mod store;
 pub mod ui;
 
 #[cfg(test)]
-#[path = "../tests/support/database.rs"]
-#[allow(
-    dead_code,
-    reason = "fixture operations are also used by integration tests"
-)]
 mod test_database;

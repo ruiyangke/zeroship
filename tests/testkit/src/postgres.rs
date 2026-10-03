@@ -16,6 +16,7 @@
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
@@ -25,13 +26,23 @@ use testcontainers::{Container, GenericImage, ImageExt};
 
 use crate::docker::{start_owned, DockerCli, OwnedContainer, Ownership};
 
+mod case;
 mod image;
 pub mod server;
 
+pub use case::{run, run_fresh, Case, CaseFixture};
 pub use image::build;
 
 /// The database the shared platform migration is applied to.
 const DATABASE: &str = "zeroship_testkit";
+
+/// The pristine migrated database a fresh-database case is cloned from.
+///
+/// It is created once from the migrated working database before any case
+/// connects, and no session ever connects to it afterwards. PostgreSQL refuses
+/// `CREATE DATABASE ... TEMPLATE` while any session is attached, so keeping it
+/// connection-free is what lets [`Platform::fresh_database`] clone it.
+const TEMPLATE_DATABASE: &str = "zeroship_testkit_template";
 
 /// The `PostgreSQL` server this process owns, without the platform migration.
 pub struct Server {
@@ -108,6 +119,13 @@ fn migrated() -> &'static url::Url {
         let url = server.admin_url();
         apply_migrations(url.as_str());
         seed_plan(server.owned.container());
+        psql(
+            server.owned.container(),
+            "postgres",
+            &format!(
+                "CREATE DATABASE \"{TEMPLATE_DATABASE}\" TEMPLATE \"{DATABASE}\""
+            ),
+        );
         url
     })
 }
@@ -166,6 +184,56 @@ impl Platform {
     ) {
         Box::pin(connect(&self.admin_url())).await
     }
+
+    /// A database cloned from the pristine migrated template, for a case whose
+    /// subject is platform-global rather than scoped to the rows it mints.
+    ///
+    /// The clone starts from the same schema and reference rows as [`platform`],
+    /// carries no other case's rows, and is removed when the returned handle
+    /// drops. PostgreSQL runs the clone from the connection-free template, so
+    /// no case ever waits on or perturbs another's database.
+    #[must_use]
+    pub fn fresh_database(&self) -> FreshDatabase {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let serial = NEXT.fetch_add(1, Ordering::Relaxed);
+        let name = format!("zeroship_case_{}_{serial}", std::process::id());
+        psql(
+            server().owned.container(),
+            "postgres",
+            &format!("CREATE DATABASE \"{name}\" TEMPLATE \"{TEMPLATE_DATABASE}\""),
+        );
+        FreshDatabase {
+            base: database_url(&self.base, &name),
+            name,
+        }
+    }
+}
+
+/// A clone of the pristine migrated template, owned by one case.
+///
+/// Dropping it removes the database; a case's connections must already be
+/// closed, which is what `WITH (FORCE)` guarantees if one was not.
+pub struct FreshDatabase {
+    base: url::Url,
+    name: String,
+}
+
+impl FreshDatabase {
+    /// The clone's URL as its superuser, `postgres`.
+    #[must_use]
+    pub fn admin_url(&self) -> url::Url {
+        self.base.clone()
+    }
+}
+
+impl Drop for FreshDatabase {
+    fn drop(&mut self) {
+        psql(
+            server().owned.container(),
+            "postgres",
+            &format!("DROP DATABASE IF EXISTS \"{}\" WITH (FORCE)", self.name),
+        );
+    }
 }
 
 /// The migrated platform database this test binary shares.
@@ -180,6 +248,13 @@ fn role_url(base: &url::Url, role: &str) -> url::Url {
     let mut url = base.clone();
     url.set_username(role).unwrap();
     url.set_password(Some(role)).unwrap();
+    url
+}
+
+/// The URL of another database on the same server, with `base`'s credentials.
+fn database_url(base: &url::Url, name: &str) -> url::Url {
+    let mut url = base.clone();
+    url.set_path(name);
     url
 }
 
@@ -272,24 +347,36 @@ fn apply_migrations(url: &str) {
 
 /// Seed the plan row the platform schema requires an app to reference.
 fn seed_plan(container: &Container<GenericImage>) {
+    psql(
+        container,
+        DATABASE,
+        "INSERT INTO zeroship.plans (id, name, runtime_limits_json) \
+         VALUES ('free', 'Free', '{}') ON CONFLICT (id) DO NOTHING",
+    );
+}
+
+/// Run one statement as the server's superuser through the `psql` in the container.
+///
+/// Used for statements PostgreSQL forbids inside a transaction or over a
+/// pooled connection, such as `CREATE DATABASE ... TEMPLATE` and `DROP DATABASE`.
+fn psql(container: &Container<GenericImage>, database: &str, sql: &str) {
     let arguments = [
         "psql",
         "-U",
         "postgres",
         "-d",
-        DATABASE,
+        database,
         "-v",
         "ON_ERROR_STOP=1",
         "-c",
-        "INSERT INTO zeroship.plans (id, name, runtime_limits_json) \
-         VALUES ('free', 'Free', '{}') ON CONFLICT (id) DO NOTHING",
+        sql,
     ];
     container
         .exec(
             ExecCommand::new(arguments.iter().copied())
                 .with_cmd_ready_condition(CmdWaitFor::exit_code(0)),
         )
-        .expect("seed the required plan");
+        .expect("run a fixture statement as the database superuser");
 }
 
 #[allow(

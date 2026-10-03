@@ -43,7 +43,7 @@ async fn refusal(response: cyper::Response) -> Refusal {
 
 #[ntex::test]
 async fn password_refusals_are_equivalent_even_when_the_padding_matches() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let server = AuthServer::start(database).await;
         let real = user(&server, "real@example.test").await;
         let locked = user(&server, "locked@example.test").await;

@@ -188,7 +188,7 @@ async fn assert_json_refusal(response: cyper::Response, status: u16, error: &str
 
 #[ntex::test]
 async fn initial_and_pending_enrollment_need_no_reauth_or_removal_notice() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let session = AccountSession::new(database).await;
         assert!(session.stored_secret().await.is_none());
         let first = session
@@ -231,7 +231,7 @@ async fn initial_and_pending_enrollment_need_no_reauth_or_removal_notice() {
 /// server keeps answering other requests meanwhile.
 #[ntex::test]
 async fn confirming_leaves_the_server_answering_while_backup_codes_are_minted() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let session = AccountSession::new(database).await;
         let device = session
             .provisioning(session.submit("enroll", &[]).await)
@@ -262,7 +262,7 @@ enum RejectedProof {
 }
 
 async fn password_rotation_after_refusal(proof: RejectedProof) {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let session = AccountSession::new(database).await;
         let device = Authenticator::confirmed(&session.server, &session.user.id).await;
         let (wrong, deadline) = device.rejected_code();
@@ -314,7 +314,7 @@ async fn active_enrollment_refuses_wrong_code_then_allows_password_rotation() {
 
 #[ntex::test]
 async fn active_enrollment_accepts_the_current_authenticator_as_reauth_proof() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let session = AccountSession::new(database).await;
         let device = Authenticator::confirmed(&session.server, &session.user.id).await;
         let mut replacement = session
@@ -330,7 +330,7 @@ async fn active_enrollment_accepts_the_current_authenticator_as_reauth_proof() {
 
 #[ntex::test]
 async fn disable_refuses_unproven_requests_then_notifies_without_revoking_the_session() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let session = AccountSession::new(database).await;
         let device = Authenticator::confirmed(&session.server, &session.user.id).await;
         for fields in [vec![], vec![("password", "incorrect account password")]] {
@@ -371,7 +371,7 @@ async fn disable_refuses_unproven_requests_then_notifies_without_revoking_the_se
 
 #[ntex::test]
 async fn disable_accepts_the_current_authenticator_as_reauth_proof() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let session = AccountSession::new(database).await;
         let device = Authenticator::confirmed(&session.server, &session.user.id).await;
         let response = session.submit("disable", &[("code", &device.code())]).await;
@@ -386,7 +386,7 @@ async fn disable_accepts_the_current_authenticator_as_reauth_proof() {
 
 #[ntex::test]
 async fn factor_management_requires_a_session_and_matching_csrf() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let session = AccountSession::new(database).await;
         let device = Authenticator::confirmed(&session.server, &session.user.id).await;
         for route in ["enroll", "confirm", "disable"] {

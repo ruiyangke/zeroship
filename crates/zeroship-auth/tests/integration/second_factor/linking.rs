@@ -9,7 +9,7 @@ use zeroship_auth::{
 
 #[ntex::test]
 async fn password_confirmation_defers_identity_creation_until_the_second_factor_succeeds() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let server = AuthServer::start(database).await;
         let user = account(&server, "creator@example.test").await;
         let device = Authenticator::confirmed(&server, &user.id).await;

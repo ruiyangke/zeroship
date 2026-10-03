@@ -9,7 +9,7 @@ use zeroship_auth::{identity::password, store::users};
 
 #[ntex::test]
 async fn existing_password_account_requires_confirmation_before_identity_and_session() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let fixture = Fixture::new(
             database,
             Provider::Google,
@@ -43,7 +43,7 @@ async fn existing_password_account_requires_confirmation_before_identity_and_ses
 
 #[ntex::test]
 async fn verified_gmail_creates_a_session_and_redeemed_code_cannot_replay() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let fixture = Fixture::new(
             database,
             Provider::Google,
@@ -71,7 +71,7 @@ async fn verified_gmail_creates_a_session_and_redeemed_code_cannot_replay() {
 
 #[ntex::test]
 async fn external_email_requires_verified_workspace_authority() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let fixture = Fixture::new(
             database,
             Provider::Google,
@@ -109,7 +109,7 @@ async fn external_email_requires_verified_workspace_authority() {
 }
 
 async fn invalid_token_cannot_persist_a_login(issue: TokenIssue) {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let fixture = Fixture::new(
             database,
             Provider::Google,

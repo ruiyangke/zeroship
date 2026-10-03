@@ -88,7 +88,7 @@ async fn stored_password(pg: &compio_postgres::Client, id: &zeroship_core::UserI
 
 #[ntex::test]
 async fn dead_tokens_never_reach_hashing() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let pg = Arc::new(database.connect_as_auth().await);
         let orm = database.orm().await;
         let calls = Rc::new(Cell::new(0_usize));
@@ -134,7 +134,7 @@ async fn dead_tokens_never_reach_hashing() {
 
 #[ntex::test]
 async fn accepted_request_reaches_the_observed_hasher() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let pg = Arc::new(database.connect_as_auth().await);
         let orm = database.orm().await;
         let user = users::create(&orm, "reset@example.test", "Reset", None)
@@ -160,7 +160,7 @@ async fn accepted_request_reaches_the_observed_hasher() {
 
 #[ntex::test]
 async fn production_route_updates_the_credential_and_consumes_the_token() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let pg = Arc::new(database.connect_as_auth().await);
         let orm = database.orm().await;
         let old_hash = hash_password(OLD_PASSWORD.to_owned()).await.unwrap();
@@ -183,7 +183,7 @@ async fn production_route_updates_the_credential_and_consumes_the_token() {
 
 #[ntex::test]
 async fn exhausted_ip_is_rejected_before_hashing_a_live_token() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let pg = Arc::new(database.connect_as_auth().await);
         let orm = database.orm().await;
         let user = users::create(&orm, "reset@example.test", "Reset", None)
@@ -223,4 +223,55 @@ async fn exhausted_ip_is_rejected_before_hashing_a_live_token() {
         );
     })
     .await;
+}
+
+/// `ResetQuery` MUST reject the legacy `t=` name. The field is `token`, and
+/// accepting `t=` would silently keep a back-compat alias in place;
+/// `/link` and every other token-redeem handler use `?token=`.
+#[test]
+fn reset_query_accepts_token_param_and_rejects_legacy_t_param() {
+    fn parse(q: &str) -> std::result::Result<ResetQuery, serde::de::value::Error> {
+        use serde::Deserialize;
+        let pairs: Vec<(String, String)> = url::form_urlencoded::parse(q.as_bytes())
+            .into_owned()
+            .collect();
+        let de = serde::de::value::MapDeserializer::new(pairs.into_iter());
+        ResetQuery::deserialize(de)
+    }
+
+    let q = parse("token=abc").expect("token= must parse");
+    assert_eq!(q.token, "abc");
+
+    let legacy = parse("t=abc");
+    assert!(
+        legacy.is_err(),
+        "legacy ?t= must not deserialize into ResetQuery; got {legacy:?}"
+    );
+}
+
+/// The `/reset` inline `<script nonce>` must carry an independent
+/// per-response CSP nonce, NOT the CSRF token.
+#[test]
+fn reset_page_script_nonce_is_independent_of_csrf() {
+    use askama::Template;
+
+    let csrf = "csrf-double-submit-token-value";
+    let script_nonce = "independent-csp-script-nonce";
+    let page = ResetPage {
+        token: "tok_abc",
+        csrf,
+        script_nonce,
+        error: None,
+    };
+
+    let html = page.render().expect("reset page renders");
+
+    assert!(
+        html.contains(&format!("nonce=\"{script_nonce}\"")),
+        "inline <script> must carry the independent script nonce"
+    );
+    assert!(
+        !html.contains(&format!("nonce=\"{csrf}\"")),
+        "inline <script> must NOT reuse the CSRF token as its nonce"
+    );
 }

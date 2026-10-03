@@ -152,7 +152,7 @@ fn wrong_alg_hs256_token(claims: &Value, kid: &str) -> String {
 
 #[compio::test]
 async fn access_token_roundtrip_served_jwks_public_only_and_issuer_consistency() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let db = database.connect_as_auth().await;
         let issuer = test_issuer();
         issuer
@@ -310,7 +310,7 @@ async fn discovery_is_served_from_rfc8414_host_insertion_path() {
 
 #[compio::test]
 async fn id_token_has_nonce_and_correct_at_hash() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let issuer = test_issuer();
         let db = database.connect_as_auth().await;
         issuer

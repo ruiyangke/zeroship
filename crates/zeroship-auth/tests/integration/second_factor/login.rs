@@ -6,7 +6,7 @@ use zeroship_auth::{identity::password, store::users};
 
 #[ntex::test]
 async fn login_requires_a_second_factor_only_after_enrollment_is_confirmed() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let server = AuthServer::start(database).await;
         let user = account(&server, "creator@example.test").await;
         let return_to = AuthServer::fresh_challenge();
@@ -35,7 +35,7 @@ async fn login_requires_a_second_factor_only_after_enrollment_is_confirmed() {
 
 #[ntex::test]
 async fn wrong_totp_preserves_the_challenge_for_a_valid_retry() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let server = AuthServer::start(database).await;
         let user = account(&server, "creator@example.test").await;
         let device = Authenticator::confirmed(&server, &user.id).await;
@@ -66,7 +66,7 @@ async fn wrong_totp_preserves_the_challenge_for_a_valid_retry() {
 /// verify each, and the server keeps answering other requests meanwhile.
 #[ntex::test]
 async fn a_rejected_code_leaves_the_server_answering_while_backup_codes_are_checked() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let server = AuthServer::start(database).await;
         let user = account(&server, "creator@example.test").await;
         let device = Authenticator::confirmed(&server, &user.id).await;
@@ -94,7 +94,7 @@ async fn a_rejected_code_leaves_the_server_answering_while_backup_codes_are_chec
 
 #[ntex::test]
 async fn backup_code_is_consumed_by_the_route_and_a_replay_can_retry_with_an_unused_code() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let server = AuthServer::start(database).await;
         let user = account(&server, "creator@example.test").await;
         let device = Authenticator::confirmed(&server, &user.id).await;
@@ -141,7 +141,7 @@ async fn backup_code_is_consumed_by_the_route_and_a_replay_can_retry_with_an_unu
 
 #[ntex::test]
 async fn concurrent_challenges_cannot_spend_the_same_backup_code_twice() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let server = AuthServer::start(database).await;
         let other_server = AuthServer::start(database).await;
         let user = account(&server, "creator@example.test").await;
@@ -209,7 +209,7 @@ async fn concurrent_challenges_cannot_spend_the_same_backup_code_twice() {
 
 #[ntex::test]
 async fn changed_password_invalidates_the_challenge_without_spending_its_backup_code() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let server = AuthServer::start(database).await;
         let user = account(&server, "creator@example.test").await;
         let device = Authenticator::confirmed(&server, &user.id).await;
@@ -259,7 +259,7 @@ async fn changed_password_invalidates_the_challenge_without_spending_its_backup_
 
 #[ntex::test]
 async fn challenge_requires_its_signed_cookie_csrf_and_return_target() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let server = AuthServer::start(database).await;
         let user = account(&server, "creator@example.test").await;
         let device = Authenticator::confirmed(&server, &user.id).await;

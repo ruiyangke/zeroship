@@ -7,7 +7,7 @@ use zeroship_auth::store::users;
 
 #[compio::test]
 async fn token_sweep_deletes_expired_rows_after_grace_and_keeps_fresh_rows() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let orm = database.orm().await;
         let client = database.connect().await;
         let db_url = database.url().to_owned();
@@ -171,7 +171,7 @@ async fn retained_verification_tokens(
 /// Idle rate-limit buckets expire while recently touched buckets survive.
 #[compio::test]
 async fn token_sweep_reaps_idle_rate_limit_buckets_and_keeps_fresh() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let client = database.connect().await;
         let db_url = database.url().to_owned();
 

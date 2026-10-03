@@ -8,7 +8,7 @@ use fixtures::{assert_failure_audit, assert_state, assert_success, issue, landin
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn landing_preserves_the_token_and_post_verifies_only_its_user_once() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let server = AuthServer::start(database).await;
         let (user_id, token) = issue(&server.pg, &server.orm, "verify@example.test").await;
         let (other_id, other_token) = issue(&server.pg, &server.orm, "other@example.test").await;
@@ -53,7 +53,7 @@ async fn landing_preserves_the_token_and_post_verifies_only_its_user_once() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn missing_or_mismatched_csrf_preserves_the_token_for_a_valid_submission() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let server = AuthServer::start(database).await;
         let (user_id, token) = issue(&server.pg, &server.orm, "csrf@example.test").await;
         let csrf = landing(&server, &token).await;
@@ -73,7 +73,7 @@ async fn missing_or_mismatched_csrf_preserves_the_token_for_a_valid_submission()
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn an_unknown_token_is_audited_without_consuming_an_existing_verification() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let server = AuthServer::start(database).await;
         let (user_id, token) = issue(&server.pg, &server.orm, "unknown-token@example.test").await;
         let csrf = landing(&server, "never-issued").await;

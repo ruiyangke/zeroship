@@ -11,7 +11,7 @@ use zeroship_authn::rate_limit::Quota;
     reason = "refill is frozen and the declared burst balance is integral"
 )]
 async fn signup_exhausts_only_its_ip_budget_and_recovers_after_refill() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let mailer = Arc::new(CapturingMailer::default());
         let server = AuthServer::with_mailer(database, mailer.clone()).await;
         let quota = Quota::SIGNUP_IP;

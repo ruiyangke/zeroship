@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 #[ntex::test]
 async fn duplicate_signup_preserves_the_account_and_matches_a_fresh_signup_response() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let mailer = Arc::new(CapturingMailer::default());
         let server = AuthServer::with_mailer(database, mailer.clone()).await;
         let form = Form::get(&server, "/signup").await;
@@ -54,7 +54,7 @@ async fn duplicate_signup_preserves_the_account_and_matches_a_fresh_signup_respo
 
 #[ntex::test]
 async fn a_database_refusal_creates_no_account_or_mail_and_the_same_submission_can_recover() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let mailer = Arc::new(CapturingMailer::default());
         let server = AuthServer::with_mailer(database, mailer.clone()).await;
         let admin = database.connect().await;
@@ -103,7 +103,7 @@ async fn a_database_refusal_creates_no_account_or_mail_and_the_same_submission_c
 
 #[ntex::test]
 async fn signup_requires_a_matching_form_cookie_before_creating_an_account() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let mailer = Arc::new(CapturingMailer::default());
         let server = AuthServer::with_mailer(database, mailer.clone()).await;
         for cookies in ["", "__Host-zsidp_csrf=unrelated-token"] {

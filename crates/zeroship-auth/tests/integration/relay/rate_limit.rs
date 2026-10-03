@@ -69,7 +69,7 @@ async fn exhaust_budget(server: &RelayServer) -> (Value, Vec<String>) {
 
 #[ntex::test]
 async fn rate_limit_refusal_remains_retryable_after_refill() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let server = RelayServer::start(database).await;
         let (message, keys) = exhaust_budget(&server).await;
         let id = message["MessageID"].as_str().unwrap();
@@ -99,7 +99,7 @@ async fn rate_limit_refusal_remains_retryable_after_refill() {
 
 #[ntex::test]
 async fn sustained_abuse_stops_forwarding_and_audits_only_local_revocation() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let server = RelayServer::start(database).await;
         let grant = server.alias.granted_scopes(&server.auth.pg).await;
         let (message, _) = exhaust_budget(&server).await;

@@ -10,7 +10,7 @@ use zeroship_auth::{identity::password_reset, store::users};
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn failed_logins_lock_the_account_and_success_after_expiry_clears_it() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let server = AuthServer::start(database).await;
         let account = user(&server, "lockout@example.test").await;
         lock_through_login(&server, &account).await;
@@ -39,7 +39,7 @@ async fn failed_logins_lock_the_account_and_success_after_expiry_clears_it() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn reset_recovers_a_locked_account_before_the_next_password_login() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let server = AuthServer::start(database).await;
         let account = user(&server, "recover@example.test").await;
         let other = user(&server, "other@example.test").await;
@@ -90,7 +90,7 @@ async fn reset_recovers_a_locked_account_before_the_next_password_login() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn password_failures_share_the_public_refusal_and_cannot_mint_sessions() {
-    Database::run(async |database| {
+    Database::run_fresh(async |database| {
         let server = AuthServer::start(database).await;
         let locked = user(&server, "locked@example.test").await;
         let wrong = user(&server, "wrong@example.test").await;
