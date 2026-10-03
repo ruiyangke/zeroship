@@ -1,4 +1,5 @@
 use super::{Error, PolicyObservation};
+use futures::channel::oneshot;
 use std::{
     collections::HashMap,
     num::NonZeroUsize,
@@ -45,11 +46,17 @@ struct Entry {
     identity: Arc<()>,
     observation: Option<PolicyObservation>,
     used_at: Instant,
+    /// Callers that arrived while this app's refresh was in flight, to be
+    /// answered from its result. Empty unless a refresh is pending.
+    waiters: Vec<oneshot::Sender<Result<PolicyObservation, Error>>>,
 }
 
 pub(super) enum Reservation<'a> {
     Cached(PolicyObservation),
     Refresh(Ticket<'a>),
+    /// A refresh for this app is already in flight; wait for its observation
+    /// rather than refuse a request that the next observation will answer.
+    Wait(oneshot::Receiver<Result<PolicyObservation, Error>>),
 }
 pub(super) struct Ticket<'a> {
     cache: &'a Cache,
@@ -83,7 +90,12 @@ impl Cache {
                     drop(entries);
                     return Ok(Reservation::Cached(observation));
                 }
-                None => return Err(Error::Unavailable),
+                None => {
+                    let (waiter, waiting) = oneshot::channel();
+                    entry.waiters.push(waiter);
+                    drop(entries);
+                    return Ok(Reservation::Wait(waiting));
+                }
                 _ => {}
             }
         } else if entries.len() == self.capacity.get() {
@@ -101,6 +113,7 @@ impl Cache {
                 identity: identity.clone(),
                 observation: None,
                 used_at: now,
+                waiters: Vec::new(),
             },
         );
         drop(entries);
@@ -151,8 +164,12 @@ impl Ticket<'_> {
             .filter(|entry| Arc::ptr_eq(&entry.identity, &self.identity))
             .ok_or(Error::Unavailable)?;
         entry.observation = Some(observation.clone());
+        let waiters = std::mem::take(&mut entry.waiters);
         drop(entries);
         self.pending = false;
+        for waiter in waiters {
+            let _ = waiter.send(Ok(observation.clone()));
+        }
         Ok(observation)
     }
 }
@@ -163,11 +180,17 @@ impl Drop for Ticket<'_> {
             let Ok(mut entries) = self.cache.entries.lock() else {
                 return;
             };
-            if entries
-                .get(&self.app)
-                .is_some_and(|entry| Arc::ptr_eq(&entry.identity, &self.identity))
-            {
-                entries.remove(&self.app);
+            let waiters = match entries.get_mut(&self.app) {
+                Some(entry) if Arc::ptr_eq(&entry.identity, &self.identity) => {
+                    let waiters = std::mem::take(&mut entry.waiters);
+                    entries.remove(&self.app);
+                    waiters
+                }
+                _ => Vec::new(),
+            };
+            drop(entries);
+            for waiter in waiters {
+                let _ = waiter.send(Err(Error::Unavailable));
             }
         }
     }

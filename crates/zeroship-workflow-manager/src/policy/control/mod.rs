@@ -9,6 +9,7 @@
 
 use super::{PolicyObservation, PolicySource};
 use crate::Error;
+use futures::channel::oneshot;
 use std::{
     future::Future,
     pin::Pin,
@@ -47,9 +48,11 @@ pub fn publication_collections() -> Result<zeroship_data_orm::schema::Schema, Er
 
 /// A thread's store bound to the process-wide observations every thread shares.
 ///
-/// Entries never renew their original source validity. Concurrent misses for
-/// the same app return a retryable failure while its bounded database
-/// observation is pending. No detached refresh survives cancellation.
+/// Entries never renew their original source validity. A miss takes the app's
+/// single refresh; a miss that arrives while that refresh is in flight waits
+/// for its observation up to the same read budget rather than being refused, so
+/// a request is not answered from a transient state. No detached refresh
+/// survives cancellation.
 #[derive(Debug)]
 pub struct ControlPolicies {
     store: ControlPolicyStore,
@@ -90,6 +93,23 @@ impl ControlPolicies {
     }
 }
 
+/// Answer a peer thread's in-flight refresh for one app.
+///
+/// The waiter queued behind a refresh its caller's own read would have started.
+/// It receives that refresh's observation, or `Unavailable` when the refresh
+/// outlived the same read budget a direct read gets or the entry was retired
+/// before the refresh completed. It is never handed a value the source did not
+/// observe on its behalf.
+async fn await_peer_observation(
+    read_timeout: Duration,
+    waiting: oneshot::Receiver<Result<PolicyObservation, Error>>,
+) -> Result<PolicyObservation, Error> {
+    let observation = compio::time::timeout(read_timeout, waiting)
+        .await
+        .map_err(|_| Error::Unavailable)?;
+    observation.map_err(|_| Error::Unavailable)?
+}
+
 impl PolicySource for ControlPolicies {
     fn observe<'a>(
         &'a self,
@@ -104,6 +124,13 @@ impl PolicySource for ControlPolicies {
                             .await
                             .map_err(|_| Error::Unavailable)?;
                     ticket.complete(observation?)
+                }
+                // A peer thread's refresh is already reading the source. A
+                // request that asked inside that window waits for its result
+                // instead of being refused: the observation it is waiting for is
+                // the one that will answer it.
+                cache::Reservation::Wait(waiting) => {
+                    await_peer_observation(self.read_timeout, waiting).await
                 }
             }
         })

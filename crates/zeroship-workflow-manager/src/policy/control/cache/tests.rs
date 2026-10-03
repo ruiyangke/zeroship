@@ -17,7 +17,9 @@ fn observation(app: &AppId) -> PolicyObservation {
 fn reserve<'a>(cache: &'a Cache, app: &AppId) -> Ticket<'a> {
     match cache.reserve(app).unwrap() {
         Reservation::Refresh(ticket) => ticket,
-        Reservation::Cached(_) => panic!("expected an authoritative refresh"),
+        Reservation::Cached(_) | Reservation::Wait(_) => {
+            panic!("expected an authoritative refresh")
+        }
     }
 }
 
@@ -37,19 +39,91 @@ fn cached_requests_preserve_identity_and_original_deadline() {
 }
 
 #[test]
-fn cancelled_refresh_releases_singleflight_without_touching_other_apps() {
-    let cache = cache(2);
+fn a_concurrent_miss_waits_for_the_inflight_refresh_and_a_cancel_releases_it() {
+    let cache = cache(3);
     let app = AppId::mint();
     let other = AppId::mint();
     let peer = reserve(&cache, &other)
         .complete(observation(&other))
         .unwrap();
+    // A miss that arrives while the app's refresh is in flight waits for it.
     let pending = reserve(&cache, &app);
-    assert!(matches!(cache.reserve(&app), Err(Error::Unavailable)));
-    drop(pending);
-    let fresh = reserve(&cache, &app).complete(observation(&app)).unwrap();
-    assert!(cache.revalidate(&fresh).is_ok());
+    let waiting = match cache.reserve(&app).unwrap() {
+        Reservation::Wait(waiting) => waiting,
+        _ => panic!("a concurrent miss must wait for the in-flight refresh"),
+    };
+    let installed = pending.complete(observation(&app)).unwrap();
+    let answered = futures::executor::block_on(waiting);
+    assert!(
+        matches!(answered, Ok(Ok(ref observation)) if observation.same_observation(&installed))
+    );
+    assert!(cache.revalidate(&installed).is_ok());
+
+    // A cancelled refresh releases its waiter rather than leaving it hanging.
+    let cancelled_app = AppId::mint();
+    let cancelled = reserve(&cache, &cancelled_app);
+    let waiting = match cache.reserve(&cancelled_app).unwrap() {
+        Reservation::Wait(waiting) => waiting,
+        _ => panic!("a concurrent miss must wait for the in-flight refresh"),
+    };
+    drop(cancelled);
+    assert!(matches!(
+        futures::executor::block_on(waiting),
+        Ok(Err(Error::Unavailable))
+    ));
+
     assert!(cache.revalidate(&peer).is_ok());
+}
+
+/// A waiter whose refresh outlives the read budget is refused inside the
+/// budget, never left waiting and never answered from anything but the peer's
+/// observation.
+///
+/// It binds the source's wait arm: a waiter that is not bounded by the read
+/// budget would outlive the outer bound here and fail rather than hang.
+#[compio::test]
+async fn a_waiter_whose_refresh_outlives_the_read_budget_is_refused() {
+    let cache = cache(2);
+    let app = AppId::mint();
+    // The refresh is in flight for the whole budget and never completes.
+    let _pending = reserve(&cache, &app);
+    let Reservation::Wait(waiting) = cache.reserve(&app).unwrap() else {
+        panic!("a concurrent miss must wait for the in-flight refresh");
+    };
+    let answered = compio::time::timeout(
+        Duration::from_secs(5),
+        super::super::await_peer_observation(Duration::from_millis(50), waiting),
+    )
+    .await;
+    assert!(
+        matches!(answered, Ok(Err(Error::Unavailable))),
+        "the waiter must be refused within the read budget: {answered:?}"
+    );
+}
+
+/// A waiter whose entry is retired before its refresh completes is refused. The
+/// cancelled refresh's late result never reaches it.
+///
+/// It binds the source's cancellation arm: an invalidated entry that kept its
+/// waiters would let the late completion answer them with the retired
+/// observation instead.
+#[compio::test]
+async fn a_waiter_is_refused_when_its_refresh_is_retired_before_completion() {
+    let cache = cache(2);
+    let app = AppId::mint();
+    let pending = reserve(&cache, &app);
+    let Reservation::Wait(waiting) = cache.reserve(&app).unwrap() else {
+        panic!("a concurrent miss must wait for the in-flight refresh");
+    };
+    // Retiring the entry drops the waiter's sender, and the refresh that was in
+    // flight can no longer install or answer anyone.
+    cache.invalidate(&app);
+    assert!(pending.complete(observation(&app)).is_err());
+    let answered = super::super::await_peer_observation(Duration::from_secs(5), waiting).await;
+    assert!(
+        matches!(answered, Err(Error::Unavailable)),
+        "a retired refresh must refuse its waiter, not answer it: {answered:?}"
+    );
 }
 
 #[test]
