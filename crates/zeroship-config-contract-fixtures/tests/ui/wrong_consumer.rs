@@ -9,7 +9,7 @@
 //! is `the_matching_consumer_token_compiles_and_reads` in tests/integration/typed_accessor.rs:
 //! same call, same key, only the consumer differs, and it compiles.
 
-use zeroship_config_contract::fixtures::{FixtureControlConfigConsumer, FixtureWorkerConfigConsumer};
+use zeroship_config_contract_fixtures::fixtures::{FixtureControlConfigConsumer, FixtureWorkerConfigConsumer};
 use zeroship_core::config::{CanonicalName, EnvKey};
 
 const CONTROL_PORT: EnvKey<String, FixtureControlConfigConsumer> =

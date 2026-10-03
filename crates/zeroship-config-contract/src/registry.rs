@@ -40,9 +40,10 @@ pub fn platform_specs() -> Vec<ConfigSpec> {
 
 /// Every linked read site belonging to a platform binary.
 ///
-/// Filtered rather than taken whole: this tool also links the fixture
-/// registries in [`crate::fixtures`], whose sites are real entries in the same
-/// slice and would otherwise be documented as production configuration.
+/// Filtered rather than taken whole: the contract crate's tests also link the
+/// fixture registries in `zeroship_config_contract_fixtures::fixtures`, whose
+/// sites are real entries in the same slice and would otherwise be documented
+/// as production configuration.
 #[must_use]
 pub fn platform_read_sites() -> Vec<ReadSite> {
     CONFIG_READ_SITES

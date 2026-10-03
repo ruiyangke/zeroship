@@ -125,8 +125,8 @@ fn a_wrong_consumer_is_both_unread_and_undeclared() {
     // Mutation: the read site keeps the identity/source but claims worker as
     // consumer instead of control.
     // Does not cover: the compile-time EnvKey consumer mismatch. That is
-    // tests/ui/wrong_consumer.rs, with its positive control in
-    // typed_accessor.rs.
+    // crates/zeroship-config-contract-fixtures/tests/ui/wrong_consumer.rs, with
+    // its positive control in typed_accessor.rs.
     let specs = [operational("control.port", CONTROL_ONLY)];
     let mut reads = sites(&specs);
     let env = reads

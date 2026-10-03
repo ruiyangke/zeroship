@@ -1,7 +1,7 @@
 //! The proof that the macro carries something a hand-written test cannot.
 //!
 //! Everything here is measured against declarations that live in the LIBRARY
-//! crate (`zeroship_config_contract::fixtures`) while the assertions run in this
+//! crate (`zeroship_config_contract_fixtures::fixtures`) while the assertions run in this
 //! separate integration-test crate. This file names no read site of its own; the
 //! one hand-written accessor call lives in tests/integration/typed_accessor.rs, a different
 //! test binary with a different registry.
@@ -23,7 +23,7 @@
 
 use clap::{CommandFactory, Parser};
 use zeroship_config_contract::contract::validate_contract;
-use zeroship_config_contract::fixtures::{
+use zeroship_config_contract_fixtures::fixtures::{
     FixtureControlConfig, FixtureControlConfigSources, FixtureControls, FixtureControlsSources,
     FixtureWorkerConfig, FixtureWorkerConfigSources,
 };

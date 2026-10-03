@@ -7,7 +7,7 @@
 //! The positive control is the identical call with a string literal in
 //! tests/integration/declared_env.rs.
 
-use zeroship_config_contract::fixtures::FixtureControlConfigConsumer;
+use zeroship_config_contract_fixtures::fixtures::FixtureControlConfigConsumer;
 
 fn main() {
     let name = "SOME_EXTERNAL_NAME";

@@ -27,6 +27,7 @@ const REACHERS: &[&str] = &[
     "zeroship-bundle",
     "zeroship-cli",
     "zeroship-config-contract",
+    "zeroship-config-contract-fixtures",
     "zeroship-control",
     "zeroship-core",
     "zeroship-data-cdc-server",

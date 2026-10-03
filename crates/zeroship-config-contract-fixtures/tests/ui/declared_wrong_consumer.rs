@@ -9,7 +9,7 @@
 //! tests/integration/declared_env.rs: same macro, same key shape, matching consumer, and it
 //! compiles and records.
 
-use zeroship_config_contract::fixtures::{FixtureControlConfigConsumer, FixtureWorkerConfigConsumer};
+use zeroship_config_contract_fixtures::fixtures::{FixtureControlConfigConsumer, FixtureWorkerConfigConsumer};
 use zeroship_core::config::DeclaredEnvKey;
 
 const CONTROL_ONLY: DeclaredEnvKey<String, FixtureControlConfigConsumer> =

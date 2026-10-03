@@ -6,7 +6,6 @@
 //! Cargo.toml. `autotests` is off, so a new file is compiled by nothing until
 //! it is declared either here or as a `[[test]]` entry.
 
-mod compile_fail;
 mod contract_fixtures;
 mod metadata_contract;
 mod overlay_sections;

@@ -51,7 +51,11 @@ thiserror = { workspace = true }
 toml = { workspace = true }
 
 [dev-dependencies]
-trybuild = "1.0"
+# The declaration fixtures and their consumer markers, shared with the
+# compile-fail suite that lives in the same leaf crate. Keeping the fixtures
+# out of this crate is what stops trybuild from rebuilding every linked
+# platform service's closure.
+zeroship-config-contract-fixtures = { workspace = true }
 
 [[test]]
 name = "main"
