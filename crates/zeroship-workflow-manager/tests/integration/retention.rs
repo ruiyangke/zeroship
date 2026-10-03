@@ -49,9 +49,7 @@ macro_rules! case {
     };
 }
 
-#[path = "retention/operation_prerequisites.rs"]
 mod operation_prerequisites;
-#[path = "retention/outcomes.rs"]
 mod outcomes;
 
 case!(

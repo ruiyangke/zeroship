@@ -5,7 +5,7 @@
 
 use crate::support;
 
-use crate::native_schema::schema::{
+use zeroship_workflow_manager::schema::{
     deployment_holds, jobs, recovery_duties, recovery_scopes, schedule_activations,
     schedule_disables, schedule_occurrences, schedule_scopes, schedules,
 };

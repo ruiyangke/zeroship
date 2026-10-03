@@ -6,7 +6,7 @@
 use crate::support;
 
 use futures::{channel::oneshot, future::ready};
-use crate::native_schema::schema::{assignments, queue_scopes, workers};
+use zeroship_workflow_manager::schema::{assignments, queue_scopes, workers};
 use std::{
     cell::{Cell, RefCell},
     future::Future,

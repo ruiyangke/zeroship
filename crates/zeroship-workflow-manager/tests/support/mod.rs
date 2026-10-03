@@ -213,7 +213,7 @@ impl Fixture {
             .await
             .unwrap();
         admin
-            .batch_execute(include_str!("../../../schema/postgres.sql"))
+            .batch_execute(include_str!("../../schema/postgres.sql"))
             .await
             .expect("generated manager PostgreSQL schema must apply");
         admin
@@ -242,7 +242,7 @@ impl Fixture {
             .execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")
             .unwrap();
         admin
-            .execute_batch(include_str!("../../../schema/sqlite.sql"))
+            .execute_batch(include_str!("../../schema/sqlite.sql"))
             .expect("generated manager SQLite schema must apply");
         Self {
             admin: Admin::Sqlite(admin),

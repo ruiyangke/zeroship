@@ -5,7 +5,7 @@
 
 use crate::support;
 
-use crate::native_schema::schema::{jobs, queue_scopes};
+use zeroship_workflow_manager::schema::{jobs, queue_scopes};
 use std::cell::Cell;
 use crate::support::{Backend, Fixture};
 use zeroship_core::{

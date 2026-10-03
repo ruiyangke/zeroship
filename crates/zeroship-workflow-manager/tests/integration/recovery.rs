@@ -89,7 +89,6 @@ const fn operation(kind: DutyKind) -> JobOperation {
     }
 }
 
-#[path = "recovery/duties.rs"]
 mod duties;
 
 async fn host(fixture: &Fixture) -> (Recovery, Queue) {

@@ -22,4 +22,8 @@ pub mod scheduling;
 
 pub use error::Error;
 pub use models::{collections, Claimant};
+/// The manager's native ORM table handles, for hosts that query the native
+/// schema directly. `collections` is the metadata a host composes into its
+/// binding.
+pub use models::schema;
 pub use queue::{DeliveryGrant, Options, Queue};

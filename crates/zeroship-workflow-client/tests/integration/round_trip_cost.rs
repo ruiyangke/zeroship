@@ -34,7 +34,7 @@
 //!   measures is the transport and credential the relocation would add.
 //!
 //! HOW TO RUN IT
-//!   cargo test -p zeroship-workflow-client --test integration -- `round_trip_cost::` --ignored --nocapture
+//!   cargo test -p zeroship-workflow-client --test main -- `integration::round_trip_cost::` --ignored --nocapture
 //! The report goes to stdout. It prints the machine's load average beside the
 //! samples: a reading taken while the machine is busy is not a reading taken
 //! while it is quiet, and the two must not be quoted as one number.

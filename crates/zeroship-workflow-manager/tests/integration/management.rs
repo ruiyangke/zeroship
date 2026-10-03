@@ -52,11 +52,8 @@ macro_rules! case {
     };
 }
 
-#[path = "management/acceptance.rs"]
 mod acceptance;
-#[path = "management/barriers.rs"]
 mod barriers;
-#[path = "management/status.rs"]
 mod status;
 
 #[derive(Debug)]

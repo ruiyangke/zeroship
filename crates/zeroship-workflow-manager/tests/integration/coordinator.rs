@@ -47,7 +47,6 @@ macro_rules! case {
     };
 }
 
-#[path = "coordinator/draining.rs"]
 mod draining;
 
 case!(
