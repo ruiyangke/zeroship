@@ -39,8 +39,8 @@ pub struct FixtureControlConfig {
 #[derive(Debug)]
 pub struct FixtureWorkerConfig {
     /// Scope-stripped operational flag.
-    #[config(name = "worker.max_pinned_isolates_per_app", default = 4)]
-    pub max_pinned_isolates_per_app: Operational<u32>,
+    #[config(name = "worker.max_isolates", default = 200)]
+    pub max_isolates: Operational<usize>,
     /// Platform-global secret: no component prefix, so no scope is stripped,
     /// and its identity comes from the shared table because several binaries
     /// read the one value.

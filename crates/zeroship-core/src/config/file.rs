@@ -290,8 +290,6 @@ pub struct WorkerSection {
     pub threads: Option<usize>,
     /// Maximum cached app isolates.
     pub max_isolates: Option<usize>,
-    /// Maximum deploy-pinned workflow replay isolates per app.
-    pub max_pinned_isolates_per_app: Option<usize>,
     /// Shutdown drain timeout in seconds.
     pub shutdown_timeout: Option<u64>,
     /// Object-store location for the app `env.storage` namespace.

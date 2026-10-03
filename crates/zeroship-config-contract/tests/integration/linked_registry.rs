@@ -210,12 +210,12 @@ fn compiled_clap_metadata_equals_the_declared_projections() {
     let worker = FixtureWorkerConfigSources::command();
     let isolates = worker
         .get_arguments()
-        .find(|arg| arg.get_id() == "max_pinned_isolates_per_app")
+        .find(|arg| arg.get_id() == "max_isolates")
         .expect("isolate argument");
-    assert_eq!(isolates.get_long(), Some("max-pinned-isolates-per-app"));
+    assert_eq!(isolates.get_long(), Some("max-isolates"));
     assert_eq!(
         isolates.get_env().and_then(std::ffi::OsStr::to_str),
-        Some("ZEROSHIP_WORKER_MAX_PINNED_ISOLATES_PER_APP")
+        Some("ZEROSHIP_WORKER_MAX_ISOLATES")
     );
 
     let control_key = worker
