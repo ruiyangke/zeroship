@@ -62,7 +62,7 @@
 //! from a broken harness, and a green one cannot be told apart from a test that never
 //! reached the path.
 //!
-//! Runs against the MySQL and PostgreSQL servers this binary owns
+//! Runs against the MySQL server this worktree shares and the PostgreSQL server this binary owns
 //! (`crate::support::mysql::mysql_url`, `crate::support::pg_database`): a server that cannot start
 //! fails the test, so the pass count cannot report coverage that never ran.
 

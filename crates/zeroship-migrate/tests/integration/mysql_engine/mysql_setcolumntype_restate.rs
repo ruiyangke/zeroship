@@ -34,7 +34,7 @@
 //!    against the live server via `load_and_lower_guarded` + the engine's
 //!    `apply_plan`, and every facet survives.
 //!
-//! Runs against the MySQL server this binary owns (`crate::support::mysql::mysql_url`).
+//! Runs against the MySQL server this worktree shares (`crate::support::mysql::mysql_url`).
 
 
 use std::collections::BTreeMap;

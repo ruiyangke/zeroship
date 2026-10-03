@@ -86,7 +86,7 @@
 //! written down at [`MYSQL_LEG`].
 //!
 //! COST. This is a live suite with one schema round-trip per row, against the
-//! PostgreSQL and MySQL servers this binary owns.
+//! PostgreSQL server this binary owns and the MySQL server this worktree shares.
 
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -118,7 +118,7 @@ use zeroship_migrate_sqlite::SqliteBackend;
 /// constant so it is in the file a MySQL author opens, not only in a doc.
 ///
 /// 1. Shared support, in `tests/support/mysql.rs`: `mysql_url()`, the DSN of the
-///    MySQL server this binary owns, and `MysqlDevSession`, which implements
+///    MySQL server this worktree shares, and `MysqlDevSession`, which implements
 ///    `driver::SqlSession` over the blocking `mysql` crate exactly as `PgDevSession`
 ///    does over the PostgreSQL one. `DatabaseGuard` is the `SchemaGuard` sibling.
 ///    Three live MySQL suites already ride it (`tests/integration/fold_live/*_mysql.rs`).
@@ -867,11 +867,40 @@ fn prelude(
 // The PostgreSQL probe
 // ---------------------------------------------------------------------------
 
+/// A sweep's minted name stem, unique to one test invocation.
+///
+/// It carries the pid and a per-invocation sequence because the live MySQL
+/// server is shared by every test process of a worktree: a stem shared across
+/// tests would let one test's census see another's `zmconf_` probes and fail it
+/// for a leak it did not make. The slug a row appends is capped so a minted name
+/// plus the `_aux` a `createSchema` row adds and the `_migrations` the engine
+/// appends stays inside MySQL's 64-byte identifier limit.
+struct Sweep(String);
+
+impl Sweep {
+    /// Mint a stem no other sweep in this process shares.
+    fn mint() -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        Self(format!(
+            "zmconf_{}_{}_",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::SeqCst)
+        ))
+    }
+
+    /// The prefix every probe schema and database of this sweep carries, so the
+    /// leak check can find them all with one catalog predicate.
+    fn prefix(&self) -> &str {
+        &self.0
+    }
+}
+
 /// A per-row unique base name. A row appends `_aux`, `_migrations` and `_role` to
 /// it, and PostgreSQL truncates an identifier past 63 bytes from the tail, so the
 /// slug is capped and the sequence number that makes the name unique sits inside the
 /// bound.
-fn nonce(kind: &str, variant: &str) -> String {
+fn nonce(sweep: &Sweep, kind: &str, variant: &str) -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let seq = NEXT.fetch_add(1, Ordering::SeqCst);
@@ -879,13 +908,9 @@ fn nonce(kind: &str, variant: &str) -> String {
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
         .collect();
-    let slug: String = slug.to_ascii_lowercase().chars().take(28).collect();
-    format!("{PROBE_PREFIX}{slug}_{seq}")
+    let slug: String = slug.to_ascii_lowercase().chars().take(20).collect();
+    format!("{}{slug}_{seq}", sweep.prefix())
 }
-
-/// The name prefix every probe schema and database carries, so the leak check can
-/// find them all with one catalog predicate.
-const PROBE_PREFIX: &str = "zmconf_";
 
 // ---------------------------------------------------------------------------
 // The extension
@@ -909,9 +934,9 @@ fn touches_the_extension(kind: &str) -> bool {
     matches!(kind, "createExtension" | "dropExtension")
 }
 
-async fn pg_verdict(url: &str, kind: &str, variant: &str, op: &Op) -> Verdict {
+async fn pg_verdict(url: &str, sweep: &Sweep, kind: &str, variant: &str, op: &Op) -> Verdict {
     let session = PgDevSession::connect(url);
-    let base = nonce(kind, variant);
+    let base = nonce(sweep, kind, variant);
     let probe = Names {
         schema: base.clone(),
         aux_schema: format!("{base}_aux"),
@@ -993,9 +1018,9 @@ async fn pg_verdict(url: &str, kind: &str, variant: &str, op: &Op) -> Verdict {
 /// The name is [`nonce`]'s, unchanged. MySQL caps an identifier at 64 bytes, and the
 /// cap on `nonce`'s slug leaves room under it for the `_migrations` the engine appends
 /// and the `_aux` a `createSchema` row would add.
-async fn mysql_verdict(url: &str, kind: &str, variant: &str, op: &Op) -> Verdict {
+async fn mysql_verdict(url: &str, sweep: &Sweep, kind: &str, variant: &str, op: &Op) -> Verdict {
     let session = MysqlDevSession::connect(url);
-    let base = nonce(kind, variant);
+    let base = nonce(sweep, kind, variant);
     let probe = Names {
         schema: base.clone(),
         aux_schema: format!("{base}_aux"),
@@ -1035,20 +1060,22 @@ async fn mysql_verdict(url: &str, kind: &str, variant: &str, op: &Op) -> Verdict
     .await
 }
 
-/// Every `zmconf_%` DATABASE `information_schema` holds, and the whole-server
-/// database count beside it.
+/// Every DATABASE carrying `sweep`'s prefix, and the whole-server database count
+/// beside it.
 ///
 /// The MySQL sibling of [`probe_schemas`], and it answers the same two questions in
 /// the same order: the global count moves for reasons that are not this file's (the
-/// other live MySQL tests of this binary create databases on the same server), and
-/// the prefixed list is the one the leak check fails on.
+/// other live MySQL tests sharing the server create databases beside this one), and
+/// the prefixed list is the one the leak check fails on. The prefix is the sweep's
+/// own, so the list holds only this sweep's probes: the census must not fail a test
+/// for a database another sweep on the shared server is still using.
 ///
 /// `information_schema.SCHEMATA` rather than `SHOW DATABASES`, because it takes a
 /// bind and returns a named column, which the seam's `query` contract needs. The
 /// underscore in `zmconf_%` is a LIKE wildcard on both servers and is left as one
 /// for the same reason the PostgreSQL query leaves it: it can only widen the match,
-/// and nothing but this sweep names a database `zmconf`.
-async fn mysql_probe_databases(session: &MysqlDevSession) -> (i64, Vec<String>) {
+/// and nothing but a sweep names a database `zmconf`.
+async fn mysql_probe_databases(session: &MysqlDevSession, sweep: &Sweep) -> (i64, Vec<String>) {
     let total: i64 = session
         .query_one("SELECT count(*) AS n FROM information_schema.SCHEMATA", &[])
         .await
@@ -1059,7 +1086,7 @@ async fn mysql_probe_databases(session: &MysqlDevSession) -> (i64, Vec<String>) 
         .query(
             "SELECT SCHEMA_NAME AS nspname FROM information_schema.SCHEMATA \
              WHERE SCHEMA_NAME LIKE ? ORDER BY SCHEMA_NAME",
-            &[zeroship_migrate::driver::Bind::Text(format!("{PROBE_PREFIX}%"))],
+            &[zeroship_migrate::driver::Bind::Text(format!("{}%", sweep.prefix()))],
         )
         .await
         .expect("query information_schema.SCHEMATA for probe databases");
@@ -1076,7 +1103,7 @@ async fn mysql_probe_databases(session: &MysqlDevSession) -> (i64, Vec<String>) 
 
 const SQLITE_PROJECT: &str = "prj_conformance";
 
-async fn sqlite_verdict(kind: &str, variant: &str, op: &Op) -> Verdict {
+async fn sqlite_verdict(sweep: &Sweep, kind: &str, variant: &str, op: &Op) -> Verdict {
     let dir: TempDir = match tempfile::tempdir() {
         Ok(dir) => dir,
         Err(error) => {
@@ -1096,7 +1123,7 @@ async fn sqlite_verdict(kind: &str, variant: &str, op: &Op) -> Verdict {
             )
         }
     };
-    let base = nonce(kind, variant);
+    let base = nonce(sweep, kind, variant);
     let probe = Names {
         schema: SQLITE_PROJECT.to_string(),
         aux_schema: format!("{base}_aux"),
@@ -1515,10 +1542,10 @@ fn judge(dialect: &str, ledger: &[(String, String, Verdict)]) {
     );
 }
 
-/// Every `zmconf_%` schema currently in `pg_namespace`, and the whole-catalog
-/// count beside it. The catalog is the sweep's own database's, so the prefixed list
-/// is exactly the probe schemas the sweep still holds.
-async fn probe_schemas(session: &PgDevSession) -> (i64, Vec<String>) {
+/// Every schema carrying `sweep`'s prefix currently in `pg_namespace`, and the
+/// whole-catalog count beside it. The catalog is the sweep's own database's, so the
+/// prefixed list is exactly the probe schemas the sweep still holds.
+async fn probe_schemas(session: &PgDevSession, sweep: &Sweep) -> (i64, Vec<String>) {
     let total: i64 = session
         .query_one("SELECT count(*)::bigint AS n FROM pg_namespace", &[])
         .await
@@ -1528,7 +1555,7 @@ async fn probe_schemas(session: &PgDevSession) -> (i64, Vec<String>) {
     let rows = session
         .query(
             "SELECT nspname FROM pg_namespace WHERE nspname LIKE $1 ORDER BY nspname",
-            &[zeroship_migrate::driver::Bind::Text(format!("{PROBE_PREFIX}%"))],
+            &[zeroship_migrate::driver::Bind::Text(format!("{}%", sweep.prefix()))],
         )
         .await
         .expect("query pg_namespace for probe schemas");
@@ -1539,42 +1566,48 @@ async fn probe_schemas(session: &PgDevSession) -> (i64, Vec<String>) {
     (total, prefixed)
 }
 
-/// The name the leak checks plant to prove they can see a leftover at all.
-const LEAK_CONTROL: &str = "zmconf_leak_control";
+/// The name the leak checks plant to prove they can see a leftover at all. It
+/// carries the sweep's prefix, so two sweeps can plant it at once without
+/// colliding on one catalog name.
+fn leak_control(sweep: &Sweep) -> String {
+    format!("{}leak_control", sweep.prefix())
+}
 
 #[compio::test]
 async fn every_postgres_row_of_the_dialect_table_answers_to_a_live_server() {
+    let sweep = Sweep::mint();
     let url = crate::support::pg_database();
     let session = PgDevSession::connect(&url);
 
     // The leak check's rejection control, before it is relied on: a planted probe
     // schema has to show up in the census, or an empty census at the end proves
     // nothing about the rows.
+    let control = leak_control(&sweep);
     session
-        .batch(&format!("CREATE SCHEMA \"{LEAK_CONTROL}\""))
+        .batch(&format!("CREATE SCHEMA \"{control}\""))
         .await
         .expect("plant the leak check's control schema");
-    let (_, planted) = probe_schemas(&session).await;
+    let (_, planted) = probe_schemas(&session, &sweep).await;
     assert_eq!(
         planted,
-        vec![LEAK_CONTROL.to_string()],
+        vec![control.clone()],
         "the census must see a probe schema that is there, and nothing else yet"
     );
     session
-        .batch(&format!("DROP SCHEMA \"{LEAK_CONTROL}\""))
+        .batch(&format!("DROP SCHEMA \"{control}\""))
         .await
         .expect("drop the leak check's control schema");
 
-    let (before_total, _) = probe_schemas(&session).await;
+    let (before_total, _) = probe_schemas(&session, &sweep).await;
     let mut ledger: Vec<(String, String, Verdict)> = Vec::new();
     for (kind, variant, op) in crate::integration::dialect_corpus::corpus() {
-        let verdict = pg_verdict(&url, kind, variant, &op).await;
+        let verdict = pg_verdict(&url, &sweep, kind, variant, &op).await;
         ledger.push((kind.to_string(), variant.to_string(), verdict));
     }
 
     // A step of the sweep rather than its own `#[test]`: a check whose subject is
     // another test's in-progress state has to be sequenced with it.
-    let (after_total, leaked) = probe_schemas(&session).await;
+    let (after_total, leaked) = probe_schemas(&session, &sweep).await;
     println!(
         "LEDGER postgres pg_namespace before={before_total} after={after_total} \
          probe_schemas_after={}",
@@ -1595,6 +1628,7 @@ async fn every_postgres_row_of_the_dialect_table_answers_to_a_live_server() {
 
 #[compio::test]
 async fn every_mysql_row_of_the_dialect_table_answers_to_a_live_server() {
+    let sweep = Sweep::mint();
     let url = crate::support::mysql::mysql_url();
     let session = MysqlDevSession::connect(&url);
 
@@ -1605,30 +1639,32 @@ async fn every_mysql_row_of_the_dialect_table_answers_to_a_live_server() {
     // The same rejection control the PostgreSQL sweep plants, over
     // `information_schema.SCHEMATA`.
     {
-        let _control = DatabaseGuard::arm(&session, [LEAK_CONTROL]);
+        let control = leak_control(&sweep);
+        let _guard = DatabaseGuard::arm(&session, [control.clone()]);
         session
-            .batch(&format!("CREATE DATABASE {}", quote_ident(LEAK_CONTROL)))
+            .batch(&format!("CREATE DATABASE {}", quote_ident(&control)))
             .await
             .expect("plant the leak check's control database");
-        let (_, planted) = mysql_probe_databases(&session).await;
+        let (_, planted) = mysql_probe_databases(&session, &sweep).await;
         assert!(
-            planted.iter().any(|name| name == LEAK_CONTROL),
+            planted.iter().any(|name| name == &control),
             "the census must see a probe database that is there; saw {planted:?}"
         );
     }
 
-    let (before_total, before) = mysql_probe_databases(&session).await;
+    let (before_total, before) = mysql_probe_databases(&session, &sweep).await;
     assert!(
         before.is_empty(),
-        "no probe database may be on the server before the sweep creates one: {before:?}"
+        "no probe database of this sweep may be on the shared server before the \
+         sweep creates one: {before:?}"
     );
     let mut ledger: Vec<(String, String, Verdict)> = Vec::new();
     for (kind, variant, op) in crate::integration::dialect_corpus::corpus() {
-        let verdict = mysql_verdict(&url, kind, variant, &op).await;
+        let verdict = mysql_verdict(&url, &sweep, kind, variant, &op).await;
         ledger.push((kind.to_string(), variant.to_string(), verdict));
     }
 
-    let (after_total, leaked) = mysql_probe_databases(&session).await;
+    let (after_total, leaked) = mysql_probe_databases(&session, &sweep).await;
     println!(
         "LEDGER mysql schemata before={before_total} after={after_total} \
          probe_databases_after={}",
@@ -1647,11 +1683,43 @@ async fn every_mysql_row_of_the_dialect_table_answers_to_a_live_server() {
     judge("mysql", &ledger);
 }
 
+/// The live-MySQL server is shared by every test process of a worktree, so the
+/// leak census reads only the sweep's own prefix: a `zmconf_` database another
+/// sweep is using must not be counted as this sweep's leak, or a test fails for
+/// a row it did not run.
+#[compio::test]
+async fn the_mysql_leak_census_reads_only_the_sweeps_probe_prefix() {
+    let sweep = Sweep::mint();
+    let url = crate::support::mysql::mysql_url();
+    let session = MysqlDevSession::connect(&url);
+    let own = format!("{}census_own", sweep.prefix());
+    let foreign = format!("zmconf_{}_census_foreign", std::process::id() + 1);
+    let _guard = DatabaseGuard::arm(&session, [own.clone(), foreign.clone()]);
+    for name in [&own, &foreign] {
+        session
+            .batch(&format!("CREATE DATABASE {}", quote_ident(name)))
+            .await
+            .expect("create a census database");
+    }
+
+    let (_, seen) = mysql_probe_databases(&session, &sweep).await;
+    assert!(
+        seen.iter().any(|name| name == &own),
+        "the census must see the sweep's own probe database; saw {seen:?}"
+    );
+    assert!(
+        !seen.iter().any(|name| name == &foreign),
+        "the census must not read another sweep's zmconf_ database as this \
+         sweep's leak; saw {seen:?}"
+    );
+}
+
 #[compio::test]
 async fn every_sqlite_row_of_the_dialect_table_answers_to_a_live_database() {
+    let sweep = Sweep::mint();
     let mut ledger: Vec<(String, String, Verdict)> = Vec::new();
     for (kind, variant, op) in crate::integration::dialect_corpus::corpus() {
-        let verdict = sqlite_verdict(kind, variant, &op).await;
+        let verdict = sqlite_verdict(&sweep, kind, variant, &op).await;
         ledger.push((kind.to_string(), variant.to_string(), verdict));
     }
     report("sqlite", &ledger);

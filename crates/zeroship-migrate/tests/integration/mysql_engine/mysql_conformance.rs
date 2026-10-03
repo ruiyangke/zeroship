@@ -13,7 +13,7 @@
 //! different client with its own pooling, so "PostgreSQL pins correctly" says
 //! nothing about it.
 //!
-//! Runs against the MySQL server this binary owns (`crate::support::mysql::mysql_url`). A
+//! Runs against the MySQL server this worktree shares (`crate::support::mysql::mysql_url`). A
 //! server that cannot start FAILS these tests: a skipped live suite reports exactly
 //! like a passing one, so there is no skip.
 

@@ -54,7 +54,7 @@
 //! character-typed column on MySQL and so hands the marker back - is covered at the
 //! unit boundary by `apply::drift::unattributed_snapshot_tests`.
 //!
-//! Runs against the MySQL server this binary owns (`crate::support::mysql::mysql_url`): a
+//! Runs against the MySQL server this worktree shares (`crate::support::mysql::mysql_url`): a
 //! server that cannot start is a failure rather than a green run with no coverage.
 
 

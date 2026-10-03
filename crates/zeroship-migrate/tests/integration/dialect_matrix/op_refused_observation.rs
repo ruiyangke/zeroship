@@ -71,8 +71,9 @@
 //!   the target object exists and the seed row is present. A leg whose setup did not
 //!   reach the server cannot answer this observation and says so.
 //!
-//! There is no skip path anywhere here: both servers are the ones this binary owns,
-//! and one that cannot start fails the observation rather than skipping it.
+//! There is no skip path anywhere here: the PostgreSQL server is the one this binary
+//! owns and the MySQL server is the one the worktree shares, and one that cannot
+//! start fails the observation rather than skipping it.
 //!
 //! # The live red, and the residual gap it pins
 //!
@@ -794,9 +795,9 @@ fn corroborate(subject: Subject, leg: &Leg) -> Result<(), String> {
 // Per-backend drivers: isolate, set up, observe, read back
 // ---------------------------------------------------------------------------
 
-/// A per-process-unique name. `zmoprefused_` rather than layer 1's `zmconf_`, because
-/// that suite's leak census fails on any `zmconf_%` name it finds on the MySQL
-/// server the tests of this binary share, and these are not its to judge.
+/// A per-process-unique name. `zmoprefused_` names this suite's own probe
+/// databases, distinct from the dialect sweep's `zmconf_` probes on the same
+/// shared server.
 fn token(case: Case) -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
 

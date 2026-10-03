@@ -17,7 +17,7 @@
 //! `snapshot_schema` to agree. A literal would be a second opinion about the thing
 //! under test.
 //!
-//! Runs against the MySQL server this binary owns (`crate::support::mysql::mysql_url`): a
+//! Runs against the MySQL server this worktree shares (`crate::support::mysql::mysql_url`): a
 //! server that cannot start is a failure rather than a green run with no coverage.
 
 

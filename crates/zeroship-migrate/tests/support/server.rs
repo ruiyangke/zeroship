@@ -1,11 +1,10 @@
-//! The PostgreSQL and MySQL servers a live suite binary owns.
+//! The PostgreSQL server a live suite binary owns.
 //!
 //! Each binary starts a server the first time one of its tests asks for it, and every
 //! test in the binary shares that server. A container per test would put dozens of
 //! servers on the machine at once for a single `cargo test`; one per binary is the
 //! cost of the binary, paid once. Isolation inside the server is the caller's:
-//! [`super::pg_database`] hands each PostgreSQL test a database of its own, and the
-//! MySQL tests create the throwaway databases they need, as they always have.
+//! [`super::pg_database`] hands each PostgreSQL test a database of its own.
 //!
 //! Nothing is configured from outside. The server is a container this process
 //! started, so there is no address to export, no provisioned instance to find, and no
@@ -32,7 +31,7 @@ use testcontainers::{ContainerRequest, GenericImage, ImageExt};
 
 use zeroship_testkit::docker::{start_owned, DockerCli, OwnedContainer, Ownership};
 
-/// The password of the superuser on both owned servers. The servers listen on a
+/// The password of the superuser on the owned server. The server listens on a
 /// loopback-mapped port for the life of one test process, so this is a fixture value,
 /// not a credential.
 const PASSWORD: &str = "zeroship-migrate-fixture";
@@ -43,12 +42,6 @@ const POSTGRES_IMAGE: (&str, &str) = ("postgres", "18");
 const POSTGRES_PORT: u16 = 5432;
 /// The database the admin connection uses to create and drop per-test databases.
 const POSTGRES_ADMIN_DATABASE: &str = "postgres";
-
-/// The MySQL image. The live MySQL suites read the catalog of the 8.4 line.
-const MYSQL_IMAGE: (&str, &str) = ("mysql", "8.4");
-const MYSQL_PORT: u16 = 3306;
-/// The database the MySQL DSN names. Tests create their own databases beside it.
-const MYSQL_DATABASE: &str = "zeroship_migrate_test";
 
 /// How long a server gets to become ready, including an image pull on a cold machine.
 const STARTUP: Duration = Duration::from_mins(5);
@@ -91,12 +84,6 @@ impl OwnedServer {
     pub fn postgres_admin_url(&self) -> String {
         self.postgres_url(POSTGRES_ADMIN_DATABASE)
     }
-
-    /// The MySQL DSN of the database this server was created with, as root.
-    #[must_use]
-    pub fn mysql_url(&self) -> String {
-        self.url("mysql", "root", MYSQL_DATABASE)
-    }
 }
 
 /// The container request the PostgreSQL server is started from.
@@ -117,29 +104,6 @@ pub fn postgres_request() -> ContainerRequest<GenericImage> {
         .with_startup_timeout(STARTUP)
 }
 
-/// The container request the MySQL server is started from.
-pub fn mysql_request() -> ContainerRequest<GenericImage> {
-    GenericImage::new(MYSQL_IMAGE.0, MYSQL_IMAGE.1)
-        .with_exposed_port(MYSQL_PORT.tcp())
-        // The entrypoint runs a temporary server on port 0 to initialize the data
-        // directory and logs `ready for connections` for it too. Only the final
-        // server listens on 3306.
-        .with_wait_for(WaitFor::message_on_either_std(
-            "port: 3306  MySQL Community Server",
-        ))
-        .with_env_var("MYSQL_ROOT_PASSWORD", PASSWORD)
-        .with_env_var("MYSQL_DATABASE", MYSQL_DATABASE)
-        // Native AIO is a per-server kernel resource, and nextest runs one
-        // process per test, so a suite that starts a server per test asks the
-        // host for one server's worth of contexts per test. `io_setup` returns
-        // EAGAIN once `fs.aio-max-nr` is reached and InnoDB aborts before the
-        // server ever listens. The engine's asynchronous I/O is not under test
-        // here, and simulated AIO is the documented fallback, so the fixture
-        // takes the server off that shared budget.
-        .with_cmd(["--innodb-use-native-aio=0"])
-        .with_startup_timeout(STARTUP)
-}
-
 /// This binary's PostgreSQL server, started on first use.
 ///
 /// # Panics
@@ -154,16 +118,6 @@ pub fn postgres() -> &'static OwnedServer {
         POSTGRES_PORT,
         postgres_request,
     )
-}
-
-/// This binary's MySQL server, started on first use.
-///
-/// # Panics
-/// When the server could not be started, with the same keep-the-first-failure rule
-/// as [`postgres`].
-pub fn mysql() -> &'static OwnedServer {
-    static SERVER: OnceLock<Result<OwnedServer, String>> = OnceLock::new();
-    owned(&SERVER, "MySQL", MYSQL_IMAGE, MYSQL_PORT, mysql_request)
 }
 
 fn owned(

@@ -349,9 +349,9 @@ fn oracle(observations: &[Observed]) -> Result<Vec<String>, String> {
 // Per-backend drivers: isolate, apply the fixture, observe
 // ---------------------------------------------------------------------------
 
-/// A per-process-unique name. `zmrowobs_` rather than layer 1's `zmconf_`, because
-/// that suite's leak census fails on any `zmconf_%` name it finds on the MySQL
-/// server the tests of this binary share, and these are not its to judge.
+/// A per-process-unique name. `zmrowobs_` names this suite's own probe
+/// databases, distinct from the dialect sweep's `zmconf_` probes on the same
+/// shared server.
 fn token(suffix: &str) -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
 

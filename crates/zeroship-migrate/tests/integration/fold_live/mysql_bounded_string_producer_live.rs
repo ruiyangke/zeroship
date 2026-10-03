@@ -29,7 +29,7 @@
 //! both "the value is not in the database", and a test that asserted on the error alone
 //! would pass on one server and fail on the other.
 //!
-//! Runs against the MySQL server this binary owns (`crate::support::mysql::mysql_url`).
+//! Runs against the MySQL server this worktree shares (`crate::support::mysql::mysql_url`).
 
 
 use crate::support::mysql::{quote_ident, DatabaseGuard, MysqlDevSession};

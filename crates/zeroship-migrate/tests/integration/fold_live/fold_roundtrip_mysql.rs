@@ -23,7 +23,7 @@
 //! engine creates the `<db>_migrations` meta database itself on the first
 //! `ensure_journal`. [`crate::support::mysql::DatabaseGuard`] guards both.
 //!
-//! Runs against the MySQL server this binary owns ([`crate::support::mysql::mysql_url`]), as
+//! Runs against the MySQL server this worktree shares ([`crate::support::mysql::mysql_url`]), as
 //! the PostgreSQL suites run against theirs: a server that cannot start fails the
 //! test. A skip must never read as a pass, so there is no skip.
 

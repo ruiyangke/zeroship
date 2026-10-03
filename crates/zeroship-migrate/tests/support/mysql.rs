@@ -1,6 +1,6 @@
 //! Live-MySQL support for the in-crate Rust tests: [`MysqlDevSession`], the
-//! database guard that goes with it, and [`mysql_url`], the DSN of the MySQL server
-//! this binary owns ([`super::server::mysql`]).
+//! database guard that goes with it, and [`mysql_url`], the DSN of the MySQL
+//! server this worktree shares ([`zeroship_testkit::mysql::server`]).
 //!
 //! **Why this file exists.** It is where a Rust test asks a live MySQL server what the
 //! engine actually did. The MySQL backend's unit tests read the SQL text it emits, and
@@ -52,19 +52,20 @@ use mysql::{Conn, Opts, Value as MyValue};
 
 use zeroship_migrate::driver::{Bind, DbError, Row, SqlSession, Value};
 
-/// The `mysql://root:…@host:port/database` DSN of this binary's MySQL server,
-/// started on first use.
+/// The `mysql://root:<password>@host:port/database` DSN of the worktree's shared MySQL
+/// server, joined on first use.
 ///
-/// The server is shared by every MySQL test in the binary. A test isolates itself the
-/// way MySQL allows, in a throwaway DATABASE named by [`database_token`] and dropped by
-/// a [`DatabaseGuard`].
+/// The server is shared by every live-MySQL test process of the worktree. A test
+/// isolates itself the way MySQL allows, in a throwaway DATABASE named by
+/// [`database_token`] and dropped by a [`DatabaseGuard`].
 ///
 /// # Panics
-/// When the server cannot be started (see [`super::server::mysql`]), which fails the
-/// calling test: a live test with no server has gathered no coverage.
+/// When the shared server cannot be booted or joined (see
+/// [`zeroship_testkit::mysql::server`]), which fails the calling test: a live
+/// test with no server has gathered no coverage.
 #[must_use]
 pub fn mysql_url() -> String {
-    super::server::mysql().mysql_url()
+    zeroship_testkit::mysql::server().admin_url()
 }
 
 /// Quote a MySQL identifier with backticks, doubling any embedded backtick.
@@ -158,9 +159,9 @@ impl MysqlDevSession {
 /// The MySQL sibling of [`SchemaGuard`](super::SchemaGuard): a `DROP DATABASE`
 /// written as the last statement of a test only runs when the test reaches it, and
 /// every assert before it is a point where a failing test skips it. Every MySQL test
-/// of the binary shares one server, so a database a failed test leaves behind is in
-/// the catalog its siblings read - `information_schema.SCHEMATA` scans included -
-/// until the process ends and the server goes with it.
+/// process of the worktree shares one server, so a database a failed test leaves
+/// behind is in the catalog its siblings read - `information_schema.SCHEMATA` scans
+/// included - until the server's teardown takes it.
 ///
 /// `must_use` sits on the TYPE, not only on the constructor, so a caller that drops
 /// the guard on the spot does not slip past it.

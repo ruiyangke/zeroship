@@ -2,7 +2,7 @@
 //! the "end-to-end PostgreSQL, MySQL, and SQLite DDL tests" the id-system design asks
 //! for, beside `synchronize_identity_pg.rs` and `synchronize_identity_sqlite.rs`.
 //!
-//! Runs against the MySQL server this binary owns (`crate::support::mysql::mysql_url`).
+//! Runs against the MySQL server this worktree shares (`crate::support::mysql::mysql_url`).
 //! These tests drive the shipped generic `MysqlBackend<MysqlDevSession>` seam.
 //!
 //! # This is NOT the PostgreSQL file with the nouns swapped, and the reason is a

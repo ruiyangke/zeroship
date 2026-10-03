@@ -38,6 +38,7 @@ const CHILD_JOURNAL: &str = "integration::testkit_shared_server::child_join_jour
 const CHILD_BLOCK: &str = "integration::testkit_shared_server::child_join_block";
 const CHILD_BARE: &str = "integration::testkit_shared_server::child_bare_server_report";
 const CHILD_REDPANDA: &str = "integration::testkit_shared_server::child_join_redpanda_report";
+const CHILD_MYSQL: &str = "integration::testkit_shared_server::child_join_mysql_report";
 
 /// A throwaway lease directory under the worktree's `target`, canonical so its
 /// path is the one the container labels carry.
@@ -324,6 +325,19 @@ fn child_join_redpanda_report() {
     let dir = read_scope();
     let spec = zeroship_testkit::redpanda::spec().expect("the Redpanda broker recipe");
     let lease = shared::join(&Scope::at(&dir, GRACE), &spec, |_| Ok(())).expect("join the broker");
+    println!("CONTAINER={}", lease.container_id);
+    println!("NONCE={}", lease.nonce);
+    println!("BOOTED={}", lease.booted);
+}
+
+/// Child side of the `MySQL` contract: join a throwaway MySQL server and report
+/// what this process saw.
+#[test]
+#[ignore = "spawned by a contract test as a child process, with its scope on stdin"]
+fn child_join_mysql_report() {
+    let dir = read_scope();
+    let spec = zeroship_testkit::mysql::spec().expect("the MySQL server recipe");
+    let lease = shared::join(&Scope::at(&dir, GRACE), &spec, |_| Ok(())).expect("join the server");
     println!("CONTAINER={}", lease.container_id);
     println!("NONCE={}", lease.nonce);
     println!("BOOTED={}", lease.booted);
@@ -738,6 +752,49 @@ fn two_processes_share_one_redpanda_broker() {
 
     assert_eq!(first, id, "a child must join the broker the parent booted");
     assert_eq!(second, id, "both children must join the one broker");
+
+    drop(held);
+    wait_removed(&id, REMOVAL_BOUND);
+    cleanup(&dir);
+}
+
+/// Two processes join one `MySQL` server, and the watchdog removes it once the
+/// last lease is released.
+///
+/// The parent holds its own lease across both sequential children; without it
+/// the watchdog would remove the server after the grace between them and the
+/// second child would boot a new one.
+#[test]
+fn two_processes_share_one_mysql_server() {
+    let _ = zeroship_testkit::mysql::build().expect("build the shared MySQL image");
+    let dir = scratch("mysql-shared");
+    let spec = zeroship_testkit::mysql::spec().expect("the MySQL server recipe");
+    let held = shared::join(&Scope::at(&dir, GRACE), &spec, |_| Ok(())).expect("boot the server");
+    let id = held.container_id.clone();
+
+    let (status, lines) = run_child(CHILD_MYSQL, &dir);
+    assert!(
+        status.success(),
+        "the first MySQL child failed:\n{}",
+        lines.join("\n")
+    );
+    let first = field(&lines, "CONTAINER=");
+    assert_eq!(
+        field(&lines, "BOOTED="),
+        "false",
+        "a child must join the server the parent booted"
+    );
+
+    let (status, lines) = run_child(CHILD_MYSQL, &dir);
+    assert!(
+        status.success(),
+        "the second MySQL child failed:\n{}",
+        lines.join("\n")
+    );
+    let second = field(&lines, "CONTAINER=");
+
+    assert_eq!(first, id, "a child must join the server the parent booted");
+    assert_eq!(second, id, "both children must join the one server");
 
     drop(held);
     wait_removed(&id, REMOVAL_BOUND);

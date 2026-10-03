@@ -21,11 +21,11 @@
 //! verb is visible to the next — exactly what `apply_transactional` relies on.
 
 
-/// The PostgreSQL and MySQL servers this binary starts and owns.
+/// The PostgreSQL server this binary starts and owns.
 pub mod server;
 
 /// The live-MySQL sibling of everything below: `MysqlDevSession`, `DatabaseGuard`,
-/// and [`mysql::mysql_url`], the DSN of this binary's owned MySQL server.
+/// and [`mysql::mysql_url`], the DSN of the worktree's shared MySQL server.
 pub mod mysql;
 
 /// The RENAME CARRIER INVENTORY shared by `rename_carrier_sweep_pg` and

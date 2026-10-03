@@ -18,6 +18,8 @@
 //! - [`postgres`] is the platform and bare servers every test process of a
 //!   worktree shares, and the case databases cloned from them.
 //! - [`redpanda`] is the broker every stream test process of a worktree shares.
+//! - [`mysql`] is the MySQL server every live-MySQL test process of a worktree
+//!   shares, and the DSNs a case's own databases are reached through.
 //! - [`redis`] owns the Redis and Dragonfly servers the driver, KV and binding
 //!   suites share.
 //! - [`tenant`] mints the scoped org/project/app/user ids a case owns.
@@ -29,6 +31,7 @@
 
 pub mod docker;
 pub mod fingerprint;
+pub mod mysql;
 pub mod nested_cargo;
 pub mod prebuilt;
 pub mod postgres;

@@ -46,7 +46,7 @@
 //! the fixture intends, and that each reported side PARSES BACK to the contract it came
 //! from. Any of those failing is a broken instrument and says so.
 //!
-//! Runs against the MySQL and PostgreSQL servers this binary owns
+//! Runs against the MySQL server this worktree shares and the PostgreSQL server this binary owns
 //! (`crate::support::mysql::mysql_url`, `crate::support::pg_database`): a server that cannot start
 //! is a failure rather than a green run with no coverage. The SQLite leg needs no
 //! server.
