@@ -1407,6 +1407,13 @@ async fn handle_websocket_upgrade(
         return native_ws_pump(stream, server_ws_id, kernel_rx, runtime, ws_pending).await;
     }
 
+    // The polyfill pump feeds leftover bytes into `read_ws_frame` by mutable
+    // borrow; the native pump moves the same value into its reader task. The
+    // shadow keeps the `mut` from being an unused-mut warning on the native
+    // build, where the parameter itself is moved.
+    #[cfg(not(feature = "runtime_native_websocket"))]
+    let mut ws_pending = ws_pending;
+
     #[cfg(not(feature = "runtime_native_websocket"))]
     {
         loop {
@@ -1685,15 +1692,18 @@ enum WsEvent {
     Outgoing,
 }
 
-/// Combined future: waits for either a TCP frame OR an outgoing notification.
-/// Avoids the overhead of `Fuse` wrappers + `futures::select!`.
-///
-/// SAFETY: `read_fut` is structurally pinned.
 #[cfg(not(feature = "runtime_native_websocket"))]
-struct WsPollBoth<F> {
-    read_fut: F,
-    outgoing_ready: Rc<Cell<bool>>,
-    pump_waker: Rc<RefCell<Option<Waker>>>,
+pin_project_lite::pin_project! {
+    /// Combined future: waits for either a TCP frame OR an outgoing notification.
+    /// Avoids the overhead of `Fuse` wrappers + `futures::select!`.
+    ///
+    /// `pin_project!` keeps `read_fut` structurally pinned.
+    struct WsPollBoth<F> {
+        #[pin]
+        read_fut: F,
+        outgoing_ready: Rc<Cell<bool>>,
+        pump_waker: Rc<RefCell<Option<Waker>>>,
+    }
 }
 
 #[cfg(not(feature = "runtime_native_websocket"))]
@@ -1719,8 +1729,7 @@ impl<F: std::future::Future<Output = Option<(u8, Vec<u8>)>>> std::future::Future
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<WsEvent> {
-        // SAFETY: read_fut is structurally pinned — we never move self after pinning.
-        let this = unsafe { self.get_unchecked_mut() };
+        let this = self.project();
 
         // Check outgoing notification first (cheapest — just a Cell read).
         if this.outgoing_ready.get() {
@@ -1728,8 +1737,7 @@ impl<F: std::future::Future<Output = Option<(u8, Vec<u8>)>>> std::future::Future
         }
 
         // Poll the TCP read.
-        let read_pin = unsafe { std::pin::Pin::new_unchecked(&mut this.read_fut) };
-        if let std::task::Poll::Ready(frame) = read_pin.poll(cx) {
+        if let std::task::Poll::Ready(frame) = this.read_fut.poll(cx) {
             return std::task::Poll::Ready(WsEvent::Frame(frame));
         }
 
@@ -2666,5 +2674,151 @@ mod worker_count_clamp_tests {
             !r.clamped_for_sqlite,
             "1-to-1 is not a clamp (no surprising log)"
         );
+    }
+}
+
+#[cfg(all(test, not(feature = "runtime_native_websocket")))]
+mod ws_poll_both_tests {
+    //! The polyfill WebSocket pump's combined read/outgoing future. These drive
+    //! `poll` directly to pin down the ordering the pump depends on: an already
+    //! set outgoing flag wins, a ready read surfaces its frame, and a pending
+    //! read registers the pump waker before re-checking the flag. The read
+    //! futures are deliberately `!Unpin`, which is what makes the structural
+    //! pinning load-bearing.
+    use super::*;
+    use std::marker::PhantomPinned;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
+    /// A read future that never resolves, recording how often it is polled.
+    struct PendingRead {
+        polls: Rc<Cell<usize>>,
+        _pin: PhantomPinned,
+    }
+
+    impl std::future::Future for PendingRead {
+        type Output = Option<(u8, Vec<u8>)>;
+
+        fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+            self.polls.set(self.polls.get() + 1);
+            Poll::Pending
+        }
+    }
+
+    /// A read future that never resolves but flips `outgoing` while it is being
+    /// polled - the race the pump's post-registration re-check exists for.
+    struct FlipOnPoll {
+        outgoing: Rc<Cell<bool>>,
+        _pin: PhantomPinned,
+    }
+
+    impl std::future::Future for FlipOnPoll {
+        type Output = Option<(u8, Vec<u8>)>;
+
+        fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+            self.outgoing.set(true);
+            Poll::Pending
+        }
+    }
+
+    /// A read future that is immediately ready with one frame.
+    struct ReadyRead {
+        frame: Option<(u8, Vec<u8>)>,
+    }
+
+    impl std::future::Future for ReadyRead {
+        type Output = Option<(u8, Vec<u8>)>;
+
+        fn poll(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+            Poll::Ready(self.frame.take())
+        }
+    }
+
+    fn waker_slot() -> Rc<RefCell<Option<Waker>>> {
+        Rc::new(RefCell::new(None))
+    }
+
+    #[test]
+    fn an_outgoing_notification_is_taken_before_the_read_is_polled() {
+        let polls = Rc::new(Cell::new(0));
+        let read = PendingRead {
+            polls: polls.clone(),
+            _pin: PhantomPinned,
+        };
+        let mut both = Box::pin(WsPollBoth::new(
+            read,
+            Rc::new(Cell::new(true)),
+            waker_slot(),
+        ));
+        let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+
+        assert!(matches!(
+            both.as_mut().poll(&mut cx),
+            Poll::Ready(WsEvent::Outgoing)
+        ));
+        assert_eq!(
+            polls.get(),
+            0,
+            "an already-set outgoing flag wins before any read poll"
+        );
+    }
+
+    #[test]
+    fn a_ready_read_resolves_to_its_frame() {
+        let read = ReadyRead {
+            frame: Some((0x1, b"hello".to_vec())),
+        };
+        let mut both = Box::pin(WsPollBoth::new(
+            read,
+            Rc::new(Cell::new(false)),
+            waker_slot(),
+        ));
+        let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+
+        match both.as_mut().poll(&mut cx) {
+            Poll::Ready(WsEvent::Frame(frame)) => {
+                assert_eq!(frame, Some((0x1, b"hello".to_vec())))
+            }
+            Poll::Ready(WsEvent::Outgoing) | Poll::Pending => {
+                panic!("a ready read must surface its frame")
+            }
+        }
+    }
+
+    #[test]
+    fn a_pending_read_registers_the_pump_waker() {
+        let read = PendingRead {
+            polls: Rc::new(Cell::new(0)),
+            _pin: PhantomPinned,
+        };
+        let pump_waker = waker_slot();
+        let mut both = Box::pin(WsPollBoth::new(
+            read,
+            Rc::new(Cell::new(false)),
+            pump_waker.clone(),
+        ));
+        let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+
+        assert!(matches!(both.as_mut().poll(&mut cx), Poll::Pending));
+        assert!(
+            pump_waker.borrow().is_some(),
+            "a pending poll stores the task waker for the outgoing notification"
+        );
+    }
+
+    #[test]
+    fn an_outgoing_notification_during_the_read_resolves_as_outgoing() {
+        let outgoing = Rc::new(Cell::new(false));
+        let read = FlipOnPoll {
+            outgoing: outgoing.clone(),
+            _pin: PhantomPinned,
+        };
+        let mut both = Box::pin(WsPollBoth::new(read, outgoing, waker_slot()));
+        let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+
+        assert!(matches!(
+            both.as_mut().poll(&mut cx),
+            Poll::Ready(WsEvent::Outgoing)
+        ));
     }
 }

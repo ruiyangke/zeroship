@@ -73,3 +73,18 @@ thread_local! {
 pub(crate) fn fast_random(out: &mut [u8]) {
     ENTROPY.with(|e| e.borrow_mut().fill(out));
 }
+
+#[cfg(test)]
+mod tests {
+    use super::zeroize_slice;
+
+    /// A volatile store per byte, with no V8, FFI or syscall beneath it, so
+    /// Miri can interpret this driving body. It checks the stores stay in
+    /// bounds and really clear the buffer.
+    #[test]
+    fn zeroize_slice_clears_every_byte() {
+        let mut buf = [0xABu8; 8];
+        zeroize_slice(&mut buf);
+        assert_eq!(buf, [0u8; 8]);
+    }
+}

@@ -40,6 +40,15 @@
           extensions = [ "rust-src" "llvm-tools" ];
         };
 
+        # Miri catches undefined behaviour by interpreting the pure unsafe code
+        # a package's unit tests reach. It needs the same nightly pin as `fuzz`
+        # plus the `miri` component and `rust-src` (Miri builds its own sysroot
+        # from the source). A separate shell keeps the default shell's stable
+        # toolchain and the fuzz shell's component set untouched.
+        miriToolchain = fuzzPkgs.rust-bin.nightly."2026-10-02".default.override {
+          extensions = [ "rust-src" "miri" ];
+        };
+
         # bindgen (libsqlite3-sys, pg_query, v8) drives libclang directly, so
         # the cc wrapper's flags never reach it: name the system headers here.
         # Darwin names them as a sysroot, since libSystem carries no headers.
@@ -184,6 +193,37 @@
           # and hangs, so leak detection is off rather than reporting the
           # sandbox's ptrace policy as a decoder crash.
           ASAN_OPTIONS = "detect_leaks=0";
+        };
+
+        # Miri only. Run a package's pure-unsafe unit tests through the flake
+        # shell so the toolchain is the one definition and nothing is installed
+        # ad hoc:
+        #
+        #   nix develop .#miri --command \
+        #     cargo miri test -p compio-postgres --lib <filter>
+        #
+        # The native build inputs match the default shell's, because Miri still
+        # compiles the package and its build scripts; the `miri` component is
+        # what differs.
+        devShells.miri = fuzzPkgs.mkShell {
+          buildInputs = with fuzzPkgs; [
+            miriToolchain
+
+            cmake
+            pkg-config
+            openssl
+            curl.dev
+            llvmPackages.clang
+            llvmPackages.libclang
+
+            git
+            which
+            zstd
+          ];
+
+          RUST_BACKTRACE = "1";
+          LIBCLANG_PATH = "${fuzzPkgs.llvmPackages.libclang.lib}/lib";
+          BINDGEN_EXTRA_CLANG_ARGS = lib.concatStringsSep " " bindgenClangArgs;
         };
       });
 }

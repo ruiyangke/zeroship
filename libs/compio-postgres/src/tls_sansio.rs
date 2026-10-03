@@ -1113,6 +1113,17 @@ mod tests {
     use std::sync::{Arc, mpsc};
     use std::time::Duration;
 
+    /// `commit` is this crate's only production `unsafe`: it copies decrypted
+    /// bytes into a compio buffer and calls `set_len` to declare them valid.
+    /// This driving body is what Miri interprets to check the `set_len`
+    /// invariant and that every byte declared valid was initialized.
+    #[test]
+    fn commit_declares_exactly_the_copied_bytes_valid() {
+        let mut buf = Vec::<u8>::with_capacity(16);
+        commit(&mut buf, b"tls-plaintext");
+        assert_eq!(buf, b"tls-plaintext");
+    }
+
     #[test]
     fn close_notify_sent_debug_names_its_type() {
         let debug = format!("{CloseNotifySent:?}");

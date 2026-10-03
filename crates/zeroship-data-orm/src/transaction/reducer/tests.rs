@@ -1309,7 +1309,11 @@ fn a_confirmed_commit_publishes_every_retained_effect_in_order() {
         .collect();
     assert_eq!(
         published,
-        vec![vec!["one".into(), "two".into(), "three".into()]],
+        vec![vec![
+            Box::<str>::from("one"),
+            Box::<str>::from("two"),
+            Box::<str>::from("three"),
+        ]],
         "exactly one publication, in order"
     );
 }
@@ -1377,7 +1381,7 @@ fn a_rolled_back_frames_effects_are_never_published_by_the_root_commit() {
         .collect();
     assert_eq!(
         published,
-        vec!["root-write".into()],
+        vec![Box::<str>::from("root-write")],
         "the rolled-back child's write is not published"
     );
 }

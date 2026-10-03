@@ -500,7 +500,7 @@ mod tests {
             .collect();
         assert_eq!(
             published,
-            vec!["root-1".into(), "released-1".into()],
+            vec![Box::<str>::from("root-1"), Box::<str>::from("released-1")],
             "a released child's effects reach the parent in order; a rolled-back \
              child's are discarded and no parent effect is touched"
         );

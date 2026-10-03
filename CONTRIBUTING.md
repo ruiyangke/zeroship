@@ -88,6 +88,21 @@ The `backend_message` target drives the backend frame decoder and `pgoutput`
 the logical-replication payload decoder. A panic or hang is a decoder bug; a
 decoding error on arbitrary bytes is not.
 
+Undefined behaviour in the workspace's pure `unsafe` code is checked with Miri
+through the flake's `miri` shell, which carries the same pinned nightly as
+`fuzz` plus the `miri` component. Run only the unit tests that drive a
+package's unsafe blocks, because Miri cannot execute the V8, io_uring, FFI or
+syscall paths the rest of the suite needs:
+
+```
+nix develop .#miri --command bash -c \
+  'cargo miri test -p compio-postgres --lib cloning_'
+```
+
+The `miri` CI job runs the same per-package filters: `cloning_` and
+`commit_declares` for `compio-postgres`, `aead_key_zeroizes` for
+`zeroship-data-orm`, and `zeroize_slice` for `zeroship-runtime`.
+
 ### Test tiers
 
 A crate links one test target, `main`, declared by `tests/main.rs`. It sets

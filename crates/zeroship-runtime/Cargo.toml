@@ -128,6 +128,9 @@ ada-url = { workspace = true }
 
 # Async
 futures = { workspace = true }
+# `pin_project!` backs the polyfill WebSocket pump's combined read/outgoing
+# future, keeping its read half structurally pinned.
+pin-project-lite = { workspace = true }
 
 # compio event loop
 compio = { workspace = true, features = ["time", "macros", "bytes"] }

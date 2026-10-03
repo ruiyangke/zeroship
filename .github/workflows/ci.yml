@@ -403,3 +403,31 @@ jobs:
         run: cargo fuzz run backend_message -- -max_total_time=60
       - name: Smoke-fuzz the pgoutput decoder
         run: cargo fuzz run pgoutput -- -max_total_time=60
+
+  # Miri interprets the workspace's pure `unsafe` code and fails on undefined
+  # behaviour. Only the unit tests that drive a package's unsafe blocks are run:
+  # the rest of the suite needs V8, io_uring, FFI or syscalls, which Miri cannot
+  # execute. The flake's `miri` shell carries the toolchain, so nothing is
+  # installed ad hoc. Each package is its own step so one failure does not hide
+  # the others.
+  miri:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        shell: nix develop .#miri --command bash -e {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/nix-toolchain
+      - name: compio-postgres waker vtables and TLS buffer commit
+        if: ${{ !cancelled() }}
+        run: |
+          cargo miri test -p compio-postgres --lib cloning_
+          cargo miri test -p compio-postgres --features tls --lib commit_declares
+      - name: zeroship-data-orm AEAD key zeroizes on drop
+        if: ${{ !cancelled() }}
+        run: |
+          cargo miri test -p zeroship-data-orm --lib aead_key_zeroizes
+      - name: zeroship-runtime entropy buffer volatile zeroize
+        if: ${{ !cancelled() }}
+        run: |
+          cargo miri test -p zeroship-runtime --lib zeroize_slice
