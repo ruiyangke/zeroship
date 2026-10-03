@@ -705,7 +705,7 @@ protocol. This extends a working client rather than inventing one.
    `crates/zeroship-workflow/Cargo.toml` declares `zeroship-workflow-client` in
    `[dependencies]`, so an edge back the other way is a Cargo cycle rather than a rule violation;
    `workflow_process_dependencies_follow_crate_ownership` in
-   `xtask/tests/workflow_architecture.rs` catches the dev-kind and transitive spellings Cargo
+   `xtask/tests/workflow/mod.rs` catches the dev-kind and transitive spellings Cargo
    would tolerate. Moving `TaskAssignment`, `WorkflowExecution`, `JobReceipt` and their
    neighbours into `zeroship-core` is therefore compulsory for a client that names them, not
    stylistic - and the closure is not three types. It reaches `WorkflowServiceError`, the DTO
@@ -736,7 +736,7 @@ protocol. This extends a working client rather than inventing one.
    measures serialized bytes and needs no view inside them.
 
    **The gate this turns on asserts its own population.**
-   `workflow_process_dependencies_follow_crate_ownership` (`xtask/tests/workflow_architecture.rs`)
+   `workflow_process_dependencies_follow_crate_ownership` (`xtask/tests/workflow/mod.rs`)
    asserts per package that the walk reached past that package - "the walk for {name} visited only
    that package, so an empty result is not evidence" - which is the control its two siblings in
    that file also carry. What that establishes is that the resolve graph came back with edges. It
@@ -1387,7 +1387,7 @@ protocol. This extends a working client rather than inventing one.
    row and every bullet below them needs one to verify against. And having the service claim
    everything and hand execution outward is barred twice: `TaskTransport`'s only dispatcher is
    `RunnerSlot`, which no production code constructs, and
-   `workflow_process_dependencies_follow_crate_ownership` (`xtask/tests/workflow_architecture.rs`)
+   `workflow_process_dependencies_follow_crate_ownership` (`xtask/tests/workflow/mod.rs`)
    forbids these processes the runner outright -
    `!["zeroship-workflow-runner", "zeroship-storage"].contains(&dependency)` - so the service
    cannot host a dispatcher at all. What is left is the authority question, and it wants an
@@ -2262,7 +2262,7 @@ part that dates, not the verdict.
    process that runs creator code, which is the opposite of how the trade reads at first.
 
    **Moving it is an invariant change rather than a configuration one.**
-   `workflow_process_dependencies_follow_crate_ownership` (`xtask/tests/workflow_architecture.rs`)
+   `workflow_process_dependencies_follow_crate_ownership` (`xtask/tests/workflow/mod.rs`)
    walks every non-dev edge and refuses `zeroship-workflow-server` any path to
    `zeroship-workflow-runner` or `zeroship-storage`, and
    `crates/zeroship-workflow-server/Cargo.toml` records the consequence beside its engine

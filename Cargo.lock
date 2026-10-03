@@ -1235,6 +1235,7 @@ dependencies = [
  "chrono",
  "cidr",
  "compio",
+ "compio-postgres-testkit",
  "compio-tls",
  "criterion",
  "eui48",
@@ -1271,6 +1272,10 @@ dependencies = [
  "x509-parser",
  "zeroize",
 ]
+
+[[package]]
+name = "compio-postgres-testkit"
+version = "0.1.0"
 
 [[package]]
 name = "compio-quic"
@@ -8360,11 +8365,9 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "testcontainers",
- "thiserror 2.0.18",
  "toml 0.8.23",
  "url",
  "uuid",
- "zeroship-core",
  "zeroship-migrate-backend",
  "zeroship-migrate-core",
  "zeroship-migrate-ir",

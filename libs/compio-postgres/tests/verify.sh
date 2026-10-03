@@ -44,7 +44,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 cd "$repo_root"
 
 # PG_TEST_URL reaches cargo only if the caller exported it; unset, the suites
-# dial DEFAULT_TEST_URL in libs/compio-postgres/tests/support/env.rs, the
+# dial DEFAULT_TEST_URL in libs/compio-postgres/testkit, the
 # server tests/provision_test_backends.sh provisions. No default is set here,
 # so this script cannot name a different server from the suites it runs.
 tls_descriptor="libs/compio-postgres/tests/data/live/tls_live.conf"
@@ -111,7 +111,7 @@ run_mode() {
 }
 
 echo "compio-postgres verification matrix"
-echo "server: ${PG_TEST_URL:-PG_TEST_URL unset, so DEFAULT_TEST_URL in tests/support/env.rs}"
+echo "server: ${PG_TEST_URL:-PG_TEST_URL unset, so DEFAULT_TEST_URL in libs/compio-postgres/testkit}"
 echo
 
 run_mode "default"          -p compio-postgres

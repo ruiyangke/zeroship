@@ -39,7 +39,8 @@ pub fn run() -> Result<()> {
             "--manifest-path",
             "xtask/Cargo.toml",
             "--test",
-            "workflow_architecture",
+            "main",
+            "workflow::",
         ]),
         "workflow crate boundaries",
     )?;

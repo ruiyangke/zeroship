@@ -11,6 +11,7 @@ mod author_and_apply_pg;
 mod compio_pg_conformance;
 mod datastore_reconciler_pg;
 mod domain_boundary;
+mod gen_artifacts_byte_identical;
 mod health_endpoints_test;
 mod smoke_apply_pg;
 mod typed_id_parity;

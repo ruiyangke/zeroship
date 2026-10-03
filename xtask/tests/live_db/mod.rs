@@ -71,7 +71,7 @@ fn repo_root() -> PathBuf {
         .expect("repo root")
 }
 
-mod common;
+use crate::common;
 fn server() -> (common::Database, admin::Server) {
     let database = common::Database::start();
     let (_, server) = database.configuration();

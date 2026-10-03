@@ -5,6 +5,7 @@ exclude = [
     "crates/zeroship-runtime/benches/ntex-bench",
     "crates/zeroship-data-testkit",
     "libs/compio-postgres/fuzz",
+    "libs/compio-postgres/testkit",
     "libs/compio-postgres/vendor/postgres-types",
     "refs",
     "tests/testkit",
@@ -227,7 +228,7 @@ zeroship-data-macros = { path = "crates/zeroship-data-macros" }
 # tier. Its entry here exists so ONE crate can name it -
 # `zeroship-config-contract`, which is `class = "test-dev-tool"` and links every
 # platform binary's generated configuration registry. No shipped binary may have
-# it in its normal closure; `xtask/tests/data_architecture.rs` enforces
+# it in its normal closure; `xtask/tests/architecture/mod.rs` enforces
 # that by inverting `cargo tree`. A DEV-dependency would be invisible to that
 # check, so do not add one.
 zeroship-data-cdc-server = { path = "crates/zeroship-data-cdc-server" }

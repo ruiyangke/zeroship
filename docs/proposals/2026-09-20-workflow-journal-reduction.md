@@ -951,7 +951,7 @@ visible from the PostgreSQL schema this document has been reading.
 `crates/zeroship-workflow-schema/Cargo.toml` declares exactly one dependency,
 `serde_json`. No engine, no ORM, no driver, no V8, and
 `the_workflow_schema_crate_reaches_nothing_else_in_the_workspace` in
-`xtask/tests/workflow_architecture.rs` holds it there.
+`xtask/tests/workflow/mod.rs` holds it there.
 
 The journal's one installer is not a service at all. Step 1 landed as a platform
 migration, `db/migrations-ts/20260919000000_workflow_journal.ts`, which reads the

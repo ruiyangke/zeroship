@@ -32,7 +32,7 @@ use std::sync::Mutex;
 
 /// Written by `tls_live_setup.sh`. A file, not an environment variable,
 /// because `libs/compio-postgres` may not read the environment outside
-/// `tests/support/env.rs` (see the header of that file).
+/// `libs/compio-postgres/testkit` (see the header of that crate).
 const DESCRIPTOR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/live/tls_live.conf");
 
 /// A committed CA that signed nothing in this suite.

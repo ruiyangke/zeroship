@@ -48,7 +48,7 @@
           ++ lib.optionals stdenv.hostPlatform.isDarwin [ "-isysroot ${pkgs.apple-sdk.sdkroot}" ];
 
         # The workspace Playwright catalog tracks this driver's version; see
-        # xtask/tests/playwright_browsers.rs.
+        # xtask/tests/playwright/mod.rs.
         playwright-driver = pkgs.playwright-driver;
 
         # `xtask test <area>` from anywhere in the repository, with no setup
@@ -118,7 +118,7 @@
           BINDGEN_EXTRA_CLANG_ARGS = lib.concatStringsSep " " bindgenClangArgs;
           PLAYWRIGHT_BROWSERS_PATH = "${playwright-driver.browsers}";
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = "1";
-          # Not exported; xtask/tests/playwright_browsers.rs reads its version.
+          # Not exported; xtask/tests/playwright/mod.rs reads its version.
           passthru = { inherit playwright-driver; };
 
           # The runtime's `wpt` test target `include_str!`s the pinned WPT tree

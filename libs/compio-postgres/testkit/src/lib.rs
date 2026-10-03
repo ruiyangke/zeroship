@@ -1,27 +1,17 @@
-//! The sealed test-key enum for this crate's gated tests, and the one default
-//! for `PG_TEST_URL`.
+//! The sealed test-key enum for compio-postgres's gated tests and benches, and
+//! the one default for `PG_TEST_URL`.
 //!
 //! `compio-postgres` is a standalone, publishable driver with NO zeroship
 //! dependency, so it cannot use the typed keys in `zeroship_core::config` that
 //! the rest of the workspace reads the environment through. Exactly one
-//! substitute is permitted: a dependency-free sealed key enum, in exactly
-//! `libs/<crate>/tests/support/env.rs`, whose variants map to literal names and
-//! whose raw access lives in one accessor.
+//! substitute is permitted: a dependency-free sealed key enum whose variants map
+//! to literal names and whose raw access lives in one accessor.
 //!
-//! The workspace source gate recognizes this file BY PATH and by shape. It
-//! permits no raw read anywhere else in `libs/compio-postgres`, including this
-//! crate's production sources: a published library takes resolved options from
-//! its caller and does not read process configuration. Adding a name here is
-//! adding a variant, which is a visible edit in a file the gate already reads.
-//!
-//! WHAT THIS DOES NOT GIVE UP, AND WHAT IT DOES: the names are still
-//! enumerable, because they are literals in a sealed enum a scanner can lift.
-//! What it does not give is a linked read SITE - there is no
-//! `DECLARED_ENV_READS` entry for a `libs/` test, because that slice lives in
-//! `zeroship-core`. Location therefore comes from the source scan, not from the
-//! binary.
+//! The integration tests reach this through `support::env` and the benchmark
+//! targets depend on the crate directly, so all of them resolve one server
+//! address from one place instead of each target carrying a spelling of its own.
 
-/// Every environment name this crate's tests are permitted to read.
+/// Every environment name compio-postgres's targets are permitted to read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TestEnvKey {
     /// Connection string for the PostgreSQL integration suites. Absent means
@@ -51,12 +41,14 @@ impl TestEnvKey {
     }
 }
 
-/// The one raw environment read in `libs/compio-postgres`.
+/// The one raw environment read for compio-postgres's targets.
 ///
 /// It takes the sealed key, never a `&str`, so no caller can name a variable
-/// this module has not declared. Non-Unicode reads as absent, matching the
-/// `std::env::var(..).ok()` every call site used before.
-#[allow(clippy::disallowed_methods)]
+/// this crate has not declared. Non-Unicode reads as absent.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the one raw environment read compio-postgres's test and bench targets are permitted"
+)]
 pub fn get(key: TestEnvKey) -> Option<String> {
     std::env::var(key.name()).ok()
 }
@@ -67,7 +59,7 @@ pub fn get(key: TestEnvKey) -> Option<String> {
 /// script exports nothing.
 ///
 /// ONE DEFINITION, beside the key it defaults. The test targets reach it
-/// through `support::test_url` and `support::plaintext_url`, and
-/// `benches/query_live.rs` includes this file, so no target carries a second
-/// spelling of the address.
+/// through `support::test_url` and `support::plaintext_url`, and the benchmark
+/// targets through this crate, so no target carries a second spelling of the
+/// address.
 pub const DEFAULT_TEST_URL: &str = "postgres://postgres:zeroship@127.0.0.1:5440/zeroship";

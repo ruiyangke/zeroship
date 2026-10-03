@@ -71,7 +71,8 @@ pub fn architecture() -> Result<()> {
             "--manifest-path",
             "xtask/Cargo.toml",
             "--test",
-            "data_architecture",
+            "main",
+            "architecture::",
         ]),
         "data architecture and database posture",
     )

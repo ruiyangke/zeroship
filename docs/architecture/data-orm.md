@@ -940,7 +940,7 @@ engines. Integration tests exercise V8 behavior, isolation, search and unmask
 transaction routing, cancellation, poisoned transactions, and session cleanup.
 Compiler tests validate generated schema and Rust model contracts.
 
-`xtask/tests/data_architecture.rs` checks dependency and plain-driver boundaries,
+`xtask/tests/architecture/mod.rs` checks dependency and plain-driver boundaries,
 concrete driver references, shared execution and SQL placement;
 `cargo xtask test data` runs the required database tests; and
 `cargo clippy --workspace --all-targets --all-features` lints workspace targets.
@@ -990,7 +990,7 @@ fixtures use a separate test-only `DatabaseFixture` helper with native values.
 There is no production text-parameter execution trait or backend DDL type mapper;
 the migration engine remains the authority for schema creation.
 
-`xtask/tests/data_architecture.rs` checks source boundaries and dependency
+`xtask/tests/architecture/mod.rs` checks source boundaries and dependency
 closures, with negative controls for its rejection predicates.
 `cargo xtask test data` exercises the
 Rust and V8 paths against the required databases.

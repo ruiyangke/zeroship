@@ -26,9 +26,10 @@
 //! matches the mechanism (a named prepared statement is reused instead of
 //! reparsed). Quote that one; do not quote the others.
 //!
-//! To price the per-operation work, write an IN-PROCESS microbenchmark of the
-//! code path, the way `benches/buf_fill.rs` does. Do not add samples here: the
-//! noise floor is a property of the round trip, not of the sample count.
+//! A benchmark target links the crate as a normal library, so it prices those
+//! paths through the public operation that exercises each one: a query carrying
+//! the corresponding `Config` option, which is what the modes below measure. Do not add samples to chase the noise: the noise
+//! floor is a property of the round trip, not of the sample count.
 //!
 //! Four features added work to paths every query crosses, and each was
 //! justified on correctness rather than cost: the socket read deadline
@@ -43,7 +44,7 @@
 //! the numbers.
 //!
 //! `PG_TEST_URL` selects the server; absent, the test suites' default is used
-//! (`DEFAULT_TEST_URL` in `tests/support/env.rs`).
+//! (`DEFAULT_TEST_URL` in `libs/compio-postgres/testkit`).
 //! Nothing here creates or drops schemas: the statement `SELECT 1` needs none,
 //! and a benchmark that mutates the database measures the mutation.
 
@@ -51,18 +52,11 @@ use std::hint::black_box;
 use std::time::Duration;
 
 use compio_postgres::{Client, Config, NoTls};
+use compio_postgres_testkit::{DEFAULT_TEST_URL, TestEnvKey, get};
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
-/// The sealed key enum this crate reads the environment through, and the
-/// default it falls back to, shared with the test suites rather than copied.
-///
-/// Keeping this in the test support module gives the benchmark and suites one
-/// typed implementation of their process input and one server address.
-#[path = "../tests/support/env.rs"]
-mod env;
-
 fn test_url() -> String {
-    env::get(env::TestEnvKey::PgTestUrl).unwrap_or_else(|| env::DEFAULT_TEST_URL.to_owned())
+    get(TestEnvKey::PgTestUrl).unwrap_or_else(|| DEFAULT_TEST_URL.to_owned())
 }
 
 /// What a case turns on. Each isolates one feature's per-operation cost

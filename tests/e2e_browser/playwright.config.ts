@@ -28,7 +28,7 @@ export default defineConfig({
     {
       // The browser comes from the development shell's
       // PLAYWRIGHT_BROWSERS_PATH, and global setup launches it first. Why
-      // @playwright/test has to match it: xtask/tests/playwright_browsers.rs.
+      // @playwright/test has to match it: xtask/tests/playwright/mod.rs.
       name: "chromium",
       use: { ...devices["Desktop Chrome"] },
     },

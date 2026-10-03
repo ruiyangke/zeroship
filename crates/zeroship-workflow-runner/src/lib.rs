@@ -4,7 +4,7 @@
 //! deploy and records intent. Nothing in it executes a workflow. This crate
 //! holds the half that does, so a platform process can serve the creator
 //! methods by depending on admission alone - which
-//! `xtask/tests/workflow_architecture.rs` requires of the manager and server.
+//! `xtask/tests/workflow/mod.rs` requires of the manager and server.
 //!
 //! The execution half adds methods to `AppWorkflows` and `WorkflowService`,
 //! which are defined in the admission crate. An inherent `impl` on a foreign

@@ -4,7 +4,7 @@
 //! suite that silently stops running.
 
 
-mod gen_artifacts_byte_identical;
+mod gen_artifacts_shape;
 mod gen_artifacts_references;
 mod gen_types_authoring_tables_from_the_fold;
 mod gen_types_decimal_roundtrip;

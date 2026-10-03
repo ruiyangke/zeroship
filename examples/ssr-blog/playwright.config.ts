@@ -21,7 +21,7 @@ export default defineConfig({
     {
       // Browser comes from the development shell's PLAYWRIGHT_BROWSERS_PATH:
       // run inside `nix develop`. Why @playwright/test has to match it:
-      // xtask/tests/playwright_browsers.rs.
+      // xtask/tests/playwright/mod.rs.
       name: "chromium",
       use: { ...devices["Desktop Chrome"] },
     },

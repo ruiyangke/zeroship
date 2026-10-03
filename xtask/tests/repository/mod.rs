@@ -1,15 +1,14 @@
-#[path = "repository/build_inputs.rs"]
+//! Repository-wide build-input, dependency-boundary and toolchain checks.
+//!
+//! Declaring each `mod` below is load-bearing: a module missing from this list
+//! is a suite that silently stops running.
+
 mod build_inputs;
-#[allow(dead_code)]
-#[path = "architecture/repo.rs"]
-mod repo;
-#[path = "repository/tls_provider.rs"]
-mod tls_provider;
-#[path = "repository/testkit_versions.rs"]
 mod testkit_versions;
-#[path = "repository/tokio_boundary.rs"]
+mod tls_provider;
 mod tokio_boundary;
 
+use crate::architecture::repo;
 use serde_json::Value;
 use std::collections::BTreeSet;
 

@@ -42,7 +42,6 @@
 /// [`conformance::run`] against a live session to prove it honours the seam
 /// invariants (session pinning, transaction visibility, bind-inference
 /// semantics, error/SQLSTATE mapping) the engine relies on but never re-checks.
-#[path = "driver/conformance.rs"]
 pub mod conformance;
 
 use std::error::Error as StdError;

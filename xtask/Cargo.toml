@@ -4,9 +4,16 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 default-run = "xtask"
+# Integration suites are modules of one `tests/main.rs` target, so the harness
+# links one test executable instead of one per file.
+autotests = false
 
 # Test orchestration has an independent dependency graph from shipped services.
 [workspace]
+
+[[test]]
+name = "main"
+path = "tests/main.rs"
 
 [dependencies]
 compio = { version = "0.18", features = ["macros", "time", "runtime", "polling"] }

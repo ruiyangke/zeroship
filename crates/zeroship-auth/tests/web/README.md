@@ -52,7 +52,7 @@ by `config_env_tier` and `check_config_smtp_test`.
 You must be inside the nix env: the runner is the development shell's own
 `playwright`, which launches the shell's browsers from `PLAYWRIGHT_BROWSERS_PATH`
 and so matches them by construction (the constraint is explained in
-`xtask/tests/playwright_browsers.rs`). Before spawning it, `run_playwright` in
+`xtask/tests/playwright/mod.rs`). Before spawning it, `run_playwright` in
 `auth_ui.rs` runs `scripts/link-playwright.sh`, which points the specs'
 `@playwright/test` at the runner's own copy; that is why this directory declares
 no Playwright dependency. Do not install Playwright here: a second copy splits

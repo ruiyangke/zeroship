@@ -3,7 +3,7 @@
 use compio_postgres::NoTls;
 use xtask::platform_db::{admin, overlay, suite_db};
 
-mod common;
+use crate::common;
 fn server() -> (common::Database, overlay::Loaded, admin::Server) {
     let database = common::Database::start();
     let (loaded, server) = database.configuration();

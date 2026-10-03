@@ -88,7 +88,7 @@ report `skipped`.
 
 The browser comes from the development shell's `PLAYWRIGHT_BROWSERS_PATH`, and
 `@playwright/test` has to be the release those browsers were built for; the
-constraint and its check are explained in `xtask/tests/playwright_browsers.rs`.
+constraint and its check are explained in `xtask/tests/playwright/mod.rs`.
 When the directory does not hold the build, step 1 of setup fails, naming the
 installed version and the path.
 

@@ -1,4 +1,4 @@
-use super::repo;
+use crate::architecture::repo;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 

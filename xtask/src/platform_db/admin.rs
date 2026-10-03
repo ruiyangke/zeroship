@@ -19,7 +19,7 @@
 //! against a real cluster -- losing a create race to a peer between the probe
 //! and the CREATE. `suite_db`'s unit tests script a [`DbAdmin`] to produce
 //! exactly that interleaving; the live behaviour is covered separately by
-//! `tests/live_suite_db.rs`.
+//! `tests/suite_db/mod.rs`.
 
 use compio_postgres::{Config, NoTls};
 

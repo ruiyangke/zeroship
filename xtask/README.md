@@ -31,7 +31,7 @@ The filtered command is for diagnosis. The unfiltered command runs the complete
 suite and is used by CI. Tests release their containers after success or panic;
 testcontainers' watchdog handles interrupted test processes.
 
-`tests/data_architecture.rs` owns dependency, SQL placement, adapter, driver,
+`tests/architecture/mod.rs` owns dependency, SQL placement, adapter, driver,
 worker privilege and database fixture checks. Rust source parsing distinguishes
 production code from test modules and documentation; Cargo metadata supplies
 normal dependency closures. Each scan has a corpus floor and rejection controls.
@@ -45,7 +45,7 @@ concurrently. Retries are disabled so a failing first attempt remains a failure.
 
 Platform database orchestration lives in this package. The `zs-testkit` binary
 is the suite-database provisioner, spawned as a child process by
-`tests/live_suite_db.rs`; service tests include preflight source from
+`tests/suite_db/mod.rs`; service tests include preflight source from
 `tests/fixtures/platform_db/`. Its integration tests own PostgreSQL containers
 and generated overlays. No helper package or optional test feature is required.
 
@@ -53,7 +53,7 @@ and generated overlays. No helper package or optional test feature is required.
 
 `cargo xtask test playwright-browsers` checks that the workspace's Playwright
 is the release the development shell's browsers were built for.
-`tests/playwright_browsers.rs` explains why that has to hold and what each check
+`tests/playwright/mod.rs` explains why that has to hold and what each check
 reads. It is the one area that needs Nix, and it needs three things:
 
 - Nix installed (https://nixos.org/download). The check enables the

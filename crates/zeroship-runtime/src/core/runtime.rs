@@ -92,8 +92,7 @@ use crate::modules::ModuleEntry;
 use crate::plugin::NativePlugin;
 use super::startup::{StartupState, WaitingRequest};
 
-#[path = "runtime_startup.rs"]
-mod startup_driver;
+mod startup;
 use crate::state::{
     DispatchResult, OpResult, ResolveValue, RuntimeState, SharedState, SpawnedTimer,
     TimerResult,

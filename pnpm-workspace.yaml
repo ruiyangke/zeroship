@@ -84,7 +84,7 @@ catalog:
   "@tailwindcss/vite": ^4.2.2
   react-router-dom: ^7.14.0
   # Exact, at the development shell's playwright-driver version; why, and the
-  # check that holds it: xtask/tests/playwright_browsers.rs. The anchor keeps
+  # check that holds it: xtask/tests/playwright/mod.rs. The anchor keeps
   # both package names on one version.
   "@playwright/test": &playwright 1.59.1
   playwright: *playwright

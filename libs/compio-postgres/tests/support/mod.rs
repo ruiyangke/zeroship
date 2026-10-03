@@ -11,7 +11,7 @@
 //! `compio-postgres` is a standalone, publishable driver with no zeroship
 //! dependency, so this helper is local rather than shared.
 
-pub mod env;
+pub use compio_postgres_testkit as env;
 
 /// Longest identifier `PostgreSQL` stores (`NAMEDATALEN - 1`).
 const MAX_POSTGRES_IDENTIFIER_LEN: usize = 63;
@@ -497,7 +497,7 @@ pub fn connection_failure_report(dsn: &str, error: &(dyn std::error::Error + 'st
 /// Where the DSN a failing test dialled came from.
 #[cfg(not(feature = "suite-over-tls"))]
 const DSN_SOURCE: &str =
-    "PG_TEST_URL, or `DEFAULT_TEST_URL` in libs/compio-postgres/tests/support/env.rs";
+    "PG_TEST_URL, or `DEFAULT_TEST_URL` in libs/compio-postgres/testkit";
 #[cfg(feature = "suite-over-tls")]
 const DSN_SOURCE: &str = "libs/compio-postgres/tests/data/live/tls_live.conf, which \
                           suite-over-tls reads in place of PG_TEST_URL";

@@ -107,7 +107,7 @@ PG_TEST_URL=postgres://user:password@host:port/dbname \
 ```
 
 With `PG_TEST_URL` unset the suites dial `DEFAULT_TEST_URL` in
-`tests/support/env.rs`, the address that script provisions.
+`libs/compio-postgres/testkit`, the address that script provisions.
 
 `--test-threads=1` is not superstition: several tests measure server-visible
 state (backend counts, replication slots, prepared statements) that concurrent

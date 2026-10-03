@@ -12,7 +12,7 @@
 //! against what the generator would produce now, and the generator is the thing
 //! that went stale.
 
-use super::repo;
+use crate::architecture::repo;
 use serde_json::Value;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};

@@ -134,25 +134,11 @@ mysql = { version = "28", default-features = false, features = ["minimal"] }
 # (`schemars`).
 serde_json = { workspace = true }
 toml = { workspace = true }
-# Compile the migration service's exact policy module into the byte-identity test;
-# a dev-dependency on the service package itself would form a package cycle.
-thiserror = { workspace = true }
 uuid = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 futures = { workspace = true }
 schemars = { workspace = true }
-# TEST-ONLY: `gen_types` mints a `DatabaseId` and derives its project schema through
-# `zeroship_core::database_derivation`, the naming the platform uses.
-#
-# Dev-only, so it never ships (`cargo tree -p zeroship-migrate -e normal` stays free of
-# it). It reaches tokio via `cyper`/`hyper` as a NORMAL dependency of zeroship-core
-# itself, which is not a new category of exposure for this crate's TEST build: the
-# `postgres` dev-dependency above already pulls tokio in transitively, accepted for the
-# same never-ships reason. `cargo xtask test repository` checks normal dependency
-# paths and direct carrier declarations across every dependency kind. This dev
-# dependency names zeroship-core, not a carrier, so neither boundary set changes.
-zeroship-core = { workspace = true }
 
 [lints]
 workspace = true
