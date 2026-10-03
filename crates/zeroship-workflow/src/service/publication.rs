@@ -118,7 +118,51 @@ impl Source {
     }
 }
 
+/// Intents one publication pass reads at a time. A pass pages until an
+/// incomplete page, so the bound only decides how many manager round trips run
+/// before the caller regains the thread.
+const PUBLICATION_PAGE: u32 = 64;
+
 impl AppWorkflows {
+    /// Drain this app's unconfirmed publication intents through `publisher`.
+    ///
+    /// The one implementation both hosts publish with: a committed start,
+    /// signal, transition, restart or completion leaves its intents here, and
+    /// the host that owns the queue drains them at once rather than waiting for
+    /// the periodic reconciliation. Publication is idempotent, so a pass that
+    /// races another leaves no duplicate.
+    ///
+    /// One refused intent does not stop the pass. A conflict or retention
+    /// refusal is about that intent alone, so the rest of the page still runs
+    /// and a failed item stays pending for the next pass or reconciliation,
+    /// exactly as [`AppWorkflows::reconcile_job`] leaves it.
+    ///
+    /// # Errors
+    /// Reports only a refused page read. Intents already confirmed are skipped
+    /// by [`AppWorkflows::publish_job`], and an item this pass could not
+    /// publish remains pending for the caller's next attempt or reconciliation.
+    pub async fn publish_pending_jobs(
+        &self,
+        publisher: &impl JobPublisher,
+    ) -> Result<(), WorkflowServiceError> {
+        let mut after = None;
+        loop {
+            let page = self.pending_jobs(after.as_ref(), PUBLICATION_PAGE).await?;
+            for job in &page {
+                if let Err(error) = self.publish_job(&job.id, publisher).await {
+                    tracing::warn!(
+                        code = error.code(),
+                        "workflow publication intent remains pending"
+                    );
+                }
+            }
+            if page.len() < PUBLICATION_PAGE as usize {
+                return Ok(());
+            }
+            after = page.last().map(|job| job.id.clone());
+        }
+    }
+
     /// Read a bounded page of pending metadata, including future timers.
     /// Restart the sweep after an empty page so earlier insertions join the next pass.
     ///

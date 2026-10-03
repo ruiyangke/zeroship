@@ -747,12 +747,14 @@ impl AppWorkflows {
         check_scope(&self.app, job)?;
         let captured = CapturedLease::capture(self, lease);
         let budget = attempt_budget(captured.as_ref().ok(), None);
-        run_attempt(
+        let result = run_attempt(
             captured.as_ref().ok().map(CapturedLease::cancelled),
             budget,
             Box::pin(self.accept_captured(delivery, captured)),
         )
-        .await
+        .await;
+        self.publication_commit();
+        result
     }
 
     async fn accept_captured(
@@ -1017,6 +1019,7 @@ impl AppWorkflows {
                 lease.check(self)?;
                 task.granted()?;
                 tx.commit().await?;
+                self.publication_commit();
                 Ok(receipt)
             }),
         )

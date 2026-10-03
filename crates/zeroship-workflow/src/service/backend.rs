@@ -34,7 +34,6 @@ pub struct AppBackend {
     requests: flume::Sender<Request>,
     outputs: SharedStepOutputs,
     inputs: SharedInputStager,
-    commit_hint: Option<CommitHint>,
 }
 impl std::fmt::Debug for AppBackend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -65,7 +64,6 @@ impl AppBackend {
             requests,
             outputs,
             inputs,
-            commit_hint: None,
         };
         compio::runtime::spawn(async move {
             receiver
@@ -85,32 +83,6 @@ impl AppBackend {
     /// The policy generation every call through this backend is bound to.
     pub const fn binding(&self) -> &PolicyBinding {
         &self.binding
-    }
-
-    /// Signal the host after every start, signal, transition and restart,
-    /// including failed calls whose commit outcome may be uncertain. Clones
-    /// share the hint; reads never trigger it.
-    #[must_use]
-    pub fn with_commit_hint(mut self, hint: CommitHint) -> Self {
-        self.commit_hint = Some(hint);
-        self
-    }
-
-    #[expect(
-        clippy::future_not_send,
-        reason = "caller cancellation is driven by its compio runtime"
-    )]
-    async fn mutate<T: Send + 'static>(
-        &self,
-        operation: impl FnOnce(AppWorkflows) -> LocalBoxFuture<'static, Result<T, WorkflowServiceError>>
-            + Send
-            + 'static,
-    ) -> Result<T, WorkflowServiceError> {
-        let result = self.call(operation).await;
-        if let Some(hint) = &self.commit_hint {
-            hint();
-        }
-        result
     }
 
     #[expect(
@@ -218,7 +190,7 @@ impl WorkflowBackend for AppBackend {
         mut options: StartOptions,
     ) -> Result<StartedRun, WorkflowServiceError> {
         let inputs = self.inputs.clone();
-        self.mutate(move |api| {
+        self.call(move |api| {
             async move {
                 // One identity for the whole start: the object the value became
                 // and the run that names it are both keyed by it, so a retried
@@ -255,7 +227,7 @@ impl WorkflowBackend for AppBackend {
         options: SignalOptions,
     ) -> Result<DeliveredSignal, WorkflowServiceError> {
         Self::run(&run_id)?;
-        self.mutate(move |api| {
+        self.call(move |api| {
             async move { api.signal(&RequestId::mint(), &run_id, options).await }.boxed_local()
         })
         .await
@@ -266,7 +238,7 @@ impl WorkflowBackend for AppBackend {
         op: RunOperation,
     ) -> Result<TransitionedRun, WorkflowServiceError> {
         Self::run(&run_id)?;
-        self.mutate(move |api| {
+        self.call(move |api| {
             async move { api.transition(&RequestId::mint(), &run_id, op).await }.boxed_local()
         })
         .await
@@ -277,7 +249,7 @@ impl WorkflowBackend for AppBackend {
         options: RestartOptions,
     ) -> Result<RestartedRun, WorkflowServiceError> {
         Self::run(&run_id)?;
-        self.mutate(move |api| {
+        self.call(move |api| {
             async move { api.restart(&RequestId::mint(), &run_id, options).await }.boxed_local()
         })
         .await

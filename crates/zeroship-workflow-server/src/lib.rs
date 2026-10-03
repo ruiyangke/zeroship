@@ -7,6 +7,7 @@ pub mod auth;
 pub mod config;
 pub mod coordinator;
 pub mod payloads;
+pub mod publication;
 pub mod runs;
 pub mod server;
 pub mod sweeps;

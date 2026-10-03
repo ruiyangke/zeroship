@@ -1341,6 +1341,58 @@ case!(
 );
 
 case!(
+    sqlite_a_renewal_and_release_do_not_hint_the_host,
+    postgres_a_renewal_and_release_do_not_hint_the_host,
+    heartbeat_release_no_hint
+);
+
+/// A renewal and a release commit no publication intent, so neither wakes the
+/// host: only the acceptance they sit between and the completion after them do.
+async fn heartbeat_release_no_hint(store: Rc<OrmStore>) {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    let (service, app, _, _deployments) = registered_service(store).await;
+    let hints = Arc::new(AtomicUsize::new(0));
+    let observed = hints.clone();
+    let scope = service
+        .fixture_app(app.clone())
+        .with_publication_hint(Arc::new(move || {
+            observed.fetch_add(1, Ordering::SeqCst);
+        }));
+    scope
+        .start(&RequestId::mint(), "Example", StartOptions::default())
+        .await
+        .unwrap();
+    let manager = Manager::new(&app).await;
+    let owner = assignment(&app);
+    publish(&scope, &manager).await;
+    let grant = manager.queue.claim(&owner).await.unwrap().unwrap();
+    let mut claimed = task(scope.accept_job(&grant).await.unwrap());
+    // The acceptance itself hints; the calls below must not.
+    hints.store(0, Ordering::SeqCst);
+    let renewed_grant = manager
+        .queue
+        .heartbeat(&owner, grant.delivery())
+        .await
+        .unwrap();
+    let renewal = scope.heartbeat_job(&claimed, &renewed_grant).await.unwrap();
+    claimed.renew(renewal);
+    assert_eq!(
+        hints.load(Ordering::SeqCst),
+        0,
+        "a renewal commits no publication intent"
+    );
+    scope.release_job(&claimed, &renewed_grant).await.unwrap();
+    assert_eq!(
+        hints.load(Ordering::SeqCst),
+        0,
+        "a release commits no publication intent"
+    );
+}
+
+case!(
     sqlite_a_completion_batch_applies_each_outcome_on_its_own,
     postgres_a_completion_batch_applies_each_outcome_on_its_own,
     outcome_identity

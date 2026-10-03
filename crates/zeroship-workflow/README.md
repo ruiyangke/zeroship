@@ -361,10 +361,10 @@ the stream within a host memory limit. `into_backend` adapts the app handle to
 over another policy registry; its bound identity cannot change between
 operations. Its construction site also supplies the reader that turns a step's
 recorded output into bytes, since this crate holds no store.
-`AppBackend::with_commit_hint` tells the trusted host when a start, signal, transition or restart finished, so
-the host can publish that commit's pending intents at once; manager
-reconciliation still recovers any intent the host misses. The hint carries no
-customer data.
+`AppWorkflows::with_publication_hint` tells the trusted host when a start,
+signal, transition, restart, ingress acceptance or delivery completion left
+pending intents, so the host can publish them at once; manager reconciliation
+still recovers any intent the host misses. The hint carries no customer data.
 Task hosts instead use `runner::TaskPayloadReader`: it captures the assignment's
 journal, resolves named occurrences in that snapshot and reads referenced
 objects through the live task lease. `WorkerTasks` implements the

@@ -643,19 +643,15 @@ impl ManagerClient {
             .await
     }
 
-    /// Delivery operations for this worker. Each settled delivery wakes the
-    /// host's publication of creator intents committed by that job. The local
-    /// host is its app's platform authority, so its own configured policy
-    /// supplies the delivery ceiling in place of a policy lease.
+    /// Delivery operations for this worker. The local host is its app's
+    /// platform authority, so its own configured policy supplies the delivery
+    /// ceiling in place of a policy lease. A committed delivery wakes the
+    /// host's publication through the journal handle's own publication hint,
+    /// not through this transport.
     #[must_use]
-    pub fn transport(
-        &self,
-        settled: flume::Sender<()>,
-        max_delivery_attempts: i64,
-    ) -> LocalTransport {
+    pub fn transport(&self, max_delivery_attempts: i64) -> LocalTransport {
         LocalTransport {
             client: self.clone(),
-            settled,
             max_delivery_attempts,
         }
     }
@@ -762,7 +758,6 @@ impl LocalSweeps {
 #[derive(Debug)]
 pub struct LocalTransport {
     client: ManagerClient,
-    settled: flume::Sender<()>,
     max_delivery_attempts: i64,
 }
 
@@ -897,14 +892,14 @@ impl JobTransport for LocalTransport {
 }
 
 impl LocalTransport {
-    /// The queue half every settlement on this host ends in, and the wake it
-    /// owes.
+    /// The queue half every settlement on this host ends in. The successor
+    /// intents a completion committed are woken by the journal handle's own
+    /// hint, so this reports only what the manager recorded.
     async fn settle_queue(
         &self,
         settlement: JournalSettlement,
     ) -> Result<SettlementReceipt, WorkflowServiceError> {
-        let receipt = self
-            .client
+        self.client
             .call(move |manager| {
                 async move {
                     manager
@@ -917,11 +912,7 @@ impl LocalTransport {
                 }
                 .boxed_local()
             })
-            .await?;
-        // Settled work may have committed successor intents in the creator
-        // outbox. A full channel already holds a pending wake.
-        let _ = self.settled.try_send(());
-        Ok(receipt)
+            .await
     }
 }
 

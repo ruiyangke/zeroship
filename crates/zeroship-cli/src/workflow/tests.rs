@@ -108,6 +108,35 @@ fn local_configuration_refuses_a_payload_budget_below_the_platform_ceiling() {
     assert!(config.validate().is_err());
 }
 
+/// A publication hint whose wake task has ended surfaces the disconnect once,
+/// rather than dropping the signal silently. The flag is the observable the
+/// host keeps the warning to one line with.
+#[test]
+fn a_disconnected_publication_wake_is_reported_once() {
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+    let (sender, receiver) = flume::bounded(1);
+    let reported = Arc::new(AtomicBool::new(false));
+    let hint = super::host::publication_hint(sender, reported.clone());
+    assert!(
+        !reported.load(Ordering::Relaxed),
+        "a live wake has not reported"
+    );
+    drop(receiver);
+    hint();
+    assert!(
+        reported.load(Ordering::Relaxed),
+        "a signal to an ended task is surfaced"
+    );
+    hint();
+    assert!(
+        reported.load(Ordering::Relaxed),
+        "the disconnect is reported once, not on every later commit"
+    );
+}
+
 /// Where the workspace install puts the TypeScript runner the bundle compiler
 /// runs under.
 fn typescript_runner(workspace: &Path) -> PathBuf {

@@ -347,6 +347,7 @@ impl AppWorkflows {
         .await?;
         captured.check()?;
         tx.commit().await?;
+        self.publication_commit();
         Ok(result)
     }
 }

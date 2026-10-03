@@ -12,6 +12,10 @@ use std::{
     time::Duration,
 };
 
+use super::{
+    coordinator::Coordinator,
+    publication::{wake_loop, PublicationWake},
+};
 use futures::{future::LocalBoxFuture, lock::Mutex};
 use zeroship_core::{app_id::AppId, workflow_coordination::Revision};
 use zeroship_data_orm::connection::ConnectionFactory;
@@ -25,7 +29,7 @@ use zeroship_workflow::{
 use zeroship_workflow_manager::{
     policy::{PolicyObservation, PolicySource},
     recovery::Recovery,
-    Error as ManagerError,
+    Error as ManagerError, Queue,
 };
 
 /// The journal, the policy registry its bindings come from, and the recovery
@@ -43,9 +47,39 @@ pub struct RunService {
     policies: Arc<HostPolicies>,
     recovery: Recovery,
     ingress: RefCell<HashMap<AppId, Rc<ServiceIngress>>>,
+    /// The queue this service publishes committed intents to. Absent on a host
+    /// that publishes another way, and then no publication wake is composed.
+    queue: Option<Queue>,
+    /// One coalescing wake per app, each driving its own drain task over this
+    /// thread's journal.
+    publications: RefCell<HashMap<AppId, Rc<PublicationWake>>>,
 }
 
 impl RunService {
+    /// Open the journal over the coordinator this service serves.
+    ///
+    /// The coordinator's own queue is where every intent a handle from this
+    /// journal commits is published. ONE constructor composes the serving
+    /// threads and the maintenance lane, so the binding cannot be present on
+    /// one host and absent on the other.
+    ///
+    /// # Errors
+    /// As [`RunService::connect_within`].
+    #[expect(
+        clippy::future_not_send,
+        reason = "the journal store and the queue it binds belong to their compio runtime"
+    )]
+    pub async fn connect_over(
+        url: &str,
+        coordinator: &Coordinator,
+        recovery: Recovery,
+        startup_timeout: Duration,
+    ) -> Result<Self, WorkflowServiceError> {
+        Ok(Self::connect_within(url, recovery, startup_timeout)
+            .await?
+            .with_queue(coordinator.queue.clone()))
+    }
+
     /// Open the journal over the service's own schema.
     ///
     /// The login holds DML on that schema and no more: `Coordinator::verify`
@@ -69,7 +103,17 @@ impl RunService {
             policies,
             recovery,
             ingress: RefCell::new(HashMap::new()),
+            queue: None,
+            publications: RefCell::new(HashMap::new()),
         })
+    }
+
+    /// Bind the queue a committed intent is published to, which composes one
+    /// coalescing publication wake per app this service binds.
+    #[must_use]
+    pub fn with_queue(mut self, queue: Queue) -> Self {
+        self.queue = Some(queue);
+        self
     }
 
     /// Open the journal under a startup budget.
@@ -115,12 +159,16 @@ impl RunService {
             policies,
             recovery,
             ingress,
+            queue,
+            publications,
         } = self;
         Self {
             journal: journal.with_deployments(deployments),
             policies,
             recovery,
             ingress,
+            queue,
+            publications,
         }
     }
 
@@ -157,9 +205,18 @@ impl RunService {
         source: &dyn PolicySource,
         app: &AppId,
     ) -> Result<AppWorkflows, WorkflowServiceError> {
-        let observed = source.observe(app).await.map_err(|_| {
-            WorkflowServiceError::Unavailable("workflow policy is unavailable".into())
-        })?;
+        let observed = match source.observe(app).await {
+            Ok(observed) => observed,
+            Err(_) => {
+                // Control serves this app no policy, which is what a deleted
+                // app looks like here. Its wake would otherwise keep a drain
+                // task and a map entry for an app no call can reach again.
+                self.publications.borrow_mut().remove(app);
+                return Err(WorkflowServiceError::Unavailable(
+                    "workflow policy is unavailable".into(),
+                ));
+            }
+        };
         let (binding, rebound) = match self.policies.current_binding(app) {
             Ok(binding) => (binding, false),
             Err(_) => (self.policies.bind(app.clone())?, true),
@@ -189,7 +246,54 @@ impl RunService {
         // reinstall involved.
         install(&binding, &observed, binding.ingress_epoch())?;
         let ingress = self.ingress(app, &binding, &observed, rebound);
-        Ok(self.journal.bind_app(&binding)?.with_ingress(ingress))
+        let api = self.journal.bind_app(&binding)?.with_ingress(ingress);
+        Ok(self.attach_publication(api, rebound))
+    }
+
+    /// Attach this app's publication wake to a freshly bound handle.
+    ///
+    /// The handle carries the wake as its commit hint, so every mutating
+    /// journal call this service makes on the app - a start, a signal, a
+    /// transition, a restart, an acceptance or a completion - schedules a
+    /// drain as soon as its commit lands.
+    ///
+    /// `rebound` retires the map's wake so the replacement generation gets a
+    /// fresh channel and a task over the new binding. The older task ends when
+    /// the last handle carrying its hint is dropped; until then its sends land
+    /// on a closed or superseded binding and are refused.
+    fn attach_publication(&self, api: AppWorkflows, rebound: bool) -> AppWorkflows {
+        let Some(queue) = self.queue.clone() else {
+            return api;
+        };
+        let app = api.app_id().clone();
+        let wake = {
+            let mut wakes = self.publications.borrow_mut();
+            if rebound {
+                wakes.remove(&app);
+            }
+            Rc::clone(wakes.entry(app.clone()).or_insert_with(|| {
+                let (sender, receiver) = flume::bounded(1);
+                let wake = Rc::new(PublicationWake::new(sender));
+                // The drain task holds a handle without the hint and the pass
+                // counter without the wake: neither carries this sender, so
+                // dropping the wake ends the task.
+                let engine = api.clone();
+                let passes = wake.counter();
+                let task_app = app.clone();
+                compio::runtime::spawn(async move {
+                    wake_loop(engine, queue, task_app, receiver, passes).await;
+                })
+                .detach();
+                wake
+            }))
+        };
+        api.with_publication_hint(wake.hint())
+    }
+
+    /// This app's publication wake on this thread, when one is composed.
+    #[must_use]
+    pub fn publication_wake(&self, app: &AppId) -> Option<Rc<PublicationWake>> {
+        self.publications.borrow().get(app).cloned()
     }
 
     /// The ingress this app establishes epochs through, refreshed to the

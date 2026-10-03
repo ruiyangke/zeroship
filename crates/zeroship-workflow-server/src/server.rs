@@ -298,8 +298,9 @@ pub async fn run(settings: WorkflowSettings, options: ServerOptions) -> Result<(
                     // scopes, the ones the driver's lanes also close, so
                     // acceptance and closure meet on the same rows.
                     let runs = Rc::new(
-                        crate::runs::RunService::connect_within(
+                        crate::runs::RunService::connect_over(
                             &url,
+                            &service,
                             service.recovery(recovery)?,
                             coordinator.startup_timeout(),
                         )
@@ -424,8 +425,9 @@ async fn sweep_lane(
     let policies =
         Rc::new(connect_policies(facts, url, options.coordinator, observations).await?);
     let runs = Rc::new(
-        crate::runs::RunService::connect_within(
+        crate::runs::RunService::connect_over(
             url,
+            startup,
             startup.recovery(options.driver.recovery)?,
             options.coordinator.startup_timeout(),
         )

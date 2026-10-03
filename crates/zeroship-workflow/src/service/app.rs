@@ -32,6 +32,10 @@ pub struct WorkflowService {
     pub(crate) deployments: Option<super::AppDeployments>,
     pub(crate) signal_authority: Option<Arc<super::SignalAuthority>>,
     ingress: Option<Rc<dyn super::IngressEpochs>>,
+    /// The host's publication wake, told after every mutating commit that can
+    /// leave an unpublished intent. Absent for a host that publishes another
+    /// way, and carries no customer data and no authority.
+    commit_hint: Option<super::CommitHint>,
 }
 impl std::fmt::Debug for WorkflowService {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -66,6 +70,7 @@ impl WorkflowService {
             deployments: None,
             signal_authority: None,
             ingress: None,
+            commit_hint: None,
         })
     }
     /// The host policy registry this service admits work against.
@@ -263,6 +268,23 @@ impl AppWorkflows {
         self
     }
 
+    /// Tell `hint` after a mutating transaction that can leave a pending
+    /// publication intent commits. The hint is a wake, not a drain: the host
+    /// that owns the queue decides when to publish. A call refused before its
+    /// transaction commits fires nothing, because no intent reached the journal.
+    #[must_use]
+    pub fn with_publication_hint(mut self, hint: super::CommitHint) -> Self {
+        self.service.commit_hint = Some(hint);
+        self
+    }
+
+    /// Fire the host's publication wake, if one is attached.
+    pub(super) fn publication_commit(&self) {
+        if let Some(hint) = &self.service.commit_hint {
+            hint();
+        }
+    }
+
     /// Run one creator ingress acceptance. When the journal refuses it because
     /// it closed the captured ingress epoch, establish a newer epoch through
     /// the host and retry once, capturing the binding's newly installed
@@ -411,6 +433,10 @@ impl AppWorkflows {
         .await?;
         captured.check()?;
         tx.commit().await?;
+        // The commit may have left a runnable frontier, so wake the host that
+        // publishes it. The wake sits after the commit, not after the call, so
+        // a refusal that committed nothing never fires it.
+        self.publication_commit();
         Ok(result)
     }
 
@@ -491,6 +517,7 @@ impl AppWorkflows {
         .await?;
         captured.check()?;
         tx.commit().await?;
+        self.publication_commit();
         Ok(result)
     }
 }

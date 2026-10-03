@@ -11,7 +11,7 @@
 )]
 
 use super::manager::{
-    self, LocalPublisher, LocalSweeps, LocalTransport, ManagerClient, ManagerThread,
+    self, LocalSweeps, LocalTransport, ManagerClient, ManagerThread,
 };
 use crate::deployment::AppDeployment;
 use futures::{
@@ -22,7 +22,10 @@ use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
     rc::Rc,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::Duration,
 };
 use zeroship_bundle::LoadedWorker;
@@ -34,8 +37,8 @@ use zeroship_workflow::{
         maintenance::{MaintenanceOptions, MaintenanceOutcome},
         schema,
         store::HostStorage,
-        AppBackend, AppPolicy, AppWorkflows, HostPolicies, IngressEpochs, PolicyBinding,
-        PolicySnapshot, WorkerIdentity, WorkflowService,
+        AppBackend, AppPolicy, AppWorkflows, CommitHint, HostPolicies, IngressEpochs,
+        PolicyBinding, PolicySnapshot, WorkerIdentity, WorkflowService,
     },
     WorkflowServiceError,
 };
@@ -46,7 +49,6 @@ use zeroship_workflow_runner::{
 };
 use zeroship_workflow_v8::{AppRuntimeLoader, V8TaskExecutor};
 
-const PUBLICATION_PAGE: u32 = 64;
 const APPLIED_POLL: Duration = Duration::from_millis(20);
 
 /// Wraps the delivery transport and executor built on the host thread.
@@ -74,6 +76,18 @@ impl Composition for Production {
     fn transport(&self, transport: LocalTransport) -> LocalTransport {
         transport
     }
+}
+
+/// The host's publication hint. A signal already pending absorbs this one, so a
+/// burst schedules one pass rather than one per signal. A disconnected channel
+/// means this wake's task has ended; the host is told once, because a reconnect
+/// would need a new wake anyway.
+pub(super) fn publication_hint(wake: flume::Sender<()>, reported: Arc<AtomicBool>) -> CommitHint {
+    Arc::new(move || {
+        if wake.try_send(()).is_err() && !reported.swap(true, Ordering::Relaxed) {
+            tracing::warn!("workflow publication wake is disconnected");
+        }
+    })
 }
 
 /// Everything the host needs, moved onto its thread.
@@ -213,23 +227,25 @@ pub async fn open<C: Composition>(
         // accept work for.
         ingress.establish_epoch(None).await?;
     }
-    let api = api.with_ingress(ingress.clone());
     let (wake_sender, wake) = flume::bounded(1);
-    let hint = wake_sender.clone();
+    // Every mutating handle this process holds carries the wake: the creator
+    // seam, the consumer's scoped journal and the maintenance lane all fire it
+    // when their commits leave intents. One mechanism, not a hint per seam.
+    let api = api
+        .with_ingress(ingress.clone())
+        .with_publication_hint(publication_hint(
+            wake_sender.clone(),
+            Arc::new(AtomicBool::new(false)),
+        ));
     // The local host keeps the creator seam on the journal it opened above.
-    let backend = api
-        .clone()
-        .into_backend(
-            &service,
-            Arc::new(ObjectStepOutputs::new(
-                objects.clone(),
-                config.payloads.max_payload_bytes,
-            )?),
-            Arc::new(objects.clone()),
-        )?
-        .with_commit_hint(Arc::new(move || {
-            let _ = hint.try_send(());
-        }));
+    let backend = api.clone().into_backend(
+        &service,
+        Arc::new(ObjectStepOutputs::new(
+            objects.clone(),
+            config.payloads.max_payload_bytes,
+        )?),
+        Arc::new(objects.clone()),
+    )?;
     let env = zeroship_runtime::serve::app_env_from_prefixed_vars(&env_vars);
     let loader = Rc::new(AppRuntimeLoader::new(
         backend.clone(),
@@ -256,7 +272,7 @@ pub async fn open<C: Composition>(
         error_backoff: consumer_options.error_backoff,
     };
     let consumer = JobConsumer::new(
-        Rc::new(composition.transport(manager.transport(wake_sender.clone(), delivery_ceiling))),
+        Rc::new(composition.transport(manager.transport(delivery_ceiling))),
         manager.worker().clone(),
         consumer_options,
     )?;
@@ -549,7 +565,7 @@ async fn publish(
     while stopped(stop.clone(), wake.recv_async()).await == Some(Ok(())) {
         while wake.try_recv().is_ok() {}
         let publisher = manager.publisher(placement.borrow().scope.clone());
-        match stopped(stop.clone(), publish_pending(api, &publisher)).await {
+        match stopped(stop.clone(), api.publish_pending_jobs(&publisher)).await {
             None => return,
             Some(Ok(())) => {}
             Some(Err(error)) => {
@@ -654,23 +670,6 @@ async fn bounded<T>(
     compio::time::timeout(timeout, Box::pin(future))
         .await
         .map_err(|_| WorkflowServiceError::Timeout)?
-}
-
-async fn publish_pending(
-    api: &AppWorkflows,
-    publisher: &LocalPublisher<'_>,
-) -> Result<(), WorkflowServiceError> {
-    let mut after = None;
-    loop {
-        let page = api.pending_jobs(after.as_ref(), PUBLICATION_PAGE).await?;
-        for job in &page {
-            api.publish_job(&job.id, publisher).await?;
-        }
-        if page.len() < PUBLICATION_PAGE as usize {
-            return Ok(());
-        }
-        after = page.last().map(|job| job.id.clone());
-    }
 }
 
 async fn stopped<T>(stop: Stop<'_>, work: impl std::future::Future<Output = T>) -> Option<T> {

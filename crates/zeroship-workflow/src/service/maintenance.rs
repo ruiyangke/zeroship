@@ -73,7 +73,7 @@ impl AppWorkflows {
         options: MaintenanceOptions,
     ) -> Result<MaintenanceOutcome, WorkflowServiceError> {
         let settled = |receipt| MaintenanceOutcome::Settled(Box::new(receipt));
-        match lease.delivery().job.operation {
+        let outcome = match lease.delivery().job.operation {
             JobOperation::Activate { .. } => self.activate_job(lease).await.map(settled),
             JobOperation::Reconcile {} => self
                 .reconcile_job(lease, publisher, options.reconciliation)
@@ -96,6 +96,15 @@ impl AppWorkflows {
                 .await
                 .map(settled),
             JobOperation::Advance { .. } => Ok(MaintenanceOutcome::Unclaimed),
+        };
+        // A committed sweep can leave publication intents -- a propagated
+        // parent's advance, a persisted fanout page, a cron run's first
+        // frontier or a management application -- and its own caller settles
+        // the queue row, not the host's publication. Firing the host wake here
+        // covers every arm once, on the lane that owns this journal.
+        if matches!(outcome, Ok(MaintenanceOutcome::Settled(_))) {
+            self.publication_commit();
         }
+        outcome
     }
 }

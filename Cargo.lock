@@ -8888,6 +8888,7 @@ dependencies = [
  "clap",
  "compio",
  "compio-postgres",
+ "flume 0.11.1",
  "futures",
  "ntex",
  "serde",

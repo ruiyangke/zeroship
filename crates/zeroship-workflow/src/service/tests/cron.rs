@@ -267,6 +267,53 @@ fn payload_id(
         .expect("the staged run input must be in this app's store")
 }
 
+/// A cron sweep commits a run's first frontier through the maintenance
+/// dispatch, which wakes the host so it can publish at once.
+#[compio::test]
+async fn a_cron_sweep_hints_the_host_that_it_committed_a_run() {
+    use crate::service::maintenance::{MaintenanceOptions, MaintenanceOutcome};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let directory = tempfile::tempdir().unwrap();
+    let store = Rc::new(sqlite_store(&directory.path().join("creator.sqlite")).await);
+    let objects = objects::Objects::new();
+    let (service, app, _, platform) = registered_service(store).await;
+    let deployment = publish(&platform, &app, json!(null), ScheduleOverlap::Allow).await;
+    let hints = Arc::new(AtomicUsize::new(0));
+    let observed = hints.clone();
+    let scope = service
+        .fixture_app(app.clone())
+        .with_publication_hint(Arc::new(move || {
+            observed.fetch_add(1, Ordering::SeqCst);
+        }));
+    activate(&scope, &deployment, 1).await;
+    assert_eq!(
+        hints.load(Ordering::SeqCst),
+        0,
+        "activation commits no publication intent"
+    );
+    let grant = Grant::cron(&app, &deployment, &ScheduleId::mint(), 1, 1000);
+    let publisher = Confirming(app.clone());
+    let outcome = scope
+        .maintenance_job(
+            &grant,
+            &publisher,
+            &objects,
+            &objects,
+            MaintenanceOptions::default(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, MaintenanceOutcome::Settled(_)),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        hints.load(Ordering::SeqCst),
+        1,
+        "the cron run's owned frontier wakes the host"
+    );
+}
+
 async fn replay(store: Rc<OrmStore>) {
     let objects = objects::Objects::new();
     let (service, app, _, platform) = registered_service(store.clone()).await;

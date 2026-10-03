@@ -19,6 +19,7 @@ reason = "Metadata coordinator with a dedicated platform database login and gene
 [dependencies]
 async-trait = { workspace = true }
 clap = { workspace = true }
+flume = { workspace = true }
 futures = { workspace = true }
 compio = { workspace = true }
 compio-postgres = { workspace = true }

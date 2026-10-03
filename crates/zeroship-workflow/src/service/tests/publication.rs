@@ -13,7 +13,7 @@ use crate::{
 use std::{cell::Cell, time::Duration};
 use zeroship_core::{
     workflow_coordination::Revision,
-    workflow_jobs::{BroadcastId, DeploymentId, JobOperation, JobSpec, PropagationId},
+    workflow_jobs::{BroadcastId, DeploymentId, JobId, JobOperation, JobSpec, PropagationId},
 };
 use zeroship_workflow_manager::Queue;
 
@@ -112,6 +112,11 @@ case!(
     sqlite_publication_deduplicates_equal_work_across_transactions,
     postgres_publication_deduplicates_equal_work_across_transactions,
     dedup
+);
+case!(
+    sqlite_publication_refused_intent_does_not_stop_the_pass,
+    postgres_publication_refused_intent_does_not_stop_the_pass,
+    poisoned_pass
 );
 
 /// A publishable job's id is the one its own content derives, so an intent
@@ -247,6 +252,47 @@ async fn dedup(store: Rc<OrmStore>, _: &FaultDb) {
             recorded.operation
         );
     }
+}
+
+/// A refused intent does not stop the pass: the intents after it still publish
+/// and only the refused one stays pending for a later pass or reconciliation.
+async fn poisoned_pass(store: Rc<OrmStore>, _: &FaultDb) {
+    let (service, app, _, _platform) = registered_service(store).await;
+    let scope = service.fixture_app(app.clone());
+    for _ in 0..3 {
+        scope
+            .start(&RequestId::mint(), "Example", StartOptions::default())
+            .await
+            .unwrap();
+    }
+    let intents = scope.pending_jobs(None, 10).await.unwrap();
+    assert_eq!(intents.len(), 3, "the app holds one intent per start");
+    let refused = intents[0].id.clone();
+    let manager = Manager::new(&app).await;
+    let publisher = RefusingOne {
+        app: app.clone(),
+        queue: manager.queue.clone(),
+        refused: refused.clone(),
+        refused_calls: Cell::new(0),
+    };
+    scope.publish_pending_jobs(&publisher).await.unwrap();
+    assert_eq!(
+        publisher.refused_calls.get(),
+        1,
+        "the refused intent is attempted once, not retried within the pass"
+    );
+    let remaining = scope.pending_jobs(None, 10).await.unwrap();
+    assert_eq!(
+        remaining.len(),
+        1,
+        "only the refused intent may remain: {remaining:?}"
+    );
+    assert_eq!(remaining[0].id, refused);
+    assert_eq!(
+        manager.count(),
+        2,
+        "every intent after the refused one must publish"
+    );
 }
 
 /// Record one Advance, one Fanout and one Propagate page, each in its own
@@ -404,6 +450,30 @@ impl JobPublisher for Publisher {
             Reply::Exact => {}
         }
         Ok(receipt)
+    }
+}
+
+/// Refuses one named intent and confirms every other, so a pass that stops at
+/// the first failure is distinguishable from one that continues.
+pub(super) struct RefusingOne {
+    app: AppId,
+    queue: Queue,
+    refused: JobId,
+    refused_calls: Cell<usize>,
+}
+impl JobPublisher for RefusingOne {
+    fn app_id(&self) -> &AppId {
+        &self.app
+    }
+    async fn submit(&self, job: &JobSpec) -> Result<JobSpec, WorkflowServiceError> {
+        if job.id == self.refused {
+            self.refused_calls.set(self.refused_calls.get() + 1);
+            return Err(WorkflowServiceError::Conflict("refused intent".into()));
+        }
+        self.queue
+            .submit(job)
+            .await
+            .map_err(|_| WorkflowServiceError::Unavailable("test manager refused".into()))
     }
 }
 

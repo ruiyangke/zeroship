@@ -69,17 +69,18 @@ impl PolicySource for Source {
     }
 }
 
-struct Fixture {
-    platform: platform::Platform,
-    state: SharedState,
-    scope: AssignedScope,
-    issuer: ServiceIssuer,
-    key: ServiceSigningKey,
-    app: AppId,
+pub(crate) struct Fixture {
+    pub(crate) platform: platform::Platform,
+    pub(crate) state: SharedState,
+    pub(crate) scope: AssignedScope,
+    pub(crate) issuer: ServiceIssuer,
+    pub(crate) key: ServiceSigningKey,
+    pub(crate) app: AppId,
+    pub(crate) worker: WorkerId,
 }
 
 impl Fixture {
-    async fn new() -> Self {
+    pub(crate) async fn new() -> Self {
         let platform = platform::Platform::new().await;
         let worker = WorkerId::mint();
         let key = ServiceSigningKey::generate();
@@ -143,10 +144,15 @@ impl Fixture {
             )
             .unwrap(),
         ));
+        // The production constructor, so a host that dropped the queue binding
+        // would fail these cases rather than pass on a fixture that added it
+        // back.
         let runs = Rc::new(
-            RunService::connect(
+            RunService::connect_over(
                 &platform.runtime_url,
+                &service,
                 service.recovery(RecoveryOptions::default()).unwrap(),
+                Options::default().startup_timeout(),
             )
             .await
             .unwrap(),
@@ -174,10 +180,11 @@ impl Fixture {
             issuer,
             key,
             app,
+            worker,
         }
     }
 
-    fn authorization(&self) -> String {
+    pub(crate) fn authorization(&self) -> String {
         format!(
             "Bearer {}",
             ServiceAssertionMinter::new(self.issuer.clone(), self.key.key_id(), &self.key)
@@ -189,7 +196,7 @@ impl Fixture {
 
     /// The queued run every case here acts on, seeded by the shared fixture
     /// the wire-pair suite seeds from too.
-    async fn seed_run(&self) -> RunId {
+    pub(crate) async fn seed_run(&self) -> RunId {
         journal::seed_run(&self.platform, &self.app).await
     }
 
@@ -199,7 +206,7 @@ impl Fixture {
     /// `Recovery::establish` refuses an unactivated scope, so without this the
     /// service can fence but cannot get past its own fence. Tests that exercise
     /// acceptance call it; the ones that do not are the control for it.
-    async fn ensure_recovery(&self) {
+    pub(crate) async fn ensure_recovery(&self) {
         self.state
             .service
             .recovery(RecoveryOptions::default())

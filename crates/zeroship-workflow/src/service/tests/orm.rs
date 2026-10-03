@@ -102,7 +102,7 @@ async fn native_client_crosses_runtime_threads_without_losing_app_scope() {
 }
 
 #[compio::test]
-async fn mutating_backend_calls_hint_the_host_and_reads_do_not() {
+async fn mutating_calls_hint_the_host_and_reads_do_not() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let directory = tempfile::tempdir().unwrap();
     let store = Rc::new(sqlite_store(&journal_file(directory.path())).await);
@@ -110,14 +110,15 @@ async fn mutating_backend_calls_hint_the_host_and_reads_do_not() {
     let hints = Arc::new(AtomicUsize::new(0));
     let observed = hints.clone();
     let objects = Objects::new();
-    let client = service
+    let api = service
         .fixture_app(app)
-        .into_backend(&service, StepOutputs::shared(&objects, 1024), objects.stager())
-        .unwrap()
-        .with_commit_hint(Arc::new(move || {
+        .with_publication_hint(Arc::new(move || {
             observed.fetch_add(1, Ordering::SeqCst);
         }));
-    let cloned = client.clone();
+    let client = api
+        .clone()
+        .into_backend(&service, StepOutputs::shared(&objects, 1024), objects.stager())
+        .unwrap();
     let run = client
         .start("Example".into(), serde_json::Value::Null, StartOptions::default())
         .await
@@ -125,12 +126,13 @@ async fn mutating_backend_calls_hint_the_host_and_reads_do_not() {
     assert_eq!(hints.load(Ordering::SeqCst), 1);
     client.status(run.id.clone()).await.unwrap();
     assert_eq!(hints.load(Ordering::SeqCst), 1, "reads commit nothing");
-    // A refused mutation still hints: a failed call may follow its commit. The
-    // run id is WELL-FORMED and absent, so the refusal comes from the journal,
-    // which is the only kind of failure a commit can precede.
-    assert!(client
+    // A boundary refusal reaches no commit, so it must not wake the host. The
+    // run id is well-formed and absent, so the refusal comes from the journal
+    // before the transaction commits.
+    assert!(api
         .signal(
-            zeroship_core::workflow_coordination::RunId::mint().as_str().to_owned(),
+            &RequestId::mint(),
+            zeroship_core::workflow_coordination::RunId::mint().as_str(),
             SignalOptions {
                 signal_type: "resume".into(),
                 payload: json!(null),
@@ -138,35 +140,113 @@ async fn mutating_backend_calls_hint_the_host_and_reads_do_not() {
         )
         .await
         .is_err());
-    assert_eq!(hints.load(Ordering::SeqCst), 2);
-    // A call refused BEFORE the journal hints nothing. A malformed run id never
-    // reaches a transaction, so there is no commit for a wake to follow, and
-    // hinting would wake the host over work that cannot exist.
-    assert!(client
-        .signal(
-            "run_missing".into(),
-            SignalOptions {
-                signal_type: "resume".into(),
-                payload: json!(null),
-            },
-        )
+    assert_eq!(
+        hints.load(Ordering::SeqCst),
+        1,
+        "a boundary refusal commits nothing"
+    );
+    // A malformed workflow name is refused before a transaction opens, so it
+    // cannot wake the host either.
+    assert!(api
+        .start(&RequestId::mint(), "", StartOptions::default())
         .await
         .is_err());
-    assert_eq!(hints.load(Ordering::SeqCst), 2, "a boundary refusal commits nothing");
-    cloned
-        .start("Example".into(), serde_json::Value::Null, StartOptions::default())
+    assert_eq!(
+        hints.load(Ordering::SeqCst),
+        1,
+        "a boundary refusal commits nothing"
+    );
+    // The hint lives on the handle, so a clone shares it.
+    api.clone()
+        .start(&RequestId::mint(), "Example", StartOptions::default())
         .await
         .unwrap();
-    assert_eq!(hints.load(Ordering::SeqCst), 3, "clones share the hint");
-    let plain = service
-        .fixture_app(client.app_id().clone())
-        .into_backend(&service, StepOutputs::shared(&objects, 1024), objects.stager())
-        .unwrap();
+    assert_eq!(hints.load(Ordering::SeqCst), 2, "clones share the hint");
+    // A handle with no hint commits without telling the host.
+    let plain = service.fixture_app(api.app_id().clone());
     plain
-        .start("Example".into(), serde_json::Value::Null, StartOptions::default())
+        .start(&RequestId::mint(), "Example", StartOptions::default())
         .await
         .unwrap();
-    assert_eq!(hints.load(Ordering::SeqCst), 3);
+    assert_eq!(hints.load(Ordering::SeqCst), 2);
+}
+
+/// An acceptance refused before its transaction commits leaves no intent, so it
+/// must not wake the host. A transition, a restart and a redeemed token all
+/// share the one acceptance path, and each refusal below stops before commit.
+#[compio::test]
+async fn refusals_before_commit_do_not_hint_the_host() {
+    use crate::operations::{RestartOptions, RunOperation};
+    use crate::service::{capability::SignalTarget, SignalAuthority};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use zeroship_core::service_assertion::{ServiceSigningKey, ServiceTrustBundle};
+    let directory = tempfile::tempdir().unwrap();
+    let store = Rc::new(sqlite_store(&journal_file(directory.path())).await);
+    let (service, app, _, _deployments) = registered_service(store).await;
+    let service = service.with_signal_authority(Arc::new(
+        SignalAuthority::new(
+            Arc::new(ServiceSigningKey::generate()),
+            ServiceTrustBundle::new(),
+        )
+        .unwrap(),
+    ));
+    let hints = Arc::new(AtomicUsize::new(0));
+    let observed = hints.clone();
+    let scope = service
+        .fixture_app(app)
+        .with_publication_hint(Arc::new(move || {
+            observed.fetch_add(1, Ordering::SeqCst);
+        }));
+    // A well-formed but absent run reaches the journal and is refused before
+    // its transaction commits.
+    assert!(scope
+        .transition(
+            &RequestId::mint(),
+            zeroship_core::workflow_coordination::RunId::mint().as_str(),
+            RunOperation::Pause,
+        )
+        .await
+        .is_err());
+    assert!(scope
+        .restart(
+            &RequestId::mint(),
+            zeroship_core::workflow_coordination::RunId::mint().as_str(),
+            RestartOptions::default(),
+        )
+        .await
+        .is_err());
+    // A token that fails capability verification is refused before its
+    // transaction commits.
+    let target = SignalTarget::Run {
+        run_id: typed_id::new_workflow_run_id(),
+    };
+    assert!(scope
+        .ingest_signal(
+            &RequestId::mint(),
+            "not-a-token",
+            &target,
+            SignalOptions {
+                signal_type: "resume".into(),
+                payload: json!(null),
+            },
+        )
+        .await
+        .is_err());
+    assert_eq!(
+        hints.load(Ordering::SeqCst),
+        0,
+        "a boundary refusal commits nothing"
+    );
+    // The commit point still wakes the host: a successful start fires once.
+    scope
+        .start(&RequestId::mint(), "Example", StartOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        hints.load(Ordering::SeqCst),
+        1,
+        "a committed start wakes the host"
+    );
 }
 
 #[compio::test]
