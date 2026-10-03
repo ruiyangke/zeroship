@@ -3,9 +3,7 @@
 //! Journal holders survive worker replacement. A journal holder does not confer
 //! authority on a manager queue; the host authenticates each retention caller.
 
-use crate::{
-    app_id::AppId, typed_id, workflow_coordination::Revision, workflow_jobs::DeploymentId,
-};
+use crate::{app_id::AppId, typed_id, workflow_jobs::DeploymentId};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -116,20 +114,12 @@ pub struct HoldReceipt {
 }
 
 /// Metadata only. Control derives journal ownership from the authenticated
-/// caller: a worker's placement is verified with the coordinator, and a
-/// journal-holding service asserts its role and names no placement.
-///
-/// `assignment_revision` is therefore present exactly when the caller holds a
-/// placement. The field cannot be self-serving in either direction, because the
-/// host compares its presence against the principal it authenticated before
-/// reading this body: a worker that omits it and a service that supplies it are
-/// both refused.
+/// caller: the journal-holding service asserts its role and names no placement,
+/// so this request carries no authority field a body could forge.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct HoldRequest {
     pub app_id: AppId,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub assignment_revision: Option<Revision>,
     pub deploy_id: String,
     pub generation: HoldGeneration,
 }
@@ -268,44 +258,26 @@ mod tests {
         invalid["unknown"] = serde_json::json!(true);
         assert!(serde_json::from_value::<HoldReceipt>(invalid).is_err());
     }
-    /// The placement revision travels only when the caller has one, and no
-    /// other authority may be named in the body.
-    ///
-    /// The absent revision is a SHAPE here, not a permission: whether a caller
-    /// may omit it is decided against the principal the host authenticated, and
-    /// `crates/zeroship-control/src/deployment_hold_api.rs` is where that
-    /// comparison lives.
+    /// The journal-hold request carries no authority field: Control derives
+    /// the holder from the authenticated role, and `deny_unknown_fields`
+    /// refuses a caller that tries to name a holder, a worker or a placement.
     #[test]
-    fn hold_request_carries_a_placement_only_when_its_caller_has_one() {
-        let placed = HoldRequest {
+    fn hold_request_carries_no_caller_supplied_authority() {
+        let request = HoldRequest {
             app_id: AppId::mint(),
-            assignment_revision: Some(Revision::try_from(1).unwrap()),
             deploy_id: typed_id::generate("dep"),
             generation: HoldGeneration::try_from(1).unwrap(),
         };
-        let encoded = serde_json::to_value(&placed).unwrap();
-        assert_eq!(encoded["assignmentRevision"], serde_json::json!(1));
+        let encoded = serde_json::to_value(&request).unwrap();
         assert_eq!(
             serde_json::from_value::<HoldRequest>(encoded.clone()).unwrap(),
-            placed
-        );
-        let asserted = HoldRequest {
-            assignment_revision: None,
-            ..placed
-        };
-        let body = serde_json::to_value(&asserted).unwrap();
-        assert!(
-            body.get("assignmentRevision").is_none(),
-            "a caller with no placement names none: {body}"
-        );
-        assert_eq!(
-            serde_json::from_value::<HoldRequest>(body).unwrap(),
-            asserted
+            request
         );
         for (field, value) in [
             ("holderId", serde_json::json!(typed_id::generate("dhl"))),
             ("workerId", serde_json::json!(typed_id::generate("wkr"))),
-            ("assignmentRevision", serde_json::json!(0)),
+            ("assignmentRevision", serde_json::json!(1)),
+            ("databaseUrl", serde_json::json!("customer-secret")),
         ] {
             let mut invalid = encoded.clone();
             invalid[field] = value;

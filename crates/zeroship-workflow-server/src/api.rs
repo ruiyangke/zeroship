@@ -23,7 +23,7 @@ use zeroship_core::{
     service_identity::endpoints,
     workflow_coordination::{
         AssignedScope, Failure, FailureCode, ManageRun, ManagementStatus, RegisterWorker,
-        ReleaseScope, ScopePage, VerifyAssignment,
+        ReleaseScope, ScopePage,
     },
 };
 
@@ -74,10 +74,6 @@ pub fn configure_with_limit(config: &mut web::ServiceConfig, limit: usize) {
         .state(web::types::JsonConfig::default().limit(limit))
         .service(web::resource("/healthz").route(web::get().to(health)))
         .service(web::resource("/readyz").route(web::get().to(ready)))
-        .service(
-            web::resource(endpoints::WORKFLOW_VERIFY_ASSIGNMENT.path_template())
-                .route(web::post().to(verify_assignment)),
-        )
         .service(
             web::resource(endpoints::WORKFLOW_MANAGE.path_template()).route(web::post().to(manage)),
         )
@@ -168,36 +164,6 @@ async fn read_json<T: DeserializeOwned + 'static>(
         web::error::JsonPayloadError::Overflow => Error::RequestTooLarge,
         _ => Error::Invalid,
     })
-}
-
-async fn verify_assignment(
-    request: web::HttpRequest,
-    state: State<SharedState>,
-    body: web::types::Payload,
-) -> web::HttpResponse {
-    respond(
-        async {
-            let _actor = compio::time::timeout(
-                Duration::from_secs(5),
-                state.auth.peer(
-                    authorization(&request),
-                    endpoints::WORKFLOW_VERIFY_ASSIGNMENT,
-                ),
-            )
-            .await
-            .map_err(|_| Error::Unavailable)??;
-            let command: VerifyAssignment = read_json(&request, body).await?;
-            let assignment = state.service.manager.verify_assignment(&command).await?;
-            compio::time::timeout(
-                Duration::from_secs(5),
-                state.auth.active_worker(&command.worker_id),
-            )
-            .await
-            .map_err(|_| Error::Unavailable)??;
-            Ok(assignment)
-        }
-        .await,
-    )
 }
 
 async fn manage(

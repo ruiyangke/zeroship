@@ -1348,23 +1348,13 @@ fn main() -> std::io::Result<()> {
     }
 
     // Deployment holds run on the retention executor, whose sessions are
-    // already open. Their coordinator client is validated here, once, so a
-    // client it would refuse refuses the boot. Every serving thread shares
-    // this one handle, so a serving thread opens no session and starts with
-    // nothing that can fail.
-    let deployment_holds = match zeroship_control::deployment_hold_api::DeploymentHoldApi::new(
-        state.registry.retention().clone(),
-        &workflow_coordinator_url,
-        Arc::clone(&state.service_auth),
-        coordinator_options.clone(),
-    ) {
-        Ok(api) => Arc::new(api),
-        Err(error) => {
-            eprintln!("control: refusing to start: deployment holds: {error}");
-            tracing::error!(%error, "control: refusing to start");
-            std::process::exit(2);
-        }
-    };
+    // already open. Every serving thread shares this one handle, so a serving
+    // thread opens no session and starts with nothing that can fail.
+    let deployment_holds = Arc::new(
+        zeroship_control::deployment_hold_api::DeploymentHoldApi::new(
+            state.registry.retention().clone(),
+        ),
+    );
 
     // Normal deployment retention: platform catalog work on the retention
     // executor, under the bounds checked before the configuration report.

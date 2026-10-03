@@ -17,7 +17,6 @@ const CATALOG: &[ServiceEndpoint] = &[
     endpoints::CONTROL_QUEUE_DEPLOYMENT_HOLD_RELEASE,
     endpoints::CONTROL_APP_FACTS,
     endpoints::CONTROL_DEPLOY_REGISTRATION,
-    endpoints::WORKFLOW_VERIFY_ASSIGNMENT,
     endpoints::WORKFLOW_MANAGE,
     endpoints::WORKFLOW_MANAGEMENT_STATUS,
     endpoints::WORKFLOW_SCHEDULE_REGISTER,
@@ -114,12 +113,6 @@ fn assert_endpoint(
 fn endpoint_catalog_records_exact_measured_operations() {
     let mut recorded: BTreeSet<ServiceEndpoint> = BTreeSet::new();
     for (endpoint, destination, method, path_template) in [
-        (
-            endpoints::WORKFLOW_VERIFY_ASSIGNMENT,
-            "workflow",
-            "POST",
-            "/v1/assignments/verify",
-        ),
         (
             endpoints::CONTROL_DEPLOYMENT_HOLD_ACQUIRE,
             "control",
@@ -444,7 +437,6 @@ fn measured_allowlist_is_encoded_and_enforced_row_by_row() {
     assert_allowlist_row(
         "svc/control",
         &[
-            endpoints::WORKFLOW_VERIFY_ASSIGNMENT,
             endpoints::WORKFLOW_MANAGE,
             endpoints::WORKFLOW_MANAGEMENT_STATUS,
             endpoints::WORKFLOW_SCHEDULE_REGISTER,
@@ -467,9 +459,10 @@ fn measured_allowlist_is_encoded_and_enforced_row_by_row() {
         &[
             endpoints::CONTROL_QUEUE_DEPLOYMENT_HOLD_ACQUIRE,
             endpoints::CONTROL_QUEUE_DEPLOYMENT_HOLD_RELEASE,
-            // The journal-scoped pair, which the worker also holds: a journal
-            // hold is decided where the journal is and applied to the catalog
-            // by Control.
+            // The journal-scoped pair: a journal hold is decided where the
+            // journal is and applied to the catalog by Control, so the
+            // service that holds the journal is the only principal granted
+            // it.
             endpoints::CONTROL_DEPLOYMENT_HOLD_ACQUIRE,
             endpoints::CONTROL_DEPLOYMENT_HOLD_RELEASE,
             // Policy inputs and the deletion marker, so the workflow service
@@ -495,8 +488,6 @@ fn measured_allowlist_is_encoded_and_enforced_row_by_row() {
         "svc/worker",
         &[
             endpoints::CONTROL_VERSIONS,
-            endpoints::CONTROL_DEPLOYMENT_HOLD_ACQUIRE,
-            endpoints::CONTROL_DEPLOYMENT_HOLD_RELEASE,
             endpoints::WORKFLOW_REGISTER,
             endpoints::WORKFLOW_ASSIGNMENTS,
             endpoints::WORKFLOW_RENEW,
@@ -581,6 +572,32 @@ fn no_principal_holds_a_join_grant_and_the_worker_holds_its_own_lifecycle() {
     let gateway = identity("zeroship.ai", "svc/gateway");
     assert!(!authorize(&gateway, endpoints::CONTROL_WORKER_RETIRE));
     assert!(!authorize(&gateway, endpoints::CONTROL_WORKER_RENEW));
+}
+
+/// A joined worker instance takes no deployment hold. Holding a deployment is
+/// control-plane retention decided where the journal is, and the workflow
+/// service that holds the journal is the only principal granted it.
+///
+/// The table keys on the role a verified instance resolves to, so refusing the
+/// worker role refuses every instance of it. The workflow service's own row is
+/// the control: the same endpoint is served for the principal that owns the
+/// journal.
+#[test]
+fn a_worker_takes_no_deployment_hold_and_the_workflow_service_does() {
+    let worker = identity("zeroship.ai", "svc/worker");
+    for endpoint in [
+        endpoints::CONTROL_DEPLOYMENT_HOLD_ACQUIRE,
+        endpoints::CONTROL_DEPLOYMENT_HOLD_RELEASE,
+    ] {
+        assert!(
+            !authorize(&worker, endpoint),
+            "a worker holds no deployment-hold grant at {endpoint:?}"
+        );
+    }
+
+    let workflow = identity("zeroship.ai", "svc/workflow");
+    assert!(authorize(&workflow, endpoints::CONTROL_DEPLOYMENT_HOLD_ACQUIRE));
+    assert!(authorize(&workflow, endpoints::CONTROL_DEPLOYMENT_HOLD_RELEASE));
 }
 
 #[test]

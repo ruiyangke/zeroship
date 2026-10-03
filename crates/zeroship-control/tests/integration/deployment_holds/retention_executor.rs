@@ -2,9 +2,8 @@
 //! from the publication catalog's.
 //!
 //! These cases observe the sessions holds occupy in `pg_stat_activity`, the
-//! order an executor's lanes admit, a queued operation whose caller has gone,
-//! and an authority budget that expires between a placed hold's last check and
-//! its commit.
+//! order an executor's lanes admit, and a queued operation whose caller has
+//! gone.
 
 use super::*;
 use futures::{channel::oneshot, future::join_all, FutureExt as _};
@@ -12,7 +11,6 @@ use std::{
     cell::Cell,
     collections::BTreeMap,
     num::NonZeroUsize,
-    sync::atomic::AtomicI64,
 };
 use zeroship_control::{
     publication::{Catalog, CatalogError, CatalogOptions, CatalogRole},
@@ -112,13 +110,7 @@ async fn concurrent_holds_occupy_only_retention_sessions() {
     }
     // The fixture's own sessions, open before the executor under test.
     let before = control_sessions(&fixture).await;
-    let api = DeploymentHoldApi::new(
-        executor(&fixture, BOUND).await,
-        "http://127.0.0.1:9",
-        fixture.state.service_auth.clone(),
-        Options::default(),
-    )
-    .unwrap();
+    let api = DeploymentHoldApi::new(executor(&fixture, BOUND).await);
     let opened: BTreeMap<i32, String> = control_sessions(&fixture)
         .await
         .into_iter()
@@ -138,7 +130,6 @@ async fn concurrent_holds_occupy_only_retention_sessions() {
         .iter()
         .map(|(app, deploy, _)| HoldRequest {
             app_id: app.clone(),
-            assignment_revision: None,
             deploy_id: deploy.clone(),
             generation: generation(1),
         })
@@ -333,250 +324,4 @@ async fn a_lane_waits_for_no_request_connection_and_no_lane() {
         .spawn(|_database, _closing| Ok(Box::pin(async {})))
         .await
         .unwrap();
-}
-
-/// A coordinator whose check number `shorten_at` shortens the placement's
-/// lease, and whose third check answers only after that lease has run out.
-struct ExpiringAuthority {
-    calls: AtomicUsize,
-    /// Which check shortens the lease: the first, on the serving thread, or
-    /// the second, inside the transaction.
-    shorten_at: AtomicUsize,
-    /// Wall-clock milliseconds at which the shortened lease ends; zero until
-    /// the shortening check sets it.
-    expires: AtomicI64,
-    /// Whether the third check should wait out the lease. The control case
-    /// answers at once.
-    stall: std::sync::atomic::AtomicBool,
-}
-
-fn wall_millis() -> i64 {
-    i64::try_from(
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis(),
-    )
-    .unwrap()
-}
-
-async fn expiring_authority(
-    authority: State<Arc<ExpiringAuthority>>,
-    body: Json<VerifyAssignment>,
-) -> web::HttpResponse {
-    let request = body.into_inner();
-    let call = authority.calls.fetch_add(1, Ordering::SeqCst) + 1;
-    let expires = if call == authority.shorten_at.load(Ordering::SeqCst) {
-        let shortened = wall_millis() + 1_000;
-        authority.expires.store(shortened, Ordering::SeqCst);
-        shortened
-    } else if call == 3 && authority.stall.load(Ordering::SeqCst) {
-        // Answer only once the shortened lease is over, with a lease that
-        // would otherwise extend it.
-        let over = authority.expires.load(Ordering::SeqCst) + 100;
-        let wait = u64::try_from(over - wall_millis()).unwrap_or(0);
-        compio::time::sleep(Duration::from_millis(wait)).await;
-        assert!(wall_millis() > authority.expires.load(Ordering::SeqCst));
-        wall_millis() + 60_000
-    } else {
-        wall_millis() + 60_000
-    };
-    web::HttpResponse::Ok().json(&Assignment {
-        app_id: request.app_id,
-        worker_id: request.worker_id,
-        revision: request.assignment_revision,
-        expires_at: expires.try_into().unwrap(),
-    })
-}
-
-/// A placed hold whose authority runs out after its hold is staged, while its
-/// last placement check is outstanding and before COMMIT, does not commit: the
-/// lease a check shortened reaches the budget, and the budget cancels the
-/// transaction before COMMIT. That holds whether the first check, made on the
-/// serving thread, or the second, made inside the transaction, shortened it.
-/// The same hold with authority that does not run out commits.
-#[compio::test(crate = "crate::support::live::system")]
-async fn authority_that_expires_before_commit_commits_nothing() {
-    let fixture = Fixture::new().await;
-    let authority = Arc::new(ExpiringAuthority {
-        calls: AtomicUsize::new(0),
-        shorten_at: AtomicUsize::new(0),
-        expires: AtomicI64::new(0),
-        stall: false.into(),
-    });
-    let state = authority.clone();
-    let server = test::server(move || {
-        let state = state.clone();
-        async move {
-            web::App::new().state(state).service(
-                web::resource(endpoints::WORKFLOW_VERIFY_ASSIGNMENT.path_template())
-                    .route(web::post().to(expiring_authority)),
-            )
-        }
-    })
-    .await;
-    crate::support::live::register_listener(server.addr());
-    let executor = executor(&fixture, 1).await;
-    let api = DeploymentHoldApi::new(
-        executor.clone(),
-        &origin(&server),
-        fixture.state.service_auth.clone(),
-        Options::default(),
-    )
-    .unwrap();
-    let worker = WorkerId::mint();
-
-    for shorten_at in [1, 2] {
-        let (app, deploy, _) = fixture
-            .deployment(&format!("retention-expiry-{shorten_at}"))
-            .await;
-        let request = HoldRequest {
-            app_id: app,
-            assignment_revision: Some(1.try_into().unwrap()),
-            deploy_id: deploy,
-            generation: generation(1),
-        };
-        let before = fixture.rows().await;
-        authority.calls.store(0, Ordering::SeqCst);
-        authority.shorten_at.store(shorten_at, Ordering::SeqCst);
-        authority.stall.store(true, Ordering::SeqCst);
-        let expired = api.acquire(&worker, &request).await;
-        assert!(
-            matches!(
-                expired,
-                Err(zeroship_workflow_manager::deployments::Error::Timeout)
-            ),
-            "shortened by check {shorten_at}: {expired:?}"
-        );
-        // The third check began, so the hold was staged in the transaction
-        // before authority ran out.
-        assert_eq!(authority.calls.load(Ordering::SeqCst), 3);
-        // The executor has one lane, so this runs only once the expired hold
-        // has left it: nothing it staged can still commit after this.
-        executor
-            .run(|_database| async { Ok::<_, CatalogError>(()) })
-            .await
-            .unwrap();
-        assert_eq!(
-            fixture.rows().await,
-            before,
-            "a hold whose authority check {shorten_at} shortened committed after it expired"
-        );
-
-        // The control: the same hold, with authority that does not run out.
-        authority.calls.store(0, Ordering::SeqCst);
-        authority.shorten_at.store(0, Ordering::SeqCst);
-        authority.stall.store(false, Ordering::SeqCst);
-        let receipt = api.acquire(&worker, &request).await.unwrap();
-        assert_eq!(authority.calls.load(Ordering::SeqCst), 3);
-        assert_eq!(receipt.state, HoldState::Held);
-        assert_eq!(fixture.rows().await.len(), before.len() + 1);
-    }
-}
-
-/// A coordinator that refuses every placement check while `refuse` is set.
-struct RefusingAuthority {
-    calls: AtomicUsize,
-    refuse: std::sync::atomic::AtomicBool,
-}
-
-async fn refusing_authority(
-    authority: State<Arc<RefusingAuthority>>,
-    body: Json<VerifyAssignment>,
-) -> web::HttpResponse {
-    let request = body.into_inner();
-    authority.calls.fetch_add(1, Ordering::SeqCst);
-    if authority.refuse.load(Ordering::SeqCst) {
-        return web::HttpResponse::Forbidden().json(&Failure {
-            code: FailureCode::Denied,
-        });
-    }
-    web::HttpResponse::Ok().json(&Assignment {
-        app_id: request.app_id,
-        worker_id: request.worker_id,
-        revision: request.assignment_revision,
-        expires_at: (wall_millis() + 60_000).try_into().unwrap(),
-    })
-}
-
-/// A worker the coordinator does not place on the app is refused on the
-/// serving thread, without waiting for or occupying a retention lane: with
-/// every lane busy, its refusal still arrives. The same worker, placed, holds
-/// once the lane is free.
-#[compio::test(crate = "crate::support::live::system")]
-async fn an_unplaced_worker_is_refused_without_a_lane() {
-    let fixture = Fixture::new().await;
-    let (app, deploy, _) = fixture.deployment("retention-unplaced").await;
-    let authority = Arc::new(RefusingAuthority {
-        calls: AtomicUsize::new(0),
-        refuse: true.into(),
-    });
-    let state = authority.clone();
-    let server = test::server(move || {
-        let state = state.clone();
-        async move {
-            web::App::new().state(state).service(
-                web::resource(endpoints::WORKFLOW_VERIFY_ASSIGNMENT.path_template())
-                    .route(web::post().to(refusing_authority)),
-            )
-        }
-    })
-    .await;
-    crate::support::live::register_listener(server.addr());
-    let executor = executor(&fixture, 1).await;
-    let api = DeploymentHoldApi::new(
-        executor.clone(),
-        &origin(&server),
-        fixture.state.service_auth.clone(),
-        Options::default(),
-    )
-    .unwrap();
-    let worker = WorkerId::mint();
-    let request = HoldRequest {
-        app_id: app,
-        assignment_revision: Some(1.try_into().unwrap()),
-        deploy_id: deploy,
-        generation: generation(1),
-    };
-
-    // The executor's one lane is busy until this test releases it.
-    let (entered, running) = oneshot::channel::<()>();
-    let (release, released) = oneshot::channel::<()>();
-    let busy = executor.run(move |_database| async move {
-        entered.send(()).unwrap();
-        released.await.unwrap();
-        Ok::<_, CatalogError>(())
-    });
-    futures::pin_mut!(busy);
-    match futures::future::select(busy.as_mut(), running).await {
-        futures::future::Either::Right((entered, _)) => entered.unwrap(),
-        futures::future::Either::Left((outcome, _)) => {
-            panic!("the busy operation finished early: {outcome:?}")
-        }
-    }
-
-    let refused = api.acquire(&worker, &request).await;
-    assert!(
-        matches!(
-            refused,
-            Err(zeroship_workflow_manager::deployments::Error::PermissionDenied)
-        ),
-        "{refused:?}"
-    );
-    assert_eq!(authority.calls.load(Ordering::SeqCst), 1);
-    // The lane was held throughout: the busy operation has not finished.
-    assert!(
-        busy.as_mut().now_or_never().is_none(),
-        "the busy operation finished before it was released"
-    );
-
-    // The control: placed, the same hold holds once the lane is free.
-    release.send(()).unwrap();
-    busy.await.unwrap();
-    authority.calls.store(0, Ordering::SeqCst);
-    authority.refuse.store(false, Ordering::SeqCst);
-    let receipt = api.acquire(&worker, &request).await.unwrap();
-    assert_eq!(receipt.state, HoldState::Held);
-    assert_eq!(authority.calls.load(Ordering::SeqCst), 3);
-    assert_eq!(fixture.rows().await.len(), 1);
 }

@@ -18,7 +18,7 @@ use zeroship_core::{
     workflow_coordination::{
         AssignedScope, DeploymentId, FailureCode, ManageRun, ManagementOperation, ManagementStatus,
         RegisterWorker, RequestId, RestartDeploy, RestartDeployment, RestartOptions, RestartTarget,
-        RunId, RunOperation, ScopePage, VerifyAssignment, WorkerId, WorkerState, AUDIENCE,
+        RunId, RunOperation, ScopePage, WorkerId, WorkerState, AUDIENCE,
     },
 };
 use zeroship_workflow_client::{ControlCoordinator, Error, Options, WorkerCoordinator};
@@ -580,61 +580,18 @@ async fn control_configuration_requires_the_control_principal_and_secure_origin(
     .unwrap();
     assert_eq!(
         client
-            .verify_assignment(&VerifyAssignment {
+            .manage(&ManageRun {
+                request_id: RequestId::mint(),
                 app_id: AppId::mint(),
-                worker_id: WorkerId::mint(),
-                assignment_revision: 1.try_into().unwrap(),
+                run_id: RunId::mint(),
+                command: ManagementOperation::Transition {
+                    operation: RunOperation::Pause,
+                },
             })
             .await
             .unwrap_err(),
         Error::RequestTooLarge
     );
-}
-
-#[compio::test]
-async fn control_assignment_verification_cannot_change_the_requested_authority() {
-    let request = VerifyAssignment {
-        app_id: AppId::mint(),
-        worker_id: WorkerId::mint(),
-        assignment_revision: 3.try_into().unwrap(),
-    };
-    let valid =
-        json!({"appId":request.app_id,"workerId":request.worker_id,"revision":3,"expiresAt":1});
-    control_reply(
-        response(200, &valid),
-        endpoints::WORKFLOW_VERIFY_ASSIGNMENT,
-        &request,
-        async |client| {
-            assert_eq!(
-                serde_json::to_value(client.verify_assignment(&request).await.unwrap()).unwrap(),
-                valid
-            );
-        },
-    )
-    .await;
-    for (field, changed) in [
-        ("appId", json!(AppId::mint())),
-        ("workerId", json!(WorkerId::mint())),
-        ("revision", json!(2)),
-        ("revision", json!(4)),
-        ("expiresAt", json!(-1)),
-        ("history", json!(["customer-secret"])),
-    ] {
-        let mut invalid = valid.clone();
-        invalid[field] = changed;
-        control_reply(
-            response(200, &invalid),
-            endpoints::WORKFLOW_VERIFY_ASSIGNMENT,
-            &request,
-            async |client| {
-                assert_eq!(
-                    client.verify_assignment(&request).await.unwrap_err(),
-                    Error::InvalidResponse
-                );
-            },
-        )
-        .await;
-    }
 }
 
 #[compio::test]
@@ -782,12 +739,25 @@ async fn native_clients_mint_fresh_full_assertions_for_the_workflow_audience() {
             .then(|| WorkerCoordinator::new(&url, auth.clone(), Options::default()).unwrap());
         let control =
             is_control.then(|| ControlCoordinator::new(&url, auth, Options::default()).unwrap());
-        let (app, placed) = (AppId::mint(), WorkerId::mint());
+        let (app, _) = (AppId::mint(), WorkerId::mint());
+        let request_id = RequestId::mint();
+        let management = ManageRun {
+            request_id: request_id.clone(),
+            app_id: app.clone(),
+            run_id: RunId::mint(),
+            command: ManagementOperation::Transition {
+                operation: RunOperation::Pause,
+            },
+        };
         let (endpoint, body, reply) = if is_control {
             (
-                endpoints::WORKFLOW_VERIFY_ASSIGNMENT,
-                json!({"appId":app,"workerId":placed,"assignmentRevision":1}),
-                json!({"appId":app,"workerId":placed,"revision":1,"expiresAt":1}),
+                endpoints::WORKFLOW_MANAGE,
+                serde_json::to_value(&management).unwrap(),
+                json!({
+                    "appId": app,
+                    "requestId": request_id,
+                    "outcome": {"kind":"applied","state":"paused"},
+                }),
             )
         } else {
             (
@@ -837,17 +807,13 @@ async fn native_clients_mint_fresh_full_assertions_for_the_workflow_audience() {
                         .unwrap()
                         .is_empty());
                 } else {
-                    let assignment = control
+                    let receipt = control
                         .as_ref()
                         .unwrap()
-                        .verify_assignment(&VerifyAssignment {
-                            app_id: app.clone(),
-                            worker_id: placed.clone(),
-                            assignment_revision: 1.try_into().unwrap(),
-                        })
+                        .manage(&management)
                         .await
                         .unwrap();
-                    assert_eq!(assignment.worker_id, placed);
+                    assert_eq!(receipt.request_id, management.request_id);
                 }
             }
         };

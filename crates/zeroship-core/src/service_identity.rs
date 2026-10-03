@@ -486,8 +486,6 @@ pub mod endpoints {
         "GET",
         "/internal/principals/{principal_id}/erasure-preflight",
     );
-    pub const WORKFLOW_VERIFY_ASSIGNMENT: ServiceEndpoint =
-        ServiceEndpoint::new("workflow", "POST", "/v1/assignments/verify");
     pub const WORKFLOW_MANAGE: ServiceEndpoint = ServiceEndpoint::new(
         "workflow",
         "POST",
@@ -667,7 +665,6 @@ pub fn service_allowlist() -> &'static [ServiceAuthorization] {
             ServiceAuthorization::new(
                 principal("svc/control"),
                 &[
-                    endpoints::WORKFLOW_VERIFY_ASSIGNMENT,
                     endpoints::WORKFLOW_MANAGE,
                     endpoints::WORKFLOW_MANAGEMENT_STATUS,
                     endpoints::WORKFLOW_SCHEDULE_REGISTER,
@@ -701,8 +698,7 @@ pub fn service_allowlist() -> &'static [ServiceAuthorization] {
                     // hold is decided and recorded where the journal is, and
                     // Control is where it takes effect on the deploy catalog,
                     // so the process that holds the journal is the one that
-                    // has to be able to say so. The worker keeps this pair for
-                    // the journals it still holds.
+                    // has to be able to say so.
                     endpoints::CONTROL_DEPLOYMENT_HOLD_ACQUIRE,
                     endpoints::CONTROL_DEPLOYMENT_HOLD_RELEASE,
                     // The policy inputs and the deletion marker the manager
@@ -729,8 +725,6 @@ pub fn service_allowlist() -> &'static [ServiceAuthorization] {
                 principal("svc/worker"),
                 &[
                     endpoints::CONTROL_VERSIONS,
-                    endpoints::CONTROL_DEPLOYMENT_HOLD_ACQUIRE,
-                    endpoints::CONTROL_DEPLOYMENT_HOLD_RELEASE,
                     endpoints::WORKFLOW_REGISTER,
                     endpoints::WORKFLOW_ASSIGNMENTS,
                     endpoints::WORKFLOW_RENEW,

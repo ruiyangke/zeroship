@@ -115,7 +115,7 @@ async fn journal_holds_are_taken_by_the_service_role_without_any_placement() {
     let (app, deployment, hash) = fixture.deployment("journal-asserted").await;
     let (_, foreign_deployment, _) = fixture.deployment("journal-asserted-foreign").await;
     // No coordinator is listening: journal authority must not read a placement.
-    let control_server = fixture.control("http://127.0.0.1:1/".into()).await;
+    let control_server = fixture.control().await;
     let client = RemoteDeploymentHolds::asserted(
         &origin(&control_server),
         fixture.workflow_role.clone(),
@@ -157,9 +157,10 @@ async fn journal_holds_are_taken_by_the_service_role_without_any_placement() {
     assert_eq!(fixture.rows().await.len(), 1);
     assert_eq!(workers(&fixture).await, 0);
 
-    // The service may not name a placement, and the worker must. The two halves
-    // of one comparison, and neither is decided by the body: the principal that
-    // authenticated decides which shape its body may have.
+    // The service may not name authority in the body: the request carries no
+    // authority field, and `deny_unknown_fields` refuses one. A
+    // joined worker is refused earlier still, at the authorization table,
+    // because only the service that holds the journal is granted this pair.
     let http = Client::new().await;
     let named = json!({
         "appId":app, "assignmentRevision":1, "deployId":deployment, "generation":2
@@ -196,8 +197,13 @@ async fn journal_holds_are_taken_by_the_service_role_without_any_placement() {
             &unnamed,
         )
         .await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "{}", worker.as_str());
-        assert_eq!(failure, json!({"code":"invalid"}));
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "a joined worker instance holds no deployment-hold grant at {}",
+            worker.as_str()
+        );
+        assert_eq!(failure, json!({"code":"unauthenticated"}));
     }
     // And the holds above are untouched by either refusal.
     let rows = fixture.rows().await;
@@ -230,7 +236,7 @@ async fn the_lane_settles_a_hold_release_control_accepted() {
         .unwrap();
     assert_eq!(acquired.state, HoldState::Held);
 
-    let control_server = fixture.control("http://127.0.0.1:1/".into()).await;
+    let control_server = fixture.control().await;
     let service = Coordinator::connect(
         &fixture.platform.runtime_url,
         CoordinatorOptions::default(),
@@ -406,7 +412,7 @@ async fn the_activation_sweep_records_controls_asserted_registration() {
     let app = AppId::mint();
     fixture.platform.seed_app(&app).await;
     let (deployment, hash) = catalog_deploy_declaring(&fixture, &app, &["Example"]).await;
-    let control_server = fixture.control("http://127.0.0.1:1/".into()).await;
+    let control_server = fixture.control().await;
     let service = Coordinator::connect(
         &fixture.platform.runtime_url,
         CoordinatorOptions::default(),
@@ -555,7 +561,7 @@ async fn the_registration_endpoint_answers_only_the_workflow_role_about_its_own_
     fixture.platform.seed_app(&app).await;
     fixture.platform.seed_app(&other).await;
     let (deployment, hash) = catalog_deploy_declaring(&fixture, &app, &["Example"]).await;
-    let control_server = fixture.control("http://127.0.0.1:1/".into()).await;
+    let control_server = fixture.control().await;
 
     let client = RemoteDeployRegistrations::asserted(
         &origin(&control_server),

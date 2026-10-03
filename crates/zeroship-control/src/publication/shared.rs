@@ -13,10 +13,10 @@
 //! thread.
 //!
 //! Control runs two, one per [`CatalogRole`]. Deployment holds do not share
-//! lanes with publication: a placed hold keeps its lane across coordinator
-//! calls, and archive and restore wait for a publication lane while they hold
-//! the app's lifecycle lock, so holds on those lanes would put a remote call
-//! between that lock and its release.
+//! lanes with publication: the publication catalog serves deploy, archive,
+//! restore and the lifecycle publisher, and the retention executor serves the
+//! deployment-hold ledger and the deployment collector, so neither waits
+//! behind the other's work.
 //!
 //! # Lock order
 //!
@@ -56,8 +56,8 @@ pub const DEFAULT_MAX_CONNECTIONS: NonZeroUsize = match NonZeroUsize::new(4) {
 
 /// The retention executor's session bound unless the configuration names one.
 ///
-/// More than one, so a placed hold waiting on the coordinator leaves a lane
-/// for the other holds and the collector.
+/// More than one, so a hold and the deployment collector do not serialize on
+/// a single lane.
 pub const DEFAULT_RETENTION_MAX_CONNECTIONS: NonZeroUsize = match NonZeroUsize::new(2) {
     Some(bound) => bound,
     None => unreachable!(),

@@ -1,10 +1,7 @@
 //! Journal-holder access to Control's normal app deployment holds.
 //!
-//! Two kinds of host take a journal hold, and they differ only in what
-//! authorizes them. A customer worker holds a placement and names its revision,
-//! which Control verifies with the coordinator on every call. The workflow
-//! service holds the journal itself and has no placement to name; it asserts its
-//! own role, which Control admits by name.
+//! The workflow service holds the journal itself and has no placement to name;
+//! it asserts its own role, which Control admits by name.
 
 #![expect(
     clippy::future_not_send,
@@ -17,12 +14,9 @@ use std::sync::Arc;
 use zeroship_core::{
     app_id::AppId,
     service_identity::{endpoints, ServiceEndpoint},
-    service_peers::{
-        service_issuer, ServiceAuth, CONTROL_SERVICE_NAME, WORKER_SERVICE_NAME,
-        WORKFLOW_SERVICE_NAME,
-    },
+    service_peers::{service_issuer, ServiceAuth, CONTROL_SERVICE_NAME, WORKFLOW_SERVICE_NAME},
     typed_id,
-    workflow_coordination::{AssignedScope, FailureCode, Revision, WorkerId},
+    workflow_coordination::FailureCode,
 };
 use zeroship_workflow_client::{self as coordination, Options, Transport};
 
@@ -30,48 +24,10 @@ use zeroship_workflow_client::{self as coordination, Options, Transport};
 #[derive(Clone, Debug)]
 pub struct RemoteDeploymentHolds {
     scope: HoldScope,
-    /// The placement this client names, and `None` for a host whose authority
-    /// is its own role. Control refuses either one presented by the other's
-    /// principal, so this is the client's half of one comparison.
-    revision: Option<Revision>,
     transport: Transport,
 }
 
 impl RemoteDeploymentHolds {
-    /// Bind retention to an app assignment of the enrolled worker `auth` signs
-    /// for. The assignment is named only by its scope: its worker is the
-    /// signer's own instance, and no expiry is claimed locally. Control
-    /// verifies the actual current placement on every call.
-    ///
-    /// # Errors
-    /// Rejects invalid endpoints and signers that are not an enrolled worker
-    /// instance.
-    pub fn new(
-        url: &str,
-        auth: Arc<ServiceAuth>,
-        scope: &AssignedScope,
-        options: Options,
-    ) -> Result<Self, WorkflowServiceError> {
-        let (issuer, _) = auth
-            .signing_identity()
-            .ok_or(WorkflowServiceError::Unauthenticated)?;
-        let worker_role = service_issuer(WORKER_SERVICE_NAME).map_err(|_| unavailable())?;
-        if issuer.principal() != worker_role.principal()
-            || issuer
-                .instance()
-                .and_then(|id| WorkerId::parse(id).ok())
-                .is_none()
-        {
-            return Err(WorkflowServiceError::PermissionDenied);
-        }
-        let audience = service_issuer(CONTROL_SERVICE_NAME).map_err(|_| unavailable())?;
-        Ok(Self {
-            scope: HoldScope::for_app(scope.app_id.clone()),
-            revision: Some(scope.assignment_revision),
-            transport: Transport::new(url, auth, audience, options).map_err(transport_error)?,
-        })
-    }
-
     /// Bind retention to `app` on the strength of the workflow service's own
     /// role, for the host that holds that app's journal.
     ///
@@ -99,7 +55,6 @@ impl RemoteDeploymentHolds {
         let audience = service_issuer(CONTROL_SERVICE_NAME).map_err(|_| unavailable())?;
         Ok(Self {
             scope: HoldScope::for_app(app),
-            revision: None,
             transport: Transport::new(url, auth, audience, options).map_err(transport_error)?,
         })
     }
@@ -115,7 +70,6 @@ impl RemoteDeploymentHolds {
             .map_err(|_| WorkflowServiceError::InvalidRequest("invalid app deployment".into()))?;
         let request = HoldRequest {
             app_id: self.scope.app().clone(),
-            assignment_revision: self.revision,
             deploy_id: deployment.to_owned(),
             generation,
         };

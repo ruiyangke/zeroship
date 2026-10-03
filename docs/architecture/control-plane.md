@@ -134,13 +134,10 @@ nest: a cron that holds its advisory-lock connection opens more under it.
 Both executors are `publication::Catalog`: a fixed set of threads, each owning
 one ORM session and running one operation at a time. Serving threads and
 background tasks ship `Send` closures to them, and dropping the caller's future
-cancels the operation; one that is still queued never starts. Holds get their
-own executor because a placed hold keeps its session across the coordinator
-calls that re-verify its placement. A placed hold's first placement check runs
-on the serving thread, so a worker the coordinator refuses never takes a
-retention session. The checks inside its transaction, the authority budget and
-COMMIT run on the retention executor's thread, so an expired budget stops
-COMMIT on the thread that would send it.
+cancels the operation; one that is still queued never starts. The retention
+executor serves the deployment-hold ledger and the deployment collector; the
+publication catalog serves deploy, archive, restore and the lifecycle
+publisher.
 
 The lock order is one-way. A caller may hold a request connection while it
 waits for an executor lane: archive and restore hold the app's lifecycle

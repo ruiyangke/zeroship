@@ -21,7 +21,7 @@ async fn app_facts_answer_the_policy_inputs_and_the_deletion_marker() {
     let gone = zeroship_core::AppId::mint();
     let plan = fixture.platform.seed_app(&live).await;
     let gone_plan = fixture.platform.seed_app(&gone).await;
-    let control_server = fixture.control("http://127.0.0.1:1/".into()).await;
+    let control_server = fixture.control().await;
     let client = ControlAppFacts::new(
         &origin(&control_server),
         fixture.workflow_role.clone(),
@@ -175,7 +175,7 @@ async fn app_facts_answer_the_apps_frozen_zone_with_a_second_zone_control() {
         .platform
         .seed_app_in(&away, Some(away_zone.as_str()))
         .await;
-    let control_server = fixture.control("http://127.0.0.1:1/".into()).await;
+    let control_server = fixture.control().await;
     let client = ControlAppFacts::new(
         &origin(&control_server),
         fixture.workflow_role.clone(),
@@ -209,7 +209,7 @@ async fn app_facts_answer_the_apps_frozen_zone_with_a_second_zone_control() {
 #[compio::test(crate = "crate::support::live::system")]
 async fn the_client_refuses_an_empty_or_oversized_request() {
     let fixture = Fixture::new().await;
-    let control_server = fixture.control("http://127.0.0.1:1/".into()).await;
+    let control_server = fixture.control().await;
     let client = ControlAppFacts::new(
         &origin(&control_server),
         fixture.workflow_role.clone(),
@@ -248,7 +248,7 @@ async fn app_facts_authenticate_before_decoding() {
     let fixture = Fixture::new().await;
     let app = zeroship_core::AppId::mint();
     fixture.platform.seed_app(&app).await;
-    let control_server = fixture.control("http://127.0.0.1:1/".into()).await;
+    let control_server = fixture.control().await;
     let origin = origin(&control_server);
     let http = Client::new().await;
     let (worker, worker_auth) = fixture.joined_worker(&http, &origin).await;

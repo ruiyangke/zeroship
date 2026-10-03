@@ -16,7 +16,7 @@ use zeroship_core::{
     service_identity::{authorize, endpoints, verify_identity, PeerCredentials, ServiceEndpoint},
     service_peers::{ServiceAuth, ServiceKeyring},
     typed_id,
-    workflow_coordination::{AssignedScope, WorkerId, AUDIENCE},
+    workflow_coordination::{WorkerId, AUDIENCE},
 };
 use zeroship_workflow::{
     deployment_holds::{
@@ -27,6 +27,7 @@ use zeroship_workflow::{
 };
 
 const CONTROL_AUDIENCE: &str = "spiffe://zeroship.ai/svc/control";
+const WORKFLOW_ISSUER: &str = "spiffe://zeroship.ai/svc/workflow";
 use zeroship_workflow_client::Options;
 
 fn auth(issuer: ServiceIssuer) -> Arc<ServiceAuth> {
@@ -43,43 +44,35 @@ fn auth(issuer: ServiceIssuer) -> Arc<ServiceAuth> {
 }
 
 struct Fixture {
-    auth: Arc<ServiceAuth>,
-    worker_id: WorkerId,
-    scope: AssignedScope,
+    service: Arc<ServiceAuth>,
+    app: AppId,
     deploy_id: String,
     generation: HoldGeneration,
 }
 
 impl Fixture {
     fn new() -> Self {
-        let worker_id = WorkerId::mint();
         Self {
-            auth: auth(
-                ServiceIssuer::parse(&format!(
-                    "spiffe://zeroship.ai/svc/worker/{}",
-                    worker_id.as_str()
-                ))
-                .unwrap(),
-            ),
-            worker_id: worker_id.clone(),
-            scope: AssignedScope {
-                app_id: AppId::mint(),
-                assignment_revision: 7.try_into().unwrap(),
-            },
+            service: auth(ServiceIssuer::parse(WORKFLOW_ISSUER).unwrap()),
+            app: AppId::mint(),
             deploy_id: typed_id::generate("dep"),
             generation: 3.try_into().unwrap(),
         }
     }
 
     fn client(&self, url: &str) -> RemoteDeploymentHolds {
-        RemoteDeploymentHolds::new(url, self.auth.clone(), &self.scope, Options::default())
-            .unwrap()
+        RemoteDeploymentHolds::asserted(
+            url,
+            self.service.clone(),
+            self.app.clone(),
+            Options::default(),
+        )
+        .unwrap()
     }
 
     fn request(&self) -> Value {
         json!({
-            "appId": self.scope.app_id,
-            "assignmentRevision": self.scope.assignment_revision,
+            "appId": self.app,
             "deployId": self.deploy_id,
             "generation": self.generation,
         })
@@ -87,11 +80,9 @@ impl Fixture {
 
     fn receipt(&self, state: HoldState) -> HoldReceipt {
         HoldReceipt {
-            app_id: self.scope.app_id.clone(),
+            app_id: self.app.clone(),
             deploy_id: self.deploy_id.clone(),
-            holder_id: HoldScope::for_app(self.scope.app_id.clone())
-                .holder()
-                .to_owned(),
+            holder_id: HoldScope::for_app(self.app.clone()).holder().to_owned(),
             generation: self.generation,
             state,
             deploy_hash: "a".repeat(64),
@@ -143,7 +134,7 @@ impl ObservedRequest {
                     .then(|| value.trim().strip_prefix("Bearer "))
                     .flatten()
             })
-            .expect("worker service assertion")
+            .expect("workflow service assertion")
     }
 
     fn assert_operation(&self, fixture: &Fixture, state: HoldState) {
@@ -153,11 +144,9 @@ impl ObservedRequest {
         );
         assert_eq!(self.body, fixture.request());
         let request: HoldRequest = serde_json::from_value(self.body.clone()).unwrap();
-        assert_eq!(request.app_id, fixture.scope.app_id);
-        assert_eq!(
-            request.assignment_revision,
-            Some(fixture.scope.assignment_revision)
-        );
+        assert_eq!(request.app_id, fixture.app);
+        assert_eq!(request.deploy_id, fixture.deploy_id);
+        assert_eq!(request.generation, fixture.generation);
     }
 }
 
@@ -215,7 +204,7 @@ async fn exchange(
 #[compio::test]
 async fn lost_reply_retries_preserve_generation_with_fresh_control_assertions() {
     let fixture = Fixture::new();
-    let (issuer, key) = fixture.auth.signing_identity().unwrap();
+    let (issuer, key) = fixture.service.signing_identity().unwrap();
     let mut trust = ServiceTrustBundle::new();
     trust.trust_signing_key(issuer, key.key_id(), key).unwrap();
     let verifier = ServiceAssertionVerifier::new(trust, Arc::new(InMemoryReplayStore::new()));
@@ -311,17 +300,17 @@ async fn receipts_cannot_substitute_scope_deployment_generation_or_state() {
 }
 
 #[test]
-fn request_contract_rejects_caller_supplied_holder_and_unscoped_metadata() {
+fn request_contract_rejects_caller_supplied_authority_and_unscoped_metadata() {
     let fixture = Fixture::new();
     let valid = fixture.request();
     serde_json::from_value::<HoldRequest>(valid.clone()).unwrap();
     for (field, value) in [
         ("holderId", json!(typed_id::generate("dhl"))),
-        ("workerId", json!(fixture.worker_id)),
+        ("workerId", json!(WorkerId::mint())),
+        ("assignmentRevision", json!(1)),
         ("deployHash", json!("a".repeat(64))),
         ("schema", json!("customer")),
         ("generation", json!(0)),
-        ("assignmentRevision", json!(0)),
         ("appId", json!("not-an-app")),
     ] {
         let mut body = valid.clone();
@@ -339,44 +328,37 @@ fn request_contract_rejects_caller_supplied_holder_and_unscoped_metadata() {
             "{field}"
         );
     }
-    // The placement is the one field a caller may omit, because a caller
-    // holding no placement has none to name. Which callers those are is
-    // decided against the authenticated principal in Control, not here.
-    let mut asserted = valid;
-    asserted.as_object_mut().unwrap().remove("assignmentRevision");
-    assert_eq!(
-        serde_json::from_value::<HoldRequest>(asserted)
-            .unwrap()
-            .assignment_revision,
-        None
-    );
 }
 
 #[compio::test]
-async fn client_requires_an_enrolled_worker_signer_and_a_secure_unambiguous_origin() {
+async fn asserted_client_requires_the_service_role_and_a_secure_unambiguous_origin() {
     let fixture = Fixture::new();
     for issuer in [
-        CONTROL_AUDIENCE,
-        "spiffe://zeroship.ai/svc/worker",
-        "spiffe://zeroship.ai/svc/worker/not-an-instance",
+        CONTROL_AUDIENCE.to_owned(),
+        "spiffe://zeroship.ai/svc/worker".to_owned(),
+        format!("spiffe://zeroship.ai/svc/worker/{}", WorkerId::mint().as_str()),
+        // An instance credential of the right service is still refused: the
+        // journal belongs to the service, not to one of its replicas.
+        format!("spiffe://zeroship.ai/svc/workflow/{}", WorkerId::mint().as_str()),
     ] {
         assert_eq!(
-            RemoteDeploymentHolds::new(
+            RemoteDeploymentHolds::asserted(
                 "https://control.example",
-                auth(ServiceIssuer::parse(issuer).unwrap()),
-                &fixture.scope,
-                Options::default()
+                auth(ServiceIssuer::parse(&issuer).unwrap()),
+                fixture.app.clone(),
+                Options::default(),
             )
             .unwrap_err(),
-            WorkflowServiceError::PermissionDenied
+            WorkflowServiceError::PermissionDenied,
+            "{issuer}"
         );
     }
     assert_eq!(
-        RemoteDeploymentHolds::new(
+        RemoteDeploymentHolds::asserted(
             "https://control.example",
             Arc::new(ServiceAuth::unconfigured()),
-            &fixture.scope,
-            Options::default()
+            fixture.app.clone(),
+            Options::default(),
         )
         .unwrap_err(),
         WorkflowServiceError::Unauthenticated
@@ -388,7 +370,7 @@ async fn client_requires_an_enrolled_worker_signer_and_a_secure_unambiguous_orig
         "http://[::1]:8080",
     ] {
         let client = fixture.client(url);
-        assert_eq!(client.scope().app(), &fixture.scope.app_id);
+        assert_eq!(client.scope().app(), &fixture.app);
     }
     for url in [
         "http://control.example",
@@ -402,10 +384,10 @@ async fn client_requires_an_enrolled_worker_signer_and_a_secure_unambiguous_orig
         "not-a-url",
     ] {
         assert!(matches!(
-            RemoteDeploymentHolds::new(
+            RemoteDeploymentHolds::asserted(
                 url,
-                fixture.auth.clone(),
-                &fixture.scope,
+                fixture.service.clone(),
+                fixture.app.clone(),
                 Options::default()
             ),
             Err(WorkflowServiceError::InvalidRequest(_))
@@ -426,10 +408,10 @@ async fn client_requires_an_enrolled_worker_signer_and_a_secure_unambiguous_orig
         },
     ] {
         assert!(matches!(
-            RemoteDeploymentHolds::new(
+            RemoteDeploymentHolds::asserted(
                 "https://control.example",
-                fixture.auth.clone(),
-                &fixture.scope,
+                fixture.service.clone(),
+                fixture.app.clone(),
                 options
             ),
             Err(WorkflowServiceError::InvalidRequest(_))
@@ -452,52 +434,16 @@ async fn client_requires_an_enrolled_worker_signer_and_a_secure_unambiguous_orig
 }
 
 /// The journal-holding service's client is admitted by its role alone, names no
-/// placement on the wire, and holds the same journal scope a worker's does.
+/// placement on the wire, and holds the journal scope for its app.
 ///
-/// Every arm but the last is a refusal, and the last two are the controls: the
+/// Every arm but the last is a refusal, and the last one is the control: the
 /// role itself is admitted, so the refusals above are about WHICH signer rather
 /// than about the constructor refusing everything.
 #[compio::test]
 async fn the_asserted_client_takes_the_service_role_and_names_no_placement() {
     let fixture = Fixture::new();
-    let app = fixture.scope.app_id.clone();
-    for issuer in [
-        CONTROL_AUDIENCE.to_owned(),
-        "spiffe://zeroship.ai/svc/worker".to_owned(),
-        format!(
-            "spiffe://zeroship.ai/svc/worker/{}",
-            fixture.worker_id.as_str()
-        ),
-        // An instance credential of the right service is still refused: the
-        // journal belongs to the service, not to one of its replicas.
-        format!(
-            "spiffe://zeroship.ai/svc/workflow/{}",
-            WorkerId::mint().as_str()
-        ),
-    ] {
-        assert_eq!(
-            RemoteDeploymentHolds::asserted(
-                "https://control.example",
-                auth(ServiceIssuer::parse(&issuer).unwrap()),
-                app.clone(),
-                Options::default(),
-            )
-            .unwrap_err(),
-            WorkflowServiceError::PermissionDenied,
-            "{issuer}"
-        );
-    }
-    assert_eq!(
-        RemoteDeploymentHolds::asserted(
-            "https://control.example",
-            Arc::new(ServiceAuth::unconfigured()),
-            app.clone(),
-            Options::default(),
-        )
-        .unwrap_err(),
-        WorkflowServiceError::Unauthenticated
-    );
-    let service = auth(ServiceIssuer::parse("spiffe://zeroship.ai/svc/workflow").unwrap());
+    let app = fixture.app.clone();
+    let service = auth(ServiceIssuer::parse(WORKFLOW_ISSUER).unwrap());
     let client = RemoteDeploymentHolds::asserted(
         "https://control.example",
         service.clone(),
@@ -506,11 +452,6 @@ async fn the_asserted_client_takes_the_service_role_and_names_no_placement() {
     )
     .unwrap();
     assert_eq!(client.scope(), &HoldScope::for_app(app.clone()));
-    assert_eq!(
-        client.scope().holder(),
-        fixture.client("https://control.example").scope().holder(),
-        "one app has one journal holder, whichever host holds the journal"
-    );
 
     let listener = compio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let client = RemoteDeploymentHolds::asserted(
@@ -562,14 +503,13 @@ async fn the_asserted_client_takes_the_service_role_and_names_no_placement() {
     .expect("asserted hold exchange completed");
 }
 
+/// The journal holder is the app, so the same app has one holder across service
+/// replicas and a different app has another.
 #[compio::test]
-async fn journal_holder_survives_worker_replacement_and_stays_app_scoped() {
+async fn the_journal_holder_is_app_scoped() {
     let fixture = Fixture::new();
     let first = fixture.client("https://control.example");
-    let mut replacement = Fixture::new();
-    replacement.scope.app_id = fixture.scope.app_id.clone();
-    replacement.scope.assignment_revision = 11.try_into().unwrap();
-    let second = replacement.client("https://control.example");
+    let second = fixture.client("https://control.example");
     let other_app = Fixture::new().client("https://control.example");
     assert_eq!(first.scope().holder(), second.scope().holder());
     assert_ne!(first.scope().holder(), other_app.scope().holder());

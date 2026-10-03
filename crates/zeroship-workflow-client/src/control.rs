@@ -6,8 +6,8 @@ use zeroship_core::{
     service_identity::endpoints,
     service_peers::{service_issuer, ServiceAuth, CONTROL_SERVICE_NAME},
     workflow_coordination::{
-        Assignment, ManageRun, ManagementOperation, ManagementReceipt, ManagementStatus, RequestId,
-        RestartDeployment, RestartOptions, RunId, RunOperation, VerifyAssignment, AUDIENCE,
+        ManageRun, ManagementOperation, ManagementReceipt, ManagementStatus, RequestId,
+        RestartDeployment, RestartOptions, RunId, RunOperation, AUDIENCE,
     },
     workflow_jobs::{JobOperation, JobSpec},
     workflow_schedules::{ActivateSchedules, DisableSchedules, RegisterSchedules},
@@ -15,8 +15,9 @@ use zeroship_core::{
 
 /// A runtime-local coordinator client bound to the trusted Control signer.
 ///
-/// The client exchanges placement, management and schedule metadata. Assignment receipts
-/// never grant access to customer credentials, the workflow journal or payloads.
+/// The client exchanges management, schedule and worker-registration metadata.
+/// Receipts never grant access to customer credentials, the workflow journal or
+/// payloads.
 #[derive(Clone, Debug)]
 pub struct ControlCoordinator {
     transport: Transport,
@@ -223,29 +224,5 @@ impl ControlCoordinator {
             return Err(Error::InvalidResponse);
         }
         Ok(receipt)
-    }
-
-    /// Check current placement without renewing it. The returned deadline is
-    /// bounded by both the placement and the enrolled worker's registration.
-    ///
-    /// # Errors
-    /// Refuses failed exchanges and any changed app, worker or assignment revision.
-    pub async fn verify_assignment(&self, request: &VerifyAssignment) -> Result<Assignment, Error> {
-        let assignment: Assignment = self
-            .transport
-            .post(endpoints::WORKFLOW_VERIFY_ASSIGNMENT, request)
-            .await?;
-        if (
-            &assignment.app_id,
-            &assignment.worker_id,
-            assignment.revision,
-        ) != (
-            &request.app_id,
-            &request.worker_id,
-            request.assignment_revision,
-        ) {
-            return Err(Error::InvalidResponse);
-        }
-        Ok(assignment)
     }
 }

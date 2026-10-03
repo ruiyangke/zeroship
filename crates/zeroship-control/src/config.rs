@@ -76,10 +76,10 @@ pub struct ControlSettings {
     #[config(shared = WORKER_URLS, default = "http://localhost:8080".to_owned())]
     pub worker_urls: Operational<String>,
 
-    /// Workflow coordinator used to verify app placement and queue management,
-    /// and to publish app lifecycle intents. An origin the manager client
-    /// would refuse refuses the boot: HTTPS, or plain HTTP to a literal
-    /// loopback address or to an origin named in `plaintext_peers`.
+    /// Workflow coordinator used for workflow queue management and to publish
+    /// app lifecycle intents. An origin the manager client would refuse
+    /// refuses the boot: HTTPS, or plain HTTP to a literal loopback address or
+    /// to an origin named in `plaintext_peers`.
     #[config(name = "control.workflow_coordinator_url", default = "http://127.0.0.1:9093".to_owned())]
     pub workflow_coordinator_url: Operational<String>,
 
@@ -105,8 +105,7 @@ pub struct ControlSettings {
 
     /// Retention sessions the whole process may hold at once, each on a
     /// thread of its own, and so also the deployment-hold and collection
-    /// operations that run at once. Kept apart from the catalog's, because a
-    /// placed hold keeps its session across coordinator calls. Must be
+    /// operations that run at once. Kept apart from the catalog's. Must be
     /// positive.
     #[config(
         name = "control.retention_max_connections",

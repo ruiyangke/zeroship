@@ -22,8 +22,8 @@ use zeroship_core::{
     service_identity::endpoints,
     service_peers::{service_issuer, CONTROL_SERVICE_NAME},
     workflow_coordination::{
-        Assignment, ManageRun, ManagementOperation, ManagementOutcome, RequestId, RunId,
-        RunOperation, WorkerId, AUDIENCE,
+        ManageRun, ManagementOperation, ManagementOutcome, RequestId, RunId, RunOperation,
+        WorkerId, AUDIENCE,
     },
     workflow_jobs::{
         Delivery, JobOperation, JobOutcome, JobReceipt, JournalSettlement, ManagementCommand,
@@ -754,7 +754,6 @@ async fn replicas_authenticate_metadata_and_keep_customer_execution_off_the_prot
     )
     .await;
     for endpoint in [
-        endpoints::WORKFLOW_VERIFY_ASSIGNMENT,
         endpoints::WORKFLOW_MANAGE,
         endpoints::WORKFLOW_MANAGEMENT_STATUS,
         endpoints::WORKFLOW_REGISTER,
@@ -843,67 +842,6 @@ async fn replicas_authenticate_metadata_and_keep_customer_execution_off_the_prot
     let assignment = fixture
         .seed_placement(&app, &worker, Duration::from_secs(30))
         .await;
-    let verification =
-        json!({"appId":app,"workerId":worker,"assignmentRevision":assignment.revision});
-    let verify = endpoints::WORKFLOW_VERIFY_ASSIGNMENT.path_template();
-    assert_eq!(
-        post(
-            &client,
-            &first.url,
-            verify,
-            &assertion(&worker_issuer, &worker_key),
-            &verification
-        )
-        .await
-        .0,
-        StatusCode::UNAUTHORIZED
-    );
-    let (status, verified) = post(
-        &client,
-        &second.url,
-        verify,
-        &assertion(&control, &control_key),
-        &verification,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    let verified: Assignment = serde_json::from_value(verified).unwrap();
-    assert_eq!(verified.app_id, assignment.app_id);
-    assert_eq!(verified.worker_id, assignment.worker_id);
-    assert_eq!(verified.revision, assignment.revision);
-    assert!(verified.expires_at <= assignment.expires_at);
-    for (field, value) in [
-        ("appId", json!(AppId::mint())),
-        ("workerId", json!(WorkerId::mint())),
-        ("assignmentRevision", json!(assignment.revision.get() + 1)),
-    ] {
-        let mut foreign = verification.clone();
-        foreign[field] = value;
-        assert_eq!(
-            post(
-                &client,
-                &second.url,
-                verify,
-                &assertion(&control, &control_key),
-                &foreign
-            )
-            .await,
-            (StatusCode::FORBIDDEN, json!({"code":"denied"}))
-        );
-    }
-    let mut injected = verification.clone();
-    injected["holderId"] = json!("caller-selected");
-    assert_eq!(
-        post(
-            &client,
-            &first.url,
-            verify,
-            &assertion(&control, &control_key),
-            &injected
-        )
-        .await,
-        (StatusCode::BAD_REQUEST, json!({"code":"invalid"}))
-    );
     let scope = json!({"appId":app,"assignmentRevision":assignment.revision});
     assert_eq!(
         post(

@@ -8,7 +8,7 @@ async fn queue_holds_work_without_workers_and_cannot_release_journal_holds() {
     let fixture = Fixture::new().await;
     let (app, deployment, hash) = fixture.deployment("queue-retention").await;
     // No coordinator is listening: queue authority must not depend on placement.
-    let control_server = fixture.control("http://127.0.0.1:1/".into()).await;
+    let control_server = fixture.control().await;
     let client = QueueDeploymentHolds::new(
         &origin(&control_server),
         fixture.workflow_role.clone(),
@@ -117,7 +117,7 @@ async fn queue_hold_http_authenticates_before_decoding_and_closes_scope() {
     let fixture = Fixture::new().await;
     let (app, deployment, _) = fixture.deployment("queue-hold-auth").await;
     let (foreign_app, foreign_deployment, _) = fixture.deployment("queue-hold-foreign").await;
-    let control_server = fixture.control("http://127.0.0.1:1/".into()).await;
+    let control_server = fixture.control().await;
     let origin = origin(&control_server);
     let http = Client::new().await;
     let (worker, worker_auth) = fixture.joined_worker(&http, &origin).await;

@@ -1,8 +1,9 @@
 # zeroship-workflow-client
 
-Authenticated workflow metadata transport for native hosts. Worker and Control
-clients validate assignment and receipt identity, mint fresh service assertions,
-bound requests and responses, and use compio HTTP connections.
+Authenticated workflow metadata transport for native hosts. Worker clients
+validate assignment and receipt identity; Control clients validate schedule and
+management receipts. Both mint fresh service assertions, bound requests and
+responses, and use compio HTTP connections.
 
 This crate depends on shared wire types, not the customer engine, manager, ORM
 or V8. Remote origins require HTTPS, with two exceptions: literal loopback, and
