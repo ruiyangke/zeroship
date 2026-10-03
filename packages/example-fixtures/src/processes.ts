@@ -34,7 +34,7 @@ export class ManagedProcess {
     if (this.stopped || !this.child.pid) return;
     this.stopped = true;
     try {
-      // Reap the owned process group, including Vite's runtime child.
+      // Reap the owned process group, with anything the service or build spawned.
       process.kill(-this.child.pid, "SIGKILL");
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
@@ -52,7 +52,12 @@ export class Processes {
   private readonly controller = new AbortController();
   readonly signal = this.controller.signal;
 
-  constructor(readonly logs: string) {}
+  constructor(readonly logs: string, private readonly cancelMessage = "Fixture cancelled") {}
+
+  /** Where the process started under `name` writes its output. */
+  log(name: string): string {
+    return join(this.logs, `${name}.log`);
+  }
 
   start(name: string, binary: string, args: string[], cwd: string, env: NodeJS.ProcessEnv = {}): ManagedProcess {
     this.signal.throwIfAborted();
@@ -60,7 +65,7 @@ export class Processes {
       PATH: process.env.PATH,
       LD_LIBRARY_PATH: process.env.LD_LIBRARY_PATH,
       ...env,
-    }, join(this.logs, `${name}.log`));
+    }, this.log(name));
     this.children.add(child);
     return child;
   }
@@ -91,7 +96,7 @@ export class Processes {
   }
 
   cancel(): void {
-    this.controller.abort(new Error("Database fixture cancelled"));
+    this.controller.abort(new Error(this.cancelMessage));
     for (const child of this.children) child.kill();
   }
 

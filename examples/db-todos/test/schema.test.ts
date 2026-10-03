@@ -8,7 +8,7 @@ import {
   type Todo,
   type User,
 } from "../src/schema";
-import { fixtureOwnerId } from "../tests/fixture/platform";
+import { fixtureOwnerId } from "../tests/fixture/settings";
 
 const userId = typedIdFromStableSeed("user", "todo-validation-user");
 

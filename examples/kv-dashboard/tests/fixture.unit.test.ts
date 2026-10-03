@@ -2,11 +2,11 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, test } from "vitest";
-import { Processes } from "./fixture/processes";
+import { Processes } from "@zeroship/example-fixtures";
 
 async function fixture(run: (processes: Processes, directory: string) => Promise<void>) {
   const directory = await mkdtemp(join(tmpdir(), "kv-process-test-"));
-  const processes = new Processes(directory);
+  const processes = new Processes(directory, "Dashboard fixture cancelled");
   try { await run(processes, directory); }
   finally {
     await processes.close();
@@ -26,7 +26,7 @@ async function alive(pid: number): Promise<boolean> {
 
 test("cleanup stops owned descendants and leaves a separate service alive", async () => {
   await fixture(async (owned, directory) => {
-    const separate = new Processes(directory);
+    const separate = new Processes(directory, "Dashboard fixture cancelled");
     try {
       const control = separate.start("control", process.execPath, ["-e", "console.log('ready'); setInterval(() => {}, 1000)"], directory);
       const parent = owned.start("parent", process.execPath, ["-e", `

@@ -1,5 +1,5 @@
 import type { TestProject } from "vitest/node";
-import { Platform } from "./platform";
+import { Platform } from "./settings";
 
 export default async function setup(project: TestProject) {
   const platform = await Platform.create();

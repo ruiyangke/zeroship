@@ -1,0 +1,28 @@
+{
+  "name": "@zeroship/example-fixtures",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Shared end-to-end platform, process and issuer fixtures for the example suites",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./src/index.ts"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@zeroship/server": "workspace:*",
+    "selfsigned": "^5.5.0",
+    "smol-toml": "^1.8.0",
+    "tar": "^7.5.13",
+    "testcontainers": "^12.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "typescript": "catalog:"
+  }
+}

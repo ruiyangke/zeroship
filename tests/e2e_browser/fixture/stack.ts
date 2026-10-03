@@ -4,7 +4,7 @@ import { generateKeyPairSync, randomBytes } from "node:crypto";
 import { createWriteStream, existsSync, rmSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { request } from "node:http";
-import { connect, createServer } from "node:net";
+import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -15,29 +15,10 @@ import { GenericContainer, Wait, type StartedTestContainer } from "testcontainer
 import { isTypedId, typedIdFromStableSeed } from "@zeroship/server/typed-id";
 import { assertStaticOnly, readManifest } from "./bundle";
 import { EXAMPLES, type AppKind, type StackDescriptor } from "./descriptor";
-import { issuer } from "./issuer";
-import { Processes } from "./processes";
+import { issuer, Processes, reservePort } from "@zeroship/example-fixtures";
 
 const suite = fileURLToPath(new URL("../", import.meta.url));
 const root = resolve(suite, "../..");
-
-async function reservePort() {
-  const server = createServer();
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", resolve);
-  });
-  const address = server.address();
-  assert(address && typeof address !== "string");
-  return {
-    number: address.port,
-    url: `http://127.0.0.1:${address.port}`,
-    release: () => new Promise<void>((resolve, reject) => {
-      if (!server.listening) return resolve();
-      server.close((error) => error ? reject(error) : resolve());
-    }),
-  };
-}
 
 /**
  * One request to the gateway addressed by Host, the way a browser reaches
@@ -74,7 +55,7 @@ export class Stack {
   private closing?: Promise<void>;
 
   private constructor(readonly work: string, readonly logs: string) {
-    this.processes = new Processes(logs);
+    this.processes = new Processes(logs, "Browser stack fixture cancelled");
   }
 
   static async create(): Promise<Stack> {
@@ -189,7 +170,7 @@ export class Stack {
     } } }));
     await processes.run("migrate", process.execPath, [join(root, "packages/zero-migrate-cli/dist/cli-bin.js"), "apply", "--config", migration, "--env", "platform", "--approve"], root);
 
-    const identity = issuer();
+    const identity = issuer({ kid: "browser-stack", scope: "organization:create apps:read apps:write apps:deploy deployments:read" });
     const jwks = await this.container("issuer", identity.container);
     const issuerUrl = `http://${jwks.getHost()}:${jwks.getMappedPort(80)}`;
     const owner = typedIdFromStableSeed("usr", "browser-stack-fixture-owner");

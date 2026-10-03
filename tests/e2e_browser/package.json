@@ -9,6 +9,7 @@
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
+    "@zeroship/example-fixtures": "workspace:*",
     "@playwright/test": "catalog:",
     "@types/node": "catalog:",
     "@zeroship/server": "workspace:*",

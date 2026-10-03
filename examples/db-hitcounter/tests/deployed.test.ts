@@ -5,7 +5,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { chromium } from "playwright";
 import { afterAll, beforeAll, expect, test } from "vitest";
 import { assertUsage, type Usage } from "./billing";
-import { Platform } from "./fixture/platform";
+import { Platform } from "./fixture/settings";
 
 let platform: Platform;
 const cancel = () => platform?.processes.cancel();

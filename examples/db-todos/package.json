@@ -24,6 +24,7 @@
     "react-dom": "catalog:react18"
   },
   "devDependencies": {
+    "@zeroship/example-fixtures": "workspace:*",
     "@types/node": "catalog:",
     "@playwright/test": "catalog:",
     "@testing-library/dom": "^10.4.1",
@@ -34,10 +35,6 @@
     "@zeroship/types": "workspace:*",
     "jsdom": "^29.1.1",
     "playwright": "catalog:",
-    "selfsigned": "^5.5.0",
-    "smol-toml": "^1.8.0",
-    "tar": "^7.5.13",
-    "testcontainers": "^12.1.0",
     "typescript": "catalog:",
     "vite": "catalog:",
     "vitest": "^4.1.7",
