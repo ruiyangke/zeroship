@@ -2,9 +2,8 @@
 //!
 //! A case's connections are joined before its runtime ends, including when the
 //! case unwinds, and a failed case re-raises its own failure rather than a
-//! teardown symptom. The container every case shares is removed after the
-//! process that owns it exits, and after that process is killed while the
-//! container is still starting.
+//! teardown symptom. An HTTP fixture the case never exercises still releases the
+//! connection its app state holds before the case ends.
 
 use futures::FutureExt;
 use std::cell::RefCell;
@@ -12,30 +11,6 @@ use std::panic::AssertUnwindSafe;
 
 use crate::support::database::Database;
 use zeroship_core::UserId;
-use zeroship_testkit::lifetime;
-
-/// The child test the lifetime measurements drive, by its full path in this
-/// binary.
-const CHILD_TEST: &str =
-    "integration::database_lifetime::the_auth_test_database_reports_its_container";
-
-#[test]
-fn the_auth_test_database_reports_its_container() {
-    lifetime::report_owner();
-    let id = zeroship_testkit::postgres::server_container_id();
-    assert!(!id.is_empty(), "the fixture reports the container it started");
-    lifetime::report_container(&id);
-}
-
-#[test]
-fn the_auth_test_database_is_removed_when_its_process_ends() {
-    lifetime::assert_removed_after_the_child_exits(CHILD_TEST);
-}
-
-#[test]
-fn the_auth_test_database_is_removed_when_its_process_is_killed_while_starting() {
-    lifetime::assert_removed_after_a_kill_during_startup(CHILD_TEST);
-}
 
 #[ntex::test]
 async fn a_failed_case_re_raises_its_failure_and_closes_its_connections() {

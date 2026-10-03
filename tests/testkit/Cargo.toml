@@ -18,7 +18,9 @@ compio-postgres = { path = "../../libs/compio-postgres" }
 compio-redis = { path = "../../libs/compio-redis" }
 compio-s3 = { path = "../../libs/compio-s3" }
 futures = "0.3"
+libc = "0.2"
 serde_json = { version = "1", features = ["raw_value", "preserve_order"] }
+sha2 = "0.10"
 tempfile = "3"
 testcontainers = { version = "0.28", default-features = false, features = ["blocking", "watchdog"] }
 toml = "0.8"

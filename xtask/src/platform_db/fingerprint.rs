@@ -1,8 +1,16 @@
-include!("../../../tests/fixtures/platform_db/fingerprint.rs");
+//! The migration-corpus fingerprint, re-exported from the testkit that owns it.
+//!
+//! The suite-database provisioner and the testkit name a shared database after
+//! the same corpus, so both read the one construction. Keeping it in the testkit
+//! rather than an `include!` of a file that has no crate of its own is what lets
+//! the fixture and its consumers link the same function.
+pub use zeroship_testkit::fingerprint::*;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+    use std::process::Command;
 
     fn tree(dir: &Path, files: &[(&str, &str)]) {
         std::fs::create_dir_all(dir.join(MIGRATIONS_DIR)).unwrap();

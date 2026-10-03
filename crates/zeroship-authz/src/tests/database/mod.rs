@@ -1,9 +1,9 @@
 //! The one migrated platform database this test binary shares, and each case's
 //! pair of connections to it.
 //!
-//! The server is owned by [`zeroship_testkit::postgres`], started and migrated
-//! the first time a case asks for it; see that module for why it is removed
-//! once this process has ended however the process ends.
+//! The server is owned by [`zeroship_testkit::postgres::platform`], booted once
+//! per worktree and leased for the life of each process; see that module for why
+//! the container's watchdog removes it once no process holds a lease.
 
 #![allow(
     clippy::future_not_send,
@@ -66,26 +66,6 @@ impl Database {
             std::panic::resume_unwind(panic);
         }
     }
-}
-
-/// The child test the lifetime measurements drive, by its full path in this binary.
-const CHILD_TEST: &str = "tests::database::the_shared_database_reports_its_container";
-
-#[test]
-fn the_shared_database_reports_its_container() {
-    zeroship_testkit::lifetime::report_owner();
-    let id = zeroship_testkit::postgres::server_container_id();
-    zeroship_testkit::lifetime::report_container(&id);
-}
-
-#[test]
-fn the_shared_database_is_removed_when_its_process_ends() {
-    zeroship_testkit::lifetime::assert_removed_after_the_child_exits(CHILD_TEST);
-}
-
-#[test]
-fn the_shared_database_is_removed_when_its_process_is_killed_while_starting() {
-    zeroship_testkit::lifetime::assert_removed_after_a_kill_during_startup(CHILD_TEST);
 }
 
 #[compio::test]

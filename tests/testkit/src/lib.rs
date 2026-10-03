@@ -6,6 +6,10 @@
 //! moves. Consumers reach this crate through `[dev-dependencies]`, so nothing
 //! here touches a shipped binary.
 //!
+//! - [`fingerprint`] hashes the platform migration corpus a working tree or a
+//!   git tree would apply.
+//! - [`shared`] elects one migrated server across every test process of a
+//!   worktree and leases it.
 //! - [`docker`] owns the containers a test process starts and the reaper that
 //!   removes them once that process ends.
 //! - [`lifetime`] carries the two measurements a fixture built on the reaper
@@ -20,11 +24,13 @@
 //! - [`nested_cargo`] starts a cargo from inside a process cargo started.
 
 pub mod docker;
+pub mod fingerprint;
 pub mod nested_cargo;
 pub mod postgres;
 pub mod redis;
 pub mod s3;
 pub mod session_keys;
+pub mod shared;
 pub mod tenant;
 
 pub use docker::lifetime;

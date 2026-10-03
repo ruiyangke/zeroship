@@ -65,10 +65,10 @@ fn is_migration_name(name: &str) -> bool {
 
 /// The migration files a working tree would apply, by basename.
 ///
-/// ONE FILTER, TWO CONSUMERS: [`of_dir`] hashes this set, and
-/// [`super::live_db`] counts it against the journal of a live database. They
-/// have to agree on membership or the two answers describe different corpora,
-/// so the selection rule lives here and neither caller restates it.
+/// ONE FILTER, TWO CONSUMERS: [`of_dir`] hashes this set, and the suite-database
+/// provisioner counts it against the journal of a live database. They have to
+/// agree on membership or the two answers describe different corpora, so the
+/// selection rule lives here and neither caller restates it.
 ///
 /// The order is `discover`'s: filenames sorted, the migration order contract
 /// the CLI applies in.

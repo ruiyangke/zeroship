@@ -97,6 +97,24 @@ impl DockerCli {
         }
     }
 
+    /// A `docker` command preloaded with this program.
+    #[must_use]
+    pub fn command(&self) -> Command {
+        Command::new(&self.program)
+    }
+
+    /// The program this CLI runs.
+    #[must_use]
+    pub fn program(&self) -> &std::ffi::OsStr {
+        &self.program
+    }
+
+    /// How this program is named in a diagnostic.
+    #[must_use]
+    pub fn describe(&self) -> String {
+        self.display()
+    }
+
     /// The full ids of the containers carrying `key=value`, by the same query the
     /// reaper runs.
     ///

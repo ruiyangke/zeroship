@@ -1,17 +1,13 @@
 //! An explicitly owned PostgreSQL server for a native test.
 //!
 //! Keep the fixture alive until its clients and service processes have stopped.
-//! The container is started through the shared reaper ([`docker`]), so a process
-//! killed while its clients are still connected leaves no server behind.
-
-#[path = "image.rs"]
-mod image;
-#[path = "../docker.rs"]
-mod docker;
+//! The container is started through the shared reaper ([`crate::docker`]), so a
+//! process killed while its clients are still connected leaves no server behind.
 
 use testcontainers::{core::IntoContainerPort, ImageExt};
 
-use docker::{start_owned, DockerCli, OwnedContainer, Ownership};
+use crate::docker::{start_owned, DockerCli, OwnedContainer, Ownership};
+use crate::postgres::image;
 
 pub struct Postgres {
     _container: OwnedContainer,
