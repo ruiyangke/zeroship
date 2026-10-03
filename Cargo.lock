@@ -8278,6 +8278,7 @@ dependencies = [
  "testcontainers",
  "toml 0.8.23",
  "url",
+ "zeroship-testkit",
 ]
 
 [[package]]
@@ -8295,6 +8296,7 @@ dependencies = [
  "zeroship-metering",
  "zeroship-runtime",
  "zeroship-runtime-macros",
+ "zeroship-testkit",
 ]
 
 [[package]]
@@ -8694,6 +8696,7 @@ version = "0.1.0"
 dependencies = [
  "compio",
  "compio-postgres",
+ "compio-redis",
  "compio-s3",
  "serde_json",
  "tempfile",

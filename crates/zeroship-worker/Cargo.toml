@@ -3,7 +3,7 @@ name = "zeroship-worker"
 version = "0.1.0"
 edition = "2021"
 description = "zeroship data plane — V8 compute worker"
-# End-to-end suites are explicit targets; a new tests/e2e/<name>.rs is compiled by nothing until tests/e2e/main.rs declares it.
+# End-to-end suites are modules of the one `tests/main.rs` target; a new tests/e2e/<name>.rs is compiled by nothing until tests/e2e/mod.rs declares it.
 autotests = false
 
 [[package.metadata.zeroship-config.targets]]
@@ -63,8 +63,8 @@ ed25519-dalek = { workspace = true }
 base64 = { workspace = true }
 
 [[test]]
-name = "e2e"
-path = "tests/e2e/main.rs"
+name = "main"
+path = "tests/main.rs"
 
 [lints]
 workspace = true

@@ -9,7 +9,7 @@
 //! `S3BlobStore` has reporting green on every machine that could not run it.
 //!
 //! Run explicitly:
-//!   `cargo test -p zeroship-bundle --test integration s3_blob_store:: -- --nocapture`
+//!   `cargo test -p zeroship-bundle --test main integration::s3_blob_store:: -- --nocapture`
 
 #![allow(clippy::future_not_send)]
 

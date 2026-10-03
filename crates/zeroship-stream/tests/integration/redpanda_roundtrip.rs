@@ -75,7 +75,14 @@ fn brokers() -> String {
 
 /// The child test the broker's lifetime measurements run, by its full path in this
 /// binary.
-const CHILD_TEST: &str = "redpanda_roundtrip::the_redpanda_broker_reports_its_container";
+///
+/// `module_path!()` prefixes the crate name; libtest names a case by its module
+/// path without that prefix, so the first segment is dropped.
+fn child_test() -> String {
+    let module = module_path!();
+    let module = module.split_once("::").map_or(module, |(_, path)| path);
+    format!("{module}::the_redpanda_broker_reports_its_container")
+}
 
 #[test]
 fn the_redpanda_broker_reports_its_container() {
@@ -91,12 +98,12 @@ fn the_redpanda_broker_reports_its_container() {
 
 #[test]
 fn the_redpanda_broker_is_removed_when_its_process_ends() {
-    lifetime::assert_removed_after_the_child_exits(CHILD_TEST);
+    lifetime::assert_removed_after_the_child_exits(&child_test());
 }
 
 #[test]
 fn the_redpanda_broker_is_removed_when_its_process_is_killed_while_starting() {
-    lifetime::assert_removed_after_a_kill_during_startup(CHILD_TEST);
+    lifetime::assert_removed_after_a_kill_during_startup(&child_test());
 }
 
 #[test]

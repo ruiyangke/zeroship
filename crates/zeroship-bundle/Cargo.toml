@@ -3,7 +3,7 @@ name = "zeroship-bundle"
 version = "0.1.0"
 edition = "2021"
 description = ".zship deploy artifact: manifest types, content-addressed blob store, pack/unpack."
-# Integration suites are explicit targets; a new tests/integration/<name>.rs is compiled by nothing until tests/integration/main.rs declares it.
+# Integration suites are modules of the one `tests/main.rs` target; a new tests/integration/<name>.rs is compiled by nothing until tests/integration/mod.rs declares it.
 autotests = false
 
 [dependencies]
@@ -32,8 +32,8 @@ zeroship-id = { workspace = true }
 compio = { workspace = true, features = ["fs", "macros", "runtime"] }
 
 [[test]]
-name = "integration"
-path = "tests/integration/main.rs"
+name = "main"
+path = "tests/main.rs"
 
 [lints]
 workspace = true

@@ -3,7 +3,7 @@ name = "zeroship-kv-v8"
 version = "0.1.0"
 edition = "2021"
 description = "V8 binding for zeroship-kv: env.kv primitives and platform usage metering"
-# Integration suites are explicit targets; a new tests/integration/<name>.rs is compiled by nothing until tests/integration/main.rs declares it.
+# Integration suites are modules of the one `tests/main.rs` target; a new tests/integration/<name>.rs is compiled by nothing until tests/integration/mod.rs declares it.
 autotests = false
 
 [dependencies]
@@ -21,10 +21,11 @@ zeroship-core = { workspace = true }
 compio = { workspace = true }
 tempfile = { workspace = true }
 testcontainers = { version = "0.28", default-features = false, features = ["blocking"] }
+zeroship-testkit = { path = "../../tests/testkit" }
 
 [[test]]
-name = "integration"
-path = "tests/integration/main.rs"
+name = "main"
+path = "tests/main.rs"
 
 [lints]
 workspace = true

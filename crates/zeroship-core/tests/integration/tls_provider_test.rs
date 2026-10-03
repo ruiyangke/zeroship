@@ -28,7 +28,11 @@ fn groups(provider: &CryptoProvider) -> Vec<rustls::NamedGroup> {
 
 /// Run the ignored case alone in a child copy of this binary.
 fn passes_alone(case: &str) {
-    let name = format!("tls_provider_test::{case}");
+    // `module_path!()` prefixes the crate name; libtest names a case by its
+    // module path without that prefix, so drop the first segment.
+    let module = module_path!();
+    let module = module.split_once("::").map_or(module, |(_, path)| path);
+    let name = format!("{module}::{case}");
     let out = std::process::Command::new(std::env::current_exe().expect("current_exe"))
         .args(["--exact", &name, "--ignored", "--nocapture", "--test-threads=1"])
         .output()

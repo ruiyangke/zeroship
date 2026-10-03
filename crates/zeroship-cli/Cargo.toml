@@ -3,7 +3,7 @@ name = "zeroship-cli"
 version = "0.1.0"
 edition = "2021"
 description = "zeroship CLI — build, serve, deploy, inspect"
-# End-to-end suites are explicit targets; a new tests/e2e/<name>.rs is compiled by nothing until tests/e2e/main.rs declares it.
+# End-to-end suites are modules of the one `tests/main.rs` target; a new tests/e2e/<name>.rs is compiled by nothing until tests/e2e/mod.rs declares it.
 autotests = false
 
 [[package.metadata.zeroship-config.targets]]
@@ -16,8 +16,8 @@ name = "zeroship"
 path = "src/main.rs"
 
 [[test]]
-name = "e2e"
-path = "tests/e2e/main.rs"
+name = "main"
+path = "tests/main.rs"
 
 [dependencies]
 async-trait = { workspace = true }

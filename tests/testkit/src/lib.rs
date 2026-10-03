@@ -12,6 +12,8 @@
 //!   owes: its container is gone after the owning process exits, and after that
 //!   process is killed while the container is still starting.
 //! - [`postgres`] is the reaper-owned platform database one test process shares.
+//! - [`redis`] owns the Redis and Dragonfly servers the driver, KV and binding
+//!   suites share.
 //! - [`tenant`] mints the scoped org/project/app/user ids a case owns.
 //! - [`s3`] owns an S3-compatible server with Docker-assigned ports.
 //! - [`session_keys`] writes the key files in-process auth servers read.
@@ -20,6 +22,7 @@
 pub mod docker;
 pub mod nested_cargo;
 pub mod postgres;
+pub mod redis;
 pub mod s3;
 pub mod session_keys;
 pub mod tenant;
