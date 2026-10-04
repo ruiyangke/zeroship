@@ -48,6 +48,10 @@ cyper = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+# The worker's own database fixture clones from the worktree's shared migrated
+# platform server, and boots a private one of its own for a posture case that
+# reaches the cluster-wide zeroship_worker role.
+zeroship-testkit = { workspace = true }
 # Creator execution fixtures keep their deployment catalog in a separate ORM database.
 zeroship-workflow-manager = { workspace = true }
 # The workflow-typed fixture adapters over the plain workflow testkit.

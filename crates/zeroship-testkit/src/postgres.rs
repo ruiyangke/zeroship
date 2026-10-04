@@ -207,6 +207,13 @@ impl FreshDatabase {
     pub fn admin_url(&self) -> url::Url {
         self.base.clone()
     }
+
+    /// The Docker id of the shared server this clone lives on, so a contract
+    /// can show two cases of a run clone from the same container.
+    #[must_use]
+    pub fn container_id(&self) -> &str {
+        &self.container_id
+    }
 }
 
 impl Drop for FreshDatabase {

@@ -8777,6 +8777,7 @@ dependencies = [
  "zeroship-shared-server",
  "zeroship-storage",
  "zeroship-storage-v8",
+ "zeroship-testkit",
  "zeroship-workflow",
  "zeroship-workflow-client",
  "zeroship-workflow-fixtures",

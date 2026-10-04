@@ -29,7 +29,10 @@ fn rejects_replication_and_rls_bypass_independently() {
 
 #[compio::test]
 async fn worker_boot_accepts_the_migrated_role_without_replication() {
-    Database::migrated(async |database| {
+    // Isolated: this reads zeroship_worker's own cluster-wide membership count,
+    // which the shared server's other worker tests must never be mutating
+    // concurrently (see `Database::isolated`'s doc).
+    Database::isolated(async |database| {
         validate_database_url(database.url_as(WORKER_DATABASE_ROLE).as_str())
             .await
             .expect("the migrated worker role must satisfy the production boot gate");
@@ -46,16 +49,19 @@ async fn worker_boot_accepts_the_migrated_role_without_replication() {
 async fn every_refused_exchange_carries_the_servers_reason() {
     // THE CONTROL: with nothing refused, both queries run and the verdict is
     // the posture's own, so each arm below is refused by its setup alone.
+    // `{role}` is substituted with this case's own minted login: a fixed
+    // `fixture_login` would be a cluster-global name every worker test
+    // process of the shared server could collide on.
     let arms = [
         (
             None,
             "worker database login must be zeroship_worker",
-            "got fixture_login",
+            "got {role}",
         ),
         (
-            Some("ALTER ROLE fixture_login CONNECTION LIMIT 0"),
+            Some("ALTER ROLE \"{role}\" CONNECTION LIMIT 0"),
             "connect to inspect worker database role: ",
-            r#"too many connections for role "fixture_login""#,
+            "too many connections for role \"{role}\"",
         ),
         (
             Some("REVOKE SELECT ON pg_catalog.pg_roles FROM PUBLIC"),
@@ -72,18 +78,26 @@ async fn every_refused_exchange_carries_the_servers_reason() {
     let mut mismatched = Vec::new();
     for (setup, step, reason) in arms {
         Database::run(async |database| {
+            let role = database.mint_role("fixture_login");
+            let substitute = |template: &str| template.replace("{role}", &role);
             database
                 .admin
-                .batch_execute("CREATE ROLE fixture_login LOGIN PASSWORD 'fixture_login'")
+                .batch_execute(&format!("CREATE ROLE \"{role}\" LOGIN PASSWORD '{role}'"))
                 .await
                 .unwrap();
             if let Some(setup) = setup {
-                database.admin.batch_execute(setup).await.unwrap();
+                database
+                    .admin
+                    .batch_execute(&substitute(setup))
+                    .await
+                    .unwrap();
             }
-            let error = validate_database_url(database.url_as("fixture_login").as_str())
+            let error = validate_database_url(database.url_as(&role).as_str())
                 .await
-                .expect_err("fixture_login is never the worker's posture");
-            if !(error.starts_with(step) && error.contains(reason)) {
+                .expect_err("a freshly minted login is never the worker's posture");
+            let step = substitute(step);
+            let reason = substitute(reason);
+            if !(error.starts_with(&step) && error.contains(&reason)) {
                 mismatched.push(format!(
                     "expected {step:?} carrying {reason:?}, got: {error}"
                 ));

@@ -14,34 +14,47 @@ async fn memberships(client: &compio_postgres::Client) -> (i64, Option<String>) 
 #[compio::test]
 async fn membership_inheritance_changes_are_visible_on_the_same_login_connection() {
     Database::run(async |database| {
+        let tenant_role = database.mint_role("tenant_role");
+        let fixture_login = database.mint_role("fixture_login");
         database
             .admin
-            .batch_execute(
-                "CREATE ROLE tenant_role; CREATE ROLE fixture_login LOGIN PASSWORD 'fixture_login'",
-            )
+            .batch_execute(&format!(
+                "CREATE ROLE \"{tenant_role}\"; \
+                 CREATE ROLE \"{fixture_login}\" LOGIN PASSWORD '{fixture_login}'"
+            ))
             .await
             .unwrap();
-        let login = database.connect_as("fixture_login").await;
+        let login = database.connect_as(&fixture_login).await;
         assert_eq!(memberships(&login).await, (0, None));
 
         database
             .admin
-            .batch_execute("GRANT tenant_role TO fixture_login WITH INHERIT TRUE")
+            .batch_execute(&format!(
+                "GRANT \"{tenant_role}\" TO \"{fixture_login}\" WITH INHERIT TRUE"
+            ))
             .await
             .unwrap();
-        assert_eq!(memberships(&login).await, (1, Some("tenant_role".into())));
+        assert_eq!(
+            memberships(&login).await,
+            (1, Some(tenant_role.clone()))
+        );
 
         // Changing the login default does not fence an existing membership.
         database
             .admin
-            .batch_execute("ALTER ROLE fixture_login NOINHERIT")
+            .batch_execute(&format!("ALTER ROLE \"{fixture_login}\" NOINHERIT"))
             .await
             .unwrap();
-        assert_eq!(memberships(&login).await, (1, Some("tenant_role".into())));
+        assert_eq!(
+            memberships(&login).await,
+            (1, Some(tenant_role.clone()))
+        );
 
         database
             .admin
-            .batch_execute("GRANT tenant_role TO fixture_login WITH INHERIT FALSE")
+            .batch_execute(&format!(
+                "GRANT \"{tenant_role}\" TO \"{fixture_login}\" WITH INHERIT FALSE"
+            ))
             .await
             .unwrap();
         assert_eq!(memberships(&login).await, (0, None));
@@ -51,7 +64,10 @@ async fn membership_inheritance_changes_are_visible_on_the_same_login_connection
 
 #[compio::test]
 async fn any_inherited_role_is_reported_and_refuses_boot() {
-    Database::migrated(async |database| {
+    // Isolated: this grants and revokes a membership on zeroship_worker itself,
+    // which every worker test process of the shared server would then also see
+    // (see `Database::isolated`'s doc).
+    Database::isolated(async |database| {
         let worker = database.connect_as(WORKER_DATABASE_ROLE).await;
         assert_eq!(memberships(&worker).await, (0, None));
 
@@ -68,21 +84,27 @@ async fn any_inherited_role_is_reported_and_refuses_boot() {
 #[compio::test]
 async fn fencing_a_grant_does_not_hide_an_inheriting_sibling_from_another_grantor() {
     Database::run(async |database| {
-        database.admin.batch_execute(
-            "CREATE ROLE tenant_role; CREATE ROLE alternate_grantor; \
-             CREATE ROLE fixture_login LOGIN PASSWORD 'fixture_login'; \
-             GRANT tenant_role TO alternate_grantor WITH ADMIN TRUE; \
-             GRANT tenant_role TO fixture_login WITH INHERIT FALSE; \
-             SET ROLE alternate_grantor; \
-             GRANT tenant_role TO fixture_login WITH INHERIT TRUE; RESET ROLE;",
-        ).await.unwrap();
-        let login = database.connect_as("fixture_login").await;
-        assert_eq!(memberships(&login).await, (1, Some("tenant_role".into())));
-        database.admin.batch_execute("REVOKE tenant_role FROM fixture_login").await.unwrap();
-        assert_eq!(memberships(&login).await, (1, Some("tenant_role".into())));
-        database.admin.batch_execute(
-            "SET ROLE alternate_grantor; GRANT tenant_role TO fixture_login WITH INHERIT FALSE; RESET ROLE",
-        ).await.unwrap();
+        let tenant_role = database.mint_role("tenant_role");
+        let alternate_grantor = database.mint_role("alternate_grantor");
+        let fixture_login = database.mint_role("fixture_login");
+        database.admin.batch_execute(&format!(
+            "CREATE ROLE \"{tenant_role}\"; CREATE ROLE \"{alternate_grantor}\"; \
+             CREATE ROLE \"{fixture_login}\" LOGIN PASSWORD '{fixture_login}'; \
+             GRANT \"{tenant_role}\" TO \"{alternate_grantor}\" WITH ADMIN TRUE; \
+             GRANT \"{tenant_role}\" TO \"{fixture_login}\" WITH INHERIT FALSE; \
+             SET ROLE \"{alternate_grantor}\"; \
+             GRANT \"{tenant_role}\" TO \"{fixture_login}\" WITH INHERIT TRUE; RESET ROLE;"
+        )).await.unwrap();
+        let login = database.connect_as(&fixture_login).await;
+        assert_eq!(memberships(&login).await, (1, Some(tenant_role.clone())));
+        database.admin.batch_execute(&format!(
+            "REVOKE \"{tenant_role}\" FROM \"{fixture_login}\""
+        )).await.unwrap();
+        assert_eq!(memberships(&login).await, (1, Some(tenant_role.clone())));
+        database.admin.batch_execute(&format!(
+            "SET ROLE \"{alternate_grantor}\"; \
+             GRANT \"{tenant_role}\" TO \"{fixture_login}\" WITH INHERIT FALSE; RESET ROLE",
+        )).await.unwrap();
         assert_eq!(memberships(&login).await, (0, None));
     }).await;
 }
@@ -193,7 +215,10 @@ impl Tenant {
 /// refuses boot on either.
 #[compio::test]
 async fn a_second_grantors_inheriting_grant_re_opens_the_fence_and_a_plain_revoke_leaves_it_open() {
-    Database::migrated(async |database| {
+    // Isolated: this grants and revokes zeroship_worker's own memberships
+    // through a second grantor, which every worker test process of the shared
+    // server would then also see (see `Database::isolated`'s doc).
+    Database::isolated(async |database| {
         let tenant = Tenant::provision(database).await;
         let worker_url = database.url_as(WORKER_DATABASE_ROLE);
 
