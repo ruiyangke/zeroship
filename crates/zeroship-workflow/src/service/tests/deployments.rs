@@ -94,8 +94,9 @@ async fn normal_app_deployments_load_from_s3() {
         Deployments::with_source(
             Arc::new(tempfile::tempdir().unwrap()),
             Arc::new(zeroship_bundle::S3BlobStore::new(
-                fixture.config("deployments"),
-                fixture.credentials(),
+                compio_s3::S3Config::parse_url(&fixture.url("deployments"))
+                    .expect("S3 fixture configuration"),
+                compio_s3::S3Credentials::new(fixture.access_key(), fixture.secret_key(), None),
                 1,
             )),
         )

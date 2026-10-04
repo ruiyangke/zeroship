@@ -4,13 +4,12 @@
 //! strings, a route is an app id and an optional database id, and a field map
 //! is `serde_json::Value`. Nothing here names a data-orm type, so a crate whose
 //! own unit tests exercise the data plane can reach it as an ordinary
-//! `[dev-dependencies]` entry rather than by compiling a copy through `#[path]`.
-//! Each consumer converts to its own types in a thin adapter beside its tests,
-//! and the identities are derived through the same
+//! `[dev-dependencies]` entry rather than by compiling a private copy of the
+//! source. Each consumer converts to its own types in a thin adapter beside its
+//! tests, and the identities are derived through the same
 //! `zeroship_core::database_derivation` composers production uses, so the
 //! adapter cannot invent a schema or role a reconciler did not create.
 
-#[path = "sqlite.rs"]
 pub mod tables;
 
 pub mod platform;
@@ -360,7 +359,7 @@ pub async fn grant_all_runtime_table_columns(
             "SELECT column_name FROM information_schema.columns \
               WHERE table_schema = $1 AND table_name = $2 \
               ORDER BY ordinal_position",
-            &[&schema, &table],
+            &[&schema, table],
         )
         .await
         .expect("read fixture table columns");

@@ -79,6 +79,18 @@ impl Platform {
         url.set_password(Some(role)).unwrap();
         url
     }
+
+    /// Whether this case owns a clone of the migrated template rather than the
+    /// process-shared working database.
+    ///
+    /// A subject that is platform-global and not scoped to the rows it mints -
+    /// the deployment's execution zones, an installation-wide sweep - requires
+    /// a clone. A fixture that reaches the process-shared database from such a
+    /// subject leaks a row every sibling case then observes.
+    #[must_use]
+    pub fn is_fresh(&self) -> bool {
+        self._fresh.is_some()
+    }
 }
 impl Platform {
     /// A live Control app in the deployment's seeded zone, created the way
@@ -193,4 +205,10 @@ pub async fn connect(url: &str) -> compio_postgres::Client {
 pub fn write_private(path: &Path, bytes: impl AsRef<[u8]>) {
     std::fs::write(path, bytes).unwrap();
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+}
+
+impl std::fmt::Debug for Platform {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("Platform").finish_non_exhaustive()
+    }
 }

@@ -7898,6 +7898,7 @@ dependencies = [
  "sha2 0.10.9",
  "tar",
  "tempfile",
+ "testcontainers",
  "thiserror 2.0.18",
  "tracing",
  "uuid",
@@ -7937,6 +7938,7 @@ dependencies = [
  "zeroship-runtime",
  "zeroship-storage",
  "zeroship-storage-v8",
+ "zeroship-testkit",
  "zeroship-workflow",
  "zeroship-workflow-manager",
  "zeroship-workflow-runner",
@@ -8294,7 +8296,6 @@ dependencies = [
  "compio",
  "serde_json",
  "tempfile",
- "testcontainers",
  "v8",
  "zeroship-core",
  "zeroship-id",
@@ -8364,7 +8365,6 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
- "testcontainers",
  "toml 0.8.23",
  "url",
  "uuid",
@@ -8489,6 +8489,7 @@ dependencies = [
  "zeroship-migrate-mysql",
  "zeroship-migrate-postgres",
  "zeroship-migrate-sqlite",
+ "zeroship-testkit",
 ]
 
 [[package]]
@@ -8619,6 +8620,7 @@ dependencies = [
  "serde_json",
  "sha1",
  "socket2",
+ "testcontainers",
  "tracing",
  "trybuild",
  "url",
@@ -8627,6 +8629,7 @@ dependencies = [
  "zeroship-core",
  "zeroship-metering",
  "zeroship-runtime-macros",
+ "zeroship-testkit",
 ]
 
 [[package]]
@@ -8670,7 +8673,6 @@ dependencies = [
  "compio-s3",
  "serde_json",
  "tempfile",
- "testcontainers",
  "v8",
  "zeroship-core",
  "zeroship-metering",
@@ -8688,7 +8690,6 @@ dependencies = [
  "rdkafka",
  "serde",
  "serde_json",
- "testcontainers",
  "thiserror 2.0.18",
  "tracing",
  "zeroship-testkit",
@@ -8701,13 +8702,13 @@ dependencies = [
  "compio",
  "compio-postgres",
  "compio-redis",
- "compio-s3",
  "futures",
  "libc",
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
  "testcontainers",
+ "tokio",
  "toml 0.8.23",
  "url",
  "zeroship-id",
@@ -8717,7 +8718,6 @@ dependencies = [
 name = "zeroship-worker"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "base64",
  "clap",
  "compio",
@@ -8747,8 +8747,10 @@ dependencies = [
  "zeroship-runtime",
  "zeroship-storage",
  "zeroship-storage-v8",
+ "zeroship-testkit",
  "zeroship-workflow",
  "zeroship-workflow-client",
+ "zeroship-workflow-fixtures",
  "zeroship-workflow-manager",
  "zeroship-workflow-runner",
  "zeroship-workflow-v8",
@@ -8773,7 +8775,6 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
- "testcontainers",
  "tracing",
  "uuid",
  "zeroship-bundle",
@@ -8817,6 +8818,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "zeroship-workflow-fixtures"
+version = "0.1.0"
+dependencies = [
+ "zeroship-workflow",
+ "zeroship-workflow-testkit",
+]
+
+[[package]]
 name = "zeroship-workflow-manager"
 version = "0.1.0"
 dependencies = [
@@ -8853,7 +8862,6 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
- "testcontainers",
  "tracing",
  "zeroship-bundle",
  "zeroship-core",
@@ -8862,6 +8870,7 @@ dependencies = [
  "zeroship-testkit",
  "zeroship-workflow",
  "zeroship-workflow-client",
+ "zeroship-workflow-fixtures",
  "zeroship-workflow-manager",
  "zeroship-workflow-testkit",
 ]
@@ -8905,6 +8914,7 @@ dependencies = [
 name = "zeroship-workflow-testkit"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "compio",
  "compio-postgres",
  "rusqlite",
@@ -8940,6 +8950,7 @@ dependencies = [
  "zeroship-storage",
  "zeroship-workflow",
  "zeroship-workflow-client",
+ "zeroship-workflow-fixtures",
  "zeroship-workflow-manager",
  "zeroship-workflow-runner",
 ]

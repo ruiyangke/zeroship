@@ -72,7 +72,7 @@ pub fn architecture() -> Result<()> {
 }
 
 fn check_snapshot_clients() -> Result<()> {
-    let server_major: u32 = include_str!("../../tests/testkit/src/postgres/Dockerfile")
+    let server_major: u32 = include_str!("../../crates/zeroship-testkit/src/postgres/Dockerfile")
         .lines()
         .find_map(|line| line.strip_prefix("FROM pgvector/pgvector:pg"))
         .ok_or("PostgreSQL fixture must declare its pgvector server tag")?

@@ -23,9 +23,9 @@ import {{ Client, Pool }} from "./fixtures/pg/pg-8.16.3.bundle.mjs";
 const config = {{
   host: "{host}",
   port: {port},
-  user: "postgres",
-  password: "zeroship",
-  database: "postgres",
+  user: "{user}",
+  password: "{password}",
+  database: "{database}",
 }};
 
 function errorPayload(err) {{
@@ -100,6 +100,9 @@ export default {{
 "#,
                 host = server.host,
                 port = server.port,
+                user = server.user,
+                password = server.password,
+                database = server.database,
             ),
             vec![module("fixtures/pg/pg-8.16.3.bundle.mjs", PG_BUNDLE)],
             allowlist(server.host, server.port, 8, 8 * 1024 * 1024),

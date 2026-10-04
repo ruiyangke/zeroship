@@ -32,15 +32,15 @@
 //! libc reads the environment from code that never takes this lock.
 //!
 //! These tests need live servers and they do NOT skip without them: the
-//! `ensure_*` helpers `docker start` the container and then panic if the port
-//! never opens. A red run here can therefore mean "the container is not on
-//! this machine" rather than "the runtime regressed" - read the panic message
-//! before believing either.
+//! `ensure_*` helpers start a container through testcontainers and panic if it
+//! cannot start or does not answer. A red run here can therefore mean "the
+//! daemon is not on this machine" rather than "the runtime regressed" - read the
+//! panic message before believing either.
 //!
 //! The six modules run CONCURRENTLY as six threads in one process.
-//! `lock_env()` serialises the environment between them; nothing serialises the
-//! `docker start` calls, and nothing stops two of them contending for the same
-//! container if a future module reuses one.
+//! `lock_env()` serialises the environment between them; the `ensure_*` helpers
+//! each hold one container in a `OnceLock`, so concurrent callers share the one
+//! server rather than starting a second.
 //!
 //! `Cargo.toml` sets `autotests = false`: a new file is compiled by nothing
 //! until it is listed below.

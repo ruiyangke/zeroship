@@ -1,90 +1,84 @@
-//! The PostgreSQL server the migration server's unit tests share.
+//! The PostgreSQL databases the migration server's unit tests run in.
 //!
-//! One server per test binary, kept in a `static`, which libtest never drops, so it
-//! is started through the shared reaper in [`zeroship_testkit::docker`]: a reaper
-//! spawned before the container exists removes it once this process has ended.
+//! Each case takes a database of its own on the bare server every test process
+//! of a worktree shares ([`zeroship_testkit::postgres::server`]): cloned from the
+//! server's pristine template when the case asks, dropped when the case's
+//! [`TestDatabase`] drops. The roles a case converges are named from the ids it
+//! mints, so two cases on the one server never reach each other's. Nothing here
+//! holds a container: the server belongs to the shared mechanism, whose watchdog
+//! removes it once the run's last lease is gone, which [`server_lifetime`]
+//! measures.
 
-use std::sync::OnceLock;
-use std::time::Duration;
+use std::ops::{Deref, DerefMut};
 
 use compio_postgres::{Client, NoTls};
-use testcontainers::core::{IntoContainerPort, WaitFor};
-use testcontainers::{GenericImage, ImageExt};
+use zeroship_testkit::postgres::server::Postgres;
 
-use zeroship_testkit::{start_owned, DockerCli, OwnedContainer, Ownership};
-
-struct Postgres {
-    owned: OwnedContainer,
-    url: String,
+/// One case's connection to a database of its own.
+///
+/// The client is declared before the database so it closes first; the database
+/// is then dropped `WITH (FORCE)`, which ends any session a case left open.
+pub(crate) struct TestDatabase {
+    client: Client,
+    _database: Postgres,
 }
 
-impl Postgres {
-    fn start() -> Self {
-        let request = GenericImage::new("postgres", "17")
-            .with_exposed_port(5432.tcp())
-            .with_wait_for(WaitFor::message_on_stdout(
-                "PostgreSQL init process complete; ready for start up.",
-            ))
-            .with_wait_for(WaitFor::message_on_stderr(
-                "database system is ready to accept connections",
-            ))
-            .with_env_var("POSTGRES_PASSWORD", "fixture")
-            .with_env_var("POSTGRES_DB", "migrate_server_unit_tests")
-            .with_cmd(["postgres", "-c", "wal_level=logical", "-c", "fsync=off"])
-            .with_startup_timeout(Duration::from_secs(120));
-        let owned = start_owned(&DockerCli::system(), &Ownership::mint(), request).unwrap_or_else(
-            |error| panic!("migration-server unit tests require Docker and PostgreSQL: {error}"),
-        );
-        let container = owned.container();
-        let host = container.get_host().expect("database host");
-        let port = container.get_host_port_ipv4(5432).expect("database port");
-        let url = format!("postgresql://postgres:fixture@{host}:{port}/migrate_server_unit_tests");
-        Self { owned, url }
+impl Deref for TestDatabase {
+    type Target = Client;
+
+    fn deref(&self) -> &Client {
+        &self.client
     }
 }
 
-static POSTGRES: OnceLock<Postgres> = OnceLock::new();
-
-pub(crate) fn url() -> &'static str {
-    &POSTGRES.get_or_init(Postgres::start).url
+impl DerefMut for TestDatabase {
+    fn deref_mut(&mut self) -> &mut Client {
+        &mut self.client
+    }
 }
 
-pub(crate) async fn connect() -> Client {
-    let (client, connection) = compio_postgres::connect(url(), NoTls)
+/// A database of this case's own on the shared bare server, and a superuser
+/// connection to it.
+pub(crate) async fn connect() -> TestDatabase {
+    let database = Postgres::start();
+    let (client, connection) = compio_postgres::connect(&database.url(), NoTls)
         .await
         .expect("connect to the migration-server test database");
+    // The connection ends when the case drops its database `WITH (FORCE)`, so
+    // its closing error is the teardown, not a failure.
     compio::runtime::spawn(async move {
-        connection
-            .run()
-            .await
-            .expect("migration-server test database connection");
+        let _ = connection.run().await;
     })
     .detach();
-    client
+    TestDatabase {
+        client,
+        _database: database,
+    }
 }
 
-/// This binary's server is removed once the process that started it has ended -
-/// after a normal exit, and after a SIGKILL while it is still starting. Both run
-/// [`server_lifetime::the_unit_test_server_reports_its_container`] alone in a child
-/// process; see `zeroship_testkit::lifetime`.
+/// The unit tests' server is removed once the last process holding it has
+/// ended: after a normal exit, and after a `SIGKILL` while it is still
+/// starting. Both run [`server_lifetime::child_joins_the_unit_test_server`]
+/// alone in a child process with a throwaway scope; see
+/// `zeroship_testkit::lifetime`.
 mod server_lifetime {
-    use super::{Postgres, POSTGRES};
     use zeroship_testkit::lifetime;
+    use zeroship_testkit::postgres::server::Postgres;
 
     /// The child test, by its full path in this binary.
-    const CHILD_TEST: &str =
-        "test_database::server_lifetime::the_unit_test_server_reports_its_container";
+    const CHILD_TEST: &str = "test_database::server_lifetime::child_joins_the_unit_test_server";
 
     #[test]
-    fn the_unit_test_server_reports_its_container() {
-        lifetime::report_owner();
-        let server = POSTGRES.get_or_init(Postgres::start);
+    #[ignore = "spawned by a lifetime measurement as a child process, with its scope on stdin"]
+    fn child_joins_the_unit_test_server() {
+        let database = Postgres::start_in(&lifetime::child_scope())
+            .expect("join the unit tests' server at the throwaway scope");
         assert!(
-            server.url.ends_with("/migrate_server_unit_tests"),
-            "{}",
-            server.url
+            database.url().ends_with(database.name()),
+            "the case's DSN names its own database: {}",
+            database.url()
         );
-        lifetime::report_container(server.owned.container().id());
+        lifetime::report_container(database.container_id());
     }
 
     #[test]

@@ -1,20 +1,13 @@
-use std::net::TcpStream as StdTcpStream;
-use std::process::Command;
 use std::sync::{Mutex, MutexGuard, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use zeroship_runtime::channel::CancelFlag;
 use zeroship_runtime::{EgressRule, Verdict,
-    
     EnvSnapshot, FetchOutcome, ModuleEntry, NetPolicy, RequestCtx, Runtime, SettledFetch,
 };
 
 const PG_BUNDLE: &str = include_str!("fixtures/pg/pg-8.16.3.bundle.mjs");
 const PG_HOST: &str = "127.0.0.1";
-const PG_PORT: u16 = 5440;
-const PG_USER: &str = "postgres";
-const PG_PASSWORD: &str = "zeroship";
-const PG_DATABASE: &str = "postgres";
 
 /// Restores the runtime's process-level dev-mode cell to whatever it held
 /// before the test, so a test that needs dev mode does not decide it for the
@@ -54,7 +47,7 @@ struct JsResult {
     body: String,
 }
 
-async fn run_pg_js(module_src: String, max_wait: Duration) -> JsResult {
+async fn run_pg_js(module_src: String, port: u16, max_wait: Duration) -> JsResult {
     assert!(
         !PG_BUNDLE.trim().is_empty(),
         "vendored pg bundle fixture must not be empty"
@@ -74,7 +67,7 @@ async fn run_pg_js(module_src: String, max_wait: Duration) -> JsResult {
         .modules(modules)
         .net_policy(
             NetPolicy::rules(
-                vec![accept_target(PG_HOST, PG_PORT)],
+                vec![accept_target(PG_HOST, port)],
                 32,
                 8 * 1024 * 1024,
             )
@@ -149,47 +142,23 @@ async fn drive_fetch_outcome(outcome: FetchOutcome, max_wait: Duration) -> JsRes
     }
 }
 
-fn require_pg_port() {
-    if StdTcpStream::connect((PG_HOST, PG_PORT)).is_ok() {
-        return;
-    }
-
-    let output = Command::new("docker")
-        .args(["start", "appbase-migrate-postgres-1"])
-        .output()
-        .unwrap_or_else(|err| panic!("failed to spawn docker start appbase-migrate-postgres-1: {err}"));
-    assert!(
-        output.status.success(),
-        "failed to start appbase-migrate-postgres-1 for pg e2e\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let start = Instant::now();
-    while start.elapsed() < Duration::from_secs(45) {
-        if StdTcpStream::connect((PG_HOST, PG_PORT)).is_ok() {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(500));
-    }
-
-    StdTcpStream::connect((PG_HOST, PG_PORT)).unwrap_or_else(|err| {
-        panic!(
-            "headline pg e2e requires live Postgres at {PG_HOST}:{PG_PORT}; \
-             start appbase-migrate-postgres-1 without tearing it down: {err}"
-        )
-    });
+/// A database of this case's own on the bare PostgreSQL server every test
+/// process of the worktree shares, dropped with the returned handle. A daemon
+/// that cannot provide it fails the run.
+fn postgres() -> zeroship_testkit::postgres::server::Postgres {
+    zeroship_testkit::postgres::server::Postgres::start()
 }
 
 #[test]
 fn unmodified_pg_client_and_pool_return_live_rows() {
     let _lock = lock_env();
     let _env = DevModeGuard::set_dev();
-    require_pg_port();
+    let database = postgres();
+    let port = database.port();
 
-    // The shared migrate Postgres answers "N" to the PostgreSQL SSLRequest
-    // probe in this worktree, so this fixture proves live pg over node:net.
-    // The CA-pinned node:tls path remains covered by tests/node_tls.rs.
+    // The shared fixture Postgres answers "N" to the PostgreSQL SSLRequest
+    // probe, so this fixture proves live pg over node:net. The CA-pinned
+    // node:tls path remains covered by tests/node_tls.rs.
     let result = compio::runtime::Runtime::new().unwrap().block_on(async {
         run_pg_js(
             format!(
@@ -294,11 +263,12 @@ export default {{
 }};
 "#,
                 host = PG_HOST,
-                port = PG_PORT,
-                user = PG_USER,
-                password = PG_PASSWORD,
-                database = PG_DATABASE,
+                port = port,
+                user = database.user(),
+                password = database.password(),
+                database = database.name(),
             ),
+            port,
             Duration::from_secs(20),
         )
         .await

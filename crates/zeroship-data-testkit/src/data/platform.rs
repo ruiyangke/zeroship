@@ -35,6 +35,7 @@ pub const WORKER_LOGIN: &str = "zeroship_worker";
 pub const DEFAULT_ZONE: &str = "ezn_default000000000000000000";
 
 /// A server the caller owns, holding the platform schema the corpus builds.
+#[derive(Debug)]
 pub struct Platform {
     admin_url: String,
 }

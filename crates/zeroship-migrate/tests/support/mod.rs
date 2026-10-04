@@ -5,8 +5,9 @@
 //! SHIPPED generic PG apply path — `PostgresBackend<PgDevSession>`, the `<D: SqlSession>`
 //! journal/drift/precondition/baseline free functions, `ops::status` — against a live
 //! Postgres through the SAME driver seam the production napi/Node `pg` host
-//! rides. The Postgres is the one this binary owns ([`server`]), and each test takes a
-//! database of its own on it through [`pg_database`].
+//! rides. The Postgres is the one every test process of the worktree shares
+//! ([`server`]), and each test takes a database of its own on it through
+//! [`pg_database`].
 //!
 //! **Never ships.** The `postgres` crate is a `[dev-dependency]` only. It pulls `tokio`
 //! transitively (blocking `postgres` wraps `tokio-postgres` on a private current-thread
@@ -21,7 +22,7 @@
 //! verb is visible to the next — exactly what `apply_transactional` relies on.
 
 
-/// The PostgreSQL server this binary starts and owns.
+/// The PostgreSQL server every test process of the worktree shares.
 pub mod server;
 
 /// The live-MySQL sibling of everything below: `MysqlDevSession`, `DatabaseGuard`,
@@ -279,12 +280,12 @@ scope = "all"
         .expect("explicit no-inject extension test charter composes")
 }
 
-/// A database of one test's own on this binary's PostgreSQL server
+/// A database of one test's own on the shared PostgreSQL server
 /// ([`server::postgres`]), dropped when the value goes out of scope.
 ///
 /// Every object a test creates lives inside it, including the ones PostgreSQL scopes
 /// to a DATABASE rather than to a schema: an installed extension, a project's advisory
-/// lock, a publication. Tests running on sibling threads of the binary therefore
+/// lock, a publication. Tests running in sibling threads and processes therefore
 /// cannot see, forge or remove each other's state, and nothing a failed test leaves
 /// behind reaches the next one.
 ///
@@ -299,6 +300,25 @@ scope = "all"
 pub struct PgDatabase {
     name: String,
     url: String,
+    host: Host,
+}
+
+/// The server a test's database lives on.
+#[derive(Debug)]
+enum Host {
+    /// The server every test process of the worktree shares.
+    Shared(&'static server::SharedServer),
+    /// A server the test owns, removed once the database's guard drops.
+    Private(server::SharedServer),
+}
+
+impl Host {
+    fn server(&self) -> &server::SharedServer {
+        match self {
+            Self::Shared(server) => server,
+            Self::Private(server) => server,
+        }
+    }
 }
 
 impl PgDatabase {
@@ -321,7 +341,7 @@ impl Drop for PgDatabase {
     fn drop(&mut self) {
         use std::io::Write as _;
 
-        let dropped = Client::connect(&server::postgres().postgres_admin_url(), NoTls).and_then(
+        let dropped = Client::connect(&self.host.server().postgres_admin_url(), NoTls).and_then(
             |mut admin| {
                 admin.batch_execute(&format!(
                     "DROP DATABASE IF EXISTS \"{}\" WITH (FORCE)",
@@ -331,8 +351,8 @@ impl Drop for PgDatabase {
         );
         if let Err(error) = dropped {
             // Never a panic: this runs while a failed test unwinds, and a panicking
-            // `Drop` there aborts the process. The server goes with the process, so
-            // the cost of a failure here is this one line, straight to the process
+            // `Drop` there aborts the process. The server is torn down with the run,
+            // so the cost of a failure here is this one line, straight to the process
             // stderr because libtest captures the print macros.
             let _ = writeln!(
                 std::io::stderr(),
@@ -343,20 +363,39 @@ impl Drop for PgDatabase {
     }
 }
 
-/// A fresh database on this binary's PostgreSQL server, for one test.
+/// A fresh database on the shared PostgreSQL server, for one test.
 ///
 /// # Panics
 /// When the server cannot be started (see [`server::postgres`]) or refuses the
 /// `CREATE DATABASE`. Either way the calling test fails: a live test with no database
 /// has gathered no coverage, and must not report any.
 pub fn pg_database() -> PgDatabase {
-    use std::sync::atomic::{AtomicU64, Ordering};
+    database_on(Host::Shared(server::postgres()))
+}
 
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    let server = server::postgres();
-    let name = format!("zm_test_{}", NEXT.fetch_add(1, Ordering::Relaxed));
+/// A fresh database on a PostgreSQL server the test owns, for a test that
+/// creates, alters or drops roles.
+///
+/// Roles are cluster-global: a database cannot hold them, and the catalog
+/// snapshot the drift and fold suites compare reads every role on the server.
+/// On the shared server one test's role changes would land between another
+/// test's two snapshots, so a role-writing test takes a server of its own
+/// ([`server::private`]), removed once this guard drops.
+///
+/// # Panics
+/// As [`pg_database`].
+pub fn private_pg_database() -> PgDatabase {
+    database_on(Host::Private(server::private()))
+}
+
+fn database_on(host: Host) -> PgDatabase {
+    // The shared server serves every test process of the run, so the name is
+    // minted rather than counted per process: two processes, or a process and
+    // the leftover of a killed one, can never be handed the same database.
+    let name = format!("zm_test_{}", uuid::Uuid::now_v7().simple());
+    let server = host.server();
     let mut admin = Client::connect(&server.postgres_admin_url(), NoTls).unwrap_or_else(|e| {
-        panic!("connect to the owned PostgreSQL server to create a test database: {e}")
+        panic!("connect to the PostgreSQL server to create a test database: {e}")
     });
     admin
         .batch_execute(&format!("CREATE DATABASE \"{name}\""))
@@ -364,6 +403,7 @@ pub fn pg_database() -> PgDatabase {
     PgDatabase {
         url: server.postgres_url(&name),
         name,
+        host,
     }
 }
 

@@ -1,6 +1,17 @@
 use super::repo;
 use regex::Regex;
 
+/// Whether `name`'s manifest classifies it `test-dev-tool`.
+fn testkit_classified(name: &str) -> bool {
+    repo::package(name)["metadata"]["zeroship-config"]["targets"]
+        .as_array()
+        .is_some_and(|targets| {
+            targets.iter().any(|target| {
+                target["target"] == name && target["class"] == "test-dev-tool"
+            })
+        })
+}
+
 fn mandatory_database_tests(package: &serde_json::Value) -> Result<usize, String> {
     let name = package["name"].as_str().ok_or("package name missing")?;
     if ["live-db-tests", "test-helpers"]
@@ -38,19 +49,33 @@ fn platform_database_tests_are_mandatory() {
         workspace.len() >= 10,
         "workspace feature scan lost its corpus"
     );
-    for package in workspace {
+    // The sanctioned dev-only testkits are members so their own tests run in
+    // the workspace suite. Every other generic fixture crate is still a
+    // fixture that belongs to a source module.
+    for name in [
+        "zeroship-test-support",
+        "zeroship-test-fixtures",
+        "zeroship-data-fixtures",
+    ] {
         assert!(
-            ![
-                "zeroship-testkit",
-                "zeroship-test-support",
-                "zeroship-test-fixtures",
-                "zeroship-data-fixtures"
-            ]
-            .iter()
-            .any(|name| package["name"] == *name),
-            "fixtures belong to source modules: {}",
-            package["name"]
+            repo::workspace()
+                .into_iter()
+                .all(|package| package["name"] != name),
+            "fixtures belong to source modules: {name}"
         );
+    }
+    for name in [
+        "zeroship-testkit",
+        "zeroship-data-testkit",
+        "zeroship-workflow-testkit",
+    ] {
+        assert!(
+            testkit_classified(name),
+            "{name} is a dev-only testkit member and must be classified \
+             `test-dev-tool` so no shipped binary may carry it"
+        );
+    }
+    for package in workspace {
         assert!(
             ["live-db-tests", "test-helpers"]
                 .iter()

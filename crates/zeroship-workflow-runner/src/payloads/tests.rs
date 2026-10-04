@@ -255,7 +255,11 @@ async fn s3_staged_payloads_round_trip_and_collect() {
     let server = crate::s3_fixture::S3Server::start();
     let directory = tempfile::tempdir().unwrap();
     let objects = PayloadObjects::open(StorageStore::from_backend(Arc::new(
-        zeroship_storage::S3::new(server.config("payloads"), server.credentials()),
+        zeroship_storage::S3::new(
+            compio_s3::S3Config::parse_url(&server.url("payloads"))
+                .expect("S3 fixture configuration"),
+            compio_s3::S3Credentials::new(server.access_key(), server.secret_key(), None),
+        ),
     )))
     .unwrap();
     let store = Rc::new(sqlite_store(&directory.path().join("app.sqlite")).await);

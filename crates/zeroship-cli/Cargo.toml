@@ -53,5 +53,10 @@ tempfile = { workspace = true }
 toml = { workspace = true }
 tracing = { workspace = true }
 
+[dev-dependencies]
+# The recorded migration set the migrate suites pin against. The testkit owns it
+# because `zeroship-migrate-node`'s suites pin the same bytes.
+zeroship-testkit = { workspace = true }
+
 [lints]
 workspace = true

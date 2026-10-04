@@ -3,13 +3,10 @@ members = ["crates/*", "libs/*"]
 resolver = "3"
 exclude = [
     "crates/zeroship-runtime/benches/ntex-bench",
-    "crates/zeroship-data-testkit",
-    "crates/zeroship-workflow-testkit",
     "libs/compio-postgres/fuzz",
     "libs/compio-postgres/testkit",
     "libs/compio-postgres/vendor/postgres-types",
     "refs",
-    "tests/testkit",
 ]
 
 # ---------------------------------------------------------------------------
@@ -217,10 +214,27 @@ rdkafka = { version = "0.36", default-features = false, features = ["cmake-build
 # other crates pick up integration-test temp dirs in the future.
 tempfile = "3"
 
+# Test-only container runtime, named only from `[dev-dependencies]` and from
+# `class = "test-dev-tool"` members, so it never reaches a shipped normal
+# closure; `cargo xtask test repository` inverts `cargo tree` over the shipped
+# binaries to prove it. `blocking` gives the synchronous runner; `watchdog`
+# stops and removes a process's containers when the process receives
+# `SIGTERM`, `SIGINT` or `SIGQUIT`. The bollard re-export it carries is how the
+# shared-server lease protocol talks to the daemon.
+testcontainers = { version = "0.28", default-features = false, features = ["blocking", "watchdog"] }
+
 # Internal crates
 zeroship-id = { path = "crates/zeroship-id" }
 zeroship-core = { path = "crates/zeroship-core" }
 zeroship-bundle = { path = "crates/zeroship-bundle" }
+# Dev-only test fixtures, members so their own tests run in the workspace
+# suite and `workspace = true` pins their dependencies. Each is classified
+# `class = "test-dev-tool"`, so no shipped binary may carry one in its normal
+# closure; `xtask/tests/architecture` and the tokio boundary checks prove it.
+zeroship-testkit = { path = "crates/zeroship-testkit" }
+zeroship-data-testkit = { path = "crates/zeroship-data-testkit" }
+zeroship-workflow-testkit = { path = "crates/zeroship-workflow-testkit" }
+zeroship-workflow-fixtures = { path = "crates/zeroship-workflow-fixtures" }
 compio-postgres = { path = "libs/compio-postgres" }
 compio-redis = { path = "libs/compio-redis" }
 compio-s3 = { path = "libs/compio-s3" }

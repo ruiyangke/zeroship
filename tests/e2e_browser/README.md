@@ -51,22 +51,24 @@ The teardown it returns stops every service, removes the containers, the work
 directory and `.stack.json`, and fails the run if a service died while the
 specs ran.
 
-The services run in process groups of their own, and the testcontainers reaper
-is shared with every other testcontainers process of the same user, so neither
-goes away with the runner. Every way out of the run takes them down:
+The services run in process groups of their own, so they do not go away with
+the runner. Every way out of the run takes them down:
 
 - SIGINT during the specs: Playwright runs the teardown.
 - SIGINT during bring-up: Playwright does not wait for the setup it
-  interrupted, so the signal handler kills the services and removes the
-  containers, the work directory and `.stack.json` synchronously.
+  interrupted, so the signal handler kills the services and removes the work
+  directory and `.stack.json` synchronously.
 - SIGTERM or SIGHUP at any point: Playwright handles neither, so the same
   handler does that and exits with `128 + signal number`.
 - Any other exit that skipped the teardown: an `exit` listener does it.
 
-A signal handler cannot wait on testcontainers' asynchronous client, so those
-paths remove containers with the `docker` CLI. Setup looks each container up
-through the CLI and fails if the CLI reaches a different daemon than the one
-testcontainers chose.
+The containers are testcontainers'. The teardown stops them; a signal handler
+cannot wait on testcontainers' asynchronous client, so on the signal paths they
+are left to its Ryuk reaper. Every testcontainers process of the same user
+shares that reaper, and it removes containers only once every connection to it
+has closed: as the runner exits when the runner was its only client, and only
+after the last other testcontainers process disconnects when one is still
+connected.
 
 `kill -9` of the runner is the exception. The containers carry the label
 `ai.zeroship.fixture=e2e-browser-deployed`, so

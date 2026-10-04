@@ -1,42 +1,23 @@
-//! The PostgreSQL server a live suite binary owns is the one the suites target, it is
-//! removed once the binary's process has ended, and each test's database goes with
-//! its guard.
+//! The PostgreSQL server the live suites share is the one they target, it is
+//! removed once the last process holding it has ended, it refuses to serve when
+//! its watchdog cannot see the lease, and each test's database goes with its
+//! guard.
 //!
-//! `crate::support::server` keeps the server in a `static`, which libtest never drops, and
-//! leaves its removal to the shared reaper in `zeroship_testkit::docker`. Three of
-//! that module's paths are measured here against real processes and a real daemon: a
-//! child test process that exits normally, a child SIGKILLed while its server is
-//! still starting (both through `zeroship_testkit::lifetime`), and a `docker` program
-//! that cannot see the container the daemon started.
+//! `crate::support::server` joins the worktree's shared server through
+//! `zeroship_testkit::shared`. Its lifetime is measured here through
+//! `zeroship_testkit::lifetime` against real child processes and a real daemon:
+//! a child that joins the suite's own recipe at a throwaway scope and exits
+//! normally, and one `SIGKILL`ed while that server is still starting.
 
-use std::os::unix::fs::PermissionsExt as _;
+use crate::support::server::{self, SharedServer};
+use zeroship_testkit::{lifetime, shared};
 
-use zeroship_testkit::docker::lifetime::{self, container_status};
-use zeroship_testkit::docker::{
-    process_owner, start_owned, DockerCli, Ownership, OWNER_LABEL, REAPER_LABEL,
-};
-use crate::support::server;
-
-/// The test the lifetime measurements run in a child process, by its full path in
-/// this binary.
+/// The child the lifetime measurements run, by its full path in this binary.
 const CHILD_TEST: &str =
-    "integration::pg_engine::owned_server::the_owned_postgres_server_is_the_one_the_suites_target";
-
-/// This process's own server reads as running: the instrument's positive control,
-/// without which an absence measured by [`container_status`] proves nothing.
-fn own_server_is_running() -> String {
-    let own = server::postgres().container_id().to_string();
-    assert_eq!(
-        container_status(&own).as_deref(),
-        Some("running"),
-        "this binary's own server must read as running"
-    );
-    own
-}
+    "integration::pg_engine::owned_server::child_joins_the_suites_server_at_a_throwaway_scope";
 
 #[test]
-fn the_owned_postgres_server_is_the_one_the_suites_target() {
-    lifetime::report_owner();
+fn the_shared_postgres_server_is_the_one_the_suites_target() {
     let db = crate::support::pg_database();
     let mut client = postgres::Client::connect(&db, postgres::NoTls)
         .expect("connect to the test's own database");
@@ -52,95 +33,99 @@ fn the_owned_postgres_server_is_the_one_the_suites_target() {
     assert!(
         version >= 180_000,
         "the live suites read catalog shapes and UUIDv7 generation from PostgreSQL 18; \
-         the owned server reports {version}"
+         the shared server reports {version}"
     );
     assert_eq!(
         database,
         db.name(),
         "the DSN a test is handed must reach the database made for it"
     );
-    lifetime::report_container(server::postgres().container_id());
+}
+
+/// Child side of the lifetime measurements: join the suite's recipe at the
+/// throwaway scope on standard input and report the container.
+#[test]
+#[ignore = "spawned by a lifetime measurement as a child process, with its scope on stdin"]
+fn child_joins_the_suites_server_at_a_throwaway_scope() {
+    let server = SharedServer::join(&lifetime::child_scope()).expect("join the suite's server");
+    let mut client = postgres::Client::connect(&server.postgres_admin_url(), postgres::NoTls)
+        .expect("connect to the throwaway server");
+    let version: i32 = client
+        .query_one("SELECT current_setting('server_version_num')::int", &[])
+        .expect("read the server version")
+        .get(0);
+    assert!(version >= 180_000, "the suite's recipe runs PostgreSQL 18, not {version}");
+    lifetime::report_container(server.container_id());
 }
 
 #[test]
-fn an_owned_server_is_removed_when_its_process_ends() {
+fn the_suites_server_is_removed_when_its_last_process_ends() {
     lifetime::assert_removed_after_the_child_exits(CHILD_TEST);
 }
 
 #[test]
-fn an_owned_server_whose_process_is_killed_while_it_starts_is_removed() {
+fn the_suites_server_whose_process_is_killed_while_it_starts_is_removed() {
     lifetime::assert_removed_after_a_kill_during_startup(CHILD_TEST);
 }
 
 #[test]
-fn a_docker_cli_that_cannot_see_the_container_refuses_the_start_and_removes_it() {
-    // The real CLI sees this process's own server by the owner label: the query the
-    // absence below is read through can find a container that is there.
-    let own = own_server_is_running();
-    let real = DockerCli::system();
-    assert!(
-        real.labelled(OWNER_LABEL, process_owner())
-            .expect("the real docker CLI answers")
-            .contains(&own),
-        "the real CLI must list this process's own server by its owner label"
+fn a_server_container_that_cannot_see_the_lease_is_refused_and_removed() {
+    // The positive control: this process's own server reads as running, so the
+    // absence asserted below is read through a query that can see a container
+    // that is there.
+    let own = server::postgres().container_id().to_owned();
+    assert_eq!(
+        shared::container_status(&own).as_deref(),
+        Some("running"),
+        "this process's own server must read as running"
     );
 
-    let fakes = [
-        (
-            "a CLI that cannot reach the daemon",
-            "echo 'Cannot connect to the Docker daemon at unix:///fake/docker.sock' >&2\nexit 1",
-            "Cannot connect to the Docker daemon",
-        ),
-        (
-            "a CLI that reaches a different daemon",
-            "exit 0",
-            "it listed []",
-        ),
-    ];
-    let dir = tempfile::tempdir().expect("a directory for the fake docker programs");
-    for (index, (what, body, expected)) in fakes.into_iter().enumerate() {
-        let program = dir.path().join(format!("docker-{index}"));
-        std::fs::write(
-            &program,
-            format!(
-                "#!/bin/sh\ncase \"$1\" in --version) echo 'Docker version 0.0.0, fake'; \
-                 exit 0 ;; esac\n{body}\n"
-            ),
-        )
-        .expect("write the fake docker program");
-        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
-            .expect("make the fake docker program executable");
-
-        let ownership = Ownership::mint();
-        let refusal = start_owned(
-            &DockerCli::at(&program),
-            &ownership,
-            server::postgres_request(),
-        )
-        .err()
-        .unwrap_or_else(|| panic!("{what}: the start must be refused"));
-        assert!(refusal.contains(expected), "{what}: {refusal}");
-        let id = refusal
-            .split_once("removes container ")
-            .and_then(|(_, rest)| rest.split_whitespace().next())
-            .unwrap_or_else(|| panic!("{what}: the refusal must name the container: {refusal}"))
-            .to_string();
+    // The suite's image with no lease directory mounted: its watchdog could never
+    // see a host lease, so the boot must refuse it rather than serve from a
+    // container nothing would remove.
+    let image = zeroship_testkit::image::with_watchdog("postgres:18")
+        .expect("build the suite's image");
+    let name = format!("zeroship-migrate-blind-{}", std::process::id());
+    let blind = shared::run_detached(&image, &[], &[], &name).expect("run the blind container");
+    let refusal = shared::refuse_a_blind_container(&blind)
+        .expect_err("a container that cannot see the lease must be refused");
+    assert!(refusal.contains("cannot see"), "{refusal}");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while let Some(state) = shared::container_status(&blind) {
         assert!(
-            id.len() == 64 && id.bytes().all(|byte| byte.is_ascii_hexdigit()),
-            "{what}: the daemon started a container and the refusal names it: {refusal}"
+            std::time::Instant::now() < deadline,
+            "the refused container {blind} is still listed ({state})"
         );
-        assert_eq!(
-            container_status(&id),
-            None,
-            "{what}: a refused start must not leave its container behind"
-        );
-        assert_eq!(
-            real.labelled(REAPER_LABEL, ownership.reaper())
-                .expect("the real docker CLI answers"),
-            Vec::<String>::new(),
-            "{what}: nothing may carry the refused start's reaper label"
-        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
     }
+}
+
+#[test]
+fn a_role_a_private_server_carries_is_invisible_to_the_shared_servers_cases() {
+    let role = format!("zm_private_probe_{}", uuid::Uuid::now_v7().simple());
+    let count = |url: &str| -> i64 {
+        postgres::Client::connect(url, postgres::NoTls)
+            .expect("connect to read the role catalog")
+            .query_one("SELECT count(*) FROM pg_roles WHERE rolname = $1", &[&role])
+            .expect("read pg_roles")
+            .get(0)
+    };
+
+    let private = crate::support::private_pg_database();
+    let shared = crate::support::pg_database();
+    postgres::Client::connect(&private, postgres::NoTls)
+        .expect("connect to the private server")
+        .batch_execute(&format!("CREATE ROLE \"{role}\""))
+        .expect("create the probe role");
+
+    // The control: the role is there on the server that made it.
+    assert_eq!(count(&private), 1, "the private server must carry its own role");
+    assert_eq!(
+        count(&shared),
+        0,
+        "a role-writing case's role reached the shared server's catalog, so every \
+         other case's snapshot would read it"
+    );
 }
 
 #[test]

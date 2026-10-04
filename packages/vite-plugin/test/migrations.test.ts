@@ -104,7 +104,7 @@ describe("op.* runtime schema descriptor bundling", () => {
 
   test("packing enforces the shared collection identity contract", async () => {
     const corpus = JSON.parse(await fs.readFile(
-      new URL("../../../tests/fixtures/data/collection-identity.json", import.meta.url), "utf8",
+      new URL("../../../crates/zeroship-data-testkit/src/data/collection-identity.json", import.meta.url), "utf8",
     )) as {
       valid: Record<string, {fields:unknown}>;
       invalid: Record<string, {fields:unknown; error:string}>;

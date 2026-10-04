@@ -23,8 +23,9 @@ zeroship-core = { workspace = true }
 base64 = { workspace = true }
 compio = { workspace = true, features = ["polling"] }
 futures = { workspace = true }
-# The shared reaper-owned platform database this binary runs its cases against.
-zeroship-testkit = { path = "../../tests/testkit" }
+# The platform database every test process of the worktree shares, joined
+# through the testkit; its watchdog removes it once no process holds its lease.
+zeroship-testkit = { workspace = true }
 
 [lints]
 workspace = true

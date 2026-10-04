@@ -1,9 +1,13 @@
 use std::fs;
-use std::net::{TcpStream as StdTcpStream, ToSocketAddrs};
 use std::path::PathBuf;
-use std::process::Command;
 use std::sync::{Mutex, MutexGuard, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use testcontainers::{
+    core::{IntoContainerPort, WaitFor},
+    runners::SyncRunner,
+    Container, GenericImage, ImageExt,
+};
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
@@ -166,18 +170,27 @@ async fn drive_fetch_outcome(outcome: FetchOutcome, max_wait: Duration) -> JsRes
     }
 }
 
-#[derive(Clone, Debug)]
+/// A live server one case holds for its whole run.
+///
+/// Whatever keeps the server is released when the case drops this: a database
+/// of the case's own on a server every test process of the worktree shares, or
+/// a container the case started. Bind it to a name at the top of the case, so it
+/// outlives the requests that use it.
 pub struct ServerInfo {
     pub host: &'static str,
     pub port: u16,
+    pub user: String,
+    pub password: String,
+    pub database: String,
+    _held: Box<dyn std::any::Any>,
 }
 
-#[derive(Clone, Debug)]
 pub struct TlsPostgresInfo {
     pub host: &'static str,
     pub port: u16,
     pub ca_pem: String,
     pub wrong_ca_pem: String,
+    _container: Container<GenericImage>,
 }
 
 struct PgTlsCertFiles {
@@ -187,216 +200,124 @@ struct PgTlsCertFiles {
     wrong_ca_pem: String,
 }
 
+/// A database of this case's own on the bare PostgreSQL server every test
+/// process of the worktree shares, dropped with the returned handle.
 pub fn ensure_pg_migrate_postgres() -> ServerInfo {
-    const PORT: u16 = 5440;
-    if tcp_reachable(LOCALHOST, PORT) {
-        return ServerInfo {
-            host: LOCALHOST,
-            port: PORT,
-        };
-    }
-
-    run_docker(&["start", "appbase-migrate-postgres-1"])
-        .unwrap_or_else(|err| panic!("failed to start appbase-migrate-postgres-1 for pg e2e: {err}"));
-    wait_for_port(LOCALHOST, PORT, Duration::from_secs(45), "migrate Postgres");
+    let database = zeroship_testkit::postgres::server::Postgres::start();
     ServerInfo {
         host: LOCALHOST,
-        port: PORT,
+        port: database.port(),
+        user: database.user().to_owned(),
+        password: database.password().to_owned(),
+        database: database.name().to_owned(),
+        _held: Box::new(database),
     }
 }
 
+/// A TLS-only PostgreSQL server this case starts and removes when it drops the
+/// returned handle.
+///
+/// Its configuration - certificates this run generated, a `pg_hba.conf` that
+/// refuses plaintext - is the subject of the one case that uses it, so no
+/// other case could share it.
 pub fn ensure_tls_postgres() -> TlsPostgresInfo {
-    const NAME: &str = "zeroship-runtime-pg-tls-e2e";
-    const PORT: u16 = 5441;
-
-    let (certs, regenerated) = ensure_pg_tls_cert_files();
-    if regenerated {
-        let _ = run_docker(&["rm", "-f", NAME]);
-    }
-
-    if tcp_reachable(LOCALHOST, PORT) {
-        let running = run_docker(&["inspect", "-f", "{{.State.Running}}", NAME]).ok();
-        assert_eq!(
-            running.as_deref(),
-            Some("true"),
-            "TLS Postgres e2e port {LOCALHOST}:{PORT} is reachable, but expected docker \
-             container {NAME} is not running; free the port or start the expected container"
-        );
-        return TlsPostgresInfo {
-            host: LOCALHOST,
-            port: PORT,
-            ca_pem: certs.ca_pem,
-            wrong_ca_pem: certs.wrong_ca_pem,
-        };
-    }
-
-    if !regenerated && run_docker(&["start", NAME]).is_ok() {
-        wait_for_port(LOCALHOST, PORT, Duration::from_secs(45), "TLS Postgres");
-    } else {
-        run_tls_postgres_container(NAME, PORT, &certs);
-        wait_for_port(LOCALHOST, PORT, Duration::from_secs(120), "TLS Postgres");
-    }
-
-    wait_for_docker_success(
-        NAME,
-        &["pg_isready", "-U", "postgres", "-d", "postgres"],
-        Duration::from_secs(120),
-        "TLS Postgres readiness",
-    );
-
+    let (certs, _) = ensure_pg_tls_cert_files();
+    let container = GenericImage::new("postgres", "16")
+        .with_exposed_port(5432.tcp())
+        // The image's entrypoint initialises the data directory behind a
+        // temporary server, which accepts no TCP connection, and then starts
+        // the final one. The init-complete line on standard output is printed
+        // between the two; the ready line on standard error is the final
+        // server's, because the temporary server's output reaches standard
+        // output through `pg_ctl`.
+        .with_wait_for(WaitFor::message_on_stdout(
+            "PostgreSQL init process complete; ready for start up.",
+        ))
+        .with_wait_for(WaitFor::message_on_stderr(
+            "database system is ready to accept connections",
+        ))
+        .with_entrypoint("bash")
+        .with_env_var("POSTGRES_PASSWORD", "zeroship")
+        .with_env_var("POSTGRES_DB", "postgres")
+        .with_env_var(
+            "ZS_PG_TLS_CERT_B64",
+            BASE64.encode(certs.server_cert_pem.as_bytes()),
+        )
+        .with_env_var(
+            "ZS_PG_TLS_KEY_B64",
+            BASE64.encode(certs.server_key_pem.as_bytes()),
+        )
+        .with_cmd(["-ceu".to_string(), TLS_BOOTSTRAP.to_string()])
+        .with_startup_timeout(Duration::from_secs(120))
+        .start()
+        .expect("TLS PostgreSQL e2e tests require Docker");
+    let port = container
+        .get_host_port_ipv4(5432)
+        .expect("mapped TLS PostgreSQL port");
     TlsPostgresInfo {
         host: LOCALHOST,
-        port: PORT,
+        port,
         ca_pem: certs.ca_pem,
         wrong_ca_pem: certs.wrong_ca_pem,
+        _container: container,
     }
 }
 
+/// A database of this case's own on the MySQL server every test process of the
+/// worktree shares, dropped with the returned handle.
 pub fn ensure_mysql() -> ServerInfo {
-    const NAME: &str = "zeroship-runtime-mysql2-e2e";
-    const PORT: u16 = 3307;
-    if tcp_reachable(LOCALHOST, PORT) {
-        return ServerInfo {
-            host: LOCALHOST,
-            port: PORT,
-        };
-    }
-
-    if run_docker(&["start", NAME]).is_err() {
-        run_docker(&[
-            "run",
-            "-d",
-            "--name",
-            NAME,
-            "-e",
-            "MYSQL_ROOT_PASSWORD=zeroship",
-            "-e",
-            "MYSQL_DATABASE=zeroship_e2e",
-            "-p",
-            "127.0.0.1:3307:3306",
-            "mysql:8",
-        ])
-        .unwrap_or_else(|err| panic!("failed to docker run mysql:8 for mysql2 e2e: {err}"));
-    }
-
-    wait_for_port(LOCALHOST, PORT, Duration::from_secs(120), "MySQL");
-    wait_for_docker_success(
-        NAME,
-        &["mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-pzeroship", "--silent"],
-        Duration::from_secs(120),
-        "MySQL readiness",
-    );
+    let server = zeroship_testkit::mysql::server();
+    let database = server
+        .case_database()
+        .expect("create this case's database on the shared MySQL server");
     ServerInfo {
-        host: LOCALHOST,
-        port: PORT,
+        host: server.host(),
+        port: server.port(),
+        user: server.user().to_owned(),
+        password: server.password().to_owned(),
+        database: database.name().to_owned(),
+        _held: Box::new(database),
     }
 }
 
+/// The standalone Redis server of the shared Redis fixture, held for this case.
 pub fn ensure_redis() -> ServerInfo {
-    const NAME: &str = "zeroship-runtime-redis-e2e";
-    const PORT: u16 = 6391;
-    if tcp_reachable(LOCALHOST, PORT) {
-        return ServerInfo {
-            host: LOCALHOST,
-            port: PORT,
-        };
-    }
-
-    if run_docker(&["start", NAME]).is_err() {
-        run_docker(&[
-            "run",
-            "-d",
-            "--name",
-            NAME,
-            "-p",
-            "127.0.0.1:6391:6379",
-            "redis:7",
-        ])
-        .unwrap_or_else(|err| panic!("failed to docker run redis:7 for ioredis e2e: {err}"));
-    }
-
-    wait_for_port(LOCALHOST, PORT, Duration::from_secs(45), "Redis");
-    wait_for_docker_success(
-        NAME,
-        &["redis-cli", "ping"],
-        Duration::from_secs(45),
-        "Redis readiness",
-    );
+    let fixtures = zeroship_testkit::redis::fixtures();
+    let url = url::Url::parse(&fixtures.redis_url()).expect("the Redis fixture URL parses");
+    let port = url.port().expect("the Redis fixture URL names its port");
     ServerInfo {
         host: LOCALHOST,
-        port: PORT,
+        port,
+        user: String::new(),
+        password: String::new(),
+        database: String::new(),
+        _held: Box::new(fixtures),
     }
 }
 
+/// A memcached server this case starts and removes when it drops the returned
+/// handle.
 pub fn ensure_memcached() -> ServerInfo {
-    const NAME: &str = "zeroship-runtime-memjs-e2e";
-    const PORT: u16 = 11212;
-    if tcp_reachable(LOCALHOST, PORT) {
-        let running = run_docker(&["inspect", "-f", "{{.State.Running}}", NAME]).ok();
-        assert_eq!(
-            running.as_deref(),
-            Some("true"),
-            "memcached e2e port {LOCALHOST}:{PORT} is reachable, but expected docker \
-             container {NAME} is not running; free the port or start the expected container"
-        );
-        return ServerInfo {
-            host: LOCALHOST,
-            port: PORT,
-        };
-    }
-
-    if run_docker(&["start", NAME]).is_err() {
-        run_docker(&[
-            "run",
-            "-d",
-            "--name",
-            NAME,
-            "-p",
-            "127.0.0.1:11212:11211",
-            "memcached:1.6",
-        ])
-        .unwrap_or_else(|err| panic!("failed to docker run memcached:1.6 for memjs e2e: {err}"));
-    }
-
-    wait_for_port(LOCALHOST, PORT, Duration::from_secs(45), "memcached");
+    let container = GenericImage::new("memcached", "1.6")
+        .with_exposed_port(11211.tcp())
+        .with_wait_for(WaitFor::message_on_stderr("server listening"))
+        // The default verbosity does not print the listening line the wait
+        // condition matches, so the server is started verbose.
+        .with_cmd(["-vv"])
+        .with_startup_timeout(Duration::from_secs(60))
+        .start()
+        .expect("memcached e2e tests require Docker");
+    let port = container
+        .get_host_port_ipv4(11211)
+        .expect("mapped memcached port");
     ServerInfo {
         host: LOCALHOST,
-        port: PORT,
+        port,
+        user: String::new(),
+        password: String::new(),
+        database: String::new(),
+        _held: Box::new(container),
     }
-}
-
-pub fn tcp_reachable(host: &str, port: u16) -> bool {
-    let Ok(mut addrs) = (host, port).to_socket_addrs() else {
-        return false;
-    };
-    addrs.any(|addr| StdTcpStream::connect_timeout(&addr, Duration::from_millis(250)).is_ok())
-}
-
-fn wait_for_port(host: &str, port: u16, timeout: Duration, label: &str) {
-    let start = Instant::now();
-    while start.elapsed() < timeout {
-        if tcp_reachable(host, port) {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(500));
-    }
-    panic!("{label} did not open {host}:{port} within {timeout:?}");
-}
-
-fn wait_for_docker_success(name: &str, exec_args: &[&str], timeout: Duration, label: &str) {
-    let start = Instant::now();
-    let mut last = String::new();
-    while start.elapsed() < timeout {
-        let mut args = vec!["exec", name];
-        args.extend_from_slice(exec_args);
-        match run_docker(&args) {
-            Ok(_) => return,
-            Err(err) => last = err,
-        }
-        std::thread::sleep(Duration::from_secs(1));
-    }
-    let logs = run_docker(&["logs", "--tail", "80", name]).unwrap_or_else(|err| err);
-    panic!("{label} did not become ready within {timeout:?}; last error: {last}; logs:\n{logs}");
 }
 
 fn ensure_pg_tls_cert_files() -> (PgTlsCertFiles, bool) {
@@ -476,8 +397,11 @@ fn generate_wrong_ca_pem() -> String {
     ca_params.self_signed(&ca_key).unwrap().pem()
 }
 
-fn run_tls_postgres_container(name: &str, port: u16, certs: &PgTlsCertFiles) {
-    const BOOTSTRAP: &str = r#"
+/// The bootstrap the TLS Postgres image runs before handing over to the server.
+///
+/// It decodes the certificates the test generated, writes the `pg_hba.conf`
+/// that rejects plaintext and accepts TLS, and starts the server with TLS on.
+const TLS_BOOTSTRAP: &str = r#"
 set -euo pipefail
 cert_dir=/var/lib/postgresql/certs
 mkdir -p "$cert_dir"
@@ -499,40 +423,6 @@ exec docker-entrypoint.sh postgres \
   -c hba_file="$cert_dir/pg_hba.conf"
 "#;
 
-    let cert_env = format!(
-        "ZS_PG_TLS_CERT_B64={}",
-        BASE64.encode(certs.server_cert_pem.as_bytes())
-    );
-    let key_env = format!(
-        "ZS_PG_TLS_KEY_B64={}",
-        BASE64.encode(certs.server_key_pem.as_bytes())
-    );
-    let publish = format!("127.0.0.1:{port}:5432");
-    let args = vec![
-        "run".to_string(),
-        "-d".to_string(),
-        "--name".to_string(),
-        name.to_string(),
-        "-e".to_string(),
-        "POSTGRES_PASSWORD=zeroship".to_string(),
-        "-e".to_string(),
-        "POSTGRES_DB=postgres".to_string(),
-        "-e".to_string(),
-        cert_env,
-        "-e".to_string(),
-        key_env,
-        "-p".to_string(),
-        publish,
-        "--entrypoint".to_string(),
-        "bash".to_string(),
-        "postgres:16".to_string(),
-        "-ceu".to_string(),
-        BOOTSTRAP.to_string(),
-    ];
-    run_docker_owned(&args)
-        .unwrap_or_else(|err| panic!("failed to docker run postgres:16 TLS e2e server: {err}"));
-}
-
 fn read_file(path: &std::path::Path) -> String {
     fs::read_to_string(path).unwrap_or_else(|err| panic!("failed to read {path:?}: {err}"))
 }
@@ -541,28 +431,6 @@ fn write_file(path: &std::path::Path, contents: &str) {
     fs::write(path, contents).unwrap_or_else(|err| panic!("failed to write {path:?}: {err}"));
 }
 
-fn run_docker_owned(args: &[String]) -> Result<String, String> {
-    let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
-    run_docker(&refs)
-}
-
-fn run_docker(args: &[&str]) -> Result<String, String> {
-    let output = Command::new("docker")
-        .args(args)
-        .output()
-        .map_err(|err| format!("docker {} failed to spawn: {err}", args.join(" ")))?;
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-    } else {
-        Err(format!(
-            "docker {} exited with status {}\nstdout:\n{}\nstderr:\n{}",
-            args.join(" "),
-            output.status,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr),
-        ))
-    }
-}
 
 /// Build an ACCEPT rule for a `node:net` test target.
 ///

@@ -13,24 +13,27 @@
 
 #![allow(clippy::future_not_send)]
 
-use zeroship_id::AppId;
-use std::process::Command;
 use std::time::Duration;
 
+use testcontainers::{
+    core::{IntoContainerPort, WaitFor},
+    runners::SyncRunner,
+    Container, GenericImage, ImageExt,
+};
 use uuid::Uuid;
 use zeroship_bundle::s3_blob::PART_SIZE;
 use zeroship_bundle::{
     sha256_hex, BlobError, BlobStore, LocalDiskBlobStore, PutOutcome, S3BlobStore,
     MAX_MANIFEST_BYTES,
 };
+use zeroship_id::AppId;
 
 use compio_s3::{S3Client, S3Config, S3Credentials};
 
-const IMAGE: &str = "ghcr.io/versity/versitygw:v1.3.0";
+const IMAGE: &str = "ghcr.io/versity/versitygw";
+const TAG: &str = "v1.3.0";
 const ACCESS_KEY: &str = "zeroship-fixture";
 const SECRET_KEY: &str = "zeroship-fixture-secret";
-const CONTAINER: &str = "zs-bundle-s3blob-test";
-const PORT: u16 = 9112;
 /// The gateway's own listener port inside the container.
 const SERVER_PORT: u16 = 7070;
 const BUCKET: &str = "zs-blob-bucket";
@@ -38,183 +41,80 @@ const BUCKET: &str = "zs-blob-bucket";
 /// log for it is a readiness condition rather than a fixed sleep.
 const READY_MARKER: &str = "VersityGW";
 
-/// Refuse the run unless a docker daemon answers `docker info`.
+/// The gateway this test runs against, started through testcontainers.
 ///
-/// # Panics
-///
-/// When docker is absent or its daemon is not running. It used to announce a
-/// skip, so the only coverage `S3BlobStore` has - and the only place the S3 and
-/// local-disk stores are compared - reported green on every machine without
-/// docker.
-fn require_docker() {
-    let answered = Command::new("docker")
-        .args(["info"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success());
-    assert!(
-        answered,
-        "Docker is unavailable, and this test requires it.\n\
-         \n\
-         \x20 backend: S3, in a container this test starts itself\n\
-         \x20 probe:   `docker info` did not succeed\n\
-         \n\
-         Nothing in this repository provisions this container - the test does it\n\
-         inline - so what is missing is docker itself. Install it, start the\n\
-         daemon, and check that your user can reach it:\n\
-         \x20 docker info\n\
-         \n\
-         The suite then pulls `{IMAGE}` on first run, so the first run needs\n\
-         network access to the registry.\n\
-         \n\
-         There is no environment variable that makes this a skip. A backend this\n\
-         test cannot reach is a failed run, not a green one."
-    );
+/// Dropping the handle removes the container and the crate's process watchdog
+/// covers a signal delivered before the drop. The gateway's POSIX backend maps
+/// each bucket to a directory under its root, so the boot command creates the
+/// bucket with `mkdir` before handing over to the server: setup needs no S3
+/// client and no vendor CLI. A daemon that cannot start it fails the run
+/// rather than skipping, because this is the only coverage `S3BlobStore` has.
+struct S3Fixture {
+    _container: Container<GenericImage>,
+    endpoint: String,
 }
 
-fn cleanup() {
-    let _ = Command::new("docker")
-        .args(["rm", "-f", CONTAINER])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
-}
-
-/// Start the S3 server container this test runs against.
-///
-/// The gateway's POSIX backend maps each bucket to a directory under its root,
-/// so the boot command creates the bucket with `mkdir` before handing over to
-/// the server: fixture setup needs no S3 client and no vendor CLI.
-///
-/// # Panics
-///
-/// When the container cannot be started, or never becomes ready. Both used to
-/// announce a skip and return `false`, and the caller returned on `false` - so
-/// a docker daemon that WAS present but refused the run, or a server that never
-/// came up, produced the same pass as a full round-trip.
-fn start_s3_server() {
-    cleanup();
-    let boot = format!(
-        "mkdir -p /data/{BUCKET} && exec /usr/local/bin/versitygw --port :{SERVER_PORT} posix /data"
-    );
-    let run = Command::new("docker")
-        .args([
-            "run",
-            "-d",
-            "--name",
-            CONTAINER,
-            "-p",
-            &format!("{PORT}:{SERVER_PORT}"),
-            "-e",
-            &format!("ROOT_ACCESS_KEY_ID={ACCESS_KEY}"),
-            "-e",
-            &format!("ROOT_SECRET_ACCESS_KEY={SECRET_KEY}"),
-            "--entrypoint",
-            "/bin/sh",
-            IMAGE,
-            "-c",
-            &boot,
-        ])
-        .status();
-    assert!(
-        matches!(run, Ok(s) if s.success()),
-        "The S3 server container this test needs would not start.\n\
-         \n\
-         \x20 backend:   S3\n\
-         \x20 image:     {IMAGE}\n\
-         \x20 container: {CONTAINER}\n\
-         \x20 port:      {PORT} on the host, mapped to {SERVER_PORT}\n\
-         \n\
-         `docker run` failed. The usual causes, in the order worth checking:\n\
-         \x20 docker ps -a --filter name={CONTAINER}   # a leftover container\n\
-         \x20 ss -lptn 'sport = :{PORT}'                     # the port is taken\n\
-         \x20 docker pull {IMAGE}   # the image is not local\n\
-         \n\
-         Nothing in this repository provisions it; the test starts and removes\n\
-         it itself, so there is no script to run - fix the daemon and re-run.\n\
-         \n\
-         There is no environment variable that makes this a skip."
-    );
-    for _ in 0..40 {
-        std::thread::sleep(Duration::from_millis(500));
-        let logs = Command::new("docker").args(["logs", CONTAINER]).output();
-        if let Ok(out) = logs {
-            let ready = String::from_utf8_lossy(&out.stdout).contains(READY_MARKER)
-                || String::from_utf8_lossy(&out.stderr).contains(READY_MARKER);
-            if ready {
-                return;
-            }
+impl S3Fixture {
+    fn start() -> Self {
+        let boot = format!(
+            "mkdir -p /data/{BUCKET} && exec /usr/local/bin/versitygw --port :{SERVER_PORT} posix /data"
+        );
+        let container = GenericImage::new(IMAGE, TAG)
+            .with_exposed_port(SERVER_PORT.tcp())
+            .with_wait_for(WaitFor::message_on_stdout(READY_MARKER))
+            .with_entrypoint("/bin/sh")
+            .with_env_var("ROOT_ACCESS_KEY_ID", ACCESS_KEY)
+            .with_env_var("ROOT_SECRET_ACCESS_KEY", SECRET_KEY)
+            .with_cmd(["-c".to_string(), boot])
+            .with_startup_timeout(Duration::from_secs(90))
+            .start()
+            .expect("S3 tests require Docker");
+        let endpoint = format!(
+            "http://{}:{}",
+            container.get_host().expect("S3 fixture host"),
+            container
+                .get_host_port_ipv4(SERVER_PORT.tcp())
+                .expect("S3 fixture mapped port"),
+        );
+        Self {
+            _container: container,
+            endpoint,
         }
     }
-    let tail = Command::new("docker")
-        .args(["logs", "--tail", "20", CONTAINER])
-        .output()
-        .map(|o| {
-            format!(
-                "{}{}",
-                String::from_utf8_lossy(&o.stdout),
-                String::from_utf8_lossy(&o.stderr)
-            )
-        })
-        .unwrap_or_else(|e| format!("(could not read container logs: {e})"));
-    cleanup();
-    panic!(
-        "The S3 server container started but never became usable.\n\
-         \n\
-         \x20 backend:   S3\n\
-         \x20 image:     {IMAGE}\n\
-         \x20 container: {CONTAINER} (already removed, so it is not in the way)\n\
-         \x20 endpoint:  http://127.0.0.1:{PORT}\n\
-         \x20 bucket:    {BUCKET}\n\
-         \n\
-         The readiness loop ran to its ceiling without `{READY_MARKER}` appearing\n\
-         in the container log, which the gateway prints once its listener is\n\
-         bound. Re-run it by hand to see what the server said:\n\
-         \x20 docker run -d --name {CONTAINER} -p {PORT}:{SERVER_PORT} \\\n\
-         \x20   -e ROOT_ACCESS_KEY_ID={ACCESS_KEY} -e ROOT_SECRET_ACCESS_KEY={SECRET_KEY} \\\n\
-         \x20   --entrypoint /bin/sh {IMAGE} -c '{boot}'\n\
-         \x20 docker logs {CONTAINER}\n\
-         \n\
-         What this loop saw last:\n\
-         {tail}\n\
-         \n\
-         There is no environment variable that makes this a skip."
-    )
-}
 
-fn s3_url() -> String {
-    // `checksum=sha256` is stated rather than inherited: it makes the
-    // single-object PUT send `x-amz-checksum-sha256`, so the server verifies a
-    // digest this client computed.
-    format!(
-        "s3://{BUCKET}/it?provider=generic&endpoint=http://127.0.0.1:{PORT}&region=us-east-1&style=path&dev_http=true&checksum=sha256"
-    )
-}
+    /// `checksum=sha256` is stated rather than inherited: it makes the
+    /// single-object PUT send `x-amz-checksum-sha256`, so the server verifies a
+    /// digest this client computed.
+    fn url(&self) -> String {
+        format!(
+            "s3://{BUCKET}/it?provider=generic&endpoint={}&region=us-east-1&style=path&dev_http=true&checksum=sha256",
+            self.endpoint,
+        )
+    }
 
-fn s3_store() -> S3BlobStore {
-    s3_store_with_concurrency(zeroship_bundle::limits::DEFAULT_UPLOAD_CONCURRENCY)
-}
+    fn store(&self) -> S3BlobStore {
+        self.store_with_concurrency(zeroship_bundle::limits::DEFAULT_UPLOAD_CONCURRENCY)
+    }
 
-/// The same store with the in-flight part-upload concurrency stated at the
-/// call site. `S3BlobStore` has taken this as a constructor argument since the
-/// crate stopped reading its own configuration, so a test that wants a
-/// specific value passes it here; planting `ZEROSHIP_BLOB_UPLOAD_CONCURRENCY`
-/// in the process environment never reached this store at all.
-fn s3_store_with_concurrency(upload_concurrency: usize) -> S3BlobStore {
-    let cfg = S3Config::parse_url(&s3_url()).expect("parse s3 url");
-    S3BlobStore::new(
-        cfg,
-        S3Credentials::new(ACCESS_KEY, SECRET_KEY, None),
-        upload_concurrency,
-    )
-}
+    /// The same store with the in-flight part-upload concurrency stated at the
+    /// call site. `S3BlobStore` has taken this as a constructor argument since
+    /// the crate stopped reading its own configuration, so a test that wants a
+    /// specific value passes it here.
+    fn store_with_concurrency(&self, upload_concurrency: usize) -> S3BlobStore {
+        let cfg = S3Config::parse_url(&self.url()).expect("parse s3 url");
+        S3BlobStore::new(
+            cfg,
+            S3Credentials::new(ACCESS_KEY, SECRET_KEY, None),
+            upload_concurrency,
+        )
+    }
 
-/// A raw `S3Client` over the same S3 bucket, for asserting low-level state
-/// (e.g. that an aborted multipart leaves no orphaned upload).
-fn s3_raw_client() -> S3Client {
-    let cfg = S3Config::parse_url(&s3_url()).expect("parse s3 url");
-    S3Client::new(cfg, S3Credentials::new(ACCESS_KEY, SECRET_KEY, None))
+    /// A raw `S3Client` over the same bucket, for asserting low-level state
+    /// (e.g. that an aborted multipart leaves no orphaned upload).
+    fn raw_client(&self) -> S3Client {
+        let cfg = S3Config::parse_url(&self.url()).expect("parse s3 url");
+        S3Client::new(cfg, S3Credentials::new(ACCESS_KEY, SECRET_KEY, None))
+    }
 }
 
 /// A `Read` source that yields `before_err` bytes (in 64 KiB reads) and then
@@ -253,34 +153,33 @@ fn local_store() -> (LocalDiskBlobStore, std::path::PathBuf) {
 
 #[test]
 fn s3_blob_store_roundtrip_and_parity() {
-    require_docker();
-    start_s3_server();
-    let result = std::panic::catch_unwind(|| {
+    let fixture = S3Fixture::start();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         compio::runtime::Runtime::new()
             .expect("compio runtime")
             .block_on(async {
                 // S3 leg.
-                let s3 = s3_store();
+                let s3 = fixture.store();
                 run_contract(&s3, "s3").await;
                 // Parallel multipart: a many-part blob under concurrency > 1
                 // round-trips byte-exact AND keeps content-address integrity
                 // (parts finish out of order; the SHA-256 is over read order).
-                run_s3_parallel_many_parts().await;
+                run_s3_parallel_many_parts(&fixture).await;
                 // Content-address integrity under concurrency: a hash that
                 // does not match the streamed bytes must ABORT before
                 // complete_multipart — nothing committed, no orphaned upload.
-                run_s3_parallel_hash_mismatch_aborts().await;
+                run_s3_parallel_hash_mismatch_aborts(&fixture).await;
                 // C1 regression: an error mid-multipart-upload must abort the
                 // upload explicitly, not leak orphaned parts or abort the
                 // process.
-                run_c1_mid_upload_abort(&s3).await;
+                run_c1_mid_upload_abort(&s3, &fixture).await;
                 // Local-disk leg — identical assertions for parity.
                 let (local, root) = local_store();
                 run_contract(&local, "local").await;
                 std::fs::remove_dir_all(&root).ok();
             });
-    });
-    cleanup();
+    }));
+    drop(fixture);
     if let Err(e) = result {
         std::panic::resume_unwind(e);
     }
@@ -294,7 +193,7 @@ fn s3_blob_store_roundtrip_and_parity() {
 /// exist on the server before the failure; only an explicit awaited abort can
 /// reclaim them. (Pre-fix, the abort was a detached `spawn` in `Drop`, which
 /// could panic off-runtime / never be polled, leaking the upload.)
-async fn run_c1_mid_upload_abort(store: &S3BlobStore) {
+async fn run_c1_mid_upload_abort(store: &S3BlobStore, fixture: &S3Fixture) {
     // Declare a size big enough to force multipart (≥ 1 full part + more), but
     // make the reader die partway. The hash is arbitrary (we never complete).
     let declared = (PART_SIZE * 2) as u64;
@@ -312,7 +211,7 @@ async fn run_c1_mid_upload_abort(store: &S3BlobStore) {
     // Sanity-check the listing path is non-vacuous first.
     let key_prefix = format!("blobs/{fake_hash}");
     {
-        let raw = s3_raw_client();
+        let raw = fixture.raw_client();
         let up = raw
             .create_multipart(&key_prefix, "application/octet-stream")
             .await
@@ -335,7 +234,7 @@ async fn run_c1_mid_upload_abort(store: &S3BlobStore) {
 
     // The fix's guarantee: the multipart upload created mid-stream was aborted
     // explicitly, so no orphaned (billed) upload remains.
-    let raw = s3_raw_client();
+    let raw = fixture.raw_client();
     let uploads = raw
         .list_multipart_uploads(&key_prefix)
         .await
@@ -367,10 +266,10 @@ impl std::io::Read for VecReader {
 /// way out, so a byte-exact round-trip proves BOTH the parts were uploaded in
 /// the correct order (sorted before complete, despite finishing out of order)
 /// AND the content address held. Pre-change this path was strictly sequential.
-async fn run_s3_parallel_many_parts() {
+async fn run_s3_parallel_many_parts(fixture: &S3Fixture) {
     // Force 4-way concurrency explicitly so the test does not depend on the
     // default.
-    let store = s3_store_with_concurrency(4);
+    let store = fixture.store_with_concurrency(4);
 
     // 5 full parts + a remainder = 6 parts, past the concurrency of 4 so
     // several waves overlap and finish out of order. Bounded by MAX_BLOB_BYTES
@@ -397,8 +296,8 @@ async fn run_s3_parallel_many_parts() {
 /// order, the whole-stream SHA-256 (computed in read order) is verified BEFORE
 /// `complete_multipart`; the mismatch must abort the upload — the object must
 /// NOT materialize under the wrong key, and no orphaned multipart remains.
-async fn run_s3_parallel_hash_mismatch_aborts() {
-    let store = s3_store_with_concurrency(4);
+async fn run_s3_parallel_hash_mismatch_aborts(fixture: &S3Fixture) {
+    let store = fixture.store_with_concurrency(4);
 
     // A multipart-sized blob (≥ 1 full part so a real multipart upload runs),
     // but we lie about its hash. declared size matches the real byte count so
@@ -423,7 +322,7 @@ async fn run_s3_parallel_hash_mismatch_aborts() {
         "integrity: object materialized under the wrong content hash"
     );
     // And no orphaned multipart upload was left behind.
-    let raw = s3_raw_client();
+    let raw = fixture.raw_client();
     let uploads = raw
         .list_multipart_uploads(&key_prefix)
         .await

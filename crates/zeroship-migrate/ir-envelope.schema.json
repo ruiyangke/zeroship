@@ -73,7 +73,7 @@
       "default": []
     },
     "checksum": {
-      "description": "An ADVISORY integrity hint: the hex `Checksum::of_ir` the\nbuilder computed over the hint-domain (`ops` + `flags` + `depends_on` +\n`supersedes` + `preconditions` - NEVER `owner_app`, which is server-stamped\nand so unpredictable to the builder). The engine RECOMPUTES and is\nauthoritative; when this hint is present the loader compares its\nrecomputed hint-domain checksum to it (a mismatch is genuine drift). The\nhint is **EXCLUDED from [`Checksum::of_ir`]** (exactly like `owner_app` is\nexcluded from the hint domain) - folding the artifact's own checksum into\nthe artifact's checksum would be circular. `deny_unknown_fields` would\notherwise reject an IR envelope carrying this advisory hint at\ndeserialize, so the field is modelled explicitly here.",
+      "description": "An ADVISORY integrity hint: the hex `Checksum::of_ir` the\nbuilder computed over the hint-domain (`ops` + `flags` + `depends_on` +\n`supersedes` + `preconditions` - NEVER `owner_app`, which is server-stamped\nand so unpredictable to the builder). The engine RECOMPUTES and is\nauthoritative; when this hint is present the loader compares its\nrecomputed hint-domain checksum to it (a mismatch is genuine drift). The\nhint is **EXCLUDED from [`Checksum::of_ir`](crate::migration::Checksum::of_ir)** (exactly like `owner_app` is\nexcluded from the hint domain) - folding the artifact's own checksum into\nthe artifact's checksum would be circular. `deny_unknown_fields` would\notherwise reject an IR envelope carrying this advisory hint at\ndeserialize, so the field is modelled explicitly here.",
       "type": [
         "string",
         "null"
@@ -6983,7 +6983,7 @@
       ]
     },
     "IrFlagsOverride": {
-      "description": "All-`Option` mirror of [`MigrationFlags`] - the override carrier in the IR.\n\nAn absent key and an explicit `null` both mean \"no override\" here;\nthe derive-then-override MERGE happens elsewhere, NOT this type's job.",
+      "description": "All-`Option` mirror of [`MigrationFlags`](crate::migration::MigrationFlags) - the override carrier in the IR.\n\nAn absent key and an explicit `null` both mean \"no override\" here;\nthe derive-then-override MERGE happens elsewhere, NOT this type's job.",
       "type": "object",
       "properties": {
         "transactional": {

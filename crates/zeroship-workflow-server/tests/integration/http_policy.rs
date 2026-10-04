@@ -141,10 +141,10 @@ struct Fixture {
 }
 impl Fixture {
     async fn new(policy: AppPolicy, configured: bool) -> Self {
-        let platform = platform::Platform::new().await;
-        // A zone this case alone declares: placement considers every eligible
-        // worker in the app's zone, so a shared default zone would let another
-        // case's worker take this app.
+        // The case declares an operator zone and places an app in it, so it
+        // works in a clone no sibling observes: placement considers every
+        // eligible worker in the app's zone, and the zone is deployment-global.
+        let platform = platform::Platform::fresh_database().await;
         let (zone, join_signer) = zone::declare_zone(&platform).await;
         let worker = WorkerId::mint();
         let signer = Signer {

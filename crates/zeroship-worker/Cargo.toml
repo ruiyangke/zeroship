@@ -50,13 +50,15 @@ tracing = { workspace = true }
 [dev-dependencies]
 # Creator execution fixtures keep their deployment catalog in a separate ORM database.
 zeroship-workflow-manager = { workspace = true }
-# Shared deployment fixtures implement the native hold-client test adapter.
-async-trait = { workspace = true }
+# The workflow-typed fixture adapters over the plain workflow testkit.
+zeroship-workflow-fixtures = { workspace = true }
 # Parse generated configuration and compose private migration host settings.
 toml = { workspace = true }
 # Rust fixtures own PostgreSQL, Redis and temporary storage.
 tempfile = { workspace = true }
-testcontainers = { version = "0.28", default-features = false, features = ["blocking", "watchdog"] }
+# The testkit owns the daemon client the fixtures query container state through.
+zeroship-testkit = { workspace = true }
+testcontainers = { workspace = true }
 # The peer-boot fixture derives deterministic Ed25519 public keys for the
 # JWKS-shaped peer documents.
 ed25519-dalek = { workspace = true }

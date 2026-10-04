@@ -186,16 +186,9 @@ async fn failed_cases_remove_their_server_without_touching_another_cases_roles()
             failure.downcast_ref::<&str>(),
             Some(&"intentional worker fixture failure")
         );
-        let containers = std::process::Command::new("docker")
-            .args(["ps", "--all", "--quiet", "--no-trunc"])
-            .output()
-            .expect("list fixture containers");
-        assert!(containers.status.success());
-        assert!(
-            !String::from_utf8(containers.stdout)
-                .unwrap()
-                .lines()
-                .any(|id| id == *failed_id.borrow()),
+        assert_eq!(
+            zeroship_testkit::shared::container_status(failed_id.borrow().as_str()),
+            None,
             "failed case leaked its server"
         );
         let client = other.connect_as("fixture_role").await;

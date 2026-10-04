@@ -23,7 +23,10 @@ use zeroship_testkit::s3::S3Server;
 #[test]
 fn s3_full_surface_and_multipart() {
     let server = S3Server::start();
-    let client = S3Client::new(server.config("smoke"), server.credentials());
+    let client = S3Client::new(
+        compio_s3::S3Config::parse_url(&server.url("smoke")).expect("S3 fixture configuration"),
+        compio_s3::S3Credentials::new(server.access_key(), server.secret_key(), None),
+    );
     compio::runtime::Runtime::new()
         .expect("compio runtime")
         .block_on(run_smoke(client));

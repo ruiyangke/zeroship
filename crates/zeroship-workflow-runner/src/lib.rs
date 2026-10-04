@@ -35,19 +35,15 @@ mod outputs;
 pub use outputs::{PreparedExecution, TaskPayloadLimits};
 
 #[cfg(test)]
-#[path = "../../../tests/fixtures/workflow_deployments.rs"]
-mod deployment_fixture;
+pub use zeroship_workflow_fixtures::deployment as deployment_fixture;
 #[cfg(test)]
-pub use zeroship_workflow_testkit::manager_queue;
+pub use zeroship_workflow_fixtures::journal as journal_fixture;
 #[cfg(test)]
-#[path = "../../../tests/fixtures/workflow_journal.rs"]
-mod journal_fixture;
+pub use zeroship_workflow_fixtures::manager_queue;
 #[cfg(test)]
-#[path = "../../../tests/fixtures/workflow_service_binding.rs"]
-mod service_binding;
+pub use zeroship_workflow_fixtures::service_binding;
 #[cfg(test)]
-#[path = "../../../tests/testkit/src/s3.rs"]
-mod s3_fixture;
+use zeroship_testkit::s3 as s3_fixture;
 
 use async_trait::async_trait;
 use zeroship_workflow::{

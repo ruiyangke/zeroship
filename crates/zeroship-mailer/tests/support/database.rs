@@ -1,7 +1,7 @@
 //! The migrated platform database a mailer case runs against.
 //!
-//! Every case in this binary shares one reaper-owned `PostgreSQL` server through
-//! [`zeroship_testkit::postgres`], migrated once. A case that owns only the rows
+//! Every case shares the one `PostgreSQL` server every test process of the
+//! worktree joins through [`zeroship_testkit::postgres`], migrated once. A case that owns only the rows
 //! it mints runs on that shared database with [`Database::run`]; a case whose
 //! subject is platform-global - here renaming the shared suppression table, so
 //! the lookup fails for every reader - gets its own database cloned from the

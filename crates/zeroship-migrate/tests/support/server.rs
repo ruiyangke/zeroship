@@ -1,82 +1,79 @@
-//! The PostgreSQL server a live suite binary owns.
+//! The PostgreSQL server the live suites share.
 //!
-//! Each binary starts a server the first time one of its tests asks for it, and every
-//! test in the binary shares that server. A container per test would put dozens of
-//! servers on the machine at once for a single `cargo test`; one per binary is the
-//! cost of the binary, paid once. Isolation inside the server is the caller's:
+//! Every test process of a worktree that asks for the server joins one shared
+//! server through [`zeroship_testkit::shared`]: the first process elects itself
+//! and boots it, every other process joins the ready server. A container per
+//! test would put dozens of servers on the machine at once; one per worktree run
+//! is paid once. Isolation inside the server is the caller's:
 //! [`super::pg_database`] hands each PostgreSQL test a database of its own.
 //!
-//! Nothing is configured from outside. The server is a container this process
-//! started, so there is no address to export, no provisioned instance to find, and no
-//! way for a run to reach a server another run is using. Docker - the daemon and its
-//! `docker` CLI - is the one prerequisite: a binary that cannot start its server fails
-//! every test that asked for one, and the failure names the server and the reason.
-//! There is no skip.
+//! Nothing is configured from outside. The server is found through a lease
+//! directory under the worktree's `target`, so there is no address to export and
+//! no provisioned instance to find. Docker is the one prerequisite: a process
+//! that cannot join the server fails every test that asked for one, and the
+//! failure names the server and the reason. There is no skip.
 //!
-//! THE SERVER DOES NOT OUTLIVE THE PROCESS. The server lives in a `static`, which
-//! libtest never drops, so it is started through the shared reaper in
-//! [`zeroship_testkit::docker`]: a reaper spawned before the
-//! container exists removes it once this process has ended, and the start is refused
-//! when the `docker` CLI that reaper runs cannot see the container. That module's doc
-//! says what this covers and what it does not. `pg_engine/owned_server.rs` measures
-//! three of its paths against real processes: a child test process that exits
-//! normally, one SIGKILLed while its server is still starting, and a `docker` program
-//! that cannot see the daemon.
+//! THE SERVER DOES NOT OUTLIVE ITS LAST LEASE. The process holds its lease for
+//! as long as it runs, and the kernel releases it however the process ends; the
+//! watchdog that is the container's first process removes the container once no
+//! process has held the lease for the idle grace. `pg_engine::owned_server`
+//! measures that against real child processes, one that exits and one killed
+//! while the server starts.
 
 use std::sync::OnceLock;
-use std::time::Duration;
 
-use testcontainers::core::{IntoContainerPort, WaitFor};
-use testcontainers::{ContainerRequest, GenericImage, ImageExt};
+use zeroship_testkit::shared::{self, Scope};
 
-use zeroship_testkit::docker::{start_owned, DockerCli, OwnedContainer, Ownership};
-
-/// The password of the superuser on the owned server. The server listens on a
-/// loopback-mapped port for the life of one test process, so this is a fixture value,
-/// not a credential.
+/// The password of the superuser on the shared server. The server listens on a
+/// loopback-mapped port for the life of one worktree run, so this is a fixture
+/// value, not a credential.
 const PASSWORD: &str = "zeroship-migrate-fixture";
 
 /// The PostgreSQL image. The suites target PostgreSQL 18: database-generated UUIDv7
 /// exists from 18 on, and the catalog shapes the drift suites pin were read from it.
-const POSTGRES_IMAGE: (&str, &str) = ("postgres", "18");
+const POSTGRES_IMAGE: &str = "postgres:18";
 const POSTGRES_PORT: u16 = 5432;
 /// The database the admin connection uses to create and drop per-test databases.
 const POSTGRES_ADMIN_DATABASE: &str = "postgres";
 
-/// How long a server gets to become ready, including an image pull on a cold machine.
-const STARTUP: Duration = Duration::from_mins(5);
+/// The scope kind the shared server is filed under in the worktree's `target`.
+const KIND: &str = "migrate-postgres";
 
-/// A server this process started, with the reaper that removes it.
+/// The shared server, leased by the process that holds it.
 #[derive(Debug)]
-pub struct OwnedServer {
-    owned: OwnedContainer,
-    host: String,
-    port: u16,
+pub struct SharedServer {
+    lease: shared::Lease,
 }
 
-impl OwnedServer {
+impl SharedServer {
+    /// Join the server `scope` names, booting it if this process is elected.
+    ///
+    /// [`postgres`] joins the worktree's scope; a lifetime measurement joins a
+    /// throwaway one.
+    ///
+    /// # Errors
+    /// When the image cannot be built or the server cannot be booted or joined.
+    pub fn join(scope: &Scope) -> Result<Self, String> {
+        let lease = shared::join(scope, &spec()?, |_| Ok(()))?;
+        Ok(Self { lease })
+    }
+
     /// The Docker id of the container, for a test that watches its lifetime.
     #[must_use]
     pub fn container_id(&self) -> &str {
-        self.owned.container().id()
-    }
-
-    fn url(&self, scheme: &str, user: &str, database: &str) -> String {
-        let mut url = url::Url::parse(&format!("{scheme}://{user}@localhost/{database}"))
-            .expect("the fixture URL template parses");
-        url.set_password(Some(PASSWORD))
-            .expect("the fixture URL accepts a password");
-        url.set_host(Some(&self.host))
-            .expect("the container host is a valid URL host");
-        url.set_port(Some(self.port))
-            .expect("the fixture URL accepts a port");
-        url.into()
+        &self.lease.container_id
     }
 
     /// A PostgreSQL DSN for `database` on this server, as its superuser.
     #[must_use]
     pub fn postgres_url(&self, database: &str) -> String {
-        self.url("postgresql", "postgres", database)
+        let mut url = url::Url::parse(&format!("postgresql://postgres@127.0.0.1/{database}"))
+            .expect("the fixture URL template parses");
+        url.set_password(Some(PASSWORD))
+            .expect("the fixture URL accepts a password");
+        url.set_port(Some(self.lease.port))
+            .expect("the fixture URL accepts a port");
+        url.into()
     }
 
     /// The PostgreSQL DSN of the admin database.
@@ -86,66 +83,98 @@ impl OwnedServer {
     }
 }
 
-/// The container request the PostgreSQL server is started from.
-pub fn postgres_request() -> ContainerRequest<GenericImage> {
-    GenericImage::new(POSTGRES_IMAGE.0, POSTGRES_IMAGE.1)
-        .with_exposed_port(POSTGRES_PORT.tcp())
-        .with_wait_for(WaitFor::message_on_stdout(
-            "PostgreSQL init process complete; ready for start up.",
-        ))
-        .with_wait_for(WaitFor::message_on_stderr(
-            "database system is ready to accept connections",
-        ))
-        .with_env_var("POSTGRES_PASSWORD", PASSWORD)
-        // Every test of the binary runs against this one server, each with its own
-        // sessions, so the stock connection ceiling is too low for a binary running
-        // on every core. Durability is not under test.
-        .with_cmd(["postgres", "-c", "max_connections=400", "-c", "fsync=off"])
-        .with_startup_timeout(STARTUP)
+/// The recipe the shared server runs under, its identity keyed to every input
+/// that changes what a ready server holds.
+fn spec() -> Result<shared::Spec, String> {
+    let image = zeroship_testkit::image::with_watchdog(POSTGRES_IMAGE)?;
+    let environment = vec![("POSTGRES_PASSWORD".to_owned(), PASSWORD.to_owned())];
+    // Every test of a run reaches this one server, each with its own sessions, so
+    // the stock connection ceiling is too low for a run on every core.
+    // Durability is not under test.
+    let args: Vec<String> = [
+        "docker-entrypoint.sh",
+        "postgres",
+        "-c",
+        "max_connections=400",
+        "-c",
+        "fsync=off",
+    ]
+    .iter()
+    .map(|argument| (*argument).to_owned())
+    .collect();
+    let list = |values: &[&str]| values.iter().map(|value| (*value).to_owned()).collect();
+    let ready = shared::Readiness {
+        log_marker: "PostgreSQL init process complete".to_owned(),
+        probe: list(&["pg_isready", "-U", "postgres", "-h", "127.0.0.1", "-p", "5432"]),
+        answer: list(&[
+            "psql",
+            "-U",
+            "postgres",
+            "-d",
+            POSTGRES_ADMIN_DATABASE,
+            "-tAc",
+            "SELECT 1",
+        ]),
+    };
+    let mut parts: Vec<Vec<u8>> = vec![image.as_bytes().to_vec()];
+    for argument in &args {
+        parts.push(argument.as_bytes().to_vec());
+    }
+    for (key, value) in &environment {
+        parts.push(format!("{key}={value}").into_bytes());
+    }
+    let refs: Vec<&[u8]> = parts.iter().map(Vec::as_slice).collect();
+    Ok(shared::Spec {
+        inputs: shared::digest(&refs),
+        image,
+        environment,
+        ports: vec![shared::Port {
+            container: POSTGRES_PORT,
+            host: shared::HostPort::Assigned,
+        }],
+        watchdog: zeroship_testkit::image::WATCHDOG.to_owned(),
+        entrypoint: shared::Entrypoint::Image,
+        args,
+        ready,
+    })
 }
 
-/// This binary's PostgreSQL server, started on first use.
+/// How long a server a case owns outlives the case's lease.
+const PRIVATE_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// A server of the calling case's own, booted from the same recipe.
+///
+/// PostgreSQL roles are cluster-global, and the catalog snapshot the drift and
+/// fold suites compare reads every role on the server. A case that creates,
+/// alters or drops roles on the shared server would therefore change what every
+/// other case's snapshot reads, between the two snapshots that case compares.
+/// Such a case takes a server of its own: its lease is the server's only lease,
+/// so once the handle drops, or the process holding it dies, the watchdog
+/// removes the server.
 ///
 /// # Panics
-/// When the server could not be started. The first failure is kept, so every later
-/// caller fails with the same reason instead of retrying a start that cannot succeed.
-pub fn postgres() -> &'static OwnedServer {
-    static SERVER: OnceLock<Result<OwnedServer, String>> = OnceLock::new();
-    owned(
-        &SERVER,
-        "PostgreSQL",
-        POSTGRES_IMAGE,
-        POSTGRES_PORT,
-        postgres_request,
-    )
+/// When the server could not be booted.
+pub fn private() -> SharedServer {
+    SharedServer::join(&Scope::private(KIND, PRIVATE_GRACE)).unwrap_or_else(|reason| {
+        panic!(
+            "zeroship-migrate's role-writing PostgreSQL tests run against a {POSTGRES_IMAGE} \
+             server of their own, and it could not be booted: {reason}"
+        )
+    })
 }
 
-fn owned(
-    slot: &'static OnceLock<Result<OwnedServer, String>>,
-    server: &str,
-    (image, tag): (&str, &str),
-    port: u16,
-    request: impl FnOnce() -> ContainerRequest<GenericImage>,
-) -> &'static OwnedServer {
-    match slot.get_or_init(|| start(request(), port)) {
-        Ok(owned) => owned,
+/// The worktree's shared PostgreSQL server, joined on first use.
+///
+/// # Panics
+/// When the server could not be joined. The first failure is kept, so every later
+/// caller fails with the same reason instead of retrying a boot that cannot succeed.
+pub fn postgres() -> &'static SharedServer {
+    static SERVER: OnceLock<Result<SharedServer, String>> = OnceLock::new();
+    match SERVER.get_or_init(|| SharedServer::join(&Scope::worktree(KIND))) {
+        Ok(server) => server,
         Err(reason) => panic!(
-            "zeroship-migrate's live {server} tests run against a {image}:{tag} server this \
-             test binary starts through Docker, and it could not be started: {reason}"
+            "zeroship-migrate's live PostgreSQL tests run against a {POSTGRES_IMAGE} server \
+             every test process of the worktree shares, and it could not be joined: {reason}"
         ),
     }
-}
-
-fn start(request: ContainerRequest<GenericImage>, port: u16) -> Result<OwnedServer, String> {
-    let owned = start_owned(&DockerCli::system(), &Ownership::mint(), request)?;
-    let host = owned
-        .container()
-        .get_host()
-        .map_err(|error| format!("the container host is unknown: {error}"))?
-        .to_string();
-    let port = owned
-        .container()
-        .get_host_port_ipv4(port)
-        .map_err(|error| format!("port {port} is not mapped: {error}"))?;
-    Ok(OwnedServer { owned, host, port })
 }

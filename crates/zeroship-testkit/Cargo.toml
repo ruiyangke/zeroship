@@ -1,0 +1,35 @@
+[package]
+name = "zeroship-testkit"
+version = "0.1.0"
+edition = "2021"
+description = "Dev-only test fixtures: the shared platform database, scoped tenants and the servers a suite shares"
+publish = false
+
+# A workspace member so its own unit tests run in the ordinary workspace suite
+# and every dependency is pinned by `workspace = true`. It is classified
+# `class = "test-dev-tool"`: consumers reach it through a `[dev-dependencies]`
+# entry, so the testcontainers it carries stays off every shipped normal edge.
+# `xtask/tests/architecture` and the tokio boundary checks prove that.
+
+[[package.metadata.zeroship-config.targets]]
+target = "zeroship-testkit"
+class = "test-dev-tool"
+reason = "Dev-only test fixtures; reached only through dev-dependencies."
+
+[dependencies]
+compio = { workspace = true }
+compio-postgres = { workspace = true }
+compio-redis = { workspace = true }
+futures = { workspace = true }
+libc = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tempfile = { workspace = true }
+testcontainers = { workspace = true }
+tokio = { version = "1", features = ["rt-multi-thread", "time"] }
+toml = { workspace = true }
+url = { workspace = true }
+zeroship-id = { workspace = true }
+
+[lints]
+workspace = true

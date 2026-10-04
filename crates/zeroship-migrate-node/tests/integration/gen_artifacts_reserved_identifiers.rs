@@ -53,8 +53,7 @@ const CONFINED_SYSTEM_SHAPE_INJECT_TOML: &str =
 
 /// The recorded migration set for `examples/db-todos`, as `zeroship migrate`
 /// puts it on the wire. Pinned against the committed descriptor below.
-const REAL_MIGRATIONS_IR: &str =
-    include_str!("../../../../tests/fixtures/migrations-ir/db-todos.ir.json");
+const REAL_MIGRATIONS_IR: &str = zeroship_testkit::recorded::DB_TODOS_MIGRATIONS_IR;
 
 /// The real committed artifact the unmutated input must reproduce.
 const REAL_RUNTIME_JSON: &str =

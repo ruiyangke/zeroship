@@ -1497,27 +1497,30 @@ async fn two_services_on_one_cluster_converge_on_one_row_and_a_zone_change_is_re
     );
 }
 
-/// The binary's shared migrated server is removed once the process that started it
-/// has ended - after a normal exit, and after a SIGKILL while it is still starting or
-/// migrating. Both run
-/// [`migrated_server_lifetime::the_migrated_server_reports_its_container`] alone in a
-/// child process; see `zeroship_testkit::lifetime`.
+/// The suite's migrated server is removed once the last process holding it has
+/// ended - after a normal exit, and after a `SIGKILL` while it is still starting
+/// or migrating. Both run
+/// [`migrated_server_lifetime::child_joins_the_migrated_server`] alone in a
+/// child process with a throwaway scope; see `zeroship_testkit::lifetime`.
 mod migrated_server_lifetime {
     use zeroship_testkit::lifetime;
 
     /// The child test, by its full path in this binary.
     const CHILD_TEST: &str =
-        "integration::datastore_reconciler_pg::migrated_server_lifetime::the_migrated_server_reports_its_container";
+        "integration::datastore_reconciler_pg::migrated_server_lifetime::child_joins_the_migrated_server";
 
     #[test]
-    fn the_migrated_server_reports_its_container() {
-        lifetime::report_owner();
-        let server = crate::support::fixture::migrated();
-        assert!(
-            server.url().ends_with("/migrate_server_tests"),
-            "{}",
-            server.url()
-        );
+    #[ignore = "spawned by a lifetime measurement as a child process, with its scope on stdin"]
+    fn child_joins_the_migrated_server() {
+        let server = crate::support::fixture::join_migrated(&lifetime::child_scope())
+            .expect("join the suite's migrated server at the throwaway scope");
+        let database = server.admin_url().path().trim_start_matches('/').to_owned();
+        zeroship_testkit::shared::psql(
+            server.container_id(),
+            &database,
+            "SELECT 1 FROM zeroship.plans WHERE id = 'free'",
+        )
+        .expect("the throwaway server carries the migrated platform schema");
         lifetime::report_container(server.container_id());
     }
 

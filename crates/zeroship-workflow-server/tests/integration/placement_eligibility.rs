@@ -111,7 +111,9 @@ const fn ready() -> RegisterWorker {
 /// admitted cannot register.
 #[ntex::test]
 async fn control_zone_facts_decide_placement() {
-    let platform = platform::Platform::new().await;
+    // The case declares operator zones, a deployment-global fact, so it works
+    // in a database no sibling observes.
+    let platform = platform::Platform::fresh_database().await;
     let seeded = platform
         .admin
         .query(
@@ -219,7 +221,7 @@ async fn zone_facts_are_frozen_and_the_manager_reads_only_its_grants() {
 /// abandons it, and its live placement can no longer renew.
 #[ntex::test]
 async fn archived_apps_stay_placeable_and_deleted_apps_do_not() {
-    let platform = platform::Platform::new().await;
+    let platform = platform::Platform::fresh_database().await;
     let service = service(&platform).await;
     // A zone this case alone declares, so only its own worker is a candidate.
     let (zone, signer) = zone_with_signer(&platform).await;
@@ -368,7 +370,7 @@ async fn blocked_manager(observer: &compio_postgres::Client) {
 /// with Control's own column rather than by anything the worker sends.
 #[ntex::test]
 async fn an_instance_whose_lease_has_run_out_is_not_placed() {
-    let platform = platform::Platform::new().await;
+    let platform = platform::Platform::fresh_database().await;
     let service = service(&platform).await;
     // A zone this case alone declares, so only its own worker is a candidate.
     let (zone, signer) = zone_with_signer(&platform).await;

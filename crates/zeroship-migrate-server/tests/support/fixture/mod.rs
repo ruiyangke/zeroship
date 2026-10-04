@@ -1,31 +1,38 @@
 //! The PostgreSQL servers the migration server's integration tests run against.
 //!
-//! [`Postgres::start`] hands a test a server of its own; [`migrated_url`] shares one
-//! migrated server across the binary, kept in a `static` that libtest never drops.
-//! Both are started through the shared reaper in [`zeroship_testkit::docker`]: a
-//! reaper spawned before the container exists removes the container once this
-//! process has ended, so neither outlives the test process however it ends.
+//! [`Postgres::start`] hands a test a server of its own, a testcontainers
+//! `Container` the test holds and drops when it ends. [`migrated_url`] is the
+//! migrated control database every test process of the worktree shares, on a
+//! platform server of this suite's own scope: its cases bootstrap cluster roles
+//! and declare execution zones, which the other suites sharing the worktree's
+//! platform server must never observe. The process holds that server's lease
+//! for as long as it runs, and the server's watchdog removes it once no process
+//! has held the lease for the idle grace, which
+//! `datastore_reconciler_pg::migrated_server_lifetime` measures.
 
 use std::sync::OnceLock;
 use std::time::Duration;
 
 use testcontainers::core::{IntoContainerPort, WaitFor};
-use testcontainers::{GenericImage, ImageExt};
+use testcontainers::runners::SyncRunner;
+use testcontainers::{Container, GenericImage, ImageExt};
+use zeroship_testkit::postgres::{Platform, PLATFORM_IDLE_GRACE};
+use zeroship_testkit::shared::Scope;
 
-mod migrations;
-pub mod tenant;
+pub use zeroship_testkit::tenant_cluster as tenant;
 pub mod world;
 
-use zeroship_testkit::docker::{start_owned, DockerCli, OwnedContainer, Ownership};
+/// The scope kind this suite's migrated server is filed under.
+const MIGRATED_KIND: &str = "migrate-server-platform";
 
 pub struct Postgres {
-    owned: OwnedContainer,
+    _owned: Container<GenericImage>,
     url: String,
 }
 
 impl Postgres {
     pub fn start() -> Self {
-        let request = GenericImage::new("postgres", "17")
+        let owned = GenericImage::new("postgres", "17")
             .with_exposed_port(5432.tcp())
             .with_wait_for(WaitFor::message_on_stdout(
                 "PostgreSQL init process complete; ready for start up.",
@@ -35,40 +42,47 @@ impl Postgres {
             ))
             .with_env_var("POSTGRES_PASSWORD", "fixture")
             .with_env_var("POSTGRES_DB", "migrate_server_tests")
-            .with_startup_timeout(Duration::from_secs(120));
-        let owned = start_owned(&DockerCli::system(), &Ownership::mint(), request).unwrap_or_else(
-            |error| panic!("migration-server tests require Docker and PostgreSQL: {error}"),
-        );
-        let container = owned.container();
-        let host = container.get_host().expect("database host");
-        let port = container.get_host_port_ipv4(5432).expect("database port");
+            .with_startup_timeout(Duration::from_secs(120))
+            .start()
+            .unwrap_or_else(|error| {
+                panic!("migration-server tests require Docker and PostgreSQL: {error}")
+            });
+        let host = owned.get_host().expect("database host");
+        let port = owned.get_host_port_ipv4(5432).expect("database port");
         let url = format!("postgresql://postgres:fixture@{host}:{port}/migrate_server_tests");
-        Self { owned, url }
+        Self {
+            _owned: owned,
+            url,
+        }
     }
 
     pub fn url(&self) -> &str {
         &self.url
     }
-
-    /// The Docker id of this server's container.
-    pub fn container_id(&self) -> &str {
-        self.owned.container().id()
-    }
-
-    fn migrated() -> Self {
-        let postgres = Self::start();
-        migrations::apply(postgres.url());
-        postgres
-    }
 }
 
-static MIGRATED: OnceLock<Postgres> = OnceLock::new();
+/// Join this suite's migrated server at `scope`, booting and migrating it if
+/// this process is elected.
+///
+/// # Errors
+/// When the server cannot be booted, migrated or joined.
+pub fn join_migrated(scope: &Scope) -> Result<Platform, String> {
+    Platform::join(scope)
+}
 
+/// The superuser DSN of the migrated control database this suite shares.
 pub fn migrated_url() -> String {
-    migrated().url().to_owned()
+    migrated().admin_url().to_string()
 }
 
-/// The binary's shared migrated server, started and migrated on first use.
-pub fn migrated() -> &'static Postgres {
-    MIGRATED.get_or_init(Postgres::migrated)
+/// This suite's migrated server, joined on first use and leased for the life of
+/// the process.
+pub fn migrated() -> &'static Platform {
+    static MIGRATED: OnceLock<Platform> = OnceLock::new();
+    MIGRATED.get_or_init(|| {
+        join_migrated(&Scope::worktree_with_grace(MIGRATED_KIND, PLATFORM_IDLE_GRACE))
+            .unwrap_or_else(|error| {
+                panic!("the migration server's migrated control database could not start: {error}")
+            })
+    })
 }

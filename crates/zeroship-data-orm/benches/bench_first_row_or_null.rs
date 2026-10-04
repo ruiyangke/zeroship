@@ -8,14 +8,8 @@ use compio_postgres::test_utils::{column_for_test, row_for_test};
 use compio_postgres::types::Type;
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 
-use zeroship_data_orm::{error, sql, value};
-#[path = "../src/backend/postgres/pg_row_json.rs"]
-#[expect(
-    dead_code,
-    unused_imports,
-    reason = "the bench drives one row-codec entry point; the rest of the module, including its test modules, is unused in the bench crate"
-)]
-mod pg_row_json;
+use zeroship_data_orm::backend::postgres::pg_row_json;
+use zeroship_data_orm::error;
 
 // ---------------------------------------------------------------------------
 // Wire-format encoders for the OID branches we exercise
@@ -216,7 +210,15 @@ fn first_row_or_null_for_bench(
     rows: &[Row],
 ) -> Result<zeroship_data_orm::value::Value, error::DbError> {
     rows.first()
-        .map(pg_row_json::row_to_value)
+        .map(decode_row)
         .transpose()
         .map(|row| row.unwrap_or(zeroship_data_orm::value::Value::Null))
+}
+
+/// One row decoded through the crate's public row codec, `rows_to_values`.
+fn decode_row(
+    row: &Row,
+) -> Result<zeroship_data_orm::value::Value, zeroship_data_orm::error::DbError> {
+    let mut values = pg_row_json::rows_to_values(std::slice::from_ref(row))?;
+    Ok(values.pop().expect("one row decodes to one value"))
 }

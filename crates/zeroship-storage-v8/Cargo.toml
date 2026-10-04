@@ -20,10 +20,9 @@ async-trait = { workspace = true }
 [dev-dependencies]
 zeroship-storage = { workspace = true, features = ["s3"] }
 compio-s3 = { workspace = true }
-testcontainers = { version = "0.28", default-features = false, features = ["blocking"] }
 compio = { workspace = true }
 tempfile = { workspace = true }
-zeroship-testkit = { path = "../../tests/testkit" }
+zeroship-testkit = { workspace = true }
 
 [lints]
 workspace = true

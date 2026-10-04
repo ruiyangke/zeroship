@@ -9,8 +9,6 @@ use node_realworld::{
 };
 
 const MYSQL2_BUNDLE: &str = include_str!("fixtures/mysql2/mysql2-3.14.1.bundle.mjs");
-const MYSQL_PASSWORD: &str = "zeroship";
-const MYSQL_DATABASE: &str = "zeroship_e2e";
 
 #[test]
 fn unmodified_mysql2_driver_queries_live_mysql_and_pool_temp_table() {
@@ -27,7 +25,7 @@ import mysql from "./fixtures/mysql2/mysql2-3.14.1.bundle.mjs";
 const config = {{
   host: "{host}",
   port: {port},
-  user: "root",
+  user: "{user}",
   password: "{password}",
   database: "{database}",
 }};
@@ -75,8 +73,9 @@ export default {{
 "#,
                 host = server.host,
                 port = server.port,
-                password = MYSQL_PASSWORD,
-                database = MYSQL_DATABASE,
+                user = server.user,
+                password = server.password,
+                database = server.database,
             ),
             vec![module(
                 "fixtures/mysql2/mysql2-3.14.1.bundle.mjs",

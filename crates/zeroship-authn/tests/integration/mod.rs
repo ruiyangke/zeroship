@@ -4,4 +4,3 @@ mod principal;
 mod rate_limit;
 mod replay;
 mod shared_database;
-mod testkit_shared_server;

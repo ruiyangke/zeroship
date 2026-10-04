@@ -1,8 +1,8 @@
 //! The migrated platform database this crate's unit tests run against.
 //!
 //! Unit tests exercise internals their own module does not export, so they
-//! cannot live in the integration target. They share the same reaper-owned
-//! server as every other test binary through [`zeroship_testkit::postgres`]:
+//! cannot live in the integration target. They share the server every test
+//! process of the worktree joins through [`zeroship_testkit::postgres`]:
 //! [`Database::run`] uses the shared migrated database, and a case scopes
 //! itself to the rows it mints.
 //!

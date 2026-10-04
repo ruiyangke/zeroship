@@ -631,24 +631,18 @@ mod live_db_tests {
         }
     }
 
-    fn db_url() -> String {
-        // A recompute cycle deletes and rewrites every usage aggregate of a
-        // period, so this case works in a clone of the migrated template: on the
-        // shared database its rewrite of the current month would delete a
-        // sibling case's rows. The clone drops when the case's thread ends.
-        use std::cell::RefCell;
-
-        thread_local! {
-            static FRESH: RefCell<Option<zeroship_testkit::postgres::FreshDatabase>> =
-                const { RefCell::new(None) };
-        }
-        FRESH.with(|fresh| {
-            fresh
-                .borrow_mut()
-                .get_or_insert_with(|| zeroship_testkit::postgres::platform().fresh_database())
-                .admin_url()
-                .to_string()
-        })
+    /// A clone of the migrated template this case owns.
+    ///
+    /// A recompute cycle deletes and rewrites every usage aggregate of a
+    /// period, so a case works in a clone: on the shared database its rewrite of
+    /// the current month would delete a sibling case's rows. The case holds the
+    /// clone as a local, so it is dropped when the case returns, on the case's
+    /// own thread. A thread-local would drop it during that thread's teardown,
+    /// and the drop enters the testkit's daemon runtime through tokio's
+    /// thread-local context, which teardown may already have destroyed; a
+    /// process-wide static would keep every clone until the shared server goes.
+    fn fresh_database() -> zeroship_testkit::postgres::FreshDatabase {
+        zeroship_testkit::postgres::platform().fresh_database()
     }
 
     async fn pg(db_url: &str) -> compio_postgres::Client {
@@ -769,7 +763,7 @@ mod live_db_tests {
         // in a clone of the migrated template: a sibling's sweep must not
         // transition this case's apps first and leave this case's `evaluate_all`
         // with nothing to report.
-        let fresh = zeroship_testkit::postgres::platform().fresh_database();
+        let fresh = fresh_database();
         let url = fresh.admin_url().to_string();
         let client = pg(&url).await;
         let registry = Registry::new(&url).await.expect("registry");
@@ -835,7 +829,8 @@ mod live_db_tests {
         // right after a Kafka-wire rewind) must leave the last good snapshot in
         // place, not overwrite it with zero. Otherwise enforcement flickers to
         // "no usage" and an over-limit app briefly escapes its spend limit.
-        let url = db_url();
+        let fresh = fresh_database();
+        let url = fresh.admin_url().to_string();
         let client = pg(&url).await;
         let registry = Registry::new(&url).await.expect("registry");
         let period = current_period_start_unix();
@@ -870,7 +865,8 @@ mod live_db_tests {
 
     #[compio::test]
     async fn stream_recompute_dedups_duplicate_event_ids() {
-        let url = db_url();
+        let fresh = fresh_database();
+        let url = fresh.admin_url().to_string();
         let client = pg(&url).await;
         let registry = Registry::new(&url).await.expect("registry");
         let period = current_period_start_unix();
@@ -902,11 +898,26 @@ mod live_db_tests {
         assert_eq!(cycle.aggregates, 1);
         assert_eq!(cycle.written, 1);
         assert_total(&client, &app, period, 42).await;
+
+        // The clone is this case's own: once the case lets it go it is gone,
+        // rather than kept for the process.
+        let name = fresh.admin_url().path().trim_start_matches('/').to_owned();
+        drop(registry);
+        drop(client);
+        drop(fresh);
+        let admin = pg(zeroship_testkit::postgres::platform().admin_url().as_str()).await;
+        let left: i64 = admin
+            .query_one("SELECT count(*) FROM pg_database WHERE datname = $1", &[&name])
+            .await
+            .expect("count the case's clone")
+            .get(0);
+        assert_eq!(left, 0, "the case's clone {name} outlived the case");
     }
 
     #[compio::test]
     async fn stream_recompute_skips_undecodable_records() {
-        let url = db_url();
+        let fresh = fresh_database();
+        let url = fresh.admin_url().to_string();
         let client = pg(&url).await;
         let registry = Registry::new(&url).await.expect("registry");
         let period = current_period_start_unix();
@@ -946,7 +957,8 @@ mod live_db_tests {
 
     #[compio::test]
     async fn unsettled_period_recompute_rewrites_current_and_previous_snapshots() {
-        let url = db_url();
+        let fresh = fresh_database();
+        let url = fresh.admin_url().to_string();
         let client = pg(&url).await;
         let registry = Registry::new(&url).await.expect("registry");
         let now = chrono::Utc

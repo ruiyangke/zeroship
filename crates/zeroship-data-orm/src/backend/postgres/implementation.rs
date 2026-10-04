@@ -309,7 +309,6 @@ impl PostgresBackend {
 
 // ===========================================================================
 #[cfg(test)]
-#[path = "snapshot_fixture.rs"]
 mod snapshot_fixture;
 
 /// Render SC-1's [`BeginIntent`] as PostgreSQL's `BEGIN` statement.

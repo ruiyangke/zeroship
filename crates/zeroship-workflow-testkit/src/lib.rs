@@ -8,18 +8,17 @@
 //! The surface speaks plain data and leaf crates only. It never names a domain
 //! crate whose own unit tests reach it, so `zeroship-workflow`,
 //! `zeroship-workflow-runner`, `zeroship-worker` and `zeroship-workflow-v8` can
-//! dev-depend on it without building a second copy of themselves. Each consumer
-//! converts in a thin module beside its tests.
+//! dev-depend on it without building a second copy of themselves. The
+//! workflow-typed adapters over the plain surface are held once in
+//! [`workflow_fixtures!`] and expanded in the crate that uses them.
 //!
 //! Nothing here is shipped; every consumer reaches it through
 //! `[dev-dependencies]`.
 
-#![expect(
-    clippy::future_not_send,
-    reason = "fixture connections and bindings stay on their compio runtime"
-)]
-
+pub mod adapters;
+pub mod deployments;
 pub mod journal;
+pub mod journal_server;
 pub mod manager_queue;
 pub mod placement;
 pub mod platform;

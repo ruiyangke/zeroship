@@ -8,14 +8,7 @@ use compio_postgres::test_utils::{column_for_test, row_for_test};
 use compio_postgres::types::Type;
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 
-use zeroship_data_orm::{error, sql, value};
-#[path = "../src/backend/postgres/pg_row_json.rs"]
-#[expect(
-    dead_code,
-    unused_imports,
-    reason = "the bench drives one row-codec entry point; the rest of the module, including its test modules, is unused in the bench crate"
-)]
-mod pg_row_json;
+use zeroship_data_orm::backend::postgres::pg_row_json;
 
 // ---------------------------------------------------------------------------
 // Wire-format encoders for the OID branches we exercise
@@ -168,19 +161,19 @@ fn bench_row_decode(c: &mut Criterion) {
     // column count. Catches wire-format breakage in `enc_*` before the
     // bench produces nonsense numbers.
     {
-        let v = pg_row_json::row_to_value(&narrow).unwrap();
+        let v = decode_row(&narrow).unwrap();
         assert_eq!(
             v.as_object().expect("narrow → object").len(),
             3,
             "narrow row should decode 3 columns",
         );
-        let v = pg_row_json::row_to_value(&medium).unwrap();
+        let v = decode_row(&medium).unwrap();
         assert_eq!(
             v.as_object().expect("medium → object").len(),
             10,
             "medium row should decode 10 columns",
         );
-        let v = pg_row_json::row_to_value(&wide).unwrap();
+        let v = decode_row(&wide).unwrap();
         assert_eq!(
             v.as_object().expect("wide → object").len(),
             50,
@@ -190,17 +183,17 @@ fn bench_row_decode(c: &mut Criterion) {
 
     group.bench_function("narrow_3cols", |b| {
         b.iter(|| {
-            black_box(pg_row_json::row_to_value(black_box(&narrow)).unwrap());
+            black_box(decode_row(black_box(&narrow)).unwrap());
         });
     });
     group.bench_function("medium_10cols", |b| {
         b.iter(|| {
-            black_box(pg_row_json::row_to_value(black_box(&medium)).unwrap());
+            black_box(decode_row(black_box(&medium)).unwrap());
         });
     });
     group.bench_function("wide_50cols", |b| {
         b.iter(|| {
-            black_box(pg_row_json::row_to_value(black_box(&wide)).unwrap());
+            black_box(decode_row(black_box(&wide)).unwrap());
         });
     });
 
@@ -209,3 +202,11 @@ fn bench_row_decode(c: &mut Criterion) {
 
 criterion_group!(benches, bench_row_decode);
 criterion_main!(benches);
+
+/// One row decoded through the crate's public row codec, `rows_to_values`.
+fn decode_row(
+    row: &Row,
+) -> Result<zeroship_data_orm::value::Value, zeroship_data_orm::error::DbError> {
+    let mut values = pg_row_json::rows_to_values(std::slice::from_ref(row))?;
+    Ok(values.pop().expect("one row decodes to one value"))
+}

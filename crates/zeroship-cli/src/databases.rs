@@ -824,7 +824,7 @@ mod tests {
     /// The shared cross-tool fixture: two databases, two apps, and a `staging`
     /// environment that overrides the ID under each label and nothing else.
     fn fixture(environment: Option<&str>) -> project_config::Resolved {
-        let text = include_str!("../../../tests/fixtures/project-config/zeroship.jsonc");
+        let text = include_str!("../tests/data/project-config/zeroship.jsonc");
         project_config::ProjectConfig::parse(
             std::path::PathBuf::from("zeroship.jsonc"),
             text.to_string(),

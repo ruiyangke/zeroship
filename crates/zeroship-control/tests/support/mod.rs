@@ -42,7 +42,9 @@ const PLATFORM_KEY_SEED: u8 = 47;
 /// fleet-wide sweep or the `pricing_config` singleton, asks for
 /// [`fresh_control_db`] instead of reaching through here.
 pub fn require_control_db() -> String {
-    zeroship_testkit::postgres::platform().admin_url().to_string()
+    zeroship_testkit::postgres::platform()
+        .admin_url()
+        .to_string()
 }
 
 /// A database a database-global case owns, cloned from the migrated template on
@@ -590,6 +592,32 @@ pub async fn seed_pricing_catalog(pg: &compio_postgres::Client) {
     )
     .await
     .expect("seed global pricing_config");
+}
+
+/// Run a fleet-wide spend sweep, which derives a state for every app the
+/// database holds.
+///
+/// A sweep is database-global: it reads the global pricing singleton and every
+/// app on the database, so a sibling's app on a plan that inherits the global FX
+/// aborts the sweep on a row this case never seeded. It therefore belongs on the
+/// clone [`isolated_control_db`] hands out, never the process-shared working
+/// database. This refuses the shared URL rather than let the outcome turn on
+/// which sibling case ran first.
+pub async fn sweep_spend(
+    registry: Registry,
+    db_url: &str,
+) -> Result<
+    Vec<zeroship_control::spend::SpendTransition>,
+    zeroship_control::registry::RegistryError,
+> {
+    assert!(
+        db_url != require_control_db(),
+        "a fleet-wide spend sweep is database-global: run the case on \
+         isolated_control_db(), not the process-shared working database"
+    );
+    zeroship_control::spend::SpendEngine::new(registry)
+        .evaluate_all()
+        .await
 }
 
 pub fn period_date(period_start_unix: i64) -> chrono::NaiveDate {

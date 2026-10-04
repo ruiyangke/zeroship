@@ -23,3 +23,4 @@ mod placement_eligibility;
 mod platform_schema;
 mod publication_wake;
 mod worker_zone;
+mod zone_declaration;

@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
 import { generateKeyPairSync, randomBytes } from "node:crypto";
 import { createWriteStream, existsSync, rmSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -85,8 +84,10 @@ export class Stack {
     let container: StartedTestContainer;
     try {
       // The suite label tells a census this suite's containers from the other
-      // fixtures that start the same images; the run label is what abandon()
-      // removes by, which also reaches a container still starting.
+      // fixtures that start the same images; the run label names this run for
+      // that census. Lifecycle and cleanup are testcontainers' own: the handle
+      // stops its container, and the shared Ryuk reaper removes what an
+      // interrupted run leaves behind once every connection to it has closed.
       container = await image.withStartupTimeout(120_000).withLabels({
         "ai.zeroship.fixture": "e2e-browser-deployed", "ai.zeroship.fixture.run": basename(this.logs),
       }).withLogConsumer((stream) => stream.pipe(createWriteStream(log))).start();
@@ -94,14 +95,6 @@ export class Stack {
       throw new Error(`The ${name} container did not start; its output: ${log}`, { cause: error });
     }
     this.containers.push(container);
-    // abandon() removes containers from a signal handler, which cannot wait
-    // on testcontainers' asynchronous client, so it uses the docker CLI. That
-    // holds only while the CLI reaches the daemon testcontainers chose, so
-    // each container is looked up through the CLI rather than assumed.
-    const seen = spawnSync("docker", ["inspect", "--format", "{{.Id}}", container.getId()], { encoding: "utf8" });
-    assert.equal(seen.stdout?.trim(), container.getId(),
-      `the docker CLI cannot see the ${name} container testcontainers started, so an interrupted run could not remove it; ` +
-      `point both at one daemon: ${seen.error ?? seen.stderr}`);
     this.processes.signal.throwIfAborted();
     return container;
   }
@@ -299,20 +292,16 @@ export class Stack {
 
   /**
    * Tear down synchronously, for a signal that arrives during bring-up: the
-   * runner exits without awaiting a setup it interrupted, and the reaper
-   * container testcontainers relies on is shared by every testcontainers
-   * process of this user, so it does not reap when this process alone exits.
+   * runner exits without awaiting a setup it interrupted. The service
+   * processes are cancelled here. The containers are left to testcontainers'
+   * Ryuk reaper, which every testcontainers process of this user shares and
+   * which removes them only once every connection to it has closed: when this
+   * process was its only client, as this process exits; while another
+   * testcontainers process is still connected, only after that one closes too.
    */
   abandon(): void {
     this.processes.cancel();
     this.containers.splice(0);
-    const listed = spawnSync("docker", ["ps", "--all", "--quiet", "--filter", `label=ai.zeroship.fixture.run=${basename(this.logs)}`], { encoding: "utf8" });
-    const ids = (listed.stdout ?? "").split("\n").filter(Boolean);
-    if (listed.status !== 0) console.error(`Browser stack: could not list this run's containers: ${listed.error ?? listed.stderr}`);
-    if (ids.length) {
-      const removed = spawnSync("docker", ["rm", "--force", "--volumes", ...ids], { encoding: "utf8" });
-      if (removed.status !== 0) console.error(`Browser stack: could not remove containers ${ids.join(" ")}: ${removed.error ?? removed.stderr}`);
-    }
     rmSync(this.work, { recursive: true, force: true });
   }
 

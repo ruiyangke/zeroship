@@ -1,8 +1,9 @@
 //! The migrated platform database an auth case runs against.
 //!
-//! Every case in this binary shares one reaper-owned `PostgreSQL` server through
-//! [`zeroship_testkit::postgres::platform`], migrated once. A case that owns
-//! only the rows and names it mints runs on that shared database; a case whose
+//! Every case shares the one `PostgreSQL` server every test process of the
+//! worktree joins through [`zeroship_testkit::postgres::platform`], migrated
+//! once. A case that owns only the rows and names it mints runs on that shared
+//! database; a case whose
 //! subject is platform-global - the signing-key registry, an audit or token
 //! sweep that acts on every row, a schema-level race - gets its own database
 //! cloned from the connection-free migrated template with

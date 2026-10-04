@@ -1,7 +1,7 @@
 //! The migrated platform database a gateway unit case runs against.
 //!
-//! Every case in this binary shares one reaper-owned `PostgreSQL` server
-//! through [`zeroship_testkit::postgres`], migrated once. A case that owns only
+//! Every case shares the one `PostgreSQL` server every test process of the
+//! worktree joins through [`zeroship_testkit::postgres`], migrated once. A case that owns only
 //! the rows and names it mints runs on that shared database; a case whose
 //! subject is platform-global - a schema rename, a table-wide lock, the
 //! signing-key registry - gets its own database cloned from the

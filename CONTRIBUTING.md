@@ -171,8 +171,9 @@ running that target; the tree is not tracked in git and nothing is fetched into
 the checkout.
 
 The native auth suite builds the platform migration host and runs the complete
-auth, authn, authz, mailer and gateway packages. Tests own their PostgreSQL,
-SMTP and HTTP fixtures through Rust; Docker is required. No external test
+auth, authn, authz, mailer and gateway packages. Tests join the migrated
+platform server every test process of the worktree shares and own their SMTP
+and HTTP fixtures through Rust; Docker is required. No external test
 database URL or generated backend overlay is needed.
 
 ```bash
@@ -181,8 +182,8 @@ cargo xtask test auth
 
 Worker tests also own their PostgreSQL and Redis containers. Run
 `cargo xtask test worker` to build the migration host and test the package.
-The billing suite does the same for control, migration, metering, and stream
-tests, including their PostgreSQL and Redpanda fixtures:
+The billing suite runs control, migration, metering, and stream tests against
+the PostgreSQL servers and the Redpanda broker every test process shares:
 
 ```bash
 cargo xtask test billing

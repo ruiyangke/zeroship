@@ -270,6 +270,10 @@ pub fn validate_target_classifications(
         .iter()
         .map(|binary| (binary.package.as_str(), binary.target.as_str()))
         .collect::<BTreeSet<_>>();
+    let packages_with_binaries = binaries
+        .iter()
+        .map(|binary| binary.package.as_str())
+        .collect::<BTreeSet<_>>();
     let mut by_key: BTreeMap<(&str, &str), Vec<&TargetClassification>> = BTreeMap::new();
     for classification in classifications {
         by_key
@@ -302,12 +306,23 @@ pub fn validate_target_classifications(
     }
     for classification in classifications {
         let key = (classification.package.as_str(), classification.target.as_str());
-        if !binary_keys.contains(&key) {
-            errors.push(MetadataContractError::StaleClassification {
-                package: classification.package.clone(),
-                target: classification.target.clone(),
-            });
+        if binary_keys.contains(&key) {
+            continue;
         }
+        // A package that ships no binary may classify itself `test-dev-tool`.
+        // The arch and tokio boundary checks recognise a dev-only fixture by
+        // that self-classification, and no shipped closure can carry the
+        // package. Anything else names a binary Cargo did not discover.
+        if classification.class == TargetClass::TestDevTool
+            && classification.target == classification.package
+            && !packages_with_binaries.contains(classification.package.as_str())
+        {
+            continue;
+        }
+        errors.push(MetadataContractError::StaleClassification {
+            package: classification.package.clone(),
+            target: classification.target.clone(),
+        });
     }
 
     let platform = classifications
@@ -332,4 +347,60 @@ pub fn validate_target_classifications(
         platform,
         excluded: binaries.len() - platform,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn binary(package: &str, target: &str) -> BinaryTarget {
+        BinaryTarget {
+            package: package.to_owned(),
+            target: target.to_owned(),
+            required_features: Vec::new(),
+        }
+    }
+
+    fn classification(package: &str, target: &str, class: TargetClass) -> TargetClassification {
+        TargetClassification {
+            package: package.to_owned(),
+            target: target.to_owned(),
+            class,
+            reason: "fixture".to_owned(),
+        }
+    }
+
+    /// A library-only fixture package classifies itself `test-dev-tool`; it
+    /// ships no binary, so the class is the only record of what it is and the
+    /// inventory must not call it stale.
+    #[test]
+    fn a_library_only_test_dev_tool_is_not_stale() {
+        let binaries = vec![binary("server", "server")];
+        let classifications = vec![
+            classification("server", "server", TargetClass::Platform),
+            classification("fixture", "fixture", TargetClass::TestDevTool),
+        ];
+        let summary = validate_target_classifications(&binaries, &classifications)
+            .expect("a library-only test-dev-tool classification is not stale");
+        assert_eq!(summary.binaries, 1);
+        assert_eq!(summary.platform, 1);
+    }
+
+    /// The exemption is narrow: a package that ships a binary cannot hide an
+    /// invented target behind `test-dev-tool`.
+    #[test]
+    fn a_test_dev_tool_classification_on_a_package_with_binaries_is_stale() {
+        let binaries = vec![binary("server", "server")];
+        let classifications = vec![
+            classification("server", "server", TargetClass::Platform),
+            classification("server", "ghost", TargetClass::TestDevTool),
+        ];
+        let errors = validate_target_classifications(&binaries, &classifications)
+            .expect_err("a test-dev-tool classification naming no binary is stale");
+        assert!(errors.iter().any(|error| matches!(
+            error,
+            MetadataContractError::StaleClassification { package, target }
+                if package == "server" && target == "ghost"
+        )));
+    }
 }

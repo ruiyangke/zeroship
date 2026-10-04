@@ -31,7 +31,7 @@ use zeroship_mailer::{Email, Mailer, MailerError, MessageId};
 
 /// The registered client the specs authorize as.
 ///
-/// Shared with `tests/fixtures/auth_ui_ids.json` only in spirit: the ids are
+/// Shared with `crates/zeroship-id/tests/data/auth_ui_ids.json` only in spirit: the ids are
 /// stable strings so a spec failure names a client an operator can find.
 const APP_ID: &str = "app_0000000000000000000000001";
 const CLIENT_ID: &str = "oac_0000000000000000000000001";

@@ -38,7 +38,9 @@ async fn auth(platform: &platform::Platform) -> WorkflowAuth {
 /// frozen on its own row, never a sibling's.
 #[ntex::test]
 async fn two_instances_in_two_zones_verify_with_their_own_zones() {
-    let platform = platform::Platform::new().await;
+    // The case declares an operator zone on top of the seeded default, a
+    // deployment-global fact, so it works in a clone no sibling observes.
+    let platform = platform::Platform::fresh_database().await;
     let (away, away_signer) = zone::declare_zone(&platform).await;
     let home = zone::Enrolled::join(
         &platform,

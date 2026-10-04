@@ -627,7 +627,7 @@ mod tests {
     /// The shared cross-tool fixture: two databases, two apps, and
     /// `storefront` declaring both with `main` as its primary.
     fn fixture() -> Resolved {
-        let text = include_str!("../../../tests/fixtures/project-config/zeroship.jsonc");
+        let text = include_str!("../tests/data/project-config/zeroship.jsonc");
         ProjectConfig::parse(std::path::PathBuf::from("zeroship.jsonc"), text.to_string())
             .expect("the committed fixture must parse")
             .resolve(None)
@@ -826,7 +826,7 @@ mod tests {
     /// them, and its `descriptor_sha256` to the committed `schema.runtime.json`
     /// by hashing that file - so a migration change that is not reflected here
     /// fails this suite by name instead of ageing quietly.
-    const DB_TODOS_IR: &str = include_str!("../../../tests/fixtures/migrations-ir/db-todos.ir.json");
+    const DB_TODOS_IR: &str = zeroship_testkit::recorded::DB_TODOS_MIGRATIONS_IR;
 
     /// The committed descriptor for the same app - the bytes the packer hashes.
     const DB_TODOS_RUNTIME_JSON: &str =
@@ -902,7 +902,7 @@ mod tests {
     /// nothing in the checkout derived.
     #[test]
     fn a_positional_file_is_refused_rather_than_posted() {
-        let recorded = repo_root().join("tests/fixtures/migrations-ir/db-todos.ir.json");
+        let recorded = zeroship_testkit::recorded::db_todos_migrations_ir_path();
         assert!(recorded.is_file(), "{}", recorded.display());
         let error = record_apply_request(&recorded).expect_err("a file must be refused");
         assert!(error.contains("is a file"), "{error}");
@@ -911,7 +911,10 @@ mod tests {
         // The control, differing in one variable: the same call against a
         // DIRECTORY that does not exist fails for the other reason, so the
         // refusal above is about the file-ness and not about every bad path.
-        let missing = repo_root().join("tests/fixtures/migrations-ir/does-not-exist");
+        let missing = recorded
+            .parent()
+            .expect("the recorded set sits in a directory")
+            .join("does-not-exist");
         let error = record_apply_request(&missing).expect_err("a missing dir must be refused");
         assert!(error.contains("no migrations directory"), "{error}");
     }

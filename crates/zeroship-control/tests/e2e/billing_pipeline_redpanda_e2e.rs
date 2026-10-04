@@ -11,115 +11,65 @@
 //! spend evaluator work together against a real broker and real Postgres, rather
 //! than each in isolation with a fake stream.
 
-use std::net::{Ipv4Addr, TcpListener};
-use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::sync::Arc;
 
 use compio_postgres::{connect, NoTls};
-use testcontainers::core::{IntoContainerPort, WaitFor};
-use testcontainers::{GenericImage, ImageExt};
 use uuid::Uuid;
 
 use zeroship_control::cron::billing_reconcile::DEFAULT_SETTLE_WINDOW_SECS;
 use zeroship_control::cron::spend_recompute::{recompute_usage_aggregates, SpendRecomputeConfig};
 use zeroship_control::metering::current_period_start_unix;
-use zeroship_control::spend::SpendEngine;
 use zeroship_control::Registry;
 use zeroship_core::app_id::AppId;
 use zeroship_metering::{Meter, UsageOutbox};
 use zeroship_stream::{adapters, StreamConfig, StreamRegistry};
 
-use zeroship_testkit::lifetime;
-use zeroship_testkit::{start_owned, DockerCli, OwnedContainer, Ownership};
-
+/// The clone this case owns.
+///
+/// The spend evaluator sweeps the whole fleet, so it reads every app the
+/// database holds and needs the global pricing singleton; a sibling's app on a
+/// plan that inherits the global FX would abort the sweep on a row this case
+/// never seeded. A clone no sibling observes keeps the case self-sufficient.
 fn db_url() -> String {
-    crate::support::require_control_db()
+    crate::support::isolated_control_db()
 }
 
-/// The broker this binary owns. It lives in a `static`, which libtest never drops, so
-/// it is started through the shared container reaper, which removes it once this
-/// process has ended.
-struct Redpanda {
-    owned: OwnedContainer,
-    brokers: String,
-}
-
-impl Redpanda {
-    fn start() -> Self {
-        let port = available_port();
-        let advertised = format!("external://127.0.0.1:{port}");
-        let request = GenericImage::new("docker.redpanda.com/redpandadata/redpanda", "v26.2.2")
-            .with_wait_for(WaitFor::message_on_stderr("Successfully started Redpanda!"))
-            .with_mapped_port(port, 19092.tcp())
-            .with_cmd([
-                "redpanda".to_owned(),
-                "start".to_owned(),
-                "--overprovisioned".to_owned(),
-                "--smp".to_owned(),
-                "1".to_owned(),
-                "--memory".to_owned(),
-                "512M".to_owned(),
-                "--reserve-memory".to_owned(),
-                "0M".to_owned(),
-                "--node-id".to_owned(),
-                "0".to_owned(),
-                "--check=false".to_owned(),
-                "--kafka-addr".to_owned(),
-                "external://0.0.0.0:19092".to_owned(),
-                "--advertise-kafka-addr".to_owned(),
-                advertised,
-                "--set".to_owned(),
-                "redpanda.auto_create_topics_enabled=true".to_owned(),
-            ])
-            .with_startup_timeout(Duration::from_secs(120));
-        let owned = start_owned(&DockerCli::system(), &Ownership::mint(), request)
-            .unwrap_or_else(|error| panic!("control tests require Docker and Redpanda: {error}"));
-        Self {
-            owned,
-            brokers: format!("127.0.0.1:{port}"),
-        }
-    }
-}
-
-fn available_port() -> u16 {
-    TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-        .expect("bind an available Redpanda port")
-        .local_addr()
-        .expect("Redpanda listener address")
-        .port()
-}
-
-static REDPANDA: OnceLock<Redpanda> = OnceLock::new();
-
+/// The broker every Redpanda case of the run shares.
+///
+/// One broker per worktree run keeps the suite under the host's global
+/// `fs.aio-max-nr`: Seastar refuses to start when several brokers boot at once.
 fn brokers() -> String {
-    REDPANDA.get_or_init(Redpanda::start).brokers.to_owned()
+    zeroship_testkit::redpanda::broker().brokers()
 }
 
-/// The child test the broker's lifetime measurements run, by its full path in this
-/// binary.
+/// The child test the broker's lifetime measurements run, by its full path in
+/// this binary.
 const CHILD_TEST: &str =
-    "e2e::billing_pipeline_redpanda_e2e::the_redpanda_broker_reports_its_container";
+    "e2e::billing_pipeline_redpanda_e2e::child_joins_the_billing_broker_at_a_throwaway_scope";
 
+/// Child side of the broker's lifetime measurements: join the broker recipe this
+/// pipeline runs against at the throwaway scope on standard input.
 #[test]
-fn the_redpanda_broker_reports_its_container() {
-    lifetime::report_owner();
-    let broker = REDPANDA.get_or_init(Redpanda::start);
+#[ignore = "spawned by a lifetime measurement as a child process, with its scope on stdin"]
+fn child_joins_the_billing_broker_at_a_throwaway_scope() {
+    let broker = zeroship_testkit::redpanda::Broker::join(&zeroship_testkit::lifetime::child_scope())
+        .expect("join the broker recipe");
     assert!(
-        broker.brokers.starts_with("127.0.0.1:"),
+        broker.brokers().starts_with("127.0.0.1:"),
         "{}",
-        broker.brokers
+        broker.brokers()
     );
-    lifetime::report_container(broker.owned.container().id());
+    zeroship_testkit::lifetime::report_container(broker.container_id());
 }
 
 #[test]
 fn the_redpanda_broker_is_removed_when_its_process_ends() {
-    lifetime::assert_removed_after_the_child_exits(CHILD_TEST);
+    zeroship_testkit::lifetime::assert_removed_after_the_child_exits(CHILD_TEST);
 }
 
 #[test]
 fn the_redpanda_broker_is_removed_when_its_process_is_killed_while_starting() {
-    lifetime::assert_removed_after_a_kill_during_startup(CHILD_TEST);
+    zeroship_testkit::lifetime::assert_removed_after_a_kill_during_startup(CHILD_TEST);
 }
 
 async fn pg(url: &str) -> compio_postgres::Client {
@@ -310,8 +260,7 @@ async fn producer_to_redpanda_to_recompute_to_spend_block_end_to_end() {
     );
 
     // ── 4. REAL spend evaluator prices the snapshot → Block (100¢ == limit) ──
-    let transitions = SpendEngine::new(registry)
-        .evaluate_all()
+    let transitions = crate::support::sweep_spend(registry, &url)
         .await
         .expect("evaluate_all");
     assert!(

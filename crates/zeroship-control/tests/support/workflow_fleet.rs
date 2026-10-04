@@ -72,12 +72,35 @@ async fn execute(url: &str, sql: &str) {
     driver.await.expect("fleet database task").expect("driver");
 }
 
+/// Port reservations held from [`port`] until [`release`], keyed by port.
+static RESERVED: std::sync::Mutex<Vec<(u16, TcpListener)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// A port reserved for one fleet child, held until that child is spawned.
+///
+/// A port picked and released immediately can be handed to a sibling process
+/// between the pick and the child's bind, which is how a fleet's child dies
+/// with `Address already in use` before its readiness poll. The reservation
+/// holds the listener until [`release`] drops it: two picks for one fleet are
+/// distinct, and the window a sibling can take a port is the spawn itself.
 pub fn port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+    let listener = TcpListener::bind("127.0.0.1:0").expect("reserve a fleet port");
+    let port = listener.local_addr().expect("reserved port").port();
+    RESERVED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push((port, listener));
+    port
+}
+
+/// Drop the reservation for `port` so the child about to bind it can.
+fn release(port: u16) {
+    let mut reserved = RESERVED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(index) = reserved.iter().position(|(held, _)| *held == port) {
+        reserved.swap_remove(index);
+    }
 }
 
 /// What this fleet runs beyond the always-present services.
@@ -226,6 +249,7 @@ impl Fleet {
         fleet.secret("relay-key.pem", cert.signing_key.serialize_pem().as_bytes());
         let relay_port = port();
         let relay_addr = format!("127.0.0.1:{relay_port}");
+        release(relay_port);
         fleet.spawn(
             "relay",
             &binaries["zeroship-data-cdc-server"],
@@ -290,6 +314,7 @@ impl Fleet {
                 url::Url::parse(&manager_url).unwrap().port().unwrap()
             );
             let payloads = fleet.payload_store();
+            release(url::Url::parse(&manager_url).unwrap().port().unwrap());
             fleet.spawn(
                 "workflow",
                 &binaries["zeroship-workflow-server"],
@@ -336,6 +361,7 @@ impl Fleet {
                 manager_url,
             ));
         }
+        release(control_port.parse().expect("control port"));
         fleet.spawn(
             "control",
             &binaries["zeroship-control"],
@@ -385,6 +411,7 @@ impl Fleet {
                 payloads.to_str().unwrap().to_owned(),
             ));
         }
+        release(worker_port.parse().expect("worker port"));
         fleet.spawn(
             "worker",
             &binaries["zeroship-worker"],
@@ -403,6 +430,7 @@ impl Fleet {
             &worker_env,
         );
         fleet.ready(fleet.worker_url.clone()).await;
+        release(gateway_port.parse().expect("gateway port"));
         fleet.spawn(
             "gateway",
             &binaries["zeroship-gate"],

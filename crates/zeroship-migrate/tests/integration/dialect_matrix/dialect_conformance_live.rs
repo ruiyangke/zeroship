@@ -1576,7 +1576,10 @@ fn leak_control(sweep: &Sweep) -> String {
 #[compio::test]
 async fn every_postgres_row_of_the_dialect_table_answers_to_a_live_server() {
     let sweep = Sweep::mint();
-    let url = crate::support::pg_database();
+    // The sweep creates, alters and drops roles, which are cluster-wide, so it
+    // runs on a server of its own rather than changing the role catalog every
+    // other case's snapshot reads on the shared one.
+    let url = crate::support::private_pg_database();
     let session = PgDevSession::connect(&url);
 
     // The leak check's rejection control, before it is relied on: a planted probe

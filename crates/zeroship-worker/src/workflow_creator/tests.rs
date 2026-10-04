@@ -7,8 +7,8 @@ use std::{
 };
 use zeroship_workflow_runner::ExecutionGuard;
 
-#[path = "../../../../tests/fixtures/workflow_deployments.rs"]
-mod deployment_fixture;
+use zeroship_workflow_fixtures::deployment as deployment_fixture;
+
 mod fixture;
 use fixture::{execute, install, Fixture};
 

@@ -227,8 +227,8 @@ fleet-wide state. The suite runners below prepare the required migrations.
 
 The provisioner writes the PostgreSQL test overlay. `PG_TEST_URL` redirects
 suites that still use this shared database.
-Auth, authn and mailer tests own their migrated PostgreSQL containers. Mailer
-also owns its Mailpit SMTP sink and inspects captured messages through its API;
+Auth, authn and mailer tests run on the migrated platform server every test
+process of the worktree shares. Mailer owns its Mailpit SMTP sink and inspects captured messages through its API;
 these tests require Docker and accept no external database or SMTP address.
 Run `cargo xtask test migrations` to build their migration host, then
 `cargo test -p zeroship-mailer` to verify delivery and suppression.
@@ -253,8 +253,9 @@ the release those browsers were built for; `xtask/README.md` lists what it needs
 ### Test database ownership
 
 `cargo xtask test auth` builds the platform migration host and runs the auth,
-authn, authz, mailer and gateway packages. Their Rust fixtures own PostgreSQL
-containers, SMTP listeners, HTTP servers and temporary files. Docker must be
+authn, authz, mailer and gateway packages. Their Rust fixtures join the migrated
+platform server every test process of the worktree shares, and own SMTP
+listeners, HTTP servers and temporary files. Docker must be
 available; no `PG_TEST_URL` or generated test overlay selects their databases.
 Ordinary `cargo test -p <package>` runs the same required cases once the
 migration host has been built.
@@ -274,12 +275,18 @@ cargo xtask platform-db sweep --apply  # reclaim them
 ```
 
 `cargo xtask test billing` builds the migration host and runs control,
-migration-service, metering, and stream tests. Their Rust fixtures own
-PostgreSQL and Redpanda; neither an external test URL nor a generated overlay
-selects those services.
-`cargo xtask test workflow` owns PostgreSQL through Testcontainers. Its control
-plane tests clone private databases from a migrated, quiescent template. The
-fixture helper removes the cached server when the test process exits.
+migration-service, metering, and stream tests. Their Rust fixtures join the
+PostgreSQL servers and the Redpanda broker every test process of the worktree
+shares; neither an external test URL nor a generated overlay selects those
+services.
+`cargo xtask test workflow` runs against the same shared platform server. Its
+control plane tests clone private databases from a migrated, quiescent template.
+
+A shared server is booted by the first test process that asks for it and
+leased by every process that uses it, through a lock file under
+`target/zeroship-testkit/`. It outlives each process by design: the watchdog
+that is the container's first process removes it once no process has held the
+lease for the server's idle grace, however the processes ended.
 
 ## Benchmarks
 

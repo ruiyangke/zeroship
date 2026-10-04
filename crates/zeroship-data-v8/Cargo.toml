@@ -37,8 +37,8 @@ zeroship-migrate-server = { workspace = true }
 zeroship-migrate-sqlite = { workspace = true }
 zeroship-migrate = { workspace = true }
 zeroship-migrate-postgres = { workspace = true }
-zeroship-data-testkit = { path = "../zeroship-data-testkit" }
-zeroship-testkit = { path = "../../tests/testkit" }
+zeroship-data-testkit = { workspace = true }
+zeroship-testkit = { workspace = true }
 
 # One integration binary; tests/integration/mod.rs and tests/e2e/mod.rs
 # declare every suite.

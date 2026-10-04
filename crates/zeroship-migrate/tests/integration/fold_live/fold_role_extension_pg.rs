@@ -23,6 +23,11 @@
 //!
 //! Without (2) this file would pass against a build where `SchemaSnapshot`
 //! dropped both fields.
+//!
+//! Each case runs on a server of its own (`support::private_pg_database`): the
+//! roles it creates are cluster-wide, and on the shared server they would land
+//! between another case's two catalog snapshots, and another case's between
+//! this one's.
 
 
 use std::collections::BTreeMap;
@@ -104,7 +109,7 @@ scope = "all"
 
 #[compio::test]
 async fn a_role_and_an_extension_fold_to_what_live_introspection_reports() {
-    let url = crate::support::pg_database();
+    let url = crate::support::private_pg_database();
     let session = PgDevSession::connect(&url);
     let schema = token("proj");
     // PostgreSQL folds unquoted role names to lower case; keep the authored name
@@ -290,7 +295,7 @@ async fn a_role_and_an_extension_fold_to_what_live_introspection_reports() {
 /// the attributes are really being compared.
 #[compio::test]
 async fn role_attributes_round_trip_and_drift_is_named() {
-    let url = crate::support::pg_database();
+    let url = crate::support::private_pg_database();
     let session = PgDevSession::connect(&url);
     let schema = token("schema");
     let role = token("rolattr").to_lowercase();
@@ -455,7 +460,7 @@ async fn role_attributes_round_trip_and_drift_is_named() {
 /// footguns. This pins the engine's half.
 #[compio::test]
 async fn drop_owned_by_removes_the_role_s_objects_and_spares_everyone_else_s() {
-    let url = crate::support::pg_database();
+    let url = crate::support::private_pg_database();
     let session = PgDevSession::connect(&url);
     let schema = token("schema");
     let owner_role = token("owned").to_lowercase();
@@ -615,7 +620,7 @@ async fn drop_owned_by_removes_the_role_s_objects_and_spares_everyone_else_s() {
 /// not fail because the role it dropped is already gone.
 #[compio::test]
 async fn drop_role_succeeds_refuses_while_owning_and_no_ops_under_if_exists() {
-    let url = crate::support::pg_database();
+    let url = crate::support::private_pg_database();
     let session = PgDevSession::connect(&url);
     let schema = token("schema");
     let plain_role = token("plain").to_lowercase();
@@ -821,7 +826,7 @@ async fn drop_role_succeeds_refuses_while_owning_and_no_ops_under_if_exists() {
 /// its own parser.
 #[compio::test]
 async fn grant_and_revoke_move_exactly_the_named_privilege() {
-    let url = crate::support::pg_database();
+    let url = crate::support::private_pg_database();
     let session = PgDevSession::connect(&url);
     let schema = token("schema");
     let grantee = token("grantee").to_lowercase();

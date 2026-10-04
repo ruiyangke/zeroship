@@ -1,0 +1,26 @@
+[package]
+name = "zeroship-workflow-fixtures"
+version = "0.1.0"
+edition = "2021"
+description = "Dev-only workflow-typed fixture adapters for the crates downstream of zeroship-workflow"
+publish = false
+
+# The workflow-typed adapters over `zeroship-workflow-testkit`, expanded against
+# `zeroship-workflow` for the crates whose tests drive a workflow service:
+# `zeroship-workflow-runner`, `zeroship-worker` and `zeroship-workflow-v8`. It
+# depends on `zeroship-workflow`, so `zeroship-workflow`'s own unit tests expand
+# the same adapters in place instead. Consumers reach it only through
+# `[dev-dependencies]`; it is classified `class = "test-dev-tool"`, so no
+# shipped binary may carry it in its normal closure.
+
+[[package.metadata.zeroship-config.targets]]
+target = "zeroship-workflow-fixtures"
+class = "test-dev-tool"
+reason = "Dev-only workflow fixture adapters; reached only through dev-dependencies."
+
+[dependencies]
+zeroship-workflow = { workspace = true }
+zeroship-workflow-testkit = { workspace = true }
+
+[lints]
+workspace = true

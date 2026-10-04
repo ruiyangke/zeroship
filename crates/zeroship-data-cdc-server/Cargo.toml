@@ -58,9 +58,10 @@ toml = { workspace = true }
 # The capture tests read the structured fields of the warning a stopped capture
 # logs, through a `Layer` over the registry.
 tracing-subscriber = { workspace = true }
-# The reaper-owned bare server and the Control corpus fixtures.
-zeroship-testkit = { path = "../../tests/testkit" }
-zeroship-data-testkit = { path = "../zeroship-data-testkit" }
+# The platform server every test process of the worktree shares, whose fresh
+# databases the relay cases clone, and the Control corpus fixtures.
+zeroship-testkit = { workspace = true }
+zeroship-data-testkit = { workspace = true }
 
 [lints]
 workspace = true

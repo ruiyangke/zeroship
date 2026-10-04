@@ -11,10 +11,8 @@ use compio_postgres::{
 use crate::value::{Map, Value};
 
 #[cfg(test)]
-#[path = "pg_row_json/array_tests.rs"]
 mod array_tests;
 #[cfg(test)]
-#[path = "pg_row_json/network_tests.rs"]
 mod network_tests;
 
 /// `PostgreSQL` counts binary timestamps from 2000-01-01, the Unix epoch plus

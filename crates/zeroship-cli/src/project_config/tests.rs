@@ -24,7 +24,7 @@ fn cfg(text: &str) -> ProjectConfig {
 
 #[test]
 fn committed_cross_tool_fixture_resolves_in_rust() {
-    let text = include_str!("../../../../tests/fixtures/project-config/zeroship.jsonc");
+    let text = include_str!("../../tests/data/project-config/zeroship.jsonc");
     let config = ProjectConfig::parse(PathBuf::from("zeroship.jsonc"), text.to_string())
         .expect("committed cross-tool fixture must parse");
     let root = config.resolve(None).expect("resolve fixture root");
@@ -1106,7 +1106,7 @@ fn the_database_flag_names_one_of_the_files_labels() {
 /// is workspace-wide because a database belongs to its project, not to an app.
 #[test]
 fn several_declared_databases_demand_the_flag_and_none_is_app_scoped() {
-    let text = include_str!("../../../../tests/fixtures/project-config/zeroship.jsonc");
+    let text = include_str!("../../tests/data/project-config/zeroship.jsonc");
     let resolved = cfg(text).resolve(None).unwrap();
     assert_eq!(resolved.database_labels(), vec!["main", "analytics"]);
 

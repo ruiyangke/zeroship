@@ -92,8 +92,7 @@ mod completion_batch;
 mod continuations;
 mod cron;
 mod delivery;
-#[path = "../../../../tests/fixtures/workflow_deployments.rs"]
-pub(super) mod deployment_fixture;
+pub(super) use crate::fixtures::deployment as deployment_fixture;
 mod deployment_retention;
 mod deployments;
 mod fanout;
@@ -106,10 +105,8 @@ mod journal_models;
 mod job_door;
 mod management;
 pub(super) use zeroship_workflow_testkit::manager_queue;
-#[path = "../../../../tests/fixtures/workflow_journal.rs"]
-pub(super) mod journal_fixture;
-#[path = "../../../../tests/fixtures/workflow_service_binding.rs"]
-pub(super) mod service_binding;
+pub(super) use crate::fixtures::journal as journal_fixture;
+pub(super) use crate::fixtures::service_binding as service_binding;
 mod objects;
 mod orm;
 mod outcomes;
@@ -122,8 +119,7 @@ pub(super) mod publication;
 mod reconciliation;
 mod requests;
 mod restart_models;
-#[path = "../../../../tests/testkit/src/s3.rs"]
-mod s3_fixture;
+use zeroship_testkit::s3 as s3_fixture;
 mod schema_binding;
 mod schema_metadata;
 mod shared_server;

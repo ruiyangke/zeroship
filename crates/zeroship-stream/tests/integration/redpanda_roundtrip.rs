@@ -4,8 +4,7 @@
 //! starting a broker of its own: several brokers starting at once exhaust the
 //! host's global `fs.aio-max-nr`, and Seastar refuses to start under that
 //! condition. Each case mints its own topic and consumer group, so cases share
-//! the broker without sharing data. The broker's own lifetime is measured in
-//! `redpanda_lifetime`, which starts a private broker on purpose.
+//! the broker without sharing data.
 
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};

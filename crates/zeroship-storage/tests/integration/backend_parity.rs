@@ -580,6 +580,16 @@ fn localfs_parity_and_large_stream() {
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "s3")]
+/// The fixture bucket's configuration under this suite's prefix.
+fn s3_config(server: &S3Server) -> compio_s3::S3Config {
+    compio_s3::S3Config::parse_url(&server.url("it")).expect("S3 fixture configuration")
+}
+
+/// The credentials the fixture gateway accepts.
+fn s3_credentials(server: &S3Server) -> compio_s3::S3Credentials {
+    compio_s3::S3Credentials::new(server.access_key(), server.secret_key(), None)
+}
+
 fn make_s3(server: &S3Server) -> zeroship_storage::S3 {
     make_s3_tuned(server, zeroship_storage::S3UploadTuning::DEFAULTS)
 }
@@ -592,7 +602,7 @@ fn make_s3_tuned(
     server: &S3Server,
     tuning: zeroship_storage::S3UploadTuning,
 ) -> zeroship_storage::S3 {
-    zeroship_storage::S3::with_tuning(server.config("it"), server.credentials(), tuning)
+    zeroship_storage::S3::with_tuning(s3_config(server), s3_credentials(server), tuning)
 }
 
 #[cfg(feature = "s3")]
@@ -624,7 +634,7 @@ fn s3_parity_and_large_stream() {
 /// aborted multipart leaves no orphaned upload.
 #[cfg(feature = "s3")]
 fn s3_raw_client(server: &S3Server) -> compio_s3::S3Client {
-    compio_s3::S3Client::new(server.config("it"), server.credentials())
+    compio_s3::S3Client::new(s3_config(server), s3_credentials(server))
 }
 
 /// A `ChunkSource` that yields `before_err` bytes (in 64 KiB chunks) and then

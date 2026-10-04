@@ -38,16 +38,14 @@
 
 mod support;
 
-/// The tenant cluster fixture, reached where it already lives rather than
-/// copied.
+/// The tenant cluster fixture `zeroship-migrate-server`'s reconciler target
+/// uses, from the shared testkit rather than copied.
 ///
-/// `zeroship-migrate-server`'s reconciler target owns this fixture and the
-/// reconciler under test here is measured against THAT server shape - the
+/// The reconciler under test here is measured against THAT server shape - the
 /// deployed major, `fsync=off`, a throwaway container per test because
-/// `pg_authid` and `pg_auth_members` are cluster-shared. A second spelling in
-/// this crate would let the two drift and make a failure here unattributable.
-#[path = "../../zeroship-migrate-server/tests/support/fixture/tenant.rs"]
-mod tenant;
+/// `pg_authid` and `pg_auth_members` are cluster-shared - and one spelling of it
+/// keeps this crate and the migration server from drifting apart.
+use zeroship_testkit::tenant_cluster as tenant;
 
 use std::collections::HashMap;
 use std::path::PathBuf;

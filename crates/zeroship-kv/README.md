@@ -72,7 +72,7 @@ cargo test -p zeroship-kv --no-default-features --features redb
 Testcontainers starts isolated databases, configures cluster slots, and removes
 containers when their tests finish. Docker must be available; startup failures
 fail the run. No backend URLs, Compose setup, or bootstrap scripts are needed.
-Shared Redis and Dragonfly fixtures live in `tests/testkit/src/redis.rs`
+Shared Redis and Dragonfly fixtures live in `crates/zeroship-testkit/src/redis.rs`
 and are reused by the KV and V8 binding tests. `tests/integration/topologies.rs` exercises deployment discovery,
 Sentinel failover, and authenticated TLS. Testcontainers is a development-only dependency; its
 Docker orchestration runs independently of the compio database operations.

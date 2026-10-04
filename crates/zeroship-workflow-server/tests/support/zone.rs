@@ -18,6 +18,12 @@ pub fn trusted() -> Rc<dyn EligibilitySource> {
 /// `db/migrations-ts/20260914000400_execution_zones_and_join_signers.ts` and
 /// `20260914000500_worker_join_bindings.ts` model Control's own rows.
 pub async fn declare_zone(platform: &platform::Platform) -> (ZoneId, String) {
+    assert!(
+        platform.is_fresh(),
+        "an operator-declared execution zone is deployment-global: declaring it in the \
+         process-shared database leaves every sibling case a second active zone, so an \
+         app created without a name is refused. Give the case a fresh_database() clone."
+    );
     let zone = ZoneId::mint();
     platform
         .admin

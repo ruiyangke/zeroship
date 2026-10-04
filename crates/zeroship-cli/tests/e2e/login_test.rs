@@ -22,7 +22,7 @@ struct MockServer {
 }
 
 impl MockServer {
-    fn start_owned(responses: Vec<(u16, String)>) -> Self {
+    fn start(responses: Vec<(u16, String)>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock server");
         listener
             .set_nonblocking(true)
@@ -104,7 +104,7 @@ fn op_token_body(refresh_token: &str) -> String {
 
 #[test]
 fn device_grant_flow_polls_the_op_until_approved_and_stores_a_refresh_token() {
-    let server = MockServer::start_owned(vec![
+    let server = MockServer::start(vec![
         (200, PROTECTED_RESOURCE_METADATA.to_string()),
         (200, device_authorization_body("dev-123")),
         (400, r#"{"error":"authorization_pending"}"#.to_string()),
@@ -220,7 +220,7 @@ fn an_expired_access_token_rotates_and_the_successor_is_persisted_before_it_is_u
     // hold `zrt_old` here - and `zrt_old` is now a REUSE presentation that
     // revokes the whole family, locking the user out. Writing first is what
     // makes a crash between rotation and use survivable.
-    let server = MockServer::start_owned(vec![
+    let server = MockServer::start(vec![
         (200, op_token_body("zrt_new")),
         (500, r#"{"error":"boom"}"#.to_string()),
     ]);
@@ -293,7 +293,7 @@ fn a_login_that_yields_no_refresh_token_fails_instead_of_storing_a_15_minute_ses
     // Same four legs as the happy path; the single variable is the absent
     // `refresh_token` on the last response. Accepting it would store a
     // credential that expires mid-deploy with nothing to rotate.
-    let server = MockServer::start_owned(vec![
+    let server = MockServer::start(vec![
         (200, PROTECTED_RESOURCE_METADATA.to_string()),
         (200, device_authorization_body("dev-norefresh")),
         (400, r#"{"error":"authorization_pending"}"#.to_string()),
@@ -336,7 +336,7 @@ fn a_refused_rotation_reports_that_the_session_ended_rather_than_a_raw_http_erro
     // Family revocation (a reuse detection, an operator revoke, an account
     // disable) surfaces here as `invalid_grant`. The human's next step is
     // `zeroship login`, so say that.
-    let server = MockServer::start_owned(vec![(
+    let server = MockServer::start(vec![(
         400,
         r#"{"error":"invalid_grant","error_description":"refresh token is invalid"}"#.to_string(),
     )]);
@@ -373,7 +373,7 @@ fn a_refused_rotation_reports_that_the_session_ended_rather_than_a_raw_http_erro
 
 #[test]
 fn login_honors_project_config_environment_and_prints_provenance() {
-    let server = MockServer::start_owned(vec![
+    let server = MockServer::start(vec![
         (200, PROTECTED_RESOURCE_METADATA.to_string()),
         (200, device_authorization_body("dev-config")),
         (400, r#"{"error":"authorization_pending"}"#.to_string()),
@@ -453,7 +453,7 @@ fn login_honors_project_config_environment_and_prints_provenance() {
 
 #[test]
 fn supabase_provider_flag_still_drives_the_one_device_flow() {
-    let server = MockServer::start_owned(vec![
+    let server = MockServer::start(vec![
         (200, PROTECTED_RESOURCE_METADATA.to_string()),
         (200, device_authorization_body("supabase-dev-123")),
         (400, r#"{"error":"authorization_pending"}"#.to_string()),

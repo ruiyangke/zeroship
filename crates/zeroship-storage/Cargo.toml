@@ -25,7 +25,7 @@ s3 = ["dep:compio-s3", "dep:futures", "dep:tracing"]
 [dev-dependencies]
 tempfile = { workspace = true }
 testcontainers = { version = "0.28", default-features = false, features = ["blocking"] }
-zeroship-testkit = { path = "../../tests/testkit" }
+zeroship-testkit = { workspace = true }
 
 [lints]
 workspace = true

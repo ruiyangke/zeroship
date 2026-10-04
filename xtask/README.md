@@ -5,9 +5,10 @@ relay tests. Assertions remain in their owning crates. This independent tooling
 workspace keeps orchestration dependencies out of shipped services.
 
 The command checks data architecture, builds the real relay executable and the PostgreSQL fixture image,
-runs nextest, then runs Cargo doctests. Each database test owns its PostgreSQL
-container through an explicit Rust guard. The container supplies logical WAL,
-pgvector and PostGIS, with a dynamically assigned host port. SQLite tests use
+runs nextest, then runs Cargo doctests. Each database case takes a database of
+its own on the bare PostgreSQL server every test process of the worktree shares,
+cloned from the server's template and dropped with the case's guard. The server
+supplies logical WAL, pgvector and PostGIS, with a dynamically assigned host port. SQLite tests use
 explicit temporary files. Startup failure fails the test; no external database
 URL or test overlay is needed.
 
@@ -16,7 +17,7 @@ of the Rust toolchain. Make Docker available, since it stays a host service.
 `pg_dump` and `pg_restore` clients matching the fixture server major version must
 be on PATH; the development shell supplies them, so this applies to a shell built
 another way. The task rejects a version mismatch before building the suite. The
-fixture server is declared in `tests/testkit/src/postgres/Dockerfile`, and the
+fixture server is declared in `crates/zeroship-testkit/src/postgres/Dockerfile`, and the
 shell's client attribute in `flake.nix` is bumped with it.
 Build the workspace SDKs with `pnpm install --frozen-lockfile` and `pnpm build`
 before compiling the V8 runtime.
@@ -28,8 +29,9 @@ cargo xtask test data --filter 'test(tests::postgres::transactions::)'
 ```
 
 The filtered command is for diagnosis. The unfiltered command runs the complete
-suite and is used by CI. Tests release their containers after success or panic;
-testcontainers' watchdog handles interrupted test processes.
+suite and is used by CI. A case drops its database after success or panic; the
+shared server's in-container watchdog removes the server once no test process
+has held its lease for the idle grace, however those processes ended.
 
 `tests/architecture/mod.rs` owns dependency, SQL placement, adapter, driver,
 worker privilege and database fixture checks. Rust source parsing distinguishes
@@ -45,8 +47,8 @@ concurrently. Retries are disabled so a failing first attempt remains a failure.
 
 Platform database orchestration lives in this package. The `zs-testkit` binary
 is the suite-database provisioner, spawned as a child process by
-`tests/suite_db/mod.rs`; service tests include preflight source from
-`tests/fixtures/platform_db/`. Its integration tests own PostgreSQL containers
+`tests/suite_db/mod.rs`; the live-database preflight lives in
+`src/platform_db/`. Its integration tests own PostgreSQL containers
 and generated overlays. No helper package or optional test feature is required.
 
 ## Playwright and the development shell's browsers

@@ -173,7 +173,7 @@ async fn assertion_failure_removes_the_owned_smtp_server() {
         Some(&"intentional SMTP fixture failure")
     );
     assert!(
-        !container_ids().contains(&*failed_id.borrow()),
+        container_is_gone(&failed_id.borrow()),
         "failed case leaked its SMTP server"
     );
 
@@ -185,26 +185,15 @@ async fn assertion_failure_removes_the_owned_smtp_server() {
     })
     .await;
     assert!(
-        !container_ids().contains(&*successful_id.borrow()),
+        container_is_gone(&successful_id.borrow()),
         "successful case leaked its SMTP server"
     );
 }
 
-/// Every Docker container id the host knows, for a fixture that proves the
-/// server it started is gone.
-pub(super) fn container_ids() -> Vec<String> {
-    let output = std::process::Command::new("docker")
-        .args(["ps", "--all", "--quiet", "--no-trunc"])
-        .output()
-        .expect("query fixture container lifecycle");
-    assert!(
-        output.status.success(),
-        "Docker container listing failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout)
-        .unwrap()
-        .lines()
-        .map(str::to_owned)
-        .collect()
+/// Whether the Docker daemon still knows a container by `id`.
+///
+/// The fixture proves the server it started is gone through the daemon API, the
+/// same client path the fixture starts it with.
+pub(super) fn container_is_gone(id: &str) -> bool {
+    zeroship_testkit::shared::container_status(id).is_none()
 }

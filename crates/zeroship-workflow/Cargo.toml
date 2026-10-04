@@ -37,10 +37,9 @@ uuid = { workspace = true }
 # both see dev-dependencies.
 [dev-dependencies]
 zeroship-workflow-manager = { workspace = true }
-zeroship-workflow-testkit = { path = "../zeroship-workflow-testkit" }
-zeroship-testkit = { path = "../../tests/testkit" }
+zeroship-workflow-testkit = { workspace = true }
+zeroship-testkit = { workspace = true }
 compio-s3 = { workspace = true }
-testcontainers = { version = "0.28", default-features = false, features = ["blocking"] }
 bytes = { workspace = true }
 compio-postgres = { workspace = true, features = ["with-chrono-0_4", "with-serde_json-1", "with-uuid-1"] }
 tempfile = { workspace = true }

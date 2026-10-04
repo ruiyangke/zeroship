@@ -1288,7 +1288,7 @@ mod live_audit_unmask_provisioning {
     use super::*;
     use crate::datastore::cluster::{converge_database, drop_database};
 
-    async fn admin_client() -> compio_postgres::Client {
+    async fn admin_client() -> crate::test_database::TestDatabase {
         crate::test_database::connect().await
     }
 

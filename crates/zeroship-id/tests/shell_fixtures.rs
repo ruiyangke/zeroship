@@ -9,7 +9,7 @@ fn auth_ui_client_identifies_its_canonical_app() {
     }
 
     let fixture: Fixture =
-        serde_json::from_str(include_str!("../../../tests/fixtures/auth_ui_ids.json"))
+        serde_json::from_str(include_str!("data/auth_ui_ids.json"))
             .expect("auth UI identity fixture is canonical");
     assert_eq!(
         typed_id::app_id_from_oauth_client_id(&fixture.client_id),

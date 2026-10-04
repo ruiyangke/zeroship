@@ -582,8 +582,8 @@ fn e2e_storage_streaming_backpressure_over_cap() {
 fn e2e_storage_streaming_s3() {
     let server = S3Server::start();
     let backend = zeroship_storage::S3::with_tuning(
-        server.config("v8"),
-        server.credentials(),
+        compio_s3::S3Config::parse_url(&server.url("v8")).expect("S3 fixture configuration"),
+        compio_s3::S3Credentials::new(server.access_key(), server.secret_key(), None),
         zeroship_storage::S3UploadTuning::DEFAULTS,
     );
     let store = StorageStore::from_backend(Arc::new(backend));

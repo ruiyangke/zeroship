@@ -50,13 +50,11 @@ zeroship-migrate-mysql = { workspace = true }
 zeroship-migrate-backend = { workspace = true }
 
 [dev-dependencies]
-# TEST-ONLY: the PostgreSQL and MySQL servers the live suites start and own
-# (`tests/support/server.rs`), and the per-test PostgreSQL fixture
-# `declared_column_roles.rs` shares with other crates.
-testcontainers = { version = "0.28", default-features = false, features = ["blocking", "watchdog"] }
 url = { workspace = true }
-# The shared reaper-owned container fixtures the live suites start.
-zeroship-testkit = { path = "../../tests/testkit" }
+# TEST-ONLY: the shared servers the live suites join (`tests/support/server.rs`,
+# `tests/support/mysql.rs`) and the per-case PostgreSQL database
+# `declared_column_roles.rs` takes on the shared bare server.
+zeroship-testkit = { workspace = true }
 # The wire contract, named DIRECTLY by the suites that build IR envelopes and dialect
 # ids rather than reading them off the engine's re-exports. It is not a `[dependencies]`
 # entry: `shipping_backends()` returns a `BackendRegistry`, but that name reaches this

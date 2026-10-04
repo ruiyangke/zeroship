@@ -806,7 +806,7 @@ mod live_capability_column_grants {
     use super::*;
     use uuid::Uuid;
 
-    async fn admin_client() -> Client {
+    async fn admin_client() -> crate::test_database::TestDatabase {
         crate::test_database::connect().await
     }
 

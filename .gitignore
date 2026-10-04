@@ -72,7 +72,4 @@ __pycache__/
 
 # Excluded dev-only crates resolve on their own when a command names their
 # manifest; the workspace lock is the one that pins shipped dependencies.
-tests/testkit/Cargo.lock
-crates/zeroship-data-testkit/Cargo.lock
-crates/zeroship-workflow-testkit/Cargo.lock
 libs/compio-postgres/testkit/Cargo.lock

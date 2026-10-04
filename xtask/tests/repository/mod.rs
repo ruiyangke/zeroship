@@ -4,7 +4,7 @@
 //! is a suite that silently stops running.
 
 mod build_inputs;
-mod testkit_versions;
+mod testkit_boundaries;
 mod tls_provider;
 mod tokio_boundary;
 

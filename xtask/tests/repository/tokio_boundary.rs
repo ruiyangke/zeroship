@@ -1,6 +1,6 @@
 use crate::architecture::repo;
 use serde_json::Value;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::process::Command;
 
@@ -10,13 +10,13 @@ use std::process::Command;
 // settles that.
 const CARRIERS: &[&str] = &["cyper", "cyper-core", "hyper", "hyper-util"];
 
-// Workspace members that REACH tokio in the resolved graph.
+// Workspace members that REACH tokio in a SHIPPED binary's resolved graph.
 //
-// Reachability, not declaration. A member that declares a carrier it never
-// names links exactly what a member that declares nothing links, so pinning
-// declarations made this gate fire on edits that changed no dependency at all.
-// It also missed the case that matters more: a member can start reaching tokio
-// through a NEW intermediate without declaring a carrier itself.
+// Reachability, not declaration, and only through packages that ship a binary.
+// The dev-only testkit members are not in any shipped binary's normal closure,
+// so the testcontainers -> bollard -> tokio path they carry is deliberately
+// absent here; the `--workspace` tree that would include it is the control in
+// `shipped_builds_compile_no_tokio_runtime`, not the subject.
 //
 // The members absent here are the ones this pin protects - the leaves that must
 // stay clean, `zeroship-workflow-schema` and `zeroship-id` among them.
@@ -26,7 +26,6 @@ const REACHERS: &[&str] = &[
     "zeroship-authn",
     "zeroship-bundle",
     "zeroship-cli",
-    "zeroship-config-contract",
     "zeroship-control",
     "zeroship-core",
     "zeroship-data-cdc-server",
@@ -70,7 +69,70 @@ fn is_tokio(name: &str) -> bool {
     name == "tokio" || name.starts_with("tokio-")
 }
 
+/// The manifest classes a package gives its targets, keyed by target name.
+fn target_classes(package: &Value) -> BTreeMap<String, String> {
+    package["metadata"]["zeroship-config"]["targets"]
+        .as_array()
+        .map(|targets| {
+            targets
+                .iter()
+                .filter_map(|target| {
+                    Some((
+                        target["target"].as_str()?.to_owned(),
+                        target["class"].as_str()?.to_owned(),
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Whether every target this package classifies is `test-dev-tool`, i.e. the
+/// package itself ships nothing. A package with no classification at all is not
+/// exempt: only an explicit test-dev-tool class buys the exemption.
+fn is_test_dev_tool_package(package: &Value) -> bool {
+    let name = package["name"].as_str().expect("package name");
+    let classes = target_classes(package);
+    classes.get(name).is_some_and(|class| class == "test-dev-tool")
+}
+
+/// The bin targets this package would ship: those its manifest does not
+/// classify `test-dev-tool`.
+fn shipped_bin_targets(package: &Value) -> Vec<String> {
+    let classes = target_classes(package);
+    package["targets"]
+        .as_array()
+        .expect("package targets")
+        .iter()
+        .filter(|target| {
+            target["kind"]
+                .as_array()
+                .is_some_and(|kinds| kinds.iter().any(|kind| kind == "bin"))
+        })
+        .filter_map(|target| target["name"].as_str())
+        .filter(|name| classes.get(*name).map(String::as_str) != Some("test-dev-tool"))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The workspace packages that ship at least one binary.
+fn shipped_packages() -> Vec<&'static Value> {
+    let packages: Vec<_> = repo::workspace()
+        .into_iter()
+        .filter(|package| !shipped_bin_targets(package).is_empty())
+        .collect();
+    assert!(
+        packages.len() >= 5,
+        "shipped-binary corpus disappeared: {}",
+        packages.len()
+    );
+    packages
+}
+
 fn forbidden_declarations(package: &Value) -> Vec<String> {
+    if is_test_dev_tool_package(package) {
+        return Vec::new();
+    }
     package["dependencies"]
         .as_array()
         .expect("package dependencies")
@@ -117,15 +179,15 @@ fn root_declarations(source: &str) -> Result<(usize, Vec<String>), String> {
     Ok((dependencies.len(), forbidden))
 }
 
-// Cargo metadata's resolve graph can include optional edges that cargo tree
-// excludes under the active feature resolution. Keep Cargo responsible for
-// selecting normal edges; do not approximate that selection from metadata.
-fn tokio_tree(root: &Path, all_features: bool) -> Result<String, String> {
+/// `cargo tree -p package -i tokio` over normal edges. Cargo is responsible for
+/// selecting activated edges; do not approximate that selection from metadata.
+fn package_tokio_tree(root: &Path, package: &str, all_features: bool) -> Result<String, String> {
     let mut command = Command::new(env!("CARGO"));
     command.current_dir(root).args([
         "tree",
-        "--workspace",
         "--locked",
+        "-p",
+        package,
         "-e",
         "normal",
         "-i",
@@ -143,7 +205,7 @@ fn tokio_tree(root: &Path, all_features: bool) -> Result<String, String> {
     let output = command.output().map_err(|error| error.to_string())?;
     if !output.status.success() {
         return Err(format!(
-            "cargo tree (all_features={all_features}) failed: {}",
+            "cargo tree -p {package} (all_features={all_features}) failed: {}",
             String::from_utf8_lossy(&output.stderr)
         ));
     }
@@ -169,24 +231,21 @@ fn tree_packages(output: &str) -> Result<BTreeSet<String>, String> {
 // `-e features,normal` restricts to normal edges, so the answer describes what a
 // DEPLOYED binary links. Dropping `normal` admits dev edges, which is how the
 // control below proves this reader can see a runtime feature when one is there.
-fn tokio_feature_tree(root: &Path, include_dev: bool) -> Result<String, String> {
+fn tokio_feature_tree(root: &Path, packages: &[&str], include_dev: bool) -> Result<String, String> {
     let edges = if include_dev { "features" } else { "features,normal" };
-    let output = Command::new(env!("CARGO"))
-        .current_dir(root)
-        .args([
-            "tree",
-            "--workspace",
-            "--locked",
-            "-e",
-            edges,
-            "--color",
-            "never",
-        ])
-        .output()
-        .map_err(|error| error.to_string())?;
+    let mut command = Command::new(env!("CARGO"));
+    command.current_dir(root).arg("tree");
+    if packages.is_empty() {
+        command.arg("--workspace");
+    }
+    for package in packages {
+        command.args(["-p", package]);
+    }
+    command.args(["--locked", "-e", edges, "--color", "never"]);
+    let output = command.output().map_err(|error| error.to_string())?;
     if !output.status.success() {
         return Err(format!(
-            "cargo tree (features, include_dev={include_dev}) failed: {}",
+            "cargo tree (features, packages={packages:?}, include_dev={include_dev}) failed: {}",
             String::from_utf8_lossy(&output.stderr)
         ));
     }
@@ -205,6 +264,18 @@ fn tokio_features(output: &str) -> Result<BTreeSet<String>, String> {
     Ok(features)
 }
 
+/// The tokio features a shipped package activates, or none when it does not
+/// reach tokio at all.
+fn shipped_package_features(root: &Path, package: &str) -> BTreeSet<String> {
+    if !repo::normal_closure(package).contains("tokio") {
+        return BTreeSet::new();
+    }
+    let output = tokio_feature_tree(root, &[package], false)
+        .unwrap_or_else(|error| panic!("feature tree for {package}: {error}"));
+    tokio_features(&output)
+        .unwrap_or_else(|error| panic!("{package} reaches tokio but has no feature rows: {error}"))
+}
+
 #[test]
 fn tokio_declarations_remain_dev_only_and_member_owned() {
     let packages = repo::workspace();
@@ -215,7 +286,7 @@ fn tokio_declarations_remain_dev_only_and_member_owned() {
         .collect();
     assert!(
         forbidden.is_empty(),
-        "non-dev tokio declarations: {forbidden:?}"
+        "non-dev tokio declarations outside a test-dev-tool package: {forbidden:?}"
     );
 
     let (examined, forbidden) = root_declarations(&repo::read("Cargo.toml")).unwrap();
@@ -235,18 +306,28 @@ fn accepted_transitive_tokio_boundary_is_unchanged() {
         .map(|package| package["name"].as_str().unwrap().to_owned())
         .collect();
     let mut reachers = BTreeSet::new();
-    for all_features in [false, true] {
-        let output = tokio_tree(&repo::root(), all_features).unwrap();
-        let selected = tree_packages(&output).unwrap();
-        assert!(
-            !selected.is_empty(),
-            "tokio reverse dependency scan is empty"
-        );
-        reachers.extend(selected);
+    let mut contributing = 0;
+    for package in shipped_packages() {
+        let name = package["name"].as_str().unwrap();
+        if !repo::normal_closure(name).contains("tokio") {
+            continue;
+        }
+        contributing += 1;
+        for all_features in [false, true] {
+            let output = package_tokio_tree(&repo::root(), name, all_features).unwrap();
+            let selected = tree_packages(&output).unwrap();
+            assert!(
+                !selected.is_empty(),
+                "tokio reverse dependency scan for {name} is empty"
+            );
+            reachers.extend(selected);
+        }
     }
     assert!(
-        reachers.len() >= 8,
-        "tokio reachability scan lost its packages"
+        contributing >= 5 && reachers.len() >= 8,
+        "tokio reachability scan lost its packages: {contributing} packages, \
+         {} reachers",
+        reachers.len()
     );
     let carriers: BTreeSet<_> = reachers.difference(&workspace_names).cloned().collect();
     assert_eq!(
@@ -271,6 +352,10 @@ fn accepted_transitive_tokio_boundary_is_unchanged() {
 /// This is the assertion the package sets above cannot make. They describe what
 /// is LINKED; `cfg_rt!` is what decides whether `tokio::runtime` exists at all.
 ///
+/// The subject is the union of every shipped package's normal features, not the
+/// whole workspace: the dev-only testkit members normally carry
+/// `testcontainers -> bollard -> tokio rt`, and they are not shipped.
+///
 /// The control is the second half, and without it the first half is vacuous: a
 /// reader that silently matched nothing would report "no runtime features" over
 /// an empty string. Admitting dev edges MUST surface `rt`, because
@@ -278,7 +363,20 @@ fn accepted_transitive_tokio_boundary_is_unchanged() {
 /// reach the Docker daemon. Same reader, same regex, one flag apart.
 #[test]
 fn shipped_builds_compile_no_tokio_runtime() {
-    let shipped = tokio_features(&tokio_feature_tree(&repo::root(), false).unwrap()).unwrap();
+    let mut shipped = BTreeSet::new();
+    let mut contributing = 0;
+    for package in shipped_packages() {
+        let name = package["name"].as_str().unwrap();
+        let features = shipped_package_features(&repo::root(), name);
+        if !features.is_empty() {
+            contributing += 1;
+            shipped.extend(features);
+        }
+    }
+    assert!(
+        contributing >= 5 && !shipped.is_empty(),
+        "shipped feature scan read no tokio features"
+    );
     let runtime: Vec<_> = RUNTIME_FEATURES
         .iter()
         .filter(|feature| shipped.contains(**feature))
@@ -297,13 +395,133 @@ fn shipped_builds_compile_no_tokio_runtime() {
         "shipped tokio features changed; review this boundary and AGENTS.md together"
     );
 
-    let with_dev = tokio_features(&tokio_feature_tree(&repo::root(), true).unwrap()).unwrap();
+    let with_dev = tokio_features(&tokio_feature_tree(&repo::root(), &[], true).unwrap()).unwrap();
     for feature in RUNTIME_FEATURES {
         assert!(
             with_dev.contains(*feature),
             "dev edges do not enable tokio {feature:?}, so the shipped assertion \
              above is reading a feature set this reader cannot see"
         );
+    }
+}
+
+/// The packages `deploy/Dockerfile` builds the shipped binaries from, read off
+/// its `RUN cargo build --release` invocation and the `\` continuations after
+/// it.
+///
+/// # Errors
+/// When there is no such invocation, it selects no package, or it builds the
+/// whole workspace.
+fn dockerfile_build(source: &str) -> Result<Vec<String>, String> {
+    let mut lines = source.lines().skip_while(|line| !line.trim_start().starts_with("RUN cargo build"));
+    let first = lines
+        .next()
+        .ok_or("the Dockerfile has no `RUN cargo build` invocation")?;
+    let mut invocation = first.trim().to_owned();
+    let mut continued = first.trim_end().ends_with('\\');
+    for line in lines {
+        if !continued {
+            break;
+        }
+        invocation.push(' ');
+        invocation.push_str(line.trim());
+        continued = line.trim_end().ends_with('\\');
+    }
+    let words: Vec<&str> = invocation
+        .split_whitespace()
+        .filter(|word| *word != "\\")
+        .collect();
+    if words.iter().any(|word| *word == "--workspace" || *word == "--all") {
+        return Err(format!(
+            "the Dockerfile builds the whole workspace, which unifies the dev-only \
+             testkits' tokio runtime into the shipped binaries: {invocation}"
+        ));
+    }
+    let packages: Vec<String> = words
+        .windows(2)
+        .filter(|pair| pair[0] == "-p" || pair[0] == "--package")
+        .map(|pair| pair[1].to_owned())
+        .collect();
+    if packages.is_empty() {
+        return Err(format!("the Dockerfile build selects no package: {invocation}"));
+    }
+    Ok(packages)
+}
+
+/// The build that produces the deployed binaries compiles no tokio runtime.
+///
+/// The per-package scan above unions what each shipped package enables alone;
+/// the image is built by ONE cargo invocation over several packages, whose
+/// features cargo unifies across the selection. This reads that exact
+/// selection off `deploy/Dockerfile` and resolves it the way the build does.
+///
+/// The control is the reason the build selects packages at all: the same
+/// reader over `--workspace` normal edges MUST surface tokio `rt`, because the
+/// dev-only testkits are workspace members whose testcontainers dependency
+/// needs a real runtime, and a workspace build unifies it into every member it
+/// builds.
+#[test]
+fn the_dockerfile_build_compiles_no_tokio_runtime() {
+    let packages = dockerfile_build(&repo::read("deploy/Dockerfile")).unwrap();
+    assert!(
+        packages.len() >= 5,
+        "the Dockerfile build selection lost its packages: {packages:?}"
+    );
+    let shipped: BTreeSet<String> = shipped_packages()
+        .iter()
+        .map(|package| package["name"].as_str().unwrap().to_owned())
+        .collect();
+    for package in &packages {
+        assert!(
+            shipped.contains(package),
+            "the Dockerfile builds {package}, which ships no binary this scan knows"
+        );
+    }
+    let selection: Vec<&str> = packages.iter().map(String::as_str).collect();
+    let built = tokio_features(&tokio_feature_tree(&repo::root(), &selection, false).unwrap())
+        .unwrap();
+    let runtime: Vec<_> = RUNTIME_FEATURES
+        .iter()
+        .filter(|feature| built.contains(**feature))
+        .collect();
+    assert!(
+        runtime.is_empty(),
+        "the Dockerfile build enables tokio {runtime:?}, so the deployed binaries \
+         carry a tokio runtime; review the zero-tokio invariant in AGENTS.md"
+    );
+    let allowed: BTreeSet<String> = SHIPPED_TOKIO_FEATURES
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect();
+    assert!(
+        built.is_subset(&allowed),
+        "the Dockerfile build enables tokio features outside the shipped set: {:?}",
+        built.difference(&allowed).collect::<Vec<_>>()
+    );
+
+    let workspace = tokio_features(&tokio_feature_tree(&repo::root(), &[], false).unwrap())
+        .unwrap();
+    assert!(
+        RUNTIME_FEATURES.iter().any(|feature| workspace.contains(*feature)),
+        "a --workspace build does not unify a tokio runtime in, so this control \
+         cannot show the reader sees one; it found {workspace:?}"
+    );
+}
+
+#[test]
+fn the_dockerfile_reader_takes_the_selection_and_refuses_a_workspace_build() {
+    let image = "FROM rust AS builder\nRUN cargo build --release \\\n    -p zeroship-control \\\n    -p zeroship-gateway\n\nFROM ubuntu\nRUN apt-get -p nope\n";
+    assert_eq!(
+        dockerfile_build(image).unwrap(),
+        ["zeroship-control", "zeroship-gateway"]
+    );
+    for refused in [
+        "RUN cargo build --release --workspace\n",
+        "RUN cargo build --release \\\n    --workspace \\\n    -p zeroship-control\n",
+        "RUN cargo build --release\n",
+        "FROM rust\nRUN make\n",
+    ] {
+        assert!(dockerfile_build(refused).is_err(), "accepted {refused:?}");
     }
 }
 
@@ -324,6 +542,26 @@ fn declaration_checks_use_package_identity_and_dependency_kind() {
         "name": "consumer", "dependencies": [{"name": "compio", "kind": null}]
     });
     assert!(forbidden_declarations(&package).is_empty());
+}
+
+#[test]
+fn declaration_check_exempts_only_a_classified_test_dev_tool() {
+    let declared = serde_json::json!({
+        "name": "zeroship-testkit",
+        "dependencies": [{"name": "tokio", "kind": null, "target": null}],
+        "metadata": {"zeroship-config": {"targets": [
+            {"target": "zeroship-testkit", "class": "test-dev-tool"}
+        ]}}
+    });
+    assert!(forbidden_declarations(&declared).is_empty());
+    let shipped = serde_json::json!({
+        "name": "zeroship-worker",
+        "dependencies": [{"name": "tokio", "kind": null, "target": null}],
+        "metadata": {"zeroship-config": {"targets": [
+            {"target": "zeroship-worker", "class": "platform"}
+        ]}}
+    });
+    assert_eq!(forbidden_declarations(&shipped).len(), 1);
 }
 
 #[test]
@@ -396,6 +634,33 @@ tokio v1.51.1\n\
 }
 
 #[test]
+fn shipped_target_classification_ignores_test_dev_tool_bins() {
+    let mixed = serde_json::json!({
+        "name": "zeroship-control",
+        "targets": [
+            {"name": "zeroship-control", "kind": ["bin"]},
+            {"name": "zeroship-mock-stripe", "kind": ["bin"]},
+            {"name": "zeroship-control", "kind": ["lib"]}
+        ],
+        "metadata": {"zeroship-config": {"targets": [
+            {"target": "zeroship-control", "class": "platform"},
+            {"target": "zeroship-mock-stripe", "class": "test-dev-tool"}
+        ]}}
+    });
+    assert_eq!(shipped_bin_targets(&mixed), ["zeroship-control"]);
+    assert!(!is_test_dev_tool_package(&mixed));
+    let only_dev = serde_json::json!({
+        "name": "zeroship-testkit",
+        "targets": [{"name": "zeroship-testkit", "kind": ["lib"]}],
+        "metadata": {"zeroship-config": {"targets": [
+            {"target": "zeroship-testkit", "class": "test-dev-tool"}
+        ]}}
+    });
+    assert!(shipped_bin_targets(&only_dev).is_empty());
+    assert!(is_test_dev_tool_package(&only_dev));
+}
+
+#[test]
 fn cargo_selects_activated_normal_edges_without_dev_or_build_edges() {
     let fixture = tempfile::tempdir().unwrap();
     let root = fixture.path();
@@ -438,17 +703,17 @@ fn cargo_selects_activated_normal_edges_without_dev_or_build_edges() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let default = tree_packages(&tokio_tree(root, false).unwrap()).unwrap();
-    let all = tree_packages(&tokio_tree(root, true).unwrap()).unwrap();
+    let default = tree_packages(&package_tokio_tree(root, "app", false).unwrap()).unwrap();
+    let all = tree_packages(&package_tokio_tree(root, "app", true).unwrap()).unwrap();
     assert_eq!(default, BTreeSet::from(["app".into()]));
     assert_eq!(all, BTreeSet::from(["app".into(), "carrier".into()]));
     std::fs::remove_file(root.join("Cargo.lock")).unwrap();
     assert!(
-        tokio_tree(root, false).is_err(),
+        package_tokio_tree(root, "app", false).is_err(),
         "Cargo failure was accepted"
     );
     assert!(
-        tokio_feature_tree(root, false).is_err(),
+        tokio_feature_tree(root, &["app"], false).is_err(),
         "Cargo failure was accepted by the feature reader"
     );
 }

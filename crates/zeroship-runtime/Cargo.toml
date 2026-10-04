@@ -223,6 +223,12 @@ runtime_legacy_websocket = []
 # (MAC-02, design `docs/archive/macro-constructor-post-init.md` §6.2).
 trybuild = "1.0"
 rcgen = "0.14"
+# The live-driver suites take a database of their own on the servers every test
+# process of the worktree shares (`zeroship-testkit`), or start a server a case
+# holds and drops (`testcontainers`) where the server's configuration is the
+# case's subject. A missing server fails the run instead of silently skipping.
+testcontainers = { workspace = true }
+zeroship-testkit = { workspace = true }
 # Wave F (RPC v2 phase 1): microbench for `default.rpc(...)` dispatch.
 criterion = { workspace = true }
 

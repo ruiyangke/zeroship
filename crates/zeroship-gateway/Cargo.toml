@@ -86,7 +86,7 @@ chrono = { version = "0.4", default-features = false, features = ["std", "serde"
 [dev-dependencies]
 # Database cases share the worktree's migrated server and run on compio.
 compio = { workspace = true, features = ["polling"] }
-zeroship-testkit = { path = "../../tests/testkit" }
+zeroship-testkit = { workspace = true }
 # The generated-controls test parses an overlay fixture to prove the
 # observability tier is read from the canonical TOML path.
 toml = { workspace = true }

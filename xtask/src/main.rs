@@ -155,14 +155,6 @@ fn main() -> ExitCode {
                 ]),
                 "harness unit tests",
             )
-        })
-        // The testkit crate is excluded from the workspace, so no `--workspace`
-        // command compiles its unit tests.
-        .and_then(|()| {
-            checked(
-                cargo().args(["test", "--manifest-path", "tests/testkit/Cargo.toml", "--lib"]),
-                "testkit unit tests",
-            )
         }),
         Task::Test {
             suite: Suite::PlaywrightBrowsers,

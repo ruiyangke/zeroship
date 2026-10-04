@@ -129,3 +129,9 @@ impl Manager {
 pub fn open_epoch() -> zeroship_core::workflow_coordination::Revision {
     1.try_into().unwrap()
 }
+
+impl std::fmt::Debug for Manager {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("Manager").finish_non_exhaustive()
+    }
+}

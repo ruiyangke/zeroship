@@ -25,7 +25,7 @@ async fn create_role_if_missing(
     attrs: &str,
 ) -> Result<bool, compio_postgres::Error> {
     let exists = !pool
-        .query_text_params("SELECT 1 FROM pg_roles WHERE rolname = $1", &[&name])
+        .query_text_params("SELECT 1 FROM pg_roles WHERE rolname = $1", &[name])
         .await?
         .is_empty();
     if exists {
@@ -141,13 +141,12 @@ pub async fn drop_binding_ladder(
     pool: &Pool,
     binding: &HarnessBinding,
 ) -> Result<(), compio_postgres::Error> {
-    let mut roles = Vec::new();
-    roles.push(binding.session_role());
-    roles.push(
+    let roles = vec![
+        binding.session_role(),
         database_derivation::capability_role_name(binding.database(), binding.capability())
             .expect("a minted database composes a legal capability role name"),
-    );
-    roles.push(binding.unmask_role());
+        binding.unmask_role(),
+    ];
     for role in roles {
         pool.execute(
             &format!("DROP ROLE IF EXISTS {}", quote_ident(&role)),

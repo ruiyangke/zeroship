@@ -652,7 +652,6 @@ fn recover_preceding_quoted_ident(text: &str) -> Option<String> {
 
 // ---------------------------------------------------------------------------
 #[cfg(test)]
-#[path = "snapshot_fixture.rs"]
 mod snapshot_fixture;
 
 #[cfg(test)]

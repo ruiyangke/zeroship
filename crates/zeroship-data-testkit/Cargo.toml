@@ -5,24 +5,32 @@ edition = "2021"
 description = "Dev-only data-plane fixtures: harness bindings, role ladders and the platform corpus"
 publish = false
 
-# This crate is excluded from the workspace on purpose. It speaks plain data and
+# A workspace member so its own tests run in the ordinary workspace suite and
+# every dependency is pinned by `workspace = true`. It speaks plain data and
 # leaf crates only, so a crate whose own unit tests exercise the data plane can
-# reach it through `[dev-dependencies]` without a duplicate-type cycle. Consumers
-# reach it only through a `[dev-dependencies]` entry, which keeps it (and the
-# migration engine it carries) off every shipped normal edge. Because it is not
-# a member it cannot inherit `workspace = true`, so versions are pinned here.
+# reach it through `[dev-dependencies]` without a duplicate-type cycle. It is
+# classified `class = "test-dev-tool"`, so no shipped binary may carry it in its
+# normal closure.
+
+[[package.metadata.zeroship-config.targets]]
+target = "zeroship-data-testkit"
+class = "test-dev-tool"
+reason = "Dev-only data-plane fixtures; reached only through dev-dependencies."
 
 [dependencies]
-compio-postgres = { path = "../../libs/compio-postgres" }
-rusqlite = { version = "0.39", features = ["bundled", "preupdate_hook"] }
-serde_json = { version = "1", features = ["raw_value", "preserve_order"] }
-sha2 = "0.10"
-tempfile = "3"
-toml = "0.8"
-tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "env-filter", "fmt", "ansi", "json", "tracing-log"] }
-url = "2"
-zeroship-core = { path = "../zeroship-core" }
-zeroship-migrate = { path = "../zeroship-migrate" }
-zeroship-migrate-postgres = { path = "../zeroship-migrate-postgres" }
-zeroship-migrate-server = { path = "../zeroship-migrate-server" }
-zeroship-migrate-sqlite = { path = "../zeroship-migrate-sqlite" }
+compio-postgres = { workspace = true }
+rusqlite = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tempfile = { workspace = true }
+toml = { workspace = true }
+tracing-subscriber = { workspace = true }
+url = { workspace = true }
+zeroship-core = { workspace = true }
+zeroship-migrate = { workspace = true }
+zeroship-migrate-postgres = { workspace = true }
+zeroship-migrate-server = { workspace = true }
+zeroship-migrate-sqlite = { workspace = true }
+
+[lints]
+workspace = true
