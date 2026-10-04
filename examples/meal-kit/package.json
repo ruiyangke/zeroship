@@ -18,6 +18,7 @@
     "@playwright/test": "catalog:",
     "@types/node": "catalog:",
     "@zeroship/db": "workspace:*",
+    "@zeroship/example-fixtures": "workspace:*",
     "@zeroship/migrate": "workspace:*",
     "@zeroship/types": "workspace:*",
     "@zeroship/vite-plugin": "workspace:*",

@@ -11,7 +11,7 @@ import { logOffset, serverErrors } from "./logs";
  * NixOS is linked against the store and runs there. With neither, Playwright
  * launches the build PLAYWRIGHT_BROWSERS_PATH holds for its own version.
  */
-function chromiumExecutable(): string | undefined {
+export function chromiumExecutable(): string | undefined {
   return process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH ?? (process.env.PATH ?? "").split(delimiter)
     .flatMap((directory) => ["chromium", "chromium-browser"].map((name) => join(directory, name))).find(existsSync);
 }

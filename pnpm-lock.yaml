@@ -819,6 +819,9 @@ importers:
       '@zeroship/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@zeroship/example-fixtures':
+        specifier: workspace:*
+        version: link:../../packages/example-fixtures
       '@zeroship/migrate':
         specifier: workspace:*
         version: link:../../packages/zero-migrate

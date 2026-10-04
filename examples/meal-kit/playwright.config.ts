@@ -1,13 +1,7 @@
 import { defineConfig } from "@playwright/test";
-import { existsSync } from "node:fs";
-import { delimiter, join } from "node:path";
+import { chromiumExecutable } from "@zeroship/example-fixtures";
 import { readyOrigin, testOrigin } from "./tests/fixture/settings";
-const executablePath =
-  process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH ??
-  (process.env.PATH ?? "")
-    .split(delimiter)
-    .map((p) => join(p, "chromium"))
-    .find(existsSync);
+const executablePath = chromiumExecutable();
 export default defineConfig({
   testDir: "tests/browser",
   fullyParallel: false,
