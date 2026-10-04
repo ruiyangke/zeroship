@@ -337,7 +337,7 @@ async fn platform_role_serves_the_journal_without_customer_or_ddl_privileges() {
         &fixture.runtime_url,
         Options::default(),
         holds::client(),
-        eligibility,
+        eligibility.clone(),
     )
     .await
     .unwrap();
@@ -414,15 +414,59 @@ async fn platform_role_serves_the_journal_without_customer_or_ddl_privileges() {
         policies.is_empty(),
         "central journal policy fences were provisioned"
     );
+    // ROLE MEMBERSHIP IS CLUSTER-GLOBAL. The two arms that grant a role rather
+    // than a database object would reach every case on the shared server,
+    // including one whose own service is starting and calls `verify`, so they
+    // are exercised against a role of this case's own. It carries the runtime
+    // role's privileges by inheritance and the one membership under test, so
+    // the same `verify` predicate decides it without the grant touching
+    // `zeroship_workflow`.
+    let probe = zeroship_core::typed_id::generate("wpr");
+    fixture
+        .admin
+        .batch_execute(&format!(
+            "CREATE ROLE \"{probe}\" LOGIN PASSWORD '{probe}'; \
+             GRANT zeroship_workflow TO \"{probe}\""
+        ))
+        .await
+        .unwrap();
+    let refused = Coordinator::connect(
+        fixture.role_url(&probe).as_ref(),
+        Options::default(),
+        holds::client(),
+        eligibility.clone(),
+    )
+    .await;
+    assert!(
+        refused.is_err(),
+        "startup accepted a runtime role carrying a role membership"
+    );
+    // The refusal is the membership rather than a missing grant: the probe
+    // inherits the runtime role's privileges, so `verify` reaches its
+    // membership predicate, and that predicate is the one true here.
+    let probe_conn = platform::connect(fixture.role_url(&probe).as_ref()).await;
+    probe_conn
+        .query("SELECT id FROM workflow_manager.queue_scopes LIMIT 0", &[])
+        .await
+        .unwrap();
+    let privileged: bool = probe_conn
+        .query_one(
+            "SELECT EXISTS(SELECT 1 FROM pg_roles other WHERE other.rolname<>current_user \
+             AND pg_has_role(current_user,other.oid,'MEMBER'))",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert!(privileged, "the probe role carries no membership to refuse");
+    fixture
+        .admin
+        .batch_execute(&format!(
+            "REVOKE zeroship_workflow FROM \"{probe}\"; DROP ROLE \"{probe}\""
+        ))
+        .await
+        .unwrap();
     for (grant, revoke) in [
-        (
-            "GRANT zeroship_workflow_migrator TO zeroship_workflow",
-            "REVOKE zeroship_workflow_migrator FROM zeroship_workflow",
-        ),
-        (
-            "GRANT pg_read_all_data TO zeroship_workflow",
-            "REVOKE pg_read_all_data FROM zeroship_workflow",
-        ),
         (
             "GRANT UPDATE ON workflow_manager.schema_version TO zeroship_workflow",
             "REVOKE UPDATE ON workflow_manager.schema_version FROM zeroship_workflow",

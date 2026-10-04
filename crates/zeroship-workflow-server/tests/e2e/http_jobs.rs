@@ -1181,6 +1181,33 @@ async fn one_exchange_carries_the_queue_and_journal_halves_of_a_delivery() {
 
     // ONE RENEWAL, BOTH LEASES. The queue's deadline moves and the journal's
     // does too, in the one exchange.
+    // A renewal recomputes the deadline from the journal's database clock, so a
+    // heartbeat that lands in the claim's own millisecond answers the same
+    // instant and extends nothing. Wait for that clock to leave the claim's
+    // millisecond before the heartbeat, so the strict extension below is a real
+    // one. The polling is bounded and fails loudly if the clock never moves.
+    let claimed_at = assignment.deadline - assignment.lease_ms;
+    let wait_until = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let now = fixture
+            .platform
+            .admin
+            .query_one(
+                "SELECT floor(extract(epoch FROM clock_timestamp())*1000)::bigint",
+                &[],
+            )
+            .await
+            .unwrap()
+            .get::<_, i64>(0);
+        if now > claimed_at {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < wait_until,
+            "the database clock never advanced past the claim"
+        );
+        compio::time::sleep(Duration::from_millis(1)).await;
+    }
     let (status, body) = fixture
         .post(
             endpoints::WORKFLOW_JOB_HEARTBEAT,

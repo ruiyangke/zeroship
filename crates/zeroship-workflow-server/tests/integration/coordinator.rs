@@ -40,7 +40,7 @@ type StoredIds = BTreeMap<(String, String, String), String>;
 use crate::support::{holds, platform, zone};
 
 struct Fixture {
-    _platform: platform::Platform,
+    platform: platform::Platform,
     admin: Client,
     runtime_url: String,
 }
@@ -82,29 +82,40 @@ impl Fixture {
             .batch_execute(zeroship_workflow_manager::deployments::POSTGRES_SCHEMA)
             .await
             .unwrap();
-        admin.batch_execute(
-            "GRANT USAGE ON SCHEMA workflow_manager,zeroship TO coordinator_test;
-             GRANT SELECT(id,execution_zone_id,deleted_at) ON zeroship.apps TO coordinator_test;
-             GRANT SELECT ON workflow_manager.schema_version TO coordinator_test;
-             GRANT SELECT,INSERT,UPDATE,DELETE ON workflow_manager.workers,
-               workflow_manager.queue_scopes,workflow_manager.deployment_holds,workflow_manager.assignments,
-               workflow_manager.placement_receipts,workflow_manager.management,workflow_manager.management_scopes,workflow_manager.jobs,
-               workflow_manager.schedule_deployments,workflow_manager.schedule_activations,
-               workflow_manager.schedule_disables,workflow_manager.schedule_scopes,
-               workflow_manager.schedules,workflow_manager.schedule_occurrences,
-               workflow_manager.recovery_scopes,workflow_manager.recovery_duties,
-               workflow_manager.capacity_demands,
-               workflow_manager.capacity_targets TO coordinator_test;"
-        ).await.unwrap();
+        grant_runtime(&admin, "coordinator_test").await;
         let runtime_url = platform.role_url("coordinator_test").to_string();
         Self {
-            _platform: platform,
+            platform,
             admin,
             runtime_url,
         }
     }
+    /// A login of this case's own, carrying the runtime grants in this clone.
+    ///
+    /// For a case that mutates a role membership: the minted login is
+    /// cluster-global but unique, so the membership reaches no sibling.
+    async fn dedicated_role(&self) -> String {
+        let role = typed_id::generate("wcr");
+        self.admin
+            .batch_execute(&format!(
+                "CREATE ROLE \"{role}\" LOGIN PASSWORD '{role}'"
+            ))
+            .await
+            .unwrap();
+        grant_runtime(&self.admin, &role).await;
+        role
+    }
+    /// The database URL of a login this case created.
+    fn role_url(&self, role: &str) -> String {
+        self.platform.role_url(role).to_string()
+    }
     async fn service(&self) -> Coordinator {
         self.options(Options::default()).await
+    }
+    async fn connect_as(&self, url: &str, options: Options) -> Coordinator {
+        Coordinator::connect(url, options, holds::client(), zone::trusted())
+            .await
+            .unwrap()
     }
     async fn options(&self, options: Options) -> Coordinator {
         Coordinator::connect(&self.runtime_url, options, holds::client(), zone::trusted())
@@ -142,6 +153,27 @@ impl Fixture {
         }
         stored
     }
+}
+/// Grant `role` the database-local authority a coordinator runtime holds in
+/// this clone. Shared by the fixture's login and any case's dedicated one.
+async fn grant_runtime(admin: &Client, role: &str) {
+    admin
+        .batch_execute(&format!(
+            "GRANT USAGE ON SCHEMA workflow_manager,zeroship TO \"{role}\";
+             GRANT SELECT(id,execution_zone_id,deleted_at) ON zeroship.apps TO \"{role}\";
+             GRANT SELECT ON workflow_manager.schema_version TO \"{role}\";
+             GRANT SELECT,INSERT,UPDATE,DELETE ON workflow_manager.workers,
+               workflow_manager.queue_scopes,workflow_manager.deployment_holds,workflow_manager.assignments,
+               workflow_manager.placement_receipts,workflow_manager.management,workflow_manager.management_scopes,workflow_manager.jobs,
+               workflow_manager.schedule_deployments,workflow_manager.schedule_activations,
+               workflow_manager.schedule_disables,workflow_manager.schedule_scopes,
+               workflow_manager.schedules,workflow_manager.schedule_occurrences,
+               workflow_manager.recovery_scopes,workflow_manager.recovery_duties,
+               workflow_manager.capacity_demands,
+               workflow_manager.capacity_targets TO \"{role}\";"
+        ))
+        .await
+        .unwrap();
 }
 fn assert_ids_retained(before: &StoredIds, after: &StoredIds) {
     assert!(!before.is_empty());
@@ -683,8 +715,13 @@ async fn lock_waits_cannot_extend_authority_and_timeout_sessions_are_reusable() 
         Err(Error::Timeout)
     );
     lock.rollback().await.unwrap();
+    // The pool session survives the cancelled command: `verify` runs several
+    // queries on the same one-connection pool that just timed out.
     bounded.verify().await.unwrap();
-    bounded
+    // The assignment the wait contended for is live, read through a
+    // coordinator whose budget is not the 80ms that produced the timeout, so
+    // the outcome does not turn on a second query fitting that budget.
+    normal
         .manager
         .renew(&worker, &assigned(&assignment))
         .await
@@ -713,26 +750,31 @@ async fn lock_waits_cannot_extend_authority_and_timeout_sessions_are_reusable() 
 #[compio::test]
 async fn metadata_schema_has_no_customer_authority_and_ids_are_bytewise() {
     let fixture = Fixture::new().await;
-    let service = fixture.service().await;
-    let runtime = connect(&fixture.runtime_url).await;
+    // The reader AND the login that receives it are cluster-global, so this
+    // case connects through a login of its own. A membership granted to the
+    // shared `coordinator_test` would reach every sibling case on the server,
+    // whose `Coordinator::connect` calls `verify`.
+    let runtime_role = fixture.dedicated_role().await;
+    let runtime_url = fixture.role_url(&runtime_role);
+    let service = fixture.connect_as(&runtime_url, Options::default()).await;
+    let runtime = connect(&runtime_url).await;
+    let reader = typed_id::generate("wcr");
     fixture
         .admin
-        .batch_execute(
-            "DO $$ BEGIN
-                 IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='customer_reader') THEN
-                     CREATE ROLE customer_reader;
-                 END IF;
-             END $$;
-         GRANT USAGE ON SCHEMA customer TO customer_reader;
-         GRANT SELECT ON customer.__zeroship_workflow_history TO customer_reader;
-         GRANT customer_reader TO coordinator_test WITH INHERIT FALSE;",
-        )
+        .batch_execute(&format!(
+            "CREATE ROLE \"{reader}\";
+         GRANT USAGE ON SCHEMA customer TO \"{reader}\";
+         GRANT SELECT ON customer.__zeroship_workflow_history TO \"{reader}\";
+         GRANT \"{reader}\" TO \"{runtime_role}\" WITH INHERIT FALSE;"
+        ))
         .await
         .unwrap();
     let privileges = runtime
         .query_one(
-            "SELECT pg_has_role(current_user,'customer_reader','USAGE'),
-                pg_has_role(current_user,'customer_reader','SET')",
+            &format!(
+                "SELECT pg_has_role(current_user,'{reader}','USAGE'),
+                pg_has_role(current_user,'{reader}','SET')"
+            ),
             &[],
         )
         .await
@@ -742,7 +784,10 @@ async fn metadata_schema_has_no_customer_authority_and_ids_are_bytewise() {
     assert_eq!(service.verify().await, Err(HostError::Unavailable));
     fixture
         .admin
-        .batch_execute("REVOKE customer_reader FROM coordinator_test")
+        .batch_execute(&format!(
+            "REVOKE \"{reader}\" FROM \"{runtime_role}\"; \
+             DROP OWNED BY \"{reader}\"; DROP ROLE \"{reader}\""
+        ))
         .await
         .unwrap();
     service.verify().await.unwrap();
@@ -846,6 +891,14 @@ async fn metadata_schema_has_no_customer_authority_and_ids_are_bytewise() {
         .await,
         Err(HostError::Unavailable)
     ));
+    // Retire the login this case minted; it owns nothing outside this clone.
+    fixture
+        .admin
+        .batch_execute(&format!(
+            "DROP OWNED BY \"{runtime_role}\"; DROP ROLE \"{runtime_role}\""
+        ))
+        .await
+        .unwrap();
 }
 
 #[compio::test]
