@@ -136,7 +136,7 @@ schedule({
 });
 
 test("compiled schedule policies match the native engine wire contract", async () => {
-  const path = new URL("../../../crates/zeroship-workflow/tests/fixtures/bundle-schedules.json", import.meta.url);
+  const path = new URL("../../../crates/zeroship-workflow/tests/integration/fixtures/bundle-schedules.json", import.meta.url);
   const fixtures = JSON.parse(await fs.readFile(path, "utf8"));
   await withRoot(async root => {
     const extras = await computeManifestExtras({

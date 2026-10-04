@@ -901,8 +901,10 @@ describe("JSONC edge cases the two readers must agree on", () => {
       "..",
       "..",
       "..",
+      "crates",
+      "zeroship-cli",
       "tests",
-      "fixtures",
+      "data",
       "project-config",
       "zeroship.jsonc",
     );
