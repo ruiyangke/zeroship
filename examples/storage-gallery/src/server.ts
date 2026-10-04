@@ -20,6 +20,7 @@
 import { bucket, type Result } from "@zeroship/storage";
 import { mutation, query } from "@zeroship/rpc/server";
 import { Checksum } from "./checksum";
+import { StreamPacer } from "./pacer";
 
 const BUCKET = "gallery";
 
@@ -190,8 +191,19 @@ export const remove = mutation(
 // `putStream`, and report only its size + checksum. The download counterpart
 // streams it back with `getStream`, drains it incrementally, and reports size
 // + checksum. The tests compare streaming checksums and physical object length.
-// Pattern copies and incremental checksums keep memory bounded. Cooperative
-// pauses respect the runtime's sustained CPU budget while scanning large objects.
+//
+// Native `set` block copies fill each chunk and an incremental checksum
+// consumes it once, so worker memory stays flat regardless of object size.
+// Checksumming a large object is a long CPU-bound loop, and after the first
+// read each per-chunk step runs in a promise continuation, which is pump work. The
+// pump's share of wall time is policed on every plan, including `unlimited`,
+// by `record_pump_cpu` in crates/zeroship-runtime/src/core/runtime.rs, which
+// is separate from the request CPU budget (that one is charged in CPU time and
+// is not reset by awaiting storage). A loop that never yields can exceed the
+// pump guard and have the isolate terminated, failing its pending requests.
+// `StreamPacer` wraps each synchronous section of the loop and pauses in
+// proportion to the work that section did, keeping the share bounded; the S3
+// waits between sections are never measured.
 // ---------------------------------------------------------------------------
 
 // One period of the deterministic pattern (a prime length so chunk/part
@@ -213,20 +225,6 @@ function fillFromPattern(out: Uint8Array, pattern: Uint8Array, start: number): v
     const slice = pattern.subarray(phase, Math.min(PATTERN_PERIOD, phase + (out.length - written)));
     out.set(slice, written);
     written += slice.length;
-  }
-}
-
-class StreamPacer {
-  private started = performance.now();
-  private processed = 0;
-
-  async checkpoint(bytes: number): Promise<void> {
-    this.processed += bytes;
-    if (this.processed < 1024 * 1024) return;
-    const elapsed = performance.now() - this.started;
-    await new Promise<void>((resolve) => setTimeout(resolve, Math.max(1, elapsed)));
-    this.started = performance.now();
-    this.processed = 0;
   }
 }
 
@@ -272,11 +270,12 @@ export const putLarge = mutation(
         }
         const len = Math.min(chunkBytes, sizeBytes - offset);
         const chunk = new Uint8Array(len);
-        fillFromPattern(chunk, pattern, offset);
-        checksum.update(chunk);
+        await pacer.work(() => {
+          fillFromPattern(chunk, pattern, offset);
+          checksum.update(chunk);
+        });
         offset += len;
         controller.enqueue(chunk);
-        await pacer.checkpoint(chunk.length);
       },
     });
 
@@ -311,9 +310,8 @@ export const getLargeHash = query(
       const { done, value } = await reader.read();
       if (done) break;
       if (value && value.length) {
-        checksum.update(value);
+        await pacer.work(() => checksum.update(value));
         total += value.length;
-        await pacer.checkpoint(value.length);
       }
     }
     return { key, found: true, size: total, checksum: checksum.hex() };
