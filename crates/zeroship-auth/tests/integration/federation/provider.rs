@@ -97,6 +97,28 @@ pub(super) enum TokenIssue {
     UntrustedSignature,
 }
 
+/// What the GitHub token endpoint returns for the code exchange.
+#[derive(Clone, Debug)]
+pub(super) enum GitHubTokenReply {
+    /// A JSON object carrying the fields the exchange reads. The object omits
+    /// `token_type` when `None`.
+    Fields {
+        scope: String,
+        token_type: Option<String>,
+    },
+    /// A body returned verbatim, for cases that exercise decode failure.
+    Body(String),
+}
+
+impl Default for GitHubTokenReply {
+    fn default() -> Self {
+        Self::Fields {
+            scope: "read:user user:email".into(),
+            token_type: Some("bearer".into()),
+        }
+    }
+}
+
 #[derive(Clone, Deserialize)]
 struct Authorization {
     client_id: String,
@@ -115,6 +137,7 @@ struct ProviderState {
     tokens: Mutex<HashSet<String>>,
     requests: Mutex<Vec<Request>>,
     token_issue: Mutex<TokenIssue>,
+    github_token: Mutex<GitHubTokenReply>,
     signing_key: EncodingKey,
     untrusted_key: EncodingKey,
     public_key: String,
@@ -141,6 +164,7 @@ impl ProviderServer {
             tokens: Mutex::default(),
             requests: Mutex::default(),
             token_issue: Mutex::new(TokenIssue::Valid),
+            github_token: Mutex::new(GitHubTokenReply::default()),
             signing_key: EncodingKey::from_ed_der(key.to_pkcs8_der().unwrap().as_bytes()),
             untrusted_key: EncodingKey::from_ed_der(
                 signing_key("untrusted-fixture-key")
@@ -189,6 +213,9 @@ impl ProviderServer {
     }
     pub fn set_token_issue(&self, issue: TokenIssue) {
         *self.state.token_issue.lock().unwrap() = issue;
+    }
+    pub fn set_github_token(&self, reply: GitHubTokenReply) {
+        *self.state.github_token.lock().unwrap() = reply;
     }
     pub fn requests(&self) -> Vec<Request> {
         self.state.requests.lock().unwrap().clone()
@@ -267,7 +294,17 @@ async fn token(form: Form<TokenForm>, state: State<Arc<ProviderState>>) -> HttpR
     let access_token = uuid::Uuid::new_v4().to_string();
     state.tokens.lock().unwrap().insert(access_token.clone());
     if state.kind == Provider::GitHub {
-        return HttpResponse::Ok().json(&json!({"access_token":access_token,"scope":"read:user user:email","token_type":"bearer"}));
+        let reply = state.github_token.lock().unwrap().clone();
+        return match reply {
+            GitHubTokenReply::Fields { scope, token_type } => {
+                let mut body = json!({"access_token":access_token,"scope":scope});
+                if let Some(token_type) = token_type {
+                    body["token_type"] = serde_json::Value::String(token_type);
+                }
+                HttpResponse::Ok().json(&body)
+            }
+            GitHubTokenReply::Body(body) => HttpResponse::Ok().body(body),
+        };
     }
     let profile = state.user.lock().unwrap().clone();
     let issue = *state.token_issue.lock().unwrap();

@@ -161,14 +161,31 @@ pub async fn complete_callback(
         .map_err(|e| AuthError::Internal(format!("github token read: {e}")))?;
     if !(200..300).contains(&status) {
         return Err(AuthError::Internal(format!(
-            "github token → {status}: {body}"
+            "github token -> {status}: {body}"
         )));
     }
 
     let tr: TokenResponse = serde_json::from_str(&body)
-        .map_err(|e| AuthError::Internal(format!("github token parse: {e}\nbody: {body}")))?;
+        .map_err(|e| AuthError::Internal(format!("github token parse: {e}")))?;
 
-    if !tr.scope.contains("user:email") {
+    // RFC 6749 section 5.1 makes `token_type` required and section 7.1
+    // forbids a client from using a token whose type it does not understand;
+    // this code uses the token as a Bearer credential.
+    if !tr.token_type.eq_ignore_ascii_case("bearer") {
+        return Err(AuthError::Internal(format!(
+            "github token_type unsupported: {}",
+            tr.token_type
+        )));
+    }
+
+    // GitHub returns a comma-separated scope list; the RFC 6749 spelling is
+    // space-separated. Compare whole entries so `user:emails` is not read as
+    // `user:email`.
+    let granted_user_email = tr
+        .scope
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .any(|scope| scope == "user:email");
+    if !granted_user_email {
         return Err(AuthError::Internal(format!(
             "github scope missing user:email (got: {})",
             tr.scope
@@ -212,19 +229,15 @@ pub async fn complete_callback(
     })
 }
 
-/// Subset of GitHub's `/login/oauth/access_token` response. We only
-/// consume `access_token` (for the subsequent `/user` + `/user/emails`
-/// requests) and `scope` (to enforce the `user:email` requirement).
+/// Subset of GitHub's `/login/oauth/access_token` response. We consume
+/// `access_token` (for the subsequent `/user` + `/user/emails` requests),
+/// `scope` (to enforce the `user:email` requirement) and `token_type` (to
+/// refuse a credential this client does not know how to present).
 #[derive(Deserialize)]
 struct TokenResponse {
     access_token: String,
     #[serde(default)]
     scope: String,
-    #[serde(default)]
-    #[expect(
-        dead_code,
-        reason = "the access-token response carries token_type for wire completeness; only access_token and scope are consumed"
-    )]
     token_type: String,
 }
 
@@ -280,7 +293,7 @@ async fn get_with_token<T: serde::de::DeserializeOwned>(
         .map_err(|e| AuthError::Internal(format!("github GET read {url}: {e}")))?;
     if !(200..300).contains(&status) {
         return Err(AuthError::Internal(format!(
-            "github GET {url} → {status}: {body}"
+            "github GET {url} -> {status}: {body}"
         )));
     }
     serde_json::from_str(&body)

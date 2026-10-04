@@ -168,6 +168,25 @@ impl Fixture {
         assert_eq!(observed, reasons);
     }
 
+    /// The most recent callback refusal's recorded error text for this case.
+    pub async fn last_callback_error(&self) -> String {
+        let row = self
+            .server
+            .pg
+            .query_one(
+                "SELECT detail->>'error' FROM zeroship.audit_events \
+                 WHERE event_type = 'oauth_callback_failure' AND auth_method = $1 \
+                   AND ip = $2 ORDER BY id DESC LIMIT 1",
+                &[
+                    &self.provider.kind().name(),
+                    &self.client_ip().parse::<std::net::IpAddr>().unwrap(),
+                ],
+            )
+            .await
+            .expect("a callback refusal records an error");
+        row.get(0)
+    }
+
     pub fn assert_stash_cleared(&self, response: &cyper::Response) {
         assert_eq!(
             support::read_set_cookie(response, self.provider.kind().stash_cookie()).as_deref(),
