@@ -282,8 +282,8 @@ pub fn ensure_mysql() -> ServerInfo {
 
 /// The standalone Redis server of the shared Redis fixture, held for this case.
 pub fn ensure_redis() -> ServerInfo {
-    let fixtures = zeroship_testkit::redis::fixtures();
-    let url = url::Url::parse(&fixtures.redis_url()).expect("the Redis fixture URL parses");
+    let redis = zeroship_testkit::redis::redis();
+    let url = url::Url::parse(&redis.url()).expect("the Redis fixture URL parses");
     let port = url.port().expect("the Redis fixture URL names its port");
     ServerInfo {
         host: LOCALHOST,
@@ -291,7 +291,7 @@ pub fn ensure_redis() -> ServerInfo {
         user: String::new(),
         password: String::new(),
         database: String::new(),
-        _held: Box::new(fixtures),
+        _held: Box::new(redis),
     }
 }
 

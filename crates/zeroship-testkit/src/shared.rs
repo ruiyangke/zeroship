@@ -940,7 +940,16 @@ fn wait_ready(container_id: &str, spec: &Spec) -> Result<(), String> {
 }
 
 /// The host port the daemon mapped `container_id`'s `port` to.
-fn mapped_port(container_id: &str, port: u16) -> Result<u16, String> {
+///
+/// Public so a multi-port server - one container running several node
+/// processes, each on its own port, as the shared Dragonfly cluster does - can
+/// resolve the mapped ports a [`Spec`] did not name as primary. A port mapping
+/// is fixed at container creation, so any process holding the lease may call
+/// this at any time, not only from inside the boot closure.
+///
+/// # Errors
+/// When the daemon cannot be asked, or it names no mapped host port for `port`.
+pub fn mapped_port(container_id: &str, port: u16) -> Result<u16, String> {
     let docker = docker();
     let inspect = block_on(docker.inspect_container(container_id, None))
         .map_err(|error| format!("inspect {container_id} for its mapped port failed: {error}"))?;

@@ -1313,9 +1313,8 @@ dependencies = [
  "rustls-native-certs",
  "rustls-pemfile",
  "serde",
- "serde_json",
- "testcontainers",
  "url",
+ "zeroship-testkit",
 ]
 
 [[package]]

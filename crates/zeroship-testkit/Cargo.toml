@@ -19,7 +19,6 @@ reason = "Dev-only test fixtures; reached only through dev-dependencies."
 [dependencies]
 compio = { workspace = true }
 compio-postgres = { workspace = true }
-compio-redis = { workspace = true }
 futures = { workspace = true }
 libc = { workspace = true }
 serde_json = { workspace = true }
@@ -30,6 +29,17 @@ tokio = { version = "1", features = ["rt-multi-thread", "time"] }
 toml = { workspace = true }
 url = { workspace = true }
 zeroship-id = { workspace = true }
+
+# compio-redis is a dev-only edge: the `redis` module hands out only URLs and
+# ports (see its module doc), and this crate's own contract tests are the only
+# thing here that opens an actual connection. Keeping it off `[dependencies]`
+# is what lets `compio-redis` dev-depend on this testkit in turn, which
+# `cargo xtask test repository`'s
+# `no_dev_only_package_depends_on_a_crate_whose_tests_use_it` enforces: a
+# normal edge back from this testkit to a consumer of it would mean cargo
+# builds that consumer's tests against two copies of compio-redis.
+[dev-dependencies]
+compio-redis = { workspace = true }
 
 [lints]
 workspace = true

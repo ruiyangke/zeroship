@@ -681,15 +681,18 @@ fn module(source: &str) -> Vec<ModuleEntry> {
 /// async (every assertion awaits a KV op), so `call_fetch_handler` returns
 /// `Pending` and the pump delivers the final `SettledFetch` via the
 /// receiver — same idiom as `call_fetch_handler.rs::async_response`.
-fn run_e2e(store: KvStore) -> (u16, String) {
-    run_app(store, KV_E2E_APP)
+fn run_e2e(store: KvStore, app_id: &str) -> (u16, String) {
+    run_app(store, KV_E2E_APP, app_id)
 }
 
 /// Generalised harness: build a Runtime around `app` JS + `backend`, pump it,
 /// call the fetch handler, and return `(status, body)`. `run_e2e` is the
 /// happy-path specialisation; the validation / edge / scenario tests pass
-/// their own app source.
-fn run_app(store: KvStore, app: &'static str) -> (u16, String) {
+/// their own app source. `app_id` scopes the KV namespace the run uses; a
+/// case on the shared Redis/Dragonfly fixture mints its own rather than
+/// reusing a literal, because the server runs every test process of the
+/// worktree at once.
+fn run_app(store: KvStore, app: &'static str, app_id: &str) -> (u16, String) {
     compio::runtime::Runtime::new()
         .unwrap()
         .block_on(async move {
@@ -698,7 +701,7 @@ fn run_app(store: KvStore, app: &'static str) -> (u16, String) {
             // APP_ID flows through env_vars → build_instance reads it to scope
             // the per-app key namespace (see crates/zeroship-runtime/src/core/plugin.rs).
             let mut env_vars = HashMap::new();
-            env_vars.insert("APP_ID".to_string(), "e2e_app".to_string());
+            env_vars.insert("APP_ID".to_string(), app_id.to_string());
 
             let plugin: Arc<dyn NativePlugin> = Arc::new(KvBinding::new(store, None));
 
@@ -765,7 +768,7 @@ fn e2e_redb() {
     let dir = tempfile::tempdir().expect("create tempdir");
     let path = dir.path().join("kv.redb");
     let store = KvStore::open(&KvConfig::Redb { path }).expect("open redb store");
-    let (status, body) = run_e2e(store);
+    let (status, body) = run_e2e(store, "e2e_app");
     assert_ok(status, &body);
 }
 
@@ -803,6 +806,7 @@ export default {
     }
 };
 "#,
+        "e2e_app",
     );
     assert_ok(status, &body);
     runtime.block_on(async {
@@ -824,7 +828,7 @@ export default {
 #[test]
 fn e2e_validation_errors() {
     let (_dir, backend) = redb_backend();
-    let (status, body) = run_app(backend, KV_VALIDATION_APP);
+    let (status, body) = run_app(backend, KV_VALIDATION_APP, "e2e_app");
     assert_ok(status, &body);
 }
 
@@ -835,7 +839,7 @@ fn e2e_validation_errors() {
 #[test]
 fn e2e_backend_edges() {
     let (_dir, backend) = redb_backend();
-    let (status, body) = run_app(backend, KV_EDGE_APP);
+    let (status, body) = run_app(backend, KV_EDGE_APP, "e2e_app");
     assert_ok(status, &body);
 }
 
@@ -844,11 +848,14 @@ fn e2e_backend_edges() {
 #[test]
 fn e2e_scenarios() {
     let (_dir, backend) = redb_backend();
-    let (status, body) = run_app(backend, KV_SCENARIO_APP);
+    let (status, body) = run_app(backend, KV_SCENARIO_APP, "e2e_app");
     assert_ok(status, &body);
 }
 
-// Run the same JavaScript contract against Docker-owned network backends.
+// Run the same JavaScript contract against the shared Redis/Dragonfly
+// servers. Each run mints its own app id, because that fixture runs every
+// test process of the worktree at once and a literal could collide with a
+// concurrent case's.
 #[test]
 fn e2e_redis() {
     let fixtures = crate::support::fixtures();
@@ -856,7 +863,7 @@ fn e2e_redis() {
         redis: fixtures.redis_config(),
     })
     .unwrap();
-    let (status, body) = run_e2e(store);
+    let (status, body) = run_e2e(store, &crate::support::case_prefix());
     assert_ok(status, &body);
 }
 
@@ -867,21 +874,24 @@ fn e2e_dragonfly_cluster() {
         redis: fixtures.cluster_config(),
     })
     .unwrap();
-    let (status, body) = run_e2e(store);
+    let (status, body) = run_e2e(store, &crate::support::case_prefix());
     assert_ok(status, &body);
 }
 
 /// A stopped server must reject KV operations with typed errors instead of
 /// hanging the isolate. The fetch harness bounds completion with a timeout.
+/// Starts a private Redis container of its own (not the shared fixture)
+/// because its subject is a server this case stops.
 #[test]
 fn e2e_backend_unavailable() {
     let server = crate::support::containers::start_redis();
-    let redis = crate::support::containers::standalone(&server);
+    let endpoint = crate::support::containers::endpoint(&server);
     server
         .stop()
         .expect("stop Redis before calling the binding");
+    let redis = zeroship_kv::RedisConfig::new(zeroship_kv::Topology::Standalone { endpoint });
     let store = KvStore::open(&KvConfig::Redis { redis }).unwrap();
-    let (status, body) = run_app(store, KV_BACKEND_DOWN_APP);
+    let (status, body) = run_app(store, KV_BACKEND_DOWN_APP, "e2e_app");
     assert_ok(status, &body);
 }
 
@@ -1057,8 +1067,9 @@ export default {
 };
 "#;
     let server = crate::support::containers::start_redis();
-    let redis = crate::support::containers::standalone(&server);
+    let endpoint = crate::support::containers::endpoint(&server);
     server.stop().unwrap();
+    let redis = zeroship_kv::RedisConfig::new(zeroship_kv::Topology::Standalone { endpoint });
     let backend = KvStore::open(&KvConfig::Redis { redis }).unwrap();
     let id = zeroship_core::AppId::mint();
     let app_id = id.as_str();

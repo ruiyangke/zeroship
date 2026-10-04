@@ -240,10 +240,8 @@ async fn assert_changed_only_locally(kv: &Kv, own: &str, other: &str) {
     assert_eq!(kv.get(&format!("private:{other}")).await.unwrap(), None);
 }
 
-async fn exercise_isolation(store: KvStore) {
+async fn exercise_isolation(store: KvStore, a_id: &str, b_id: &str) {
     init_v8();
-    let a_id = "isolation_app_a";
-    let b_id = "isolation_app_b";
     let a = store.namespace(Namespace::app(a_id).unwrap());
     let b = store.namespace(Namespace::app(b_id).unwrap());
     seed(&a, a_id).await;
@@ -275,14 +273,19 @@ async fn apps_cannot_operate_on_each_other_in_redb() {
         path: dir.path().join("kv.redb"),
     })
     .unwrap();
-    exercise_isolation(store).await;
+    exercise_isolation(store, "isolation_app_a", "isolation_app_b").await;
 }
 
+/// The shared Redis and Dragonfly servers run every test process of the
+/// worktree at once, so each pass mints its own pair of app ids rather than a
+/// literal: a literal could collide with a concurrent case's.
 #[compio::test]
 async fn apps_cannot_operate_on_each_other_in_redis_and_dragonfly() {
     let fixtures = crate::support::fixtures();
     for redis in [fixtures.redis_config(), fixtures.cluster_config()] {
         let store = KvStore::open(&KvConfig::Redis { redis }).unwrap();
-        exercise_isolation(store).await;
+        let a_id = crate::support::case_prefix();
+        let b_id = crate::support::case_prefix();
+        exercise_isolation(store, &a_id, &b_id).await;
     }
 }

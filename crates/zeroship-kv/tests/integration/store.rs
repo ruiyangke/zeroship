@@ -86,16 +86,16 @@ fn configured_redb_requires_its_compiled_implementation() {
     clippy::future_not_send,
     reason = "Exercises thread-local compio operations."
 )]
-async fn exercise_store(store: &KvStore) {
+async fn exercise_store(store: &KvStore, prefix: &str) {
     use zeroship_kv::{limits, TtlState};
 
-    let app = store.namespace(Namespace::app("app_example").unwrap());
-    let other_app = store.namespace(Namespace::app("app_other").unwrap());
-    let platform = store.namespace(Namespace::platform("control").unwrap());
-    let other_service = store.namespace(Namespace::platform("auth").unwrap());
-    let same_platform = store
-        .clone()
-        .namespace(Namespace::platform("control").unwrap());
+    let app_name = format!("{prefix}_app");
+    let platform_name = format!("{prefix}_control");
+    let app = store.namespace(Namespace::app(&app_name).unwrap());
+    let other_app = store.namespace(Namespace::app(&format!("{prefix}_other")).unwrap());
+    let platform = store.namespace(Namespace::platform(&platform_name).unwrap());
+    let other_service = store.namespace(Namespace::platform(&format!("{prefix}_auth")).unwrap());
+    let same_platform = store.clone().namespace(Namespace::platform(&platform_name).unwrap());
 
     app.set("shared", "app value", None).await.unwrap();
     platform
@@ -133,7 +133,7 @@ async fn exercise_store(store: &KvStore) {
         Err(KvError::InvalidValue { .. })
     ));
     assert!(matches!(
-        platform.get("{app_example}:shared").await,
+        platform.get(&format!("{{{app_name}}}:shared")).await,
         Err(KvError::InvalidKey { .. })
     ));
     assert!(platform.delete("").await.is_err());
@@ -194,8 +194,11 @@ async fn configured_redb_store_shares_handles_and_preserves_data_after_reopen() 
         path: dir.path().join("nested/kv.redb"),
     };
     let store = KvStore::open(&config).unwrap();
-    exercise_store(&store).await;
-    let kv = store.namespace(Namespace::platform("control").unwrap());
+    // A private, single-file store: no other case can reach it, so a literal
+    // prefix is fine, and this function's own follow-up checks below must
+    // name the same "control" platform `exercise_store` wrote into.
+    exercise_store(&store, "store-reopen").await;
+    let kv = store.namespace(Namespace::platform("store-reopen_control").unwrap());
     kv.set("persistent", "saved", None).await.unwrap();
     drop(store);
     assert_eq!(
@@ -208,7 +211,7 @@ async fn configured_redb_store_shares_handles_and_preserves_data_after_reopen() 
         .contains(zeroship_kv::STATE_DIR_LOCK_MARKER));
     drop(kv);
     let reopened = KvStore::open(&config).unwrap();
-    let kv = reopened.namespace(Namespace::platform("control").unwrap());
+    let kv = reopened.namespace(Namespace::platform("store-reopen_control").unwrap());
     assert_eq!(
         kv.get("persistent").await.unwrap().as_deref(),
         Some("saved")
@@ -230,6 +233,10 @@ fn failed_embedded_open_does_not_fall_back_to_another_store() {
     ));
 }
 
+/// The shared Redis and Dragonfly servers run every test process of the
+/// worktree at once, so each pass mints its own namespace prefix rather than
+/// a literal: a literal could collide with a concurrent case's, and
+/// `exercise_store` asserts the exact key set under it.
 #[cfg(feature = "redis")]
 #[compio::test]
 async fn runtime_redis_configuration_runs_the_same_scoped_contract() {
@@ -237,6 +244,6 @@ async fn runtime_redis_configuration_runs_the_same_scoped_contract() {
     for redis in [fixtures.redis_config(), fixtures.cluster_config()] {
         let config = KvConfig::Redis { redis };
         let store = KvStore::open(&config).unwrap();
-        exercise_store(&store).await;
+        exercise_store(&store, &crate::support::case_prefix()).await;
     }
 }

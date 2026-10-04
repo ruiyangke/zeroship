@@ -1,3 +1,10 @@
+//! Every suite below starts and configures its own Redis/Dragonfly
+//! containers rather than joining `zeroship_testkit::redis::redis()` or
+//! `cluster()`: each one mutates the server's own configuration - cluster
+//! slot ownership, replication topology, ACL users, TLS certificates - which
+//! is exactly the state every other case on the shared servers must not see
+//! change.
+
 #![cfg(feature = "redis")]
 #![allow(
     clippy::future_not_send,

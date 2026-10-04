@@ -38,6 +38,9 @@ const CHILD_BLOCK: &str = "integration::testkit_shared_server::child_join_block"
 const CHILD_BARE: &str = "integration::testkit_shared_server::child_bare_server_report";
 const CHILD_REDPANDA: &str = "integration::testkit_shared_server::child_join_redpanda_report";
 const CHILD_MYSQL: &str = "integration::testkit_shared_server::child_join_mysql_report";
+const CHILD_REDIS: &str = "integration::testkit_shared_server::child_join_redis_report";
+const CHILD_DRAGONFLY_CLUSTER: &str =
+    "integration::testkit_shared_server::child_join_dragonfly_cluster_report";
 const CHILD_HOLD: &str = "integration::testkit_shared_server::child_join_hold";
 
 /// A throwaway lease directory under the worktree's `target`, canonical so its
@@ -320,6 +323,33 @@ fn child_join_mysql_report() {
     let dir = read_scope();
     let spec = zeroship_testkit::mysql::spec().expect("the MySQL server recipe");
     let lease = shared::join(&Scope::at(&dir, GRACE), &spec, |_| Ok(())).expect("join the server");
+    println!("CONTAINER={}", lease.container_id);
+    println!("NONCE={}", lease.nonce);
+    println!("BOOTED={}", lease.booted);
+}
+
+/// Child side of the Redis contract: join a throwaway standalone Redis server
+/// and report what this process saw.
+#[test]
+#[ignore = "spawned by a contract test as a child process, with its scope on stdin"]
+fn child_join_redis_report() {
+    let dir = read_scope();
+    let spec = zeroship_testkit::redis::standalone_spec().expect("the Redis server recipe");
+    let lease = shared::join(&Scope::at(&dir, GRACE), &spec, |_| Ok(())).expect("join the server");
+    println!("CONTAINER={}", lease.container_id);
+    println!("NONCE={}", lease.nonce);
+    println!("BOOTED={}", lease.booted);
+}
+
+/// Child side of the Dragonfly cluster contract: join a throwaway cluster
+/// container and report what this process saw. The boot closure is a no-op:
+/// this contract checks container-identity sharing, not slot configuration.
+#[test]
+#[ignore = "spawned by a contract test as a child process, with its scope on stdin"]
+fn child_join_dragonfly_cluster_report() {
+    let dir = read_scope();
+    let spec = zeroship_testkit::redis::cluster_spec().expect("the Dragonfly cluster recipe");
+    let lease = shared::join(&Scope::at(&dir, GRACE), &spec, |_| Ok(())).expect("join the cluster");
     println!("CONTAINER={}", lease.container_id);
     println!("NONCE={}", lease.nonce);
     println!("BOOTED={}", lease.booted);
@@ -788,6 +818,181 @@ fn two_processes_share_one_mysql_server() {
     drop(held);
     wait_removed(&id, REMOVAL_BOUND);
     cleanup(&dir);
+}
+
+/// Two processes join one standalone Redis server, and the watchdog removes it
+/// once the last lease is released.
+///
+/// The parent holds its own lease across both sequential children; without it
+/// the watchdog would remove the server after the grace between them and the
+/// second child would boot a new one.
+#[test]
+fn two_processes_share_one_redis_server() {
+    let dir = scratch("redis-shared");
+    let spec = zeroship_testkit::redis::standalone_spec().expect("the Redis server recipe");
+    let held = shared::join(&Scope::at(&dir, GRACE), &spec, |_| Ok(())).expect("boot the server");
+    let id = held.container_id.clone();
+
+    let (status, lines) = run_child(CHILD_REDIS, &dir);
+    assert!(
+        status.success(),
+        "the first Redis child failed:\n{}",
+        lines.join("\n")
+    );
+    let first = field(&lines, "CONTAINER=");
+    assert_eq!(
+        field(&lines, "BOOTED="),
+        "false",
+        "a child must join the server the parent booted"
+    );
+
+    let (status, lines) = run_child(CHILD_REDIS, &dir);
+    assert!(
+        status.success(),
+        "the second Redis child failed:\n{}",
+        lines.join("\n")
+    );
+    let second = field(&lines, "CONTAINER=");
+
+    assert_eq!(first, id, "a child must join the server the parent booted");
+    assert_eq!(second, id, "both children must join the one server");
+
+    drop(held);
+    wait_removed(&id, REMOVAL_BOUND);
+    cleanup(&dir);
+}
+
+/// Two processes join one Dragonfly cluster container, and the watchdog
+/// removes it once the last lease is released.
+///
+/// The parent holds its own lease across both sequential children; without it
+/// the watchdog would remove the cluster after the grace between them and the
+/// second child would boot a new one. This is the regression the run-shared
+/// cluster fixture exists to prevent: before it, every test process started
+/// its own three-node cluster.
+#[test]
+fn two_processes_share_one_dragonfly_cluster_server() {
+    let dir = scratch("dragonfly-cluster-shared");
+    let spec = zeroship_testkit::redis::cluster_spec().expect("the Dragonfly cluster recipe");
+    let held = shared::join(&Scope::at(&dir, GRACE), &spec, |_| Ok(())).expect("boot the cluster");
+    let id = held.container_id.clone();
+
+    let (status, lines) = run_child(CHILD_DRAGONFLY_CLUSTER, &dir);
+    assert!(
+        status.success(),
+        "the first cluster child failed:\n{}",
+        lines.join("\n")
+    );
+    let first = field(&lines, "CONTAINER=");
+    assert_eq!(
+        field(&lines, "BOOTED="),
+        "false",
+        "a child must join the cluster container the parent booted"
+    );
+
+    let (status, lines) = run_child(CHILD_DRAGONFLY_CLUSTER, &dir);
+    assert!(
+        status.success(),
+        "the second cluster child failed:\n{}",
+        lines.join("\n")
+    );
+    let second = field(&lines, "CONTAINER=");
+
+    assert_eq!(first, id, "a child must join the cluster container the parent booted");
+    assert_eq!(second, id, "both children must join the one cluster container");
+
+    drop(held);
+    wait_removed(&id, REMOVAL_BOUND);
+    cleanup(&dir);
+}
+
+/// A node inside the shared Dragonfly cluster dying must not leave a
+/// container the watchdog still considers healthy but that answers short a
+/// slot owner for the rest of the run: the wrapper running all three nodes
+/// must exit the moment any one of them does, so the watchdog's own liveness
+/// check on its tracked child fails, `auto_remove` takes the container, and
+/// the next joiner boots a fresh, fully configured cluster - mirroring how
+/// `a_stopped_server_is_replaced` proves the single-process servers recover
+/// from the same shape of failure.
+#[test]
+fn a_cluster_with_a_dead_node_is_replaced() {
+    let dir = scratch("cluster-dead-node");
+    let spec = zeroship_testkit::redis::cluster_spec().expect("the Dragonfly cluster recipe");
+    let first = shared::join(&Scope::at(&dir, GRACE), &spec, |_| Ok(())).expect("boot the cluster");
+    let dead = first.container_id.clone();
+
+    // Shut down one node from the inside - the shape of a crash, not a
+    // graceful `docker stop` of the whole container: the other two nodes keep
+    // running underneath it. Node 1 listens on port 7001 (`CLUSTER_BASE_PORT
+    // + 1` in `src/redis.rs`); `SHUTDOWN` closes the connection without a
+    // reply, so the exec's own exit code is not what this test checks.
+    let _ = shared::exec_in_container(&dead, &["redis-cli", "-p", "7001", "SHUTDOWN", "NOSAVE"]);
+
+    // `first`'s lease is held throughout this wait, on purpose: the
+    // throwaway scope's ordinary idle-grace teardown (`GRACE`, above) would
+    // otherwise remove the container on its own a couple of seconds after a
+    // dropped lease, regardless of the dead node, and the removal below would
+    // prove nothing about the wrapper. Removal here can only come from the
+    // watchdog noticing its tracked child - the wrapper - has exited, which is
+    // the fix under test: a wrapper that outlives the dead node leaves this
+    // waiting out its full bound against a cluster that still looks ready
+    // with two of its three nodes alive.
+    wait_removed(&dead, REMOVAL_BOUND);
+    drop(first);
+
+    let second = shared::join(&Scope::at(&dir, GRACE), &spec, |_| Ok(())).expect("boot a fresh cluster");
+    assert!(
+        second.booted,
+        "a cluster whose node died must be replaced with a fresh boot, not joined"
+    );
+    assert_ne!(second.container_id, dead, "the cluster with the dead node must not be reused");
+
+    let live = second.container_id.clone();
+    drop(second);
+    wait_removed(&live, REMOVAL_BOUND);
+    cleanup(&dir);
+}
+
+/// The shared standalone Redis server and the Dragonfly cluster are each
+/// shared by every test process of a run, so two cases that overlap on either
+/// one must not see each other's keys. Each "case" here is a concurrent
+/// future minting its own prefix with `case_prefix()`, writing a label under
+/// it, and reading the label back after a window where a concurrent case's
+/// write could have landed on the same key - which is exactly what happens if
+/// the prefix is not unique.
+#[compio::test]
+async fn concurrent_cases_on_the_shared_redis_server_see_only_their_own_prefix() {
+    let url = zeroship_testkit::redis::redis().url();
+
+    async fn one_case(url: String, label: &'static str) -> bool {
+        let prefix = zeroship_testkit::redis::case_prefix();
+        let key = format!("{prefix}:marker");
+        let mut client = compio_redis::Client::connect(&url)
+            .await
+            .expect("connect to the shared Redis server");
+        client.set(&key, label.as_bytes(), None).await.expect("set this case's marker");
+        // Give a concurrent case's write a window to land on the same key if
+        // the two cases' prefixes were not actually distinct.
+        compio::time::sleep(Duration::from_millis(200)).await;
+        let seen = client
+            .get(&key)
+            .await
+            .expect("get this case's marker")
+            .expect("the key this case wrote is still there");
+        client.del(&key).await.ok();
+        String::from_utf8(seen).expect("a label is valid UTF-8") == label
+    }
+
+    let (a_ok, b_ok) =
+        futures::future::join(one_case(url.clone(), "case-a"), one_case(url, "case-b")).await;
+    assert!(
+        a_ok,
+        "a case must read back its own write under its own prefix, not a concurrent case's"
+    );
+    assert!(
+        b_ok,
+        "a case must read back its own write under its own prefix, not a concurrent case's"
+    );
 }
 
 #[test]
