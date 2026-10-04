@@ -92,7 +92,7 @@ impl CookieFixture {
 
 #[compio::test]
 async fn cookie_arm_rejects_revoked_family_statelessly() {
-    Database::migrated(async |database| {
+    Database::run(async |database| {
         let fixture = CookieFixture::new(database);
         assert!(matches!(fixture.resolve().await, CookieOutcome::Allowed(_)));
         fixture.revoke().await;
@@ -109,7 +109,7 @@ async fn cookie_arm_rejects_revoked_family_statelessly() {
 
 #[compio::test]
 async fn revocation_cache_honors_revocation_after_ttl_expiry() {
-    Database::migrated(async |database| {
+    Database::run(async |database| {
         let fixture = CookieFixture::new(database);
         assert!(matches!(fixture.resolve().await, CookieOutcome::Allowed(_)));
         fixture.revoke().await;
@@ -128,7 +128,8 @@ async fn revocation_cache_honors_revocation_after_ttl_expiry() {
 
 #[compio::test]
 async fn revocation_cache_negative_entry_serves_without_db_within_ttl() {
-    Database::migrated(async |database| {
+    // Renames a platform table, so the case owns the database it changes.
+    Database::run_fresh(async |database| {
         let fixture = CookieFixture::new(database);
         assert!(matches!(fixture.resolve().await, CookieOutcome::Allowed(_)));
         assert_eq!(
@@ -140,7 +141,7 @@ async fn revocation_cache_negative_entry_serves_without_db_within_ttl() {
             Some(None)
         );
         database
-            .admin
+            .admin()
             .batch_execute(
                 "ALTER TABLE zeroship.token_revocations RENAME TO unavailable_revocations",
             )
@@ -156,7 +157,7 @@ async fn revocation_cache_negative_entry_serves_without_db_within_ttl() {
             "an expired entry hid a database failure"
         );
         database
-            .admin
+            .admin()
             .batch_execute(
                 "ALTER TABLE zeroship.unavailable_revocations RENAME TO token_revocations",
             )
@@ -172,7 +173,7 @@ async fn revocation_cache_negative_entry_serves_without_db_within_ttl() {
 
 #[compio::test]
 async fn revocation_cache_same_node_bust_takes_effect_immediately() {
-    Database::migrated(async |database| {
+    Database::run(async |database| {
         let fixture = CookieFixture::new(database);
         assert!(matches!(fixture.resolve().await, CookieOutcome::Allowed(_)));
         fixture.revoke().await;
@@ -191,10 +192,11 @@ async fn revocation_cache_same_node_bust_takes_effect_immediately() {
 
 #[compio::test]
 async fn revocation_cache_miss_plus_db_error_fails_closed() {
-    Database::migrated(async |database| {
+    // Renames a platform table, so the case owns the database it changes.
+    Database::run_fresh(async |database| {
         let fixture = CookieFixture::new(database);
         database
-            .admin
+            .admin()
             .batch_execute(
                 "ALTER TABLE zeroship.token_revocations RENAME TO unavailable_revocations",
             )
@@ -210,7 +212,7 @@ async fn revocation_cache_miss_plus_db_error_fails_closed() {
             None
         );
         database
-            .admin
+            .admin()
             .batch_execute(
                 "ALTER TABLE zeroship.unavailable_revocations RENAME TO token_revocations",
             )
@@ -308,7 +310,7 @@ impl BearerFixture {
 
 #[ntex::test]
 async fn bearer_raw_op_revocation_is_per_app_not_global() {
-    Database::migrated(async |database| {
+    Database::run(async |database| {
         let fixture = BearerFixture::new(database).await;
         let app_a = fixture.token(OP_APP_A, "app-a.zeroship.ai");
         let app_b = fixture.token(OP_APP_B, "app-b.zeroship.ai");
@@ -337,7 +339,7 @@ async fn bearer_raw_op_revocation_is_per_app_not_global() {
 
 #[ntex::test]
 async fn revocation_keyed_on_pws_rejects_raw_op_bearer() {
-    Database::migrated(async |database| {
+    Database::run(async |database| {
         let fixture = BearerFixture::new(database).await;
         let bearer = fixture.token(OP_APP_A, "myapp.zeroship.ai");
         assert!(
@@ -350,7 +352,7 @@ async fn revocation_keyed_on_pws_rejects_raw_op_bearer() {
             BearerOutcome::Invalid
         ));
         database
-            .admin
+            .admin()
             .execute(
                 "DELETE FROM zeroship.token_revocations WHERE client_id = $1 AND sub = $2",
                 &[&bearer.client_id, &bearer.subject],

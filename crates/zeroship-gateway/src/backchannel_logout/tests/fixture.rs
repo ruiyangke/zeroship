@@ -6,6 +6,7 @@ use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 pub struct Handler {
     pub state: Arc<crate::GateState>,
     pub user: UserId,
+    app: AppFixture,
     key: SigningKey,
     _files: tempfile::TempDir,
     _jwks: test::TestServer,
@@ -31,25 +32,38 @@ impl Handler {
             }
         })
         .await;
+        let app = AppFixture::mint();
         let (state, files) = build_state(
+            &app,
             server.url("").trim_end_matches('/'),
             Some(database.config_as("zeroship_gateway", capacity)),
         );
         let user = UserId::mint();
-        seed_user(&database.admin, &user).await;
+        seed_user(&app, database.admin(), &user).await;
         Self {
             state,
             user,
+            app,
             key,
             _files: files,
             _jwks: server,
         }
     }
 
+    /// The app id this case's route and seeded rows belong to.
+    pub fn target_app(&self) -> AppId {
+        self.app.id.clone()
+    }
+
+    /// The OAuth client this case's route and seeded rows belong to.
+    pub fn client_id(&self) -> &str {
+        &self.app.client_id
+    }
+
     pub fn claims(&self, sub: Option<&UserId>, sid: Option<&str>) -> Value {
         let now = now_secs();
         let mut claims = json!({
-            "iss": self.state.oidc_rp.issuer, "aud": client_id(), "iat": now, "exp": now + 120,
+            "iss": self.state.oidc_rp.issuer, "aud": self.app.client_id, "iat": now, "exp": now + 120,
             "jti": Uuid::new_v4().to_string(),
             "events": { zeroship_core::logout_token::BCL_EVENT: {} },
         });
@@ -104,44 +118,51 @@ impl Handler {
             &self.state.oidc_rp.jwks,
             token,
             MOCK_ISSUER,
-            client_id(),
+            &self.app.client_id,
         )
         .await
         .expect("valid signed logout token before exercising concurrency");
     }
 }
 
-pub fn target_app() -> AppId {
-    AppId::parse(APP_ID).unwrap()
-}
-
 pub async fn other_user(admin: &Client) -> UserId {
     let user = UserId::mint();
     admin.execute(
-        "INSERT INTO zeroship.users (id, email, name) VALUES ($1, 'other@zeroship.test', 'Other User')",
-        &[&user.as_str()],
+        "INSERT INTO zeroship.users (id, email, name) VALUES ($1, $2, 'Other User')",
+        &[
+            &user.as_str(),
+            &format!("other-{}@zeroship.test", user.as_str()),
+        ],
     ).await.unwrap();
     user
 }
 
-pub async fn other_app(admin: &Client) -> AppId {
+pub async fn other_app(admin: &Client, owner: &AppId) -> AppId {
     let app = AppId::mint();
     admin
         .execute(
             "INSERT INTO zeroship.apps (id, name, project_id, organization_id) \
-         SELECT $1, 'other-app', project_id, organization_id FROM zeroship.apps WHERE id = $2",
-            &[&app.as_str(), &APP_ID],
+         SELECT $1, $2, project_id, organization_id FROM zeroship.apps WHERE id = $3",
+            &[
+                &app.as_str(),
+                &format!("other-{}", app.as_str()),
+                &owner.as_str(),
+            ],
         )
         .await
         .unwrap();
     app
 }
 
-pub async fn markers(admin: &Client) -> Vec<(String, String)> {
+/// The revocation markers this case owns, scoped to the OAuth client it
+/// minted so cases sharing the migrated database never observe each other's
+/// rows.
+pub async fn markers(admin: &Client, client_id: &str) -> Vec<(String, String)> {
     admin
         .query(
-            "SELECT client_id, sub FROM zeroship.token_revocations ORDER BY client_id, sub",
-            &[],
+            "SELECT client_id, sub FROM zeroship.token_revocations WHERE client_id = $1 \
+             ORDER BY client_id, sub",
+            &[&client_id],
         )
         .await
         .unwrap()
@@ -190,7 +211,7 @@ pub async fn assert_audit(admin: &Client, claims: &Value, revoked: u64) {
         )
         .await
         .expect("exactly one successful revocation audit");
-    assert_eq!(row.get::<_, String>("client_id"), client_id());
+    assert_eq!(row.get::<_, String>("client_id"), claims["aud"].as_str().unwrap());
     assert_eq!(row.get::<_, String>("outcome"), "success");
     assert_eq!(
         row.get::<_, String>("auth_method"),

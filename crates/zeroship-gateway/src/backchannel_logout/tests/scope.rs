@@ -28,31 +28,31 @@ async fn sid_only_resolves_the_subject_from_the_matching_session_rows() {
 }
 
 async fn exercise_scope(scope: Scope) {
-    Database::migrated(async |database| {
+    Database::run(async |database| {
         let handler = Handler::new(database, 1).await;
         let target = handler
-            .session(&handler.user, &target_app(), Some("target-sid"))
+            .session(&handler.user, &handler.target_app(), Some("target-sid"))
             .await;
         let sibling = handler
-            .session(&handler.user, &target_app(), Some("sibling-sid"))
+            .session(&handler.user, &handler.target_app(), Some("sibling-sid"))
             .await;
-        let foreign_app = other_app(&database.admin).await;
+        let foreign_app = other_app(database.admin(), &handler.target_app()).await;
         let foreign = handler
             .session(&handler.user, &foreign_app, Some("target-sid"))
             .await;
-        let another_user = other_user(&database.admin).await;
+        let another_user = other_user(database.admin()).await;
         let another_sid = if matches!(scope, Scope::MatchingSid) {
             "target-sid"
         } else {
             "another-user-sid"
         };
         let another = handler
-            .session(&another_user, &target_app(), Some(another_sid))
+            .session(&another_user, &handler.target_app(), Some(another_sid))
             .await;
         for id in [target, sibling, foreign, another] {
-            assert!(!revoked(&database.admin, id).await);
+            assert!(!revoked(database.admin(), id).await);
         }
-        assert!(markers(&database.admin).await.is_empty());
+        assert!(markers(database.admin(), handler.client_id()).await.is_empty());
 
         let claims = match scope {
             Scope::Subject => handler.claims(Some(&handler.user), None),
@@ -70,26 +70,26 @@ async fn exercise_scope(scope: Scope) {
             &test::call_service(&app, request(&handler.sign(&claims))).await,
             StatusCode::OK,
         );
-        assert!(revoked(&database.admin, target).await);
+        assert!(revoked(database.admin(), target).await);
         let all_subject_rows = matches!(scope, Scope::Subject | Scope::MissingSid);
-        assert_eq!(revoked(&database.admin, sibling).await, all_subject_rows);
+        assert_eq!(revoked(database.admin(), sibling).await, all_subject_rows);
         assert!(
-            !revoked(&database.admin, foreign).await,
+            !revoked(database.admin(), foreign).await,
             "preserve the same user and sid at another app"
         );
         assert!(
-            !revoked(&database.admin, another).await,
+            !revoked(database.admin(), another).await,
             "preserve an unrelated user's session row"
         );
         assert_eq!(
-            markers(&database.admin).await,
+            markers(database.admin(), handler.client_id()).await,
             [(
-                client_id().to_owned(),
+                handler.client_id().to_owned(),
                 test_pairwise_subject(&handler.user, APP_HOST)
             )]
         );
         assert_audit(
-            &database.admin,
+            database.admin(),
             &claims,
             if all_subject_rows { 2 } else { 1 },
         )

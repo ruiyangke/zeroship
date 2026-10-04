@@ -2,7 +2,8 @@ use super::*;
 
 #[ntex::test]
 async fn authorize_redirects_to_op_with_browser_pkce() {
-    let (state, _files) = state();
+    let app_fixture = AppFixture::mint();
+    let (state, _files) = state(&app_fixture);
     let app = test::init_service(browser_app!(state)).await;
 
     let req = test::TestRequest::get()
@@ -27,7 +28,7 @@ async fn authorize_redirects_to_op_with_browser_pkce() {
         "redirect parameters must not repeat"
     );
     for (key, expected) in [
-        ("client_id", client_id()),
+        ("client_id", app_fixture.client_id.as_str()),
         ("response_type", "code"),
         ("code_challenge", "CH_browser"),
         ("code_challenge_method", "S256"),
@@ -50,7 +51,8 @@ async fn authorize_redirects_to_op_with_browser_pkce() {
 
 #[ntex::test]
 async fn authorize_passes_prompt_through() {
-    let (state, _files) = state();
+    let app_fixture = AppFixture::mint();
+    let (state, _files) = state(&app_fixture);
     let app = test::init_service(browser_app!(state)).await;
 
     let req = test::TestRequest::get()
@@ -72,10 +74,16 @@ async fn authorize_passes_prompt_through() {
 
 #[ntex::test]
 async fn authorize_503_when_client_not_provisioned() {
-    let (state, _files) = state();
-    let mut routes = build_route_map_for(APP_ID, APP_NAME, APP_HOST, client_id());
+    let app_fixture = AppFixture::mint();
+    let (state, _files) = state(&app_fixture);
+    let mut routes = build_route_map_for(
+        app_fixture.id.as_str(),
+        APP_NAME,
+        APP_HOST,
+        &app_fixture.client_id,
+    );
     routes
-        .get_mut(&AppId::parse(APP_ID).unwrap())
+        .get_mut(&app_fixture.id)
         .unwrap()
         .oauth_client_id = None;
     state.routes.update_snapshot(
@@ -100,7 +108,8 @@ async fn authorize_503_when_client_not_provisioned() {
 
 #[ntex::test]
 async fn authorize_400_when_missing_pkce_or_state_or_nonce() {
-    let (state, _files) = state();
+    let app_fixture = AppFixture::mint();
+    let (state, _files) = state(&app_fixture);
     let app = test::init_service(browser_app!(state)).await;
 
     for (uri, why) in [
@@ -123,7 +132,8 @@ async fn authorize_400_when_missing_pkce_or_state_or_nonce() {
 
 #[ntex::test]
 async fn authorize_rejects_foreign_redirect_uri() {
-    let (state, _files) = state();
+    let app_fixture = AppFixture::mint();
+    let (state, _files) = state(&app_fixture);
     let app = test::init_service(browser_app!(state)).await;
     let req = test::TestRequest::get()
         .uri("/__zeroship/auth/authorize?code_challenge=c&state=s&nonce=n&redirect_uri=https%3A%2F%2Fevil.example%2Fcb")

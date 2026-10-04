@@ -2,7 +2,8 @@ use super::*;
 
 #[ntex::test]
 async fn popup_callback_pins_its_nonce_and_keeps_query_values_out_of_html() {
-    let (state, _files) = state();
+    let app_fixture = AppFixture::mint();
+    let (state, _files) = state(&app_fixture);
     let app = test::init_service(browser_app!(state)).await;
 
     let xss = "<script>alert(1)</script>";
@@ -53,7 +54,8 @@ async fn popup_callback_pins_its_nonce_and_keeps_query_values_out_of_html() {
 
 #[ntex::test]
 async fn popup_callback_nonce_is_per_response() {
-    let (state, _files) = state();
+    let app_fixture = AppFixture::mint();
+    let (state, _files) = state(&app_fixture);
     let app = test::init_service(browser_app!(state)).await;
 
     let nonce_of = |csp: String| {

@@ -2,7 +2,8 @@ use super::*;
 
 #[ntex::test]
 async fn malformed_refresh_response_does_not_expose_tokens_in_errors() {
-    let op = Arc::new(MockOP::new(client_id()));
+    let app_fixture = AppFixture::mint();
+        let op = Arc::new(MockOP::new(&app_fixture.client_id));
     op.garbage_2xx.store(true, Ordering::SeqCst);
     let (base, _srv) = boot_mock_op(op.clone()).await;
     let oidc = OidcRp::new(
@@ -13,7 +14,7 @@ async fn malformed_refresh_response_does_not_expose_tokens_in_errors() {
     .with_issuer(MOCK_ISSUER);
 
     let err = oidc
-        .refresh_token_public(client_id(), "rt_seed")
+        .refresh_token_public(&app_fixture.client_id, "rt_seed")
         .await
         .expect_err("garbage 2xx body must fail to parse");
     let msg = err.to_string();
@@ -30,15 +31,16 @@ async fn malformed_refresh_response_does_not_expose_tokens_in_errors() {
 
 #[ntex::test]
 async fn session_mint_recovers_after_reload_one_refresh() {
-    Database::migrated(async |database| {
-        let op = Arc::new(MockOP::new(client_id()));
-        seed_user(&database.admin, &op.user_id).await;
+    Database::run(async |database| {
+        let app_fixture = AppFixture::mint();
+        let op = Arc::new(MockOP::new(&app_fixture.client_id));
+        seed_user(&app_fixture, database.admin(), &op.user_id).await;
         let user_id = op.user_id.clone();
         let relay_email = format!("{}@relay.zeroship.localhost", Uuid::new_v4().simple());
-        seed_relay_alias(&database.admin, &user_id, &relay_email).await;
+        seed_relay_alias(&app_fixture, database.admin(), &user_id, &relay_email).await;
         let (base, _srv) = boot_mock_op(op.clone()).await;
         let db_cfg = database.config_as("zeroship_gateway", 8);
-        let (state, _files) = build_state(&base, Some(db_cfg.clone()));
+        let (state, _files) = build_state(&app_fixture, &base, Some(db_cfg.clone()));
         let app = test::init_service(anchors_app!(state.clone())).await;
 
         let req = test::TestRequest::post()
@@ -80,7 +82,7 @@ async fn session_mint_recovers_after_reload_one_refresh() {
             .session_verifier
             .as_ref()
             .expect("session verifier")
-            .verify(&new_session_token, client_id())
+            .verify(&new_session_token, &app_fixture.client_id)
             .expect("re-signed session cookie verifies locally");
 
         let body: serde_json::Value = read_json(resp).await;
@@ -132,18 +134,18 @@ async fn session_mint_recovers_after_reload_one_refresh() {
         );
         assert_eq!(
             new_claims.app,
-            client_id(),
+            app_fixture.client_id.as_str(),
             "re-signed cookie binds to the route client_id"
         );
 
         {
             let rows = database
-                .admin
+                .admin()
                 .query(
                     "SELECT name, avatar_url FROM zeroship.gateway_sessions \
                  WHERE user_id = $1 AND app_id = $2 AND revoked_at IS NULL \
                  ORDER BY issued_at DESC LIMIT 1",
-                    &[&user_id.as_str(), &APP_ID],
+                    &[&user_id.as_str(), &app_fixture.id.as_str()],
                 )
                 .await
                 .expect("audit row query");
@@ -167,16 +169,17 @@ async fn session_mint_recovers_after_reload_one_refresh() {
 
 #[ntex::test]
 async fn session_mint_persists_rotated_refresh_token_for_next_rotation() {
-    Database::migrated(async |database| {
-        let op = Arc::new(MockOP::new(client_id()));
+    Database::run(async |database| {
+        let app_fixture = AppFixture::mint();
+        let op = Arc::new(MockOP::new(&app_fixture.client_id));
         op.enforce_refresh_reuse_detection();
-        seed_user(&database.admin, &op.user_id).await;
+        seed_user(&app_fixture, database.admin(), &op.user_id).await;
         let user_id = op.user_id.clone();
         let relay_email = format!("{}@relay.zeroship.localhost", Uuid::new_v4().simple());
-        seed_relay_alias(&database.admin, &user_id, &relay_email).await;
+        seed_relay_alias(&app_fixture, database.admin(), &user_id, &relay_email).await;
         let (base, _srv) = boot_mock_op(op.clone()).await;
         let db_cfg = database.config_as("zeroship_gateway", 8);
-        let (state, _files) = build_state(&base, Some(db_cfg.clone()));
+        let (state, _files) = build_state(&app_fixture, &base, Some(db_cfg.clone()));
         let app = test::init_service(anchors_app!(state.clone())).await;
 
         let req = test::TestRequest::post()
@@ -200,7 +203,7 @@ async fn session_mint_persists_rotated_refresh_token_for_next_rotation() {
             anchors::parse_anchor_cookie(&anchor_pair).expect("anchor id parses from cookie");
 
         let expiry = database
-            .admin
+            .admin()
             .query_one(
                 "SELECT created_at, abs_expires_at FROM zeroship.app_session_anchors WHERE id = $1",
                 &[&anchor_id],
@@ -234,7 +237,7 @@ async fn session_mint_persists_rotated_refresh_token_for_next_rotation() {
             let mut conn = pool.acquire().await.expect("conn");
             let anchor = anchors::read_live(
                 &mut conn,
-                &AppId::parse(APP_ID).expect("fixed app id"),
+                &app_fixture.id,
                 anchor_id,
             )
             .await
@@ -246,7 +249,8 @@ async fn session_mint_persists_rotated_refresh_token_for_next_rotation() {
                 "rotation must not slide the absolute expiry"
             );
             let aad =
-                format!("zs-anchor-refresh:{}:{}", client_id(), user_id.as_str()).into_bytes();
+                format!("zs-anchor-refresh:{}:{}", app_fixture.client_id, user_id.as_str())
+                .into_bytes();
             let plaintext = zeroship_core::crypto::decrypt(
                 &state.anchor_enc_key,
                 &aad,
@@ -287,15 +291,16 @@ async fn session_mint_persists_rotated_refresh_token_for_next_rotation() {
 
 #[ntex::test]
 async fn session_mint_invalid_grant_deletes_anchor_and_requires_login() {
-    Database::migrated(async |database| {
-        let op = Arc::new(MockOP::new(client_id()));
-        seed_user(&database.admin, &op.user_id).await;
+    Database::run(async |database| {
+        let app_fixture = AppFixture::mint();
+        let op = Arc::new(MockOP::new(&app_fixture.client_id));
+        seed_user(&app_fixture, database.admin(), &op.user_id).await;
         let user_id = op.user_id.clone();
         let relay_email = format!("{}@relay.zeroship.localhost", Uuid::new_v4().simple());
-        seed_relay_alias(&database.admin, &user_id, &relay_email).await;
+        seed_relay_alias(&app_fixture, database.admin(), &user_id, &relay_email).await;
         let (base, _srv) = boot_mock_op(op.clone()).await;
         let db_cfg = database.config_as("zeroship_gateway", 8);
-        let (state, _files) = build_state(&base, Some(db_cfg.clone()));
+        let (state, _files) = build_state(&app_fixture, &base, Some(db_cfg.clone()));
         let app = test::init_service(anchors_app!(state.clone())).await;
 
         let req = test::TestRequest::post()
@@ -362,7 +367,7 @@ async fn session_mint_invalid_grant_deletes_anchor_and_requires_login() {
             let mut conn = pool.acquire().await.expect("conn");
             let anchor = anchors::read_live(
                 &mut conn,
-                &AppId::parse(APP_ID).expect("fixed app id"),
+                &app_fixture.id,
                 anchor_id,
             )
             .await

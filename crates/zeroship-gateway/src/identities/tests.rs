@@ -7,6 +7,7 @@
 
 use chrono::{DateTime, Utc};
 use compio_postgres::{Client, Row};
+use uuid::Uuid;
 use zeroship_core::{app_id::AppId, auth, typed_id, user_id::UserId};
 
 use super::{lookup_relay_email, upsert};
@@ -50,7 +51,11 @@ async fn seed_user(admin: &Client, label: &str) -> UserId {
     admin
         .execute(
             "INSERT INTO zeroship.users (id, email, name) VALUES ($1, $2, $3)",
-            &[&user.as_str(), &format!("{label}@zeroship.test"), &label],
+            &[
+                &user.as_str(),
+                &format!("{label}-{}@zeroship.test", user.as_str()),
+                &label,
+            ],
         )
         .await
         .unwrap();
@@ -121,9 +126,9 @@ async fn assert_unscoped(client: &Client) {
 
 #[compio::test]
 async fn relay_lookup_distinguishes_missing_unminted_active_and_revoked_aliases() {
-    Database::migrated(async |database| {
-        let app = App::seed(&database.admin, "https://relay.zeroship.test").await;
-        let user = seed_user(&database.admin, "relay-user").await;
+    Database::run(async |database| {
+        let app = App::seed(database.admin(), "https://relay.zeroship.test").await;
+        let user = seed_user(database.admin(), "relay-user").await;
         let pool = checkout(&database.config_as("zeroship_gateway", 1))
             .await
             .unwrap();
@@ -149,7 +154,7 @@ async fn relay_lookup_distinguishes_missing_unminted_active_and_revoked_aliases(
         upsert(&mut client, &app.client_id, &user, &app.subject(&user))
             .await
             .unwrap();
-        let row = stored(&database.admin, &app, &user).await;
+        let row = stored(database.admin(), &app, &user).await;
         assert_eq!(row.get::<_, String>("pairwise_sub"), app.subject(&user));
         assert!(row.get::<_, Option<String>>("relay_email").is_none());
         assert!(row.get::<_, Option<DateTime<Utc>>>("revoked_at").is_none());
@@ -160,16 +165,16 @@ async fn relay_lookup_distinguishes_missing_unminted_active_and_revoked_aliases(
             None
         );
 
-        let alias = "consented@relay.zeroship.test";
-        assign_alias(&database.admin, &app, &user, alias).await;
+        let alias = format!("consented-{}@relay.zeroship.test", Uuid::new_v4().simple());
+        assign_alias(database.admin(), &app, &user, &alias).await;
         assert_eq!(
             lookup_relay_email(&mut client, &app.client_id, &user)
                 .await
                 .unwrap()
                 .as_deref(),
-            Some(alias)
+            Some(alias.as_str())
         );
-        revoke(&database.admin, &app, &user).await;
+        revoke(database.admin(), &app, &user).await;
         assert_eq!(
             lookup_relay_email(&mut client, &app.client_id, &user)
                 .await
@@ -177,11 +182,11 @@ async fn relay_lookup_distinguishes_missing_unminted_active_and_revoked_aliases(
             None
         );
         assert_eq!(
-            stored(&database.admin, &app, &user)
+            stored(database.admin(), &app, &user)
                 .await
                 .get::<_, Option<String>>("relay_email")
                 .as_deref(),
-            Some(alias)
+            Some(alias.as_str())
         );
         assert_unscoped(&client).await;
     })
@@ -190,9 +195,9 @@ async fn relay_lookup_distinguishes_missing_unminted_active_and_revoked_aliases(
 
 #[compio::test]
 async fn upsert_reactivates_the_same_mapping_without_replacing_its_alias() {
-    Database::migrated(async |database| {
-        let app = App::seed(&database.admin, "https://regrant.zeroship.test").await;
-        let user = seed_user(&database.admin, "regrant-user").await;
+    Database::run(async |database| {
+        let app = App::seed(database.admin(), "https://regrant.zeroship.test").await;
+        let user = seed_user(database.admin(), "regrant-user").await;
         let pool = checkout(&database.config_as("zeroship_gateway", 1))
             .await
             .unwrap();
@@ -201,10 +206,11 @@ async fn upsert_reactivates_the_same_mapping_without_replacing_its_alias() {
         upsert(&mut client, &app.client_id, &user, &subject)
             .await
             .unwrap();
-        let created: DateTime<Utc> = stored(&database.admin, &app, &user).await.get("created_at");
-        assign_alias(&database.admin, &app, &user, "retained@relay.zeroship.test").await;
-        revoke(&database.admin, &app, &user).await;
-        assert!(stored(&database.admin, &app, &user)
+        let created: DateTime<Utc> = stored(database.admin(), &app, &user).await.get("created_at");
+        let alias = format!("retained-{}@relay.zeroship.test", Uuid::new_v4().simple());
+        assign_alias(database.admin(), &app, &user, &alias).await;
+        revoke(database.admin(), &app, &user).await;
+        assert!(stored(database.admin(), &app, &user)
             .await
             .get::<_, Option<DateTime<Utc>>>("revoked_at")
             .is_some());
@@ -213,27 +219,31 @@ async fn upsert_reactivates_the_same_mapping_without_replacing_its_alias() {
             upsert(&mut client, &app.client_id, &user, &subject)
                 .await
                 .unwrap();
-            let row = stored(&database.admin, &app, &user).await;
+            let row = stored(database.admin(), &app, &user).await;
             assert_eq!(row.get::<_, String>("pairwise_sub"), subject);
             assert_eq!(row.get::<_, DateTime<Utc>>("created_at"), created);
             assert!(row.get::<_, Option<DateTime<Utc>>>("revoked_at").is_none());
             assert_eq!(
                 row.get::<_, Option<String>>("relay_email").as_deref(),
-                Some("retained@relay.zeroship.test")
+                Some(alias.as_str())
             );
             assert_eq!(
                 lookup_relay_email(&mut client, &app.client_id, &user)
                     .await
                     .unwrap()
                     .as_deref(),
-                Some("retained@relay.zeroship.test")
+                Some(alias.as_str())
             );
             assert_unscoped(&client).await;
         }
         assert_eq!(
             database
-                .admin
-                .query_one("SELECT count(*) FROM zeroship.app_user_identities", &[])
+                .admin()
+                .query_one(
+                    "SELECT count(*) FROM zeroship.app_user_identities \
+                     WHERE app_client_id = $1 AND global_user_id = $2",
+                    &[&app.client_id, &user.as_str()],
+                )
                 .await
                 .unwrap()
                 .get::<_, i64>(0),
@@ -245,9 +255,9 @@ async fn upsert_reactivates_the_same_mapping_without_replacing_its_alias() {
 
 #[compio::test]
 async fn upsert_refuses_subject_drift_without_reviving_or_overwriting_the_mapping() {
-    Database::migrated(async |database| {
-        let app = App::seed(&database.admin, "https://binding.zeroship.test").await;
-        let user = seed_user(&database.admin, "binding-user").await;
+    Database::run(async |database| {
+        let app = App::seed(database.admin(), "https://binding.zeroship.test").await;
+        let user = seed_user(database.admin(), "binding-user").await;
         let subject = app.subject(&user);
         let changed_subject = auth::derive_pairwise(
             &auth::derive_pairwise_salt(b"gateway-identity-fixture"), &user, "https://changed.zeroship.test"
@@ -257,13 +267,14 @@ async fn upsert_refuses_subject_drift_without_reviving_or_overwriting_the_mappin
         let mut client = pool.acquire().await.unwrap();
         upsert(&mut client, &app.client_id, &user, &subject).await.unwrap();
         upsert(&mut client, &app.client_id, &user, &subject).await.unwrap();
-        assign_alias(&database.admin, &app, &user, "bound@relay.zeroship.test").await;
-        revoke(&database.admin, &app, &user).await;
-        let before = stored(&database.admin, &app, &user).await;
+        let alias = format!("bound-{}@relay.zeroship.test", Uuid::new_v4().simple());
+        assign_alias(database.admin(), &app, &user, &alias).await;
+        revoke(database.admin(), &app, &user).await;
+        let before = stored(database.admin(), &app, &user).await;
 
         let error = upsert(&mut client, &app.client_id, &user, &changed_subject).await.expect_err("a stored subject cannot be rebound");
         assert!(matches!(error, GatewayError::Db(ref message) if message == "app_user_identities pairwise binding changed"));
-        let after = stored(&database.admin, &app, &user).await;
+        let after = stored(database.admin(), &app, &user).await;
         assert_eq!(after.get::<_, String>("pairwise_sub"), subject);
         assert_eq!(after.get::<_, Option<String>>("relay_email"), before.get::<_, Option<String>>("relay_email"));
         assert_eq!(after.get::<_, Option<DateTime<Utc>>>("revoked_at"), before.get::<_, Option<DateTime<Utc>>>("revoked_at"));
@@ -271,37 +282,37 @@ async fn upsert_refuses_subject_drift_without_reviving_or_overwriting_the_mappin
         assert_unscoped(&client).await;
         assert_eq!(lookup_relay_email(&mut client, &app.client_id, &user).await.unwrap(), None);
         upsert(&mut client, &app.client_id, &user, &subject).await.unwrap();
-        assert_eq!(lookup_relay_email(&mut client, &app.client_id, &user).await.unwrap().as_deref(), Some("bound@relay.zeroship.test"));
+        assert_eq!(lookup_relay_email(&mut client, &app.client_id, &user).await.unwrap().as_deref(), Some(alias.as_str()));
     }).await;
 }
 
 #[compio::test]
 async fn relay_lookup_is_scoped_to_the_app_and_user_on_a_reused_connection() {
-    Database::migrated(async |database| {
-        let app = App::seed(&database.admin, "https://first.zeroship.test").await;
-        let other_app = App::seed(&database.admin, "https://second.zeroship.test").await;
-        let user = seed_user(&database.admin, "first-user").await;
-        let other_user = seed_user(&database.admin, "second-user").await;
+    Database::run(async |database| {
+        let app = App::seed(database.admin(), "https://first.zeroship.test").await;
+        let other_app = App::seed(database.admin(), "https://second.zeroship.test").await;
+        let user = seed_user(database.admin(), "first-user").await;
+        let other_user = seed_user(database.admin(), "second-user").await;
         let pool = checkout(&database.config_as("zeroship_gateway", 1))
             .await
             .unwrap();
-        for (app, user, alias) in [
-            (&app, &user, "first@relay.zeroship.test"),
-            (&other_app, &user, "other-app@relay.zeroship.test"),
-            (&app, &other_user, "other-user@relay.zeroship.test"),
-        ] {
+        let first_alias = format!("first-{}@relay.zeroship.test", Uuid::new_v4().simple());
+        let other_app_alias = format!("other-app-{}@relay.zeroship.test", Uuid::new_v4().simple());
+        let other_user_alias = format!("other-user-{}@relay.zeroship.test", Uuid::new_v4().simple());
+        let assignments = [
+            (&app, &user, first_alias.as_str()),
+            (&other_app, &user, other_app_alias.as_str()),
+            (&app, &other_user, other_user_alias.as_str()),
+        ];
+        for (app, user, alias) in assignments {
             let mut client = pool.acquire().await.unwrap();
             upsert(&mut client, &app.client_id, user, &app.subject(user))
                 .await
                 .unwrap();
-            assign_alias(&database.admin, app, user, alias).await;
+            assign_alias(database.admin(), app, user, alias).await;
             assert_unscoped(&client).await;
         }
-        for (app, user, alias) in [
-            (&app, &user, "first@relay.zeroship.test"),
-            (&other_app, &user, "other-app@relay.zeroship.test"),
-            (&app, &other_user, "other-user@relay.zeroship.test"),
-        ] {
+        for (app, user, alias) in assignments {
             let mut client = pool.acquire().await.unwrap();
             assert_eq!(
                 lookup_relay_email(&mut client, &app.client_id, user)
@@ -312,7 +323,7 @@ async fn relay_lookup_is_scoped_to_the_app_and_user_on_a_reused_connection() {
             );
             assert_unscoped(&client).await;
         }
-        revoke(&database.admin, &app, &user).await;
+        revoke(database.admin(), &app, &user).await;
         let mut client = pool.acquire().await.unwrap();
         assert_eq!(
             lookup_relay_email(&mut client, &app.client_id, &user)
@@ -325,14 +336,14 @@ async fn relay_lookup_is_scoped_to_the_app_and_user_on_a_reused_connection() {
                 .await
                 .unwrap()
                 .as_deref(),
-            Some("other-app@relay.zeroship.test")
+            Some(other_app_alias.as_str())
         );
         assert_eq!(
             lookup_relay_email(&mut client, &app.client_id, &other_user)
                 .await
                 .unwrap()
                 .as_deref(),
-            Some("other-user@relay.zeroship.test")
+            Some(other_user_alias.as_str())
         );
         assert_unscoped(&client).await;
     })
@@ -341,9 +352,10 @@ async fn relay_lookup_is_scoped_to_the_app_and_user_on_a_reused_connection() {
 
 #[compio::test]
 async fn relay_lookup_reports_database_errors_and_recovers_after_repair() {
-    Database::migrated(async |database| {
-        let app = App::seed(&database.admin, "https://repair.zeroship.test").await;
-        let user = seed_user(&database.admin, "repair-user").await;
+    // Renames a platform table, so the case owns the database it changes.
+    Database::run_fresh(async |database| {
+        let app = App::seed(database.admin(), "https://repair.zeroship.test").await;
+        let user = seed_user(database.admin(), "repair-user").await;
         let pool = checkout(&database.config_as("zeroship_gateway", 1))
             .await
             .unwrap();
@@ -351,9 +363,9 @@ async fn relay_lookup_reports_database_errors_and_recovers_after_repair() {
         upsert(&mut client, &app.client_id, &user, &app.subject(&user))
             .await
             .unwrap();
-        assign_alias(&database.admin, &app, &user, "repaired@relay.zeroship.test").await;
+        assign_alias(database.admin(), &app, &user, "repaired@relay.zeroship.test").await;
         database
-            .admin
+            .admin()
             .batch_execute(
                 "ALTER TABLE zeroship.app_user_identities RENAME TO fixture_unavailable_identities",
             )
@@ -364,7 +376,7 @@ async fn relay_lookup_reports_database_errors_and_recovers_after_repair() {
             .expect_err("database failure must not become an absent alias");
         assert!(matches!(error, GatewayError::Db(_)));
         database
-            .admin
+            .admin()
             .batch_execute(
                 "ALTER TABLE zeroship.fixture_unavailable_identities RENAME TO app_user_identities",
             )
@@ -387,9 +399,10 @@ async fn competing_first_writes_preserve_the_winning_subject() {
     use futures::{join, FutureExt};
     use std::panic::AssertUnwindSafe;
 
-    Database::migrated(async |database| {
-        let app = App::seed(&database.admin, "https://concurrent.zeroship.test").await;
-        let user = seed_user(&database.admin, "concurrent-user").await;
+    // Takes a table-wide lock as its barrier, so the case owns the table.
+    Database::run_fresh(async |database| {
+        let app = App::seed(database.admin(), "https://concurrent.zeroship.test").await;
+        let user = seed_user(database.admin(), "concurrent-user").await;
         let first_subject = app.subject(&user);
         let second_subject = auth::derive_pairwise(
             &auth::derive_pairwise_salt(b"gateway-identity-fixture"),
@@ -403,7 +416,7 @@ async fn competing_first_writes_preserve_the_winning_subject() {
         let first_pid: i32 = first.query_one("SELECT pg_backend_pid()", &[]).await.unwrap().get(0);
         let second_pid: i32 = second.query_one("SELECT pg_backend_pid()", &[]).await.unwrap().get(0);
         assert_ne!(first_pid, second_pid);
-        database.admin.batch_execute("BEGIN; LOCK TABLE zeroship.app_user_identities IN SHARE MODE").await.unwrap();
+        database.admin().batch_execute("BEGIN; LOCK TABLE zeroship.app_user_identities IN SHARE MODE").await.unwrap();
         let outcome = AssertUnwindSafe(async {
             let writes = async {
                 join!(
@@ -413,12 +426,12 @@ async fn competing_first_writes_preserve_the_winning_subject() {
             };
             let release = async {
                 database.wait_until_blocked(&[first_pid, second_pid]).await;
-                database.admin.batch_execute("COMMIT").await.unwrap();
+                database.admin().batch_execute("COMMIT").await.unwrap();
             };
             join!(writes, release).0
         }).catch_unwind().await;
         if outcome.is_err() {
-            database.admin.batch_execute("ROLLBACK").await.expect("release the fixture lock after a failed barrier");
+            database.admin().batch_execute("ROLLBACK").await.expect("release the fixture lock after a failed barrier");
         }
         let results = outcome.unwrap_or_else(|panic| std::panic::resume_unwind(panic));
         let (winner, refusal) = match results {
@@ -427,7 +440,7 @@ async fn competing_first_writes_preserve_the_winning_subject() {
             other => panic!("competing subjects must produce a winner and a refusal: {other:?}"),
         };
         assert!(matches!(refusal, GatewayError::Db(ref message) if message == "app_user_identities pairwise binding changed"));
-        assert_eq!(stored(&database.admin, &app, &user).await.get::<_, String>("pairwise_sub"), winner);
+        assert_eq!(stored(database.admin(), &app, &user).await.get::<_, String>("pairwise_sub"), winner);
         assert_unscoped(&first).await;
         assert_unscoped(&second).await;
     }).await;

@@ -12,7 +12,7 @@ use crate::{anchors, GateState};
 use ntex::web::{self, test};
 use std::sync::{atomic::Ordering, Arc};
 use uuid::Uuid;
-use zeroship_core::{app_id::AppId, user_id::UserId};
+use zeroship_core::user_id::UserId;
 
 mod cookies;
 mod refresh;

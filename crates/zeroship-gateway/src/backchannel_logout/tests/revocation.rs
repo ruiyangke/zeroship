@@ -17,13 +17,14 @@ async fn provider_revoke_failure_does_not_restore_the_deleted_anchor() {
     reason = "follow the minted credential through logout and failed recovery in one scenario"
 )]
 async fn exercise_revocation(provider_unavailable: bool) {
-    Database::migrated(async |database| {
-        let op = Arc::new(MockOP::new(client_id()));
+    Database::run(async |database| {
+        let app_fixture = AppFixture::mint();
+        let op = Arc::new(MockOP::new(&app_fixture.client_id));
         op.revoke_unavailable
             .store(provider_unavailable, Ordering::SeqCst);
-        seed_user(&database.admin, &op.user_id).await;
+        seed_user(&app_fixture, database.admin(), &op.user_id).await;
         let (base, _provider) = boot_mock_op(op.clone()).await;
-        let (state, _files) = build_state(&base, Some(database.config_as("zeroship_gateway", 1)));
+        let (state, _files) = build_state(&app_fixture, &base, Some(database.config_as("zeroship_gateway", 1)));
         let app = test::init_service(anchors_bcl_app!(state)).await;
         let login = test::call_service(
             &app,
@@ -54,38 +55,40 @@ async fn exercise_revocation(provider_unavailable: bool) {
             test::call_service(&app, read_session()).await.status(),
             StatusCode::OK
         );
-        assert!(stored_anchor_ids(&database.admin).await.contains(&primary));
+        assert!(stored_anchor_ids(database.admin(), std::slice::from_ref(&app_fixture.id))
+            .await
+            .contains(&primary));
         let session: Uuid = database
-            .admin
+            .admin()
             .query_one(
                 "SELECT id FROM zeroship.gateway_sessions WHERE user_id = $1 AND app_id = $2",
-                &[&op.user_id.as_str(), &APP_ID],
+                &[&op.user_id.as_str(), &app_fixture.id.as_str()],
             )
             .await
             .unwrap()
             .get(0);
-        assert!(!revoked(&database.admin, session).await);
+        assert!(!revoked(database.admin(), session).await);
 
         let sibling = control_anchor(
             &state,
-            &target_app(),
-            client_id(),
+            &app_fixture.id,
+            &app_fixture.client_id,
             &op.user_id,
             "rt_other_device",
         )
         .await;
-        let another_user = other_user(&database.admin).await;
+        let another_user = other_user(database.admin()).await;
         let another = control_anchor(
             &state,
-            &target_app(),
-            client_id(),
+            &app_fixture.id,
+            &app_fixture.client_id,
             &another_user,
             "rt_other_user",
         )
         .await;
-        let foreign_app = other_app(&database.admin).await;
+        let foreign_app = other_app(database.admin(), &app_fixture.id).await;
         let foreign_client = zeroship_core::typed_id::app_oauth_client_id(&foreign_app);
-        database.admin.execute(
+        database.admin().execute(
             "INSERT INTO zeroship.oauth_clients (client_id, client_name, redirect_uris, scopes) \
              VALUES ($1, 'Other App', ARRAY['https://other.zeroship.ai/cb'], ARRAY['openid'])",
             &[&foreign_client],
@@ -100,16 +103,23 @@ async fn exercise_revocation(provider_unavailable: bool) {
         .await;
         let mut before = vec![primary, sibling, another, foreign];
         before.sort_unstable();
-        assert_eq!(stored_anchor_ids(&database.admin).await, before);
-        assert!(markers(&database.admin).await.is_empty());
+        assert_eq!(
+            stored_anchor_ids(
+                database.admin(),
+                &[app_fixture.id.clone(), foreign_app.clone()]
+            )
+            .await,
+            before
+        );
+        assert!(markers(database.admin(), &app_fixture.client_id).await.is_empty());
 
         let subject = test_pairwise_subject(&op.user_id, APP_HOST);
         let now = std::time::Instant::now();
         state
             .revocation_cache
-            .store(client_id(), &subject, None, now);
+            .store(&app_fixture.client_id, &subject, None, now);
         assert_eq!(
-            state.revocation_cache.get(client_id(), &subject, now),
+            state.revocation_cache.get(&app_fixture.client_id, &subject, now),
             Some(None)
         );
         let jti = Uuid::new_v4().to_string();
@@ -118,11 +128,15 @@ async fn exercise_revocation(provider_unavailable: bool) {
             &test::call_service(&app, request(&token)).await,
             StatusCode::OK,
         );
-        assert!(revoked(&database.admin, session).await);
+        assert!(revoked(database.admin(), session).await);
         let mut survivors = vec![another, foreign];
         survivors.sort_unstable();
         assert_eq!(
-            stored_anchor_ids(&database.admin).await,
+            stored_anchor_ids(
+                database.admin(),
+                &[app_fixture.id.clone(), foreign_app.clone()]
+            )
+            .await,
             survivors,
             "family teardown must preserve other apps and users"
         );
@@ -138,13 +152,13 @@ async fn exercise_revocation(provider_unavailable: bool) {
             "decrypt the minter's ciphertext and revoke with the app's broker credentials"
         );
         assert_eq!(
-            markers(&database.admin).await,
-            [(client_id().to_owned(), subject.clone())]
+            markers(database.admin(), &app_fixture.client_id).await,
+            [(app_fixture.client_id.clone(), subject.clone())]
         );
         assert_eq!(
             state
                 .revocation_cache
-                .get(client_id(), &subject, std::time::Instant::now()),
+                .get(&app_fixture.client_id, &subject, std::time::Instant::now()),
             None
         );
         assert_eq!(
@@ -174,11 +188,18 @@ async fn exercise_revocation(provider_unavailable: bool) {
             &test::call_service(&app, request(&token)).await,
             StatusCode::OK,
         );
-        assert_eq!(stored_anchor_ids(&database.admin).await, survivors);
+        assert_eq!(
+            stored_anchor_ids(
+                database.admin(),
+                &[app_fixture.id.clone(), foreign_app.clone()]
+            )
+            .await,
+            survivors
+        );
         let mut after_replay = op.revoked_refresh_tokens.lock().unwrap().clone();
         after_replay.sort_unstable();
         assert_eq!(after_replay, expected_tokens);
-        assert_eq!(audit_count(&database.admin, &jti).await, 1);
+        assert_eq!(audit_count(database.admin(), &jti).await, 1);
     })
     .await;
 }

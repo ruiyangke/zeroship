@@ -30,8 +30,11 @@ impl Principals {
         admin
             .execute(
                 "INSERT INTO zeroship.organizations (id, slug, name, billing_email) \
-                 VALUES ($1, 'session-fixture', 'Session Fixture', 'fixture@zeroship.test')",
-                &[&organization],
+                 VALUES ($1, $2, 'Session Fixture', 'fixture@zeroship.test')",
+                &[
+                    &organization,
+                    &format!("session-{}", Uuid::new_v4().simple()),
+                ],
             )
             .await
             .unwrap();
@@ -133,8 +136,8 @@ async fn assert_unscoped(client: &Client) {
 
 #[compio::test]
 async fn create_commits_identity_claims_and_fixed_expiry_windows() {
-    Database::migrated(async |database| {
-        let principals = Principals::seed(&database.admin).await;
+    Database::run(async |database| {
+        let principals = Principals::seed(database.admin()).await;
         let pool = checkout(&database.config_as("zeroship_gateway", 1))
             .await
             .unwrap();
@@ -178,7 +181,7 @@ async fn create_commits_identity_claims_and_fixed_expiry_windows() {
         );
         assert_eq!(session.amr, methods);
 
-        let stored = stored_row(&database.admin, session.id).await;
+        let stored = stored_row(database.admin(), session.id).await;
         assert_eq!(stored.get::<_, String>("app_id"), principals.app.as_str());
         assert_eq!(stored.get::<_, String>("user_id"), principals.user.as_str());
         assert_eq!(
@@ -233,8 +236,8 @@ async fn create_commits_identity_claims_and_fixed_expiry_windows() {
 
 #[compio::test]
 async fn create_preserves_absent_claims_and_empty_arrays() {
-    Database::migrated(async |database| {
-        let principals = Principals::seed(&database.admin).await;
+    Database::run(async |database| {
+        let principals = Principals::seed(database.admin()).await;
         let pool = checkout(&database.config_as("zeroship_gateway", 1))
             .await
             .unwrap();
@@ -253,7 +256,7 @@ async fn create_preserves_absent_claims_and_empty_arrays() {
         assert!(!session.email_verified);
         assert!(session.granted_scopes.is_empty());
         assert!(session.amr.is_empty());
-        let stored = stored_row(&database.admin, session.id).await;
+        let stored = stored_row(database.admin(), session.id).await;
         for column in ["sid", "email_text", "name", "avatar_url"] {
             assert!(
                 stored.get::<_, Option<String>>(column).is_none(),
@@ -275,8 +278,8 @@ async fn create_preserves_absent_claims_and_empty_arrays() {
 
 #[compio::test]
 async fn user_revocation_is_scoped_idempotent_and_rebinds_the_connection() {
-    Database::migrated(async |database| {
-        let principals = Principals::seed(&database.admin).await;
+    Database::run(async |database| {
+        let principals = Principals::seed(database.admin()).await;
         let pool = checkout(&database.config_as("zeroship_gateway", 1))
             .await
             .unwrap();
@@ -312,14 +315,14 @@ async fn user_revocation_is_scoped_idempotent_and_rebinds_the_connection() {
                 .unwrap(),
             2
         );
-        let target_revoked = revoked_at(&database.admin, target.id)
+        let target_revoked = revoked_at(database.admin(), target.id)
             .await
             .expect("target revoked");
-        let sibling_revoked = revoked_at(&database.admin, sibling.id)
+        let sibling_revoked = revoked_at(database.admin(), sibling.id)
             .await
             .expect("sibling revoked");
-        assert!(revoked_at(&database.admin, other_app.id).await.is_none());
-        assert!(revoked_at(&database.admin, other_user.id).await.is_none());
+        assert!(revoked_at(database.admin(), other_app.id).await.is_none());
+        assert!(revoked_at(database.admin(), other_user.id).await.is_none());
         assert_unscoped(&client).await;
         assert_eq!(
             revoke_app_sessions_for_user(&mut client, &principals.app, &principals.user)
@@ -328,11 +331,11 @@ async fn user_revocation_is_scoped_idempotent_and_rebinds_the_connection() {
             0
         );
         assert_eq!(
-            revoked_at(&database.admin, target.id).await,
+            revoked_at(database.admin(), target.id).await,
             Some(target_revoked)
         );
         assert_eq!(
-            revoked_at(&database.admin, sibling.id).await,
+            revoked_at(database.admin(), sibling.id).await,
             Some(sibling_revoked)
         );
 
@@ -345,8 +348,8 @@ async fn user_revocation_is_scoped_idempotent_and_rebinds_the_connection() {
                 .unwrap(),
             1
         );
-        assert!(revoked_at(&database.admin, other_app.id).await.is_some());
-        assert!(revoked_at(&database.admin, other_user.id).await.is_none());
+        assert!(revoked_at(database.admin(), other_app.id).await.is_some());
+        assert!(revoked_at(database.admin(), other_user.id).await.is_none());
         assert_unscoped(&client).await;
     })
     .await;
@@ -354,8 +357,8 @@ async fn user_revocation_is_scoped_idempotent_and_rebinds_the_connection() {
 
 #[compio::test]
 async fn sid_revocation_requires_the_subject_to_match_when_supplied() {
-    Database::migrated(async |database| {
-        let principals = Principals::seed(&database.admin).await;
+    Database::run(async |database| {
+        let principals = Principals::seed(database.admin()).await;
         let pool = checkout(&database.config_as("zeroship_gateway", 1))
             .await
             .unwrap();
@@ -396,7 +399,7 @@ async fn sid_revocation_requires_the_subject_to_match_when_supplied() {
             .unwrap()
             .is_empty()
         );
-        assert!(revoked_at(&database.admin, target.id).await.is_none());
+        assert!(revoked_at(database.admin(), target.id).await.is_none());
         assert_eq!(
             revoke_app_sessions_for_sid(
                 &mut client,
@@ -408,11 +411,11 @@ async fn sid_revocation_requires_the_subject_to_match_when_supplied() {
             .unwrap(),
             vec![principals.user.clone()]
         );
-        let timestamp = revoked_at(&database.admin, target.id)
+        let timestamp = revoked_at(database.admin(), target.id)
             .await
             .expect("matched sid revoked");
         for id in [other_sid.id, other_app.id, other_user.id] {
-            assert!(revoked_at(&database.admin, id).await.is_none());
+            assert!(revoked_at(database.admin(), id).await.is_none());
         }
         assert_eq!(
             revoke_app_sessions_for_sid(
@@ -426,7 +429,7 @@ async fn sid_revocation_requires_the_subject_to_match_when_supplied() {
             vec![principals.user.clone()]
         );
         assert_eq!(
-            revoked_at(&database.admin, target.id).await,
+            revoked_at(database.admin(), target.id).await,
             Some(timestamp)
         );
         assert_unscoped(&client).await;
@@ -436,8 +439,8 @@ async fn sid_revocation_requires_the_subject_to_match_when_supplied() {
 
 #[compio::test]
 async fn sid_revocation_without_subject_returns_distinct_users_including_prior_revocations() {
-    Database::migrated(async |database| {
-        let principals = Principals::seed(&database.admin).await;
+    Database::run(async |database| {
+        let principals = Principals::seed(database.admin()).await;
         let pool = checkout(&database.config_as("zeroship_gateway", 1))
             .await
             .unwrap();
@@ -454,7 +457,7 @@ async fn sid_revocation_without_subject_returns_distinct_users_including_prior_r
                 .unwrap(),
             1
         );
-        let prior_timestamp = revoked_at(&database.admin, prior.id)
+        let prior_timestamp = revoked_at(database.admin(), prior.id)
             .await
             .expect("previous revocation");
         let live = create(
@@ -489,13 +492,13 @@ async fn sid_revocation_without_subject_returns_distinct_users_including_prior_r
         assert!(users.contains(&principals.user));
         assert!(users.contains(&principals.other_user));
         assert_eq!(
-            revoked_at(&database.admin, prior.id).await,
+            revoked_at(database.admin(), prior.id).await,
             Some(prior_timestamp)
         );
-        assert!(revoked_at(&database.admin, live.id).await.is_some());
-        assert!(revoked_at(&database.admin, duplicate.id).await.is_some());
-        assert!(revoked_at(&database.admin, other_app.id).await.is_none());
-        assert!(revoked_at(&database.admin, other_sid.id).await.is_none());
+        assert!(revoked_at(database.admin(), live.id).await.is_some());
+        assert!(revoked_at(database.admin(), duplicate.id).await.is_some());
+        assert!(revoked_at(database.admin(), other_app.id).await.is_none());
+        assert!(revoked_at(database.admin(), other_sid.id).await.is_none());
         assert!(
             revoke_app_sessions_for_sid(&mut client, &principals.app, "absent", None)
                 .await
@@ -509,8 +512,8 @@ async fn sid_revocation_without_subject_returns_distinct_users_including_prior_r
 
 #[compio::test]
 async fn latest_sid_uses_the_newest_non_null_value_for_the_app_and_user() {
-    Database::migrated(async |database| {
-        let principals = Principals::seed(&database.admin).await;
+    Database::run(async |database| {
+        let principals = Principals::seed(database.admin()).await;
         let pool = checkout(&database.config_as("zeroship_gateway", 1)).await.unwrap();
         let mut client = pool.acquire().await.unwrap();
         assert!(latest_sid_for_user(&mut client, &principals.app, &principals.user).await.unwrap().is_none());
@@ -522,7 +525,7 @@ async fn latest_sid_uses_the_newest_non_null_value_for_the_app_and_user() {
             (1_700_000_040, &principals.app, &principals.other_user, Some("other-user")),
         ] {
             let session = create(&mut client, &new_session(app, user, sid)).await.unwrap();
-            database.admin.execute(
+            database.admin().execute(
                 "UPDATE zeroship.gateway_sessions SET issued_at = to_timestamp($1::bigint) WHERE id = $2",
                 &[&issued, &session.id],
             ).await.unwrap();
@@ -537,8 +540,8 @@ async fn latest_sid_uses_the_newest_non_null_value_for_the_app_and_user() {
 
 #[compio::test]
 async fn failed_create_rolls_back_and_the_connection_can_serve_another_app() {
-    Database::migrated(async |database| {
-        let principals = Principals::seed(&database.admin).await;
+    Database::run(async |database| {
+        let principals = Principals::seed(database.admin()).await;
         let pool = checkout(&database.config_as("zeroship_gateway", 1))
             .await
             .unwrap();
@@ -558,8 +561,12 @@ async fn failed_create_rolls_back_and_the_connection_can_serve_another_app() {
         .expect_err("an unknown app must fail its foreign key");
         assert_eq!(
             database
-                .admin
-                .query_one("SELECT count(*) FROM zeroship.gateway_sessions", &[])
+                .admin()
+                .query_one(
+                    "SELECT count(*) FROM zeroship.gateway_sessions \
+                     WHERE app_id = $1 AND user_id = $2",
+                    &[&principals.app.as_str(), &principals.user.as_str()],
+                )
                 .await
                 .unwrap()
                 .get::<_, i64>(0),
@@ -573,12 +580,12 @@ async fn failed_create_rolls_back_and_the_connection_can_serve_another_app() {
         .await
         .unwrap();
         assert_eq!(
-            stored_row(&database.admin, recovered.id)
+            stored_row(database.admin(), recovered.id)
                 .await
                 .get::<_, String>("app_id"),
             principals.other_app.as_str()
         );
-        assert!(revoked_at(&database.admin, existing.id).await.is_none());
+        assert!(revoked_at(database.admin(), existing.id).await.is_none());
         assert_unscoped(&client).await;
     })
     .await;

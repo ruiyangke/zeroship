@@ -3,11 +3,14 @@
 use super::*;
 use crate::anchors;
 
-pub async fn stored_anchor_ids(admin: &compio_postgres::Client) -> Vec<Uuid> {
+/// The anchors this case owns, scoped to the app ids it minted so cases
+/// sharing the migrated database never observe each other's rows.
+pub async fn stored_anchor_ids(admin: &compio_postgres::Client, apps: &[AppId]) -> Vec<Uuid> {
+    let apps: Vec<String> = apps.iter().map(|app| app.as_str().to_owned()).collect();
     admin
         .query(
-            "SELECT id FROM zeroship.app_session_anchors ORDER BY id",
-            &[],
+            "SELECT id FROM zeroship.app_session_anchors WHERE app_id = ANY($1::text[]) ORDER BY id",
+            &[&apps],
         )
         .await
         .unwrap()

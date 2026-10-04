@@ -2,10 +2,10 @@ use super::*;
 use crate::auth_token::{anchor_aad, resolve_route, rotate_family, RouteCtx};
 use futures::{poll, FutureExt};
 
-async fn stored_anchor(state: &GateState, user: &UserId) -> anchors::Anchor {
+async fn stored_anchor(state: &GateState, app: &AppFixture, user: &UserId) -> anchors::Anchor {
     let encrypted = zeroship_core::crypto::encrypt(
         &state.anchor_enc_key,
-        &anchor_aad(client_id(), user.as_str()),
+        &anchor_aad(&app.client_id, user.as_str()),
         INITIAL_REFRESH_TOKEN.as_bytes(),
     )
     .unwrap();
@@ -16,8 +16,8 @@ async fn stored_anchor(state: &GateState, user: &UserId) -> anchors::Anchor {
     anchors::create(
         &mut connection,
         &anchors::NewAnchor {
-            app_id: &AppId::parse(APP_ID).unwrap(),
-            client_id: client_id(),
+            app_id: &app.id,
+            client_id: &app.client_id,
             global_user_id: user,
             refresh_token_enc: &encrypted,
             refresh_family_id: "rotation-fixture",
@@ -40,13 +40,14 @@ fn route(state: &GateState) -> RouteCtx {
 
 #[ntex::test]
 async fn concurrent_callers_share_the_real_rotation_and_persist_its_result() {
-    Database::migrated(async |database| {
-        let op = Arc::new(MockOP::new(client_id()));
+    Database::run(async |database| {
+        let app = AppFixture::mint();
+        let op = Arc::new(MockOP::new(&app.client_id));
         op.enforce_refresh_reuse_detection();
-        seed_user(&database.admin, &op.user_id).await;
+        seed_user(&app, database.admin(), &op.user_id).await;
         let (base, _server) = boot_mock_op(op.clone()).await;
-        let (state, _files) = build_state(&base, Some(database.config_as("zeroship_gateway", 1)));
-        let anchor = stored_anchor(&state, &op.user_id).await;
+        let (state, _files) = build_state(&app, &base, Some(database.config_as("zeroship_gateway", 1)));
+        let anchor = stored_anchor(&state, &app, &op.user_id).await;
         let route = route(&state);
         let (entered, release) = op.pause_refresh();
         let mut leader = Box::pin(rotate_family(&state, &route, &anchor));
@@ -87,12 +88,13 @@ async fn concurrent_callers_share_the_real_rotation_and_persist_its_result() {
 
 #[ntex::test]
 async fn a_follower_finishes_the_real_rotation_after_the_leader_disconnects() {
-    Database::migrated(async |database| {
-        let op = Arc::new(MockOP::new(client_id()));
-        seed_user(&database.admin, &op.user_id).await;
+    Database::run(async |database| {
+        let app = AppFixture::mint();
+        let op = Arc::new(MockOP::new(&app.client_id));
+        seed_user(&app, database.admin(), &op.user_id).await;
         let (base, _server) = boot_mock_op(op.clone()).await;
-        let (state, _files) = build_state(&base, Some(database.config_as("zeroship_gateway", 1)));
-        let anchor = stored_anchor(&state, &op.user_id).await;
+        let (state, _files) = build_state(&app, &base, Some(database.config_as("zeroship_gateway", 1)));
+        let anchor = stored_anchor(&state, &app, &op.user_id).await;
         let route = route(&state);
         let (entered, release) = op.pause_refresh();
         let mut leader = Box::pin(rotate_family(&state, &route, &anchor));
@@ -113,12 +115,13 @@ async fn a_follower_finishes_the_real_rotation_after_the_leader_disconnects() {
 
 #[ntex::test]
 async fn disconnecting_every_caller_releases_the_real_rotation() {
-    Database::migrated(async |database| {
-        let op = Arc::new(MockOP::new(client_id()));
-        seed_user(&database.admin, &op.user_id).await;
+    Database::run(async |database| {
+        let app = AppFixture::mint();
+        let op = Arc::new(MockOP::new(&app.client_id));
+        seed_user(&app, database.admin(), &op.user_id).await;
         let (base, _server) = boot_mock_op(op.clone()).await;
-        let (state, _files) = build_state(&base, Some(database.config_as("zeroship_gateway", 1)));
-        let anchor = stored_anchor(&state, &op.user_id).await;
+        let (state, _files) = build_state(&app, &base, Some(database.config_as("zeroship_gateway", 1)));
+        let anchor = stored_anchor(&state, &app, &op.user_id).await;
         let route = route(&state);
         let (entered, release) = op.pause_refresh();
         let mut leader = Box::pin(rotate_family(&state, &route, &anchor));

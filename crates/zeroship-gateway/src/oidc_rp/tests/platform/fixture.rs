@@ -15,7 +15,7 @@ impl App {
         let client = zeroship_core::typed_id::app_oauth_client_id(&id);
         let user = UserId::mint();
         let email = crate::tests::browser::seed_app_and_client_for(
-            &database.admin,
+            database.admin(),
             &user,
             id.as_str(),
             APP_NAME,
@@ -27,7 +27,7 @@ impl App {
             .await
             .unwrap();
         database
-            .admin
+            .admin()
             .execute(
                 "UPDATE zeroship.users SET password_hash = $2 WHERE id = $1",
                 &[&user.as_str(), &hash],
@@ -40,13 +40,13 @@ impl App {
             "email".to_owned(),
             "profile".to_owned(),
         ];
-        database.admin.execute(
+        database.admin().execute(
             "UPDATE zeroship.oauth_clients SET redirect_uris = $2, scopes = $3, skip_consent = TRUE WHERE client_id = $1",
             &[&client, &vec![redirect.to_owned()], &scopes],
         ).await.unwrap();
-        database.admin.execute("INSERT INTO zeroship.app_oauth_clients (app_id, client_id, sector_identifier) VALUES ($1, $2, $3)",
+        database.admin().execute("INSERT INTO zeroship.app_oauth_clients (app_id, client_id, sector_identifier) VALUES ($1, $2, $3)",
             &[&id.as_str(), &client, &SECTOR]).await.unwrap();
-        database.admin.execute(
+        database.admin().execute(
             "INSERT INTO zeroship.oauth_grants (user_id, client_id, granted_scopes, granted_at, updated_at) VALUES ($1, $2, $3, NOW(), NOW())",
             &[&user.as_str(), &client, &scopes],
         ).await.unwrap();

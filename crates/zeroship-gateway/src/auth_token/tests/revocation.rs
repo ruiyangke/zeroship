@@ -2,23 +2,24 @@ use super::*;
 
 #[ntex::test]
 async fn backchannel_logout_revokes_refreshed_session_with_sid_logout_token() {
-    Database::migrated(async |database| {
-        let op = Arc::new(MockOP::new(bcl_client_id()));
+    Database::run(async |database| {
+        let bcl = AppFixture::mint();
+        let op = Arc::new(MockOP::new(&bcl.client_id));
         op.omit_refresh_id_token_on_refresh();
         let user_id = op.user_id.clone();
         let _email = seed_app_and_client_for(
-            &database.admin,
+            database.admin(),
             &user_id,
-            BCL_REFRESH_APP_ID,
-            BCL_REFRESH_APP_NAME,
+            bcl.id.as_str(),
+            &bcl.name,
             BCL_REFRESH_APP_HOST,
-            bcl_client_id(),
+            &bcl.client_id,
         )
         .await;
         let relay_email = format!("{}@relay.zeroship.localhost", Uuid::new_v4().simple());
         seed_relay_alias_for(
-            &database.admin,
-            bcl_client_id(),
+            database.admin(),
+            &bcl.client_id,
             BCL_REFRESH_APP_HOST,
             &user_id,
             &relay_email,
@@ -29,13 +30,13 @@ async fn backchannel_logout_revokes_refreshed_session_with_sid_logout_token() {
         let (state, _files) = build_state_with_route(
             &base,
             Some(db_cfg.clone()),
-            BCL_REFRESH_APP_ID,
+            bcl.id.as_str(),
             BCL_REFRESH_APP_NAME,
             BCL_REFRESH_APP_HOST,
-            bcl_client_id(),
+            &bcl.client_id,
         );
         let app = test::init_service(anchors_bcl_app!(state.clone())).await;
-        let app_id = BCL_REFRESH_APP_ID;
+        let app_id = bcl.id.clone();
 
         let req = test::TestRequest::post()
             .uri("/__zeroship/auth/session")
@@ -54,13 +55,13 @@ async fn backchannel_logout_revokes_refreshed_session_with_sid_logout_token() {
             anchors::parse_anchor_cookie(&anchor_pair).expect("anchor id parses from cookie");
 
         {
-            let client = &database.admin;
+            let client = database.admin();
             let row = client
                 .query_one(
                     "SELECT sid FROM zeroship.gateway_sessions \
                  WHERE user_id = $1 AND app_id = $2 AND revoked_at IS NULL \
                  ORDER BY issued_at DESC LIMIT 1",
-                    &[&user_id.as_str(), &app_id],
+                    &[&user_id.as_str(), &app_id.as_str()],
                 )
                 .await
                 .expect("initial session row");
@@ -88,13 +89,13 @@ async fn backchannel_logout_revokes_refreshed_session_with_sid_logout_token() {
         );
 
         let refreshed_session_id = {
-            let client = &database.admin;
+            let client = database.admin();
             let row = client
                 .query_one(
                     "SELECT id AS session_id, sid FROM zeroship.gateway_sessions \
                  WHERE user_id = $1 AND app_id = $2 AND revoked_at IS NULL \
                  ORDER BY issued_at DESC LIMIT 1",
-                    &[&user_id.as_str(), &app_id],
+                    &[&user_id.as_str(), &app_id.as_str()],
                 )
                 .await
                 .expect("refreshed session row");
@@ -122,7 +123,7 @@ async fn backchannel_logout_revokes_refreshed_session_with_sid_logout_token() {
             let pool = crate::db::checkout(&db_cfg).await.expect("pool");
             let mut conn = pool.acquire().await.expect("conn");
             let row = database
-                .admin
+                .admin()
                 .query_one(
                     "SELECT revoked_at IS NOT NULL AS revoked \
                  FROM zeroship.gateway_sessions WHERE id = $1",
@@ -133,7 +134,7 @@ async fn backchannel_logout_revokes_refreshed_session_with_sid_logout_token() {
             let revoked: bool = row.get("revoked");
             assert!(revoked, "BCL must revoke the refreshed gateway session row");
             let deleted: bool = database
-                .admin
+                .admin()
                 .query_one(
                     "SELECT NOT EXISTS (SELECT FROM zeroship.app_session_anchors WHERE id = $1)",
                     &[&anchor_id],
@@ -145,7 +146,7 @@ async fn backchannel_logout_revokes_refreshed_session_with_sid_logout_token() {
             assert!(
                 anchors::read_live(
                     &mut conn,
-                    &AppId::parse(app_id).expect("fixed app id"),
+                    &app_id,
                     anchor_id
                 )
                 .await
@@ -178,14 +179,15 @@ async fn backchannel_logout_revokes_refreshed_session_with_sid_logout_token() {
 
 #[ntex::test]
 async fn cookie_mint_writes_identity_so_reset_evicts_cookie_session() {
-    Database::migrated(async |database| {
-        let op = Arc::new(MockOP::new(client_id()));
+    Database::run(async |database| {
+        let app_fixture = AppFixture::mint();
+        let op = Arc::new(MockOP::new(&app_fixture.client_id));
         let user_id = op.user_id.clone();
-        let email = seed_app_and_client(&database.admin, &user_id).await;
+        let email = seed_app_and_client(&app_fixture, database.admin(), &user_id).await;
 
         let (base, _srv) = boot_mock_op(op.clone()).await;
         let db_cfg = database.config_as("zeroship_gateway", 8);
-        let (state, _files) = build_state(&base, Some(db_cfg));
+        let (state, _files) = build_state(&app_fixture, &base, Some(db_cfg));
         let app = test::init_service(anchors_app!(state.clone())).await;
 
         let expected_pws = zeroship_core::auth::derive_pairwise(
@@ -221,11 +223,11 @@ async fn cookie_mint_writes_identity_so_reset_evicts_cookie_session() {
         );
 
         let persisted: String = database
-            .admin
+            .admin()
             .query_one(
                 "SELECT pairwise_sub FROM zeroship.app_user_identities \
          WHERE app_client_id = $1 AND global_user_id = $2",
-                &[&client_id(), &user_id.as_str()],
+                &[&app_fixture.client_id, &user_id.as_str()],
             )
             .await
             .expect("observe the identity written by the minter")
@@ -247,12 +249,12 @@ async fn cookie_mint_writes_identity_so_reset_evicts_cookie_session() {
             "reset must target the seeded user"
         );
 
-        let assert_client = &database.admin;
+        let assert_client = database.admin();
         let marker_count: i64 = assert_client
             .query_one(
                 "SELECT COUNT(*) FROM zeroship.token_revocations \
              WHERE client_id = $1 AND sub = $2",
-                &[&client_id(), &expected_pws],
+                &[&app_fixture.client_id, &expected_pws],
             )
             .await
             .expect("count family markers")
@@ -271,14 +273,15 @@ async fn cookie_mint_writes_identity_so_reset_evicts_cookie_session() {
 
 #[ntex::test]
 async fn interactive_cookie_mint_writes_identity_so_reset_evicts_session() {
-    Database::migrated(async |database| {
-        let op = Arc::new(MockOP::new(client_id()));
+    Database::run(async |database| {
+        let app_fixture = AppFixture::mint();
+        let op = Arc::new(MockOP::new(&app_fixture.client_id));
         let user_id = op.user_id.clone();
-        let email = seed_app_and_client(&database.admin, &user_id).await;
+        let email = seed_app_and_client(&app_fixture, database.admin(), &user_id).await;
 
         let (base, _srv) = boot_mock_op(op.clone()).await;
         let db_cfg = database.config_as("zeroship_gateway", 8);
-        let (state, _files) = build_state(&base, Some(db_cfg.clone()));
+        let (state, _files) = build_state(&app_fixture, &base, Some(db_cfg.clone()));
 
         let sector = format!("https://{APP_HOST}");
         let expected_pws =
@@ -289,7 +292,7 @@ async fn interactive_cookie_mint_writes_identity_so_reset_evicts_session() {
         let cookie = crate::auth_token::issue_interactive_session_cookie(
             &state,
             &db_cfg,
-            client_id(),
+            &app_fixture.client_id,
             Some(sector.as_str()),
             &user_id,
             cookie_iat,
@@ -308,11 +311,11 @@ async fn interactive_cookie_mint_writes_identity_so_reset_evicts_session() {
         );
 
         let persisted: String = database
-            .admin
+            .admin()
             .query_one(
                 "SELECT pairwise_sub FROM zeroship.app_user_identities \
          WHERE app_client_id = $1 AND global_user_id = $2",
-                &[&client_id(), &user_id.as_str()],
+                &[&app_fixture.client_id, &user_id.as_str()],
             )
             .await
             .expect("observe the identity written by the minter")
@@ -356,16 +359,17 @@ async fn interactive_cookie_mint_writes_identity_so_reset_evicts_session() {
 
 #[ntex::test]
 async fn mint_racing_concurrent_reset_fails_closed_no_fresh_cookie() {
-    Database::migrated(async |database| {
-        let op = Arc::new(MockOP::new(client_id()));
+    Database::run(async |database| {
+        let app_fixture = AppFixture::mint();
+        let op = Arc::new(MockOP::new(&app_fixture.client_id));
         let user_id = op.user_id.clone();
-        let email = seed_app_and_client(&database.admin, &user_id).await;
+        let email = seed_app_and_client(&app_fixture, database.admin(), &user_id).await;
         let relay_email = format!("{}@relay.zeroship.localhost", Uuid::new_v4().simple());
-        seed_relay_alias(&database.admin, &user_id, &relay_email).await;
+        seed_relay_alias(&app_fixture, database.admin(), &user_id, &relay_email).await;
 
         let (base, _srv) = boot_mock_op(op.clone()).await;
         let db_cfg = database.config_as("zeroship_gateway", 8);
-        let (state, _files) = build_state(&base, Some(db_cfg));
+        let (state, _files) = build_state(&app_fixture, &base, Some(db_cfg));
         let app = test::init_service(anchors_app!(state.clone())).await;
 
         let req = test::TestRequest::post()
@@ -430,7 +434,7 @@ async fn mint_racing_concurrent_reset_fails_closed_no_fresh_cookie() {
         "F4: the rotation must fail closed (login_required), not return a 200 identity projection"
     );
 
-        let assert_client = &database.admin;
+        let assert_client = database.admin();
         let live_anchor_count: i64 = assert_client
             .query_one(
                 "SELECT COUNT(*) FROM zeroship.app_session_anchors \
@@ -453,7 +457,7 @@ async fn mint_racing_concurrent_reset_fails_closed_no_fresh_cookie() {
             .query_one(
                 "SELECT COUNT(*) FROM zeroship.token_revocations \
              WHERE client_id = $1 AND sub = $2",
-                &[&client_id(), &expected_pws],
+                &[&app_fixture.client_id, &expected_pws],
             )
             .await
             .expect("count markers")

@@ -21,7 +21,7 @@ impl Provider {
         let files = tempfile::tempdir().unwrap();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
-        let mut url = database.url.clone();
+        let mut url = database.base_url().clone();
         url.set_username("zeroship_auth").unwrap();
         url.set_password(Some("zeroship_auth")).unwrap();
         let config = Arc::new(config(files.path(), url.as_str(), &base));
@@ -136,7 +136,9 @@ async fn failed_flow_releases_provider_connections_and_secret_files() {
     use futures::FutureExt;
     use std::{cell::RefCell, panic::AssertUnwindSafe};
     let directory = RefCell::new(None);
-    let failure = AssertUnwindSafe(Database::migrated(async |database| {
+    // Publishes to the platform signing-key registry, so the case owns the
+    // database it changes.
+    let failure = AssertUnwindSafe(Database::run_fresh(async |database| {
         let app = App::seed(database, REDIRECT_URI).await;
         let provider = Provider::start(database).await;
         *directory.borrow_mut() = Some(provider.files.path().to_owned());

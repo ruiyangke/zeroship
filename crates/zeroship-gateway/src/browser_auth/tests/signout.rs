@@ -17,14 +17,16 @@ async fn provider_failure_does_not_undo_local_signout() {
 }
 
 async fn exercise_signout(scope: &str, provider_unavailable: bool) {
-    Database::migrated(async |database| {
-        let op = Arc::new(MockOP::new(client_id()));
+    Database::run(async |database| {
+        let app_fixture = AppFixture::mint();
+        let op = Arc::new(MockOP::new(&app_fixture.client_id));
         op.revoke_unavailable.store(provider_unavailable, Ordering::SeqCst);
-        seed_user(&database.admin, &op.user_id).await;
+        seed_user(&app_fixture, database.admin(), &op.user_id).await;
         let (base, _provider) = boot_mock_op(op.clone()).await;
-        let (state, _files) = build_state(&base, Some(database.config_as("zeroship_gateway", 1)));
+        let (state, _files) =
+            build_state(&app_fixture, &base, Some(database.config_as("zeroship_gateway", 1)));
         let app = test::init_service(browser_app!(state)).await;
-        let target_app = AppId::parse(APP_ID).unwrap();
+        let target_app = app_fixture.id.clone();
 
         // The real minter encrypts this family's refresh token and issues its cookie.
         let login = test::call_service(&app, test::TestRequest::post()
@@ -46,21 +48,32 @@ async fn exercise_signout(scope: &str, provider_unavailable: bool) {
             .to_request();
         assert_eq!(test::call_service(&app, read_session()).await.status().as_u16(), 200);
 
-        let sibling = control_anchor(&state, &target_app, client_id(), &op.user_id, "rt_other_device").await;
+        let sibling =
+            control_anchor(&state, &target_app, &app_fixture.client_id, &op.user_id, "rt_other_device")
+                .await;
         let other_user = UserId::mint();
-        database.admin.execute(
-            "INSERT INTO zeroship.users (id, email, name) VALUES ($1, 'other@zeroship.test', 'Other User')",
-            &[&other_user.as_str()],
+        database.admin().execute(
+            "INSERT INTO zeroship.users (id, email, name) VALUES ($1, $2, 'Other User')",
+            &[
+                &other_user.as_str(),
+                &format!("other-{}@zeroship.test", other_user.as_str()),
+            ],
         ).await.unwrap();
-        let other_users_anchor = control_anchor(&state, &target_app, client_id(), &other_user, "rt_other_user").await;
+        let other_users_anchor =
+            control_anchor(&state, &target_app, &app_fixture.client_id, &other_user, "rt_other_user")
+                .await;
         let other_app = AppId::mint();
         let other_client = zeroship_core::typed_id::app_oauth_client_id(&other_app);
-        database.admin.execute(
+        database.admin().execute(
             "INSERT INTO zeroship.apps (id, name, project_id, organization_id) \
-             SELECT $1, 'other-app', project_id, organization_id FROM zeroship.apps WHERE id = $2",
-            &[&other_app.as_str(), &APP_ID],
+             SELECT $1, $2, project_id, organization_id FROM zeroship.apps WHERE id = $3",
+            &[
+                &other_app.as_str(),
+                &format!("other-{}", other_app.as_str()),
+                &app_fixture.id.as_str(),
+            ],
         ).await.unwrap();
-        database.admin.execute(
+        database.admin().execute(
             "INSERT INTO zeroship.oauth_clients (client_id, client_name, redirect_uris, scopes) \
              VALUES ($1, 'Other App', ARRAY['https://other.zeroship.ai/__zeroship/auth/callback'], ARRAY['openid'])",
             &[&other_client],
@@ -78,18 +91,34 @@ async fn exercise_signout(scope: &str, provider_unavailable: bool) {
             .to_request();
 
         // A foreign anchor must not grant authority over either app's families.
-        let before = stored_anchor_ids(&database.admin).await;
+        let owned_apps = [app_fixture.id.clone(), other_app.clone()];
+        let before = stored_anchor_ids(database.admin(), &owned_apps).await;
         let refused = test::call_service(&app, request(foreign)).await;
         assert_eq!(refused.status().as_u16(), 204);
         assert_cookie_clears(&refused);
-        assert_eq!(stored_anchor_ids(&database.admin).await, before);
+        assert_eq!(stored_anchor_ids(database.admin(), &owned_apps).await, before);
         assert!(op.revoked_refresh_tokens.lock().unwrap().is_empty());
-        assert!(database.admin.query("SELECT client_id FROM zeroship.token_revocations", &[]).await.unwrap().is_empty());
+        assert!(
+            database
+                .admin()
+                .query(
+                    "SELECT client_id FROM zeroship.token_revocations WHERE client_id = $1",
+                    &[&app_fixture.client_id],
+                )
+                .await
+                .unwrap()
+                .is_empty()
+        );
 
         let subject = test_pairwise_subject(&op.user_id, APP_HOST);
         let now = std::time::Instant::now();
-        state.revocation_cache.store(client_id(), &subject, None, now);
-        assert_eq!(state.revocation_cache.get(client_id(), &subject, now), Some(None));
+        state
+            .revocation_cache
+            .store(&app_fixture.client_id, &subject, None, now);
+        assert_eq!(
+            state.revocation_cache.get(&app_fixture.client_id, &subject, now),
+            Some(None)
+        );
 
         let response = test::call_service(&app, request(primary)).await;
         assert_eq!(response.status().as_u16(), 204);
@@ -98,8 +127,11 @@ async fn exercise_signout(scope: &str, provider_unavailable: bool) {
         let mut expected = vec![foreign, other_users_anchor];
         if scope == "local" { expected.push(sibling); }
         expected.sort_unstable();
-        assert_eq!(stored_anchor_ids(&database.admin).await, expected,
-            "signout must preserve anchors outside its scope");
+        assert_eq!(
+            stored_anchor_ids(database.admin(), &owned_apps).await,
+            expected,
+            "signout must preserve anchors outside its scope"
+        );
 
         let mut revoked = op.revoked_refresh_tokens.lock().unwrap().clone();
         revoked.sort_unstable();
@@ -107,11 +139,17 @@ async fn exercise_signout(scope: &str, provider_unavailable: bool) {
         if scope == "global" { expected_tokens.push("rt_other_device".to_owned()); }
         expected_tokens.sort_unstable();
         assert_eq!(revoked, expected_tokens, "revoke the decrypted families with their broker credentials");
-        let markers: Vec<(String, String)> = database.admin.query(
-            "SELECT client_id, sub FROM zeroship.token_revocations", &[],
+        let markers: Vec<(String, String)> = database.admin().query(
+            "SELECT client_id, sub FROM zeroship.token_revocations WHERE client_id = $1",
+            &[&app_fixture.client_id],
         ).await.unwrap().iter().map(|row| (row.get(0), row.get(1))).collect();
-        assert_eq!(markers, [(client_id().to_owned(), subject.clone())]);
-        assert_eq!(state.revocation_cache.get(client_id(), &subject, std::time::Instant::now()), None);
+        assert_eq!(markers, [(app_fixture.client_id.clone(), subject.clone())]);
+        assert_eq!(
+            state
+                .revocation_cache
+                .get(&app_fixture.client_id, &subject, std::time::Instant::now()),
+            None
+        );
         let refused = test::call_service(&app, read_session()).await;
         assert_eq!(refused.status().as_u16(), 401);
         assert_eq!(read_json(refused).await["error"], "login_required");
@@ -119,7 +157,7 @@ async fn exercise_signout(scope: &str, provider_unavailable: bool) {
         let repeated = test::call_service(&app, request(primary)).await;
         assert_eq!(repeated.status().as_u16(), 204);
         assert_cookie_clears(&repeated);
-        assert_eq!(stored_anchor_ids(&database.admin).await, expected);
+        assert_eq!(stored_anchor_ids(database.admin(), &owned_apps).await, expected);
         let mut after_repeat = op.revoked_refresh_tokens.lock().unwrap().clone();
         after_repeat.sort_unstable();
         assert_eq!(after_repeat, expected_tokens, "repeated signout must not revoke other families");
@@ -128,7 +166,8 @@ async fn exercise_signout(scope: &str, provider_unavailable: bool) {
 
 #[ntex::test]
 async fn signout_rejects_missing_custom_header_and_foreign_origin() {
-    let (state, _files) = state();
+    let app_fixture = AppFixture::mint();
+    let (state, _files) = state(&app_fixture);
     let app = test::init_service(browser_app!(state)).await;
 
     let req = test::TestRequest::post()
@@ -151,7 +190,8 @@ async fn signout_rejects_missing_custom_header_and_foreign_origin() {
 
 #[ntex::test]
 async fn signout_without_an_anchor_clears_cookies() {
-    let (state, _files) = state();
+    let app_fixture = AppFixture::mint();
+    let (state, _files) = state(&app_fixture);
     let app = test::init_service(browser_app!(state)).await;
 
     let req = test::TestRequest::post()

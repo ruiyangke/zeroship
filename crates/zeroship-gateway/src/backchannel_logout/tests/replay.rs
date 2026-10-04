@@ -5,9 +5,9 @@ use std::time::Duration;
 
 #[ntex::test]
 async fn completed_replay_preserves_new_sessions_and_the_original_audit() {
-    Database::migrated(async |database| {
+    Database::run(async |database| {
         let handler = Handler::new(database, 1).await;
-        let original = handler.session(&handler.user, &target_app(), None).await;
+        let original = handler.session(&handler.user, &handler.target_app(), None).await;
         let claims = handler.claims(Some(&handler.user), None);
         let token = handler.sign(&claims);
         let app = test::init_service(
@@ -20,19 +20,19 @@ async fn completed_replay_preserves_new_sessions_and_the_original_audit() {
             &test::call_service(&app, request(&token)).await,
             StatusCode::OK,
         );
-        assert!(revoked(&database.admin, original).await);
-        assert_audit(&database.admin, &claims, 1).await;
+        assert!(revoked(database.admin(), original).await);
+        assert_audit(database.admin(), &claims, 1).await;
 
-        let later = handler.session(&handler.user, &target_app(), None).await;
+        let later = handler.session(&handler.user, &handler.target_app(), None).await;
         assert_response(
             &test::call_service(&app, request(&token)).await,
             StatusCode::OK,
         );
         assert!(
-            !revoked(&database.admin, later).await,
+            !revoked(database.admin(), later).await,
             "a completed replay must not revoke a later login"
         );
-        assert_audit(&database.admin, &claims, 1).await;
+        assert_audit(database.admin(), &claims, 1).await;
     })
     .await;
 }
@@ -48,9 +48,9 @@ async fn replay_waiting_for_the_pool_observes_the_completed_revocation() {
 }
 
 async fn exercise_concurrent_replay(queue_for_pool: bool) {
-    Database::migrated(async |database| {
+    Database::run(async |database| {
         let handler = Handler::new(database, if queue_for_pool { 1 } else { 2 }).await;
-        let session = handler.session(&handler.user, &target_app(), None).await;
+        let session = handler.session(&handler.user, &handler.target_app(), None).await;
         let claims = handler.claims(Some(&handler.user), None);
         let token = handler.sign(&claims);
         handler.warm_jwks(&token).await;
@@ -70,9 +70,9 @@ async fn exercise_concurrent_replay(queue_for_pool: bool) {
                 .configure(crate::backchannel_logout::configure),
         )
         .await;
-        database.admin.batch_execute("BEGIN").await.unwrap();
+        database.admin().batch_execute("BEGIN").await.unwrap();
         database
-            .admin
+            .admin()
             .query_one(
                 "SELECT id FROM zeroship.gateway_sessions WHERE id = $1 FOR UPDATE",
                 &[&session],
@@ -94,7 +94,7 @@ async fn exercise_concurrent_replay(queue_for_pool: bool) {
                         poll!(&mut pending).is_pending(),
                         "the duplicate must wait for the occupied pool"
                     );
-                    database.admin.batch_execute("ROLLBACK").await.unwrap();
+                    database.admin().batch_execute("ROLLBACK").await.unwrap();
                     finished_rx.recv_async().await.unwrap();
                     pending.await
                 } else {
@@ -104,10 +104,10 @@ async fn exercise_concurrent_replay(queue_for_pool: bool) {
                             "inflight duplicate must finish while the original holds its claim",
                         );
                     assert_eq!(
-                        audit_count(&database.admin, claims["jti"].as_str().unwrap()).await,
+                        audit_count(database.admin(), claims["jti"].as_str().unwrap()).await,
                         0
                     );
-                    database.admin.batch_execute("ROLLBACK").await.unwrap();
+                    database.admin().batch_execute("ROLLBACK").await.unwrap();
                     response
                 }
             };
@@ -116,12 +116,12 @@ async fn exercise_concurrent_replay(queue_for_pool: bool) {
         .catch_unwind()
         .await;
         // Release the observer's lock even if the concurrency assertion panics.
-        database.admin.batch_execute("ROLLBACK").await.unwrap();
+        database.admin().batch_execute("ROLLBACK").await.unwrap();
         let (first, duplicate) = outcome.unwrap_or_else(|panic| std::panic::resume_unwind(panic));
         assert_response(&first, StatusCode::OK);
         assert_response(&duplicate, StatusCode::OK);
-        assert!(revoked(&database.admin, session).await);
-        assert_audit(&database.admin, &claims, 1).await;
+        assert!(revoked(database.admin(), session).await);
+        assert_audit(database.admin(), &claims, 1).await;
     })
     .await;
 }

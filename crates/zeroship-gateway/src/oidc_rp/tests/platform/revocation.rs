@@ -6,7 +6,8 @@ use super::*;
     reason = "follow the real cross-service logout from login through failed recovery"
 )]
 async fn revoking_an_app_session_at_the_provider_ends_gateway_authentication() {
-    Database::migrated(async |database| {
+    // Publishes to the platform signing-key registry, so the case owns the database it changes.
+    Database::run_fresh(async |database| {
         let redirect = format!("{SECTOR}/__zeroship/auth/popup-callback");
         let seeded = App::seed(database, &redirect).await;
         let provider = Provider::start(database).await;
@@ -16,7 +17,7 @@ async fn revoking_an_app_session_at_the_provider_ends_gateway_authentication() {
             let state = bcl_state.clone();
             async move { web::App::new().state(state).configure(crate::backchannel_logout::configure) }
         }).await;
-        database.admin.execute(
+        database.admin().execute(
             "UPDATE zeroship.oauth_clients SET backchannel_logout_uri = $2 WHERE client_id = $1",
             &[&seeded.client, &receiver.url("/oidc/backchannel-logout")],
         ).await.unwrap();
@@ -39,11 +40,11 @@ async fn revoking_an_app_session_at_the_provider_ends_gateway_authentication() {
         let before = test::call_service(&app, protected_request(&cookie)).await;
         assert_eq!(before.status(), StatusCode::OK);
         assert_eq!(test::read_body(before).await.as_ref(), b"protected asset");
-        let session: Uuid = database.admin.query_one(
+        let session: Uuid = database.admin().query_one(
             "SELECT id FROM zeroship.gateway_sessions WHERE user_id = $1 AND app_id = $2 AND revoked_at IS NULL",
             &[&seeded.user.as_str(), &seeded.id.as_str()],
         ).await.expect("real login wrote the app session").get(0);
-        assert!(database.admin.query_one("SELECT id FROM zeroship.app_session_anchors WHERE id = $1", &[&anchor_id])
+        assert!(database.admin().query_one("SELECT id FROM zeroship.app_session_anchors WHERE id = $1", &[&anchor_id])
             .await.is_ok(), "real login wrote the reload anchor");
 
         let csrf = "provider-revoke-csrf";
@@ -57,11 +58,11 @@ async fn revoking_an_app_session_at_the_provider_ends_gateway_authentication() {
         let after = test::call_service(&app, protected_request(&cookie)).await;
         assert_eq!(after.status(), StatusCode::UNAUTHORIZED,
             "the same cookie must no longer authenticate the protected route");
-        let missing: bool = database.admin.query_one(
+        let missing: bool = database.admin().query_one(
             "SELECT NOT EXISTS (SELECT FROM zeroship.app_session_anchors WHERE id = $1)", &[&anchor_id],
         ).await.unwrap().get(0);
         assert!(missing, "the real backchannel receiver must delete the reload anchor");
-        let audit: Value = database.admin.query_one(
+        let audit: Value = database.admin().query_one(
             "SELECT detail FROM zeroship.audit_events WHERE event_type = 'backchannel_logout_revoke' AND client_id = $1",
             &[&seeded.client],
         ).await.expect("the provider's HTTP logout reached the gateway receiver").get(0);

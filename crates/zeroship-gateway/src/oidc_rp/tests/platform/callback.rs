@@ -2,7 +2,8 @@ use super::*;
 
 #[ntex::test]
 async fn callback_binds_state_and_client_before_redeeming_the_code() {
-    Database::migrated(async |database| {
+    // Publishes to the platform signing-key registry, so the case owns the database it changes.
+    Database::run_fresh(async |database| {
         let app = App::seed(database, REDIRECT_URI).await;
         let provider = Provider::start(database).await;
         let rp = rp(&provider.base);

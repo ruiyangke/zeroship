@@ -1,248 +1,271 @@
-//! Own the database and drain this thread's gateway pool before runtime teardown.
+//! The migrated platform database a gateway unit case runs against.
+//!
+//! Every case in this binary shares one reaper-owned `PostgreSQL` server
+//! through [`zeroship_testkit::postgres`], migrated once. A case that owns only
+//! the rows and names it mints runs on that shared database; a case whose
+//! subject is platform-global - a schema rename, a table-wide lock, the
+//! signing-key registry - gets its own database cloned from the
+//! connection-free migrated template with [`Database::run_fresh`].
+//!
+//! Connections the case opens are joined before its runtime ends, including
+//! when an assertion unwinds, and the case's own panic is re-raised after that.
+//! The runner lives in the testkit; this is the gateway-specific adapter over
+//! it.
 
-#![allow(
-    clippy::future_not_send,
-    reason = "the fixture belongs to its compio runtime"
-)]
+use compio_postgres::Client;
+use std::cell::{OnceCell, RefCell};
 
-use compio_postgres::{Client, NoTls};
-use futures::FutureExt;
-use std::cell::RefCell;
-use std::panic::AssertUnwindSafe;
-use std::sync::OnceLock;
-use std::time::Duration;
-use testcontainers::core::{IntoContainerPort, WaitFor};
-use testcontainers::{runners::SyncRunner, Container, GenericImage, ImageExt};
+use zeroship_testkit::postgres::{Case, CaseFixture};
 
 use super::super::{DbConfig, POOL};
 
-mod migrations;
-
+/// The migrated platform database one gateway case runs against.
 pub struct Database {
-    postgres: Container<GenericImage>,
-    pub(crate) url: url::Url,
-    pub(crate) admin: Client,
-    driver: compio::runtime::JoinHandle<Result<(), compio_postgres::Error>>,
-    service_drivers: RefCell<Vec<compio::runtime::JoinHandle<Result<(), compio_postgres::Error>>>>,
+    case: Case,
+    /// The case's superuser connection, opened once before its body runs.
+    ///
+    /// Its driver is held here rather than registered with the case: the
+    /// connection lives as long as the fixture, so the runner's connection
+    /// join would wait on a client the fixture still owns.
+    admin: OnceCell<Client>,
+    admin_driver: RefCell<Option<AdminDriver>>,
+}
+
+type AdminDriver = compio::runtime::JoinHandle<Result<(), compio_postgres::Error>>;
+
+impl CaseFixture for Database {
+    fn from_case(case: Case) -> Self {
+        Self {
+            case,
+            admin: OnceCell::new(),
+            admin_driver: RefCell::new(None),
+        }
+    }
+
+    fn case(&self) -> &Case {
+        &self.case
+    }
+}
+
+impl std::ops::Deref for Database {
+    type Target = Case;
+
+    fn deref(&self) -> &Self::Target {
+        &self.case
+    }
 }
 
 impl Database {
-    pub(crate) async fn run(test: impl AsyncFnOnce(&Self)) {
-        Self::run_image(image(), test).await;
-    }
-
-    pub(crate) async fn migrated(test: impl AsyncFnOnce(&Self)) {
-        static SEED: OnceLock<migrations::Seed> = OnceLock::new();
-        let seed = SEED.get_or_init(migrations::Seed::build);
-        let image = image()
-            .with_env_var("POSTGRES_DB", "postgres")
-            .with_copy_to("/docker-entrypoint-initdb.d/roles.sql", seed.roles.clone())
-            .with_copy_to(
-                "/docker-entrypoint-initdb.d/schema.sql",
-                seed.database.clone(),
-            );
-        Self::run_image(image, test).await;
-    }
-
-    async fn run_image(
-        image: testcontainers::ContainerRequest<GenericImage>,
-        test: impl AsyncFnOnce(&Self),
-    ) {
-        assert!(
-            POOL.with(|pool| pool.borrow().is_none()),
-            "a previous case retained its gateway pool"
-        );
-        let postgres = image
-            .start()
-            .expect("gateway database tests require Docker and PostgreSQL");
-        let url = database_url(&postgres);
-        let mut config: compio_postgres::Config = url.as_str().parse().unwrap();
-        config.connect_timeout(Duration::from_secs(10));
-        let (admin, connection) = config
-            .connect(NoTls)
-            .await
-            .expect("connect fixture observer");
-        let database = Self {
-            postgres,
-            url,
-            admin,
-            driver: compio::runtime::spawn(async move { connection.run().await }),
-            service_drivers: RefCell::new(Vec::new()),
-        };
-        let outcome = AssertUnwindSafe(async {
-            compio::time::timeout(Duration::from_secs(45), Box::pin(test(&database)))
-                .await
-                .expect("gateway database case timed out");
+    /// Run `test` against the shared migrated database.
+    #[expect(
+        clippy::future_not_send,
+        reason = "fixtures belong to their compio runtime"
+    )]
+    pub async fn run(test: impl AsyncFnOnce(&Self)) {
+        zeroship_testkit::postgres::run::<Self>(async |database| {
+            database.initialize().await;
+            database.exercise(test).await;
         })
-        .catch_unwind()
         .await;
+    }
 
-        let drained = compio::time::timeout(Duration::from_secs(15), async {
-            let cached = POOL.with(|slot| slot.borrow_mut().take());
-            if let Some((_, pool)) = cached {
-                pool.close().await;
-            }
-            let drivers = database.service_drivers.take();
-            for driver in drivers {
-                driver.await.expect("service driver task").expect("service connection");
-            }
-            loop {
-                let empty: bool = database.admin.query_one(
-                    "SELECT NOT EXISTS (SELECT FROM pg_stat_activity WHERE backend_type = 'client backend' AND pid <> pg_backend_pid())", &[]
-                ).await.expect("observe pool connection cleanup").get(0);
-                if empty { break; }
-                compio::time::sleep(Duration::from_millis(25)).await;
-            }
-        }).await;
-        let Self {
-            postgres,
-            admin,
-            driver,
-            ..
-        } = database;
-        drop(admin);
-        let closed = compio::time::timeout(Duration::from_secs(15), driver).await;
-        let removed = postgres.rm();
-        drained.expect("pool connections must close before the database is removed");
-        closed
-            .expect("observer connection timed out")
-            .expect("observer task")
-            .expect("observer connection");
-        removed.expect("remove the owned PostgreSQL server");
+    /// Run `test` against a database cloned from the migrated template.
+    #[expect(
+        clippy::future_not_send,
+        reason = "fixtures belong to their compio runtime"
+    )]
+    pub async fn run_fresh(test: impl AsyncFnOnce(&Self)) {
+        zeroship_testkit::postgres::run_fresh::<Self>(async |database| {
+            database.initialize().await;
+            database.exercise(test).await;
+        })
+        .await;
+    }
+
+    /// Run the case body and close this thread's gateway pool afterwards, even
+    /// when the body unwinds, so a later case on the same thread cannot inherit
+    /// a pool bound to this case's database.
+    #[expect(
+        clippy::future_not_send,
+        reason = "fixtures belong to their compio runtime"
+    )]
+    async fn exercise(&self, test: impl AsyncFnOnce(&Self)) {
+        use futures::FutureExt;
+        use std::panic::AssertUnwindSafe;
+
+        let outcome = AssertUnwindSafe(async { test(self).await })
+            .catch_unwind()
+            .await;
+        if let Some((_, pool)) = POOL.with(|slot| slot.borrow_mut().take()) {
+            pool.close().await;
+        }
         if let Err(panic) = outcome {
             std::panic::resume_unwind(panic);
         }
     }
 
-    pub(crate) fn config(&self, capacity: usize) -> DbConfig {
-        DbConfig::new(self.url.as_str(), capacity)
+    /// Open the case's superuser connection before its body runs, so
+    /// [`Database::admin`] can hand out a reference rather than connect per
+    /// call.
+    #[expect(
+        clippy::future_not_send,
+        reason = "fixtures belong to their compio runtime"
+    )]
+    async fn initialize(&self) {
+        if self.admin.get().is_none() {
+            let (client, driver) = zeroship_testkit::postgres::connect(self.base_url()).await;
+            *self.admin_driver.borrow_mut() = Some(driver);
+            let _ = self.admin.set(client);
+        }
     }
 
+    /// The case's superuser connection, for seeding and independent
+    /// observation outside tenant filtering.
+    #[must_use]
+    pub fn admin(&self) -> &Client {
+        self.admin
+            .get()
+            .expect("the case runner opens the admin connection before the body")
+    }
+
+    #[must_use]
+    pub(crate) fn config(&self, capacity: usize) -> DbConfig {
+        DbConfig::new(self.base_url().as_str(), capacity)
+    }
+
+    #[must_use]
     pub(crate) fn config_as(&self, role: &str, capacity: usize) -> DbConfig {
-        let mut url = self.url.clone();
+        let mut url = self.base_url().clone();
         url.set_username(role).unwrap();
         url.set_password(Some(role)).unwrap();
         DbConfig::new(url.as_str(), capacity)
     }
 
+    #[expect(
+        clippy::future_not_send,
+        reason = "fixtures belong to their compio runtime"
+    )]
     pub(crate) async fn connect_as(&self, role: &str) -> Client {
-        let mut url = self.url.clone();
+        let mut url = self.base_url().clone();
         url.set_username(role).unwrap();
         url.set_password(Some(role)).unwrap();
-        let (client, connection) = compio_postgres::connect(url.as_str(), NoTls)
-            .await
-            .expect("connect the service role");
-        self.service_drivers
-            .borrow_mut()
-            .push(compio::runtime::spawn(
-                async move { connection.run().await },
-            ));
-        client
+        self.connect_to(url.as_str()).await
     }
 
+    #[expect(
+        clippy::future_not_send,
+        reason = "fixtures belong to their compio runtime"
+    )]
     pub(crate) async fn wait_until_blocked(&self, pids: &[i32]) {
-        assert!(!pids.is_empty(), "lock observation needs active backends");
-        compio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                let blocked: bool = self.admin.query_one(
-                    "SELECT bool_and(cardinality(pg_blocking_pids(pid)) > 0) FROM unnest($1::int[]) AS requested(pid)", &[&pids]
-                ).await.expect("observe blocked pool queries").get(0);
-                if blocked { break; }
-                compio::time::sleep(Duration::from_millis(25)).await;
-            }
-        }).await.expect("all pool queries must reach the database lock");
+        assert!(
+            self.case.wait_until_blocked(pids).await,
+            "all pool queries must reach the database lock"
+        );
     }
-}
-
-fn image() -> testcontainers::ContainerRequest<GenericImage> {
-    GenericImage::new("postgres", "17")
-        .with_exposed_port(5432.tcp())
-        .with_wait_for(WaitFor::message_on_stdout(
-            "PostgreSQL init process complete; ready for start up.",
-        ))
-        .with_wait_for(WaitFor::message_on_stderr(
-            "database system is ready to accept connections",
-        ))
-        .with_env_var("POSTGRES_PASSWORD", "fixture")
-        .with_env_var("POSTGRES_DB", "gateway_tests")
-        .with_startup_timeout(Duration::from_secs(120))
-}
-
-fn database_url(postgres: &Container<GenericImage>) -> url::Url {
-    let mut url = url::Url::parse("postgresql://postgres:fixture@localhost/gateway_tests").unwrap();
-    url.set_host(Some(
-        &postgres.get_host().expect("database host").to_string(),
-    ))
-    .unwrap();
-    url.set_port(Some(
-        postgres.get_host_port_ipv4(5432).expect("database port"),
-    ))
-    .unwrap();
-    url
 }
 
 #[compio::test]
-async fn assertion_failure_releases_the_cache_and_the_owned_server() {
+async fn a_failed_case_re_raises_its_failure_and_closes_its_connections() {
     use super::super::checkout;
-    use std::cell::RefCell;
+    use futures::FutureExt;
+    use std::panic::AssertUnwindSafe;
+    use zeroship_core::UserId;
 
-    let failed_id = RefCell::new(String::new());
+    let role = format!("gateway_failed_{}", UserId::mint().as_str());
     let failure = AssertUnwindSafe(Database::run(async |database| {
-        *failed_id.borrow_mut() = database.postgres.id().to_owned();
-        let pool = checkout(&database.config(1)).await.unwrap();
+        let admin = database.admin();
+        admin
+            .batch_execute(&format!(
+                "CREATE ROLE \"{role}\" LOGIN PASSWORD '{role}'"
+            ))
+            .await
+            .unwrap();
+        let pool = checkout(&database.config_as(&role, 1)).await.unwrap();
         let _lease = pool.acquire().await.unwrap();
-        panic!("intentional pool fixture failure");
+        let open: i64 = admin
+            .query_one(
+                "SELECT count(*) FROM pg_stat_activity WHERE usename = $1",
+                &[&role],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert!(
+            open > 0,
+            "the failed case must hold its own connection before it unwinds"
+        );
+        panic!("intentional fixture failure");
     }))
     .catch_unwind()
     .await
-    .expect_err("propagate case failure");
+    .expect_err("a failed case must re-raise its own panic");
     assert_eq!(
         failure.downcast_ref::<&str>(),
-        Some(&"intentional pool fixture failure")
+        Some(&"intentional fixture failure")
     );
     assert!(POOL.with(|pool| pool.borrow().is_none()));
-    let containers = std::process::Command::new("docker")
-        .args(["ps", "--all", "--quiet", "--no-trunc"])
-        .output()
-        .expect("list fixture containers");
-    assert!(containers.status.success());
-    assert!(
-        !String::from_utf8(containers.stdout)
-            .unwrap()
-            .lines()
-            .any(|id| id == *failed_id.borrow()),
-        "failed case leaked its server"
-    );
+
     Database::run(async |database| {
-        let pool = checkout(&database.config(1)).await.unwrap();
+        let admin = database.admin();
+        let open: i64 = admin
+            .query_one(
+                "SELECT count(*) FROM pg_stat_activity WHERE usename = $1",
+                &[&role],
+            )
+            .await
+            .unwrap()
+            .get(0);
         assert_eq!(
-            pool.query("SELECT current_database()", &[]).await.unwrap()[0].get::<_, String>(0),
-            "gateway_tests"
+            open, 0,
+            "a failed case must close its connections before re-raising"
         );
-    })
-    .await;
-}
-
-#[compio::test]
-async fn migrated_cases_restore_service_authority_without_sharing_mutations() {
-    use super::super::checkout;
-
-    Database::migrated(async |database| {
-        database
-            .admin
-            .batch_execute("CREATE TABLE fixture_mutation (id integer)")
+        admin
+            .batch_execute(&format!("DROP ROLE \"{role}\""))
             .await
             .unwrap();
     })
     .await;
-    Database::migrated(async |database| {
-        let absent: bool = database
-            .admin
-            .query_one("SELECT to_regclass('fixture_mutation') IS NULL", &[])
+}
+
+#[compio::test]
+async fn fresh_cases_isolate_schema_changes_from_the_shared_database() {
+    use super::super::checkout;
+
+    Database::run_fresh(async |database| {
+        database
+            .admin()
+            .batch_execute(
+                "ALTER TABLE zeroship.app_user_identities RENAME TO fixture_fresh_identities",
+            )
+            .await
+            .unwrap();
+        let renamed: bool = database
+            .admin()
+            .query_one(
+                "SELECT to_regclass('zeroship.fixture_fresh_identities') IS NOT NULL",
+                &[],
+            )
             .await
             .unwrap()
             .get(0);
-        assert!(absent, "a previous case mutated the migration seed");
+        assert!(renamed, "the fresh case owns the schema it changed");
+    })
+    .await;
+
+    Database::run(async |database| {
+        let present: bool = database
+            .admin()
+            .query_one(
+                "SELECT to_regclass('zeroship.app_user_identities') IS NOT NULL",
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert!(
+            present,
+            "a fresh case's schema change must not reach the shared database"
+        );
         let pool = checkout(&database.config_as("zeroship_gateway", 1))
             .await
             .unwrap();

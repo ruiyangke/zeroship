@@ -2,9 +2,10 @@ use super::*;
 
 #[ntex::test]
 async fn foreign_origin_is_rejected_no_cors_reflection() {
-    let op = Arc::new(MockOP::new(client_id()));
+    let app_fixture = AppFixture::mint();
+    let op = Arc::new(MockOP::new(&app_fixture.client_id));
     let (base, _srv) = boot_mock_op(op).await;
-    let (state, _files) = build_state(&base, None);
+    let (state, _files) = build_state(&app_fixture, &base, None);
 
     let app = test::init_service(anchors_app!(state)).await;
 
@@ -37,9 +38,10 @@ async fn foreign_origin_is_rejected_no_cors_reflection() {
 
 #[ntex::test]
 async fn token_missing_custom_header_is_rejected() {
-    let op = Arc::new(MockOP::new(client_id()));
+    let app_fixture = AppFixture::mint();
+    let op = Arc::new(MockOP::new(&app_fixture.client_id));
     let (base, _srv) = boot_mock_op(op).await;
-    let (state, _files) = build_state(&base, None);
+    let (state, _files) = build_state(&app_fixture, &base, None);
     let app = test::init_service(anchors_app!(state)).await;
 
     let req = test::TestRequest::post()
@@ -55,9 +57,10 @@ async fn token_missing_custom_header_is_rejected() {
 
 #[ntex::test]
 async fn session_mint_without_custom_header_is_rejected() {
-    let op = Arc::new(MockOP::new(client_id()));
+    let app_fixture = AppFixture::mint();
+    let op = Arc::new(MockOP::new(&app_fixture.client_id));
     let (base, _srv) = boot_mock_op(op).await;
-    let (state, _files) = build_state(&base, None);
+    let (state, _files) = build_state(&app_fixture, &base, None);
     let app = test::init_service(anchors_app!(state)).await;
 
     let req = test::TestRequest::get()
@@ -70,9 +73,10 @@ async fn session_mint_without_custom_header_is_rejected() {
 
 #[ntex::test]
 async fn session_get_fast_path_honors_valid_pairwise_cookie_db_free() {
-    let op = Arc::new(MockOP::new(client_id()));
+    let app_fixture = AppFixture::mint();
+    let op = Arc::new(MockOP::new(&app_fixture.client_id));
     let (base, _srv) = boot_mock_op(op).await;
-    let (state, _files) = build_state(&base, None);
+    let (state, _files) = build_state(&app_fixture, &base, None);
     assert!(
         state.db.is_none(),
         "fixture must have no DB for the DB-free proof"
@@ -80,7 +84,7 @@ async fn session_get_fast_path_honors_valid_pairwise_cookie_db_free() {
 
     let pws = test_pairwise_subject(&UserId::mint(), APP_HOST);
     let scopes = vec!["openid".to_string(), "email".to_string()];
-    let cookie = issue_session_cookie(&state, &pws, &scopes);
+    let cookie = issue_session_cookie(&state, &app_fixture.client_id, &pws, &scopes);
 
     let app = test::init_service(anchors_app!(state)).await;
     let req = test::TestRequest::get()
@@ -107,16 +111,17 @@ async fn session_get_fast_path_honors_valid_pairwise_cookie_db_free() {
 
 #[ntex::test]
 async fn session_get_fast_path_rejects_non_pairwise_sub() {
-    let op = Arc::new(MockOP::new(client_id()));
+    let app_fixture = AppFixture::mint();
+    let op = Arc::new(MockOP::new(&app_fixture.client_id));
     let (base, _srv) = boot_mock_op(op).await;
-    let (state, _files) = build_state(&base, None);
+    let (state, _files) = build_state(&app_fixture, &base, None);
 
     let global_like = UserId::mint().as_str().to_owned();
     assert!(
         !zeroship_core::auth::is_pairwise_subject(&global_like),
         "a global user ID is not a pairwise subject"
     );
-    let cookie = issue_session_cookie(&state, &global_like, &[]);
+    let cookie = issue_session_cookie(&state, &app_fixture.client_id, &global_like, &[]);
 
     let app = test::init_service(anchors_app!(state)).await;
     let req = test::TestRequest::get()
@@ -139,10 +144,11 @@ async fn session_get_fast_path_rejects_non_pairwise_sub() {
 
 #[ntex::test]
 async fn session_post_fails_fast_without_signing_key() {
-    let op = Arc::new(MockOP::new(client_id()));
+    let app_fixture = AppFixture::mint();
+    let op = Arc::new(MockOP::new(&app_fixture.client_id));
     let (base, _srv) = boot_mock_op(op).await;
 
-    let (mut state, _files) = build_state(&base, None);
+    let (mut state, _files) = build_state(&app_fixture, &base, None);
     {
         let st = Arc::get_mut(&mut state).expect("sole owner before init_service");
         st.signing_key = None;
@@ -176,13 +182,14 @@ async fn session_post_fails_fast_without_signing_key() {
 
 #[ntex::test]
 async fn token_exchange_is_identity_only_and_sets_both_cookies() {
-    Database::migrated(async |database| {
-        let op = Arc::new(MockOP::new(client_id()));
-        seed_user(&database.admin, &op.user_id).await;
+    Database::run(async |database| {
+        let app_fixture = AppFixture::mint();
+        let op = Arc::new(MockOP::new(&app_fixture.client_id));
+        seed_user(&app_fixture, database.admin(), &op.user_id).await;
         let user_id = op.user_id.clone();
         let (base, _srv) = boot_mock_op(op.clone()).await;
         let db = database.config_as("zeroship_gateway", 8);
-        let (state, _files) = build_state(&base, Some(db));
+        let (state, _files) = build_state(&app_fixture, &base, Some(db));
         let app = test::init_service(anchors_app!(state.clone())).await;
 
         let req = test::TestRequest::post()
@@ -268,11 +275,11 @@ async fn token_exchange_is_identity_only_and_sets_both_cookies() {
             .session_verifier
             .as_ref()
             .expect("session verifier")
-            .verify(&session_token, client_id())
+            .verify(&session_token, &app_fixture.client_id)
             .expect("signed session cookie verifies locally");
         assert_eq!(
             claims.app,
-            client_id(),
+            app_fixture.client_id.as_str(),
             "cookie app binds to the route client_id"
         );
         assert_eq!(claims.sub, expected_pws, "cookie sub is the per-app pws_");
@@ -284,12 +291,12 @@ async fn token_exchange_is_identity_only_and_sets_both_cookies() {
         );
 
         {
-            let conn = &database.admin;
+            let conn = database.admin();
             let rows = conn
                 .query(
                     "SELECT user_id, app_id FROM zeroship.gateway_sessions \
                  WHERE user_id = $1 AND app_id = $2",
-                    &[&user_id.as_str(), &APP_ID],
+                    &[&user_id.as_str(), &app_fixture.id.as_str()],
                 )
                 .await
                 .expect("audit row query");
@@ -304,15 +311,16 @@ async fn token_exchange_is_identity_only_and_sets_both_cookies() {
 
 #[ntex::test]
 async fn token_exchange_swaps_email_for_relay_alias() {
-    Database::migrated(async |database| {
-        let op = Arc::new(MockOP::new(client_id()));
-        seed_user(&database.admin, &op.user_id).await;
+    Database::run(async |database| {
+        let app_fixture = AppFixture::mint();
+        let op = Arc::new(MockOP::new(&app_fixture.client_id));
+        seed_user(&app_fixture, database.admin(), &op.user_id).await;
         let user_id = op.user_id.clone();
         let relay_email = format!("{}@relay.zeroship.localhost", Uuid::new_v4().simple());
-        seed_relay_alias(&database.admin, &user_id, &relay_email).await;
+        seed_relay_alias(&app_fixture, database.admin(), &user_id, &relay_email).await;
         let (base, _srv) = boot_mock_op(op.clone()).await;
         let db = database.config_as("zeroship_gateway", 8);
-        let (state, _files) = build_state(&base, Some(db));
+        let (state, _files) = build_state(&app_fixture, &base, Some(db));
         let app = test::init_service(anchors_app!(state.clone())).await;
 
         let req = test::TestRequest::post()
@@ -349,12 +357,13 @@ async fn token_exchange_swaps_email_for_relay_alias() {
 
 #[ntex::test]
 async fn token_exchange_fails_closed_when_no_alias() {
-    Database::migrated(async |database| {
-        let op = Arc::new(MockOP::new(client_id()));
-        seed_user(&database.admin, &op.user_id).await;
+    Database::run(async |database| {
+        let app_fixture = AppFixture::mint();
+        let op = Arc::new(MockOP::new(&app_fixture.client_id));
+        seed_user(&app_fixture, database.admin(), &op.user_id).await;
         let (base, _srv) = boot_mock_op(op.clone()).await;
         let db = database.config_as("zeroship_gateway", 8);
-        let (state, _files) = build_state(&base, Some(db));
+        let (state, _files) = build_state(&app_fixture, &base, Some(db));
         let app = test::init_service(anchors_app!(state.clone())).await;
 
         let req = test::TestRequest::post()
@@ -387,15 +396,16 @@ async fn token_exchange_fails_closed_when_no_alias() {
 
 #[ntex::test]
 async fn session_steady_state_projects_cookie_without_op() {
-    Database::migrated(async |database| {
-        let op = Arc::new(MockOP::new(client_id()));
-        seed_user(&database.admin, &op.user_id).await;
+    Database::run(async |database| {
+        let app_fixture = AppFixture::mint();
+        let op = Arc::new(MockOP::new(&app_fixture.client_id));
+        seed_user(&app_fixture, database.admin(), &op.user_id).await;
         let user_id = op.user_id.clone();
         let relay_email = format!("{}@relay.zeroship.localhost", Uuid::new_v4().simple());
-        seed_relay_alias(&database.admin, &user_id, &relay_email).await;
+        seed_relay_alias(&app_fixture, database.admin(), &user_id, &relay_email).await;
         let (base, _srv) = boot_mock_op(op.clone()).await;
         let db_cfg = database.config_as("zeroship_gateway", 8);
-        let (state, _files) = build_state(&base, Some(db_cfg.clone()));
+        let (state, _files) = build_state(&app_fixture, &base, Some(db_cfg.clone()));
         let app = test::init_service(anchors_app!(state.clone())).await;
 
         let req = test::TestRequest::post()
@@ -449,15 +459,16 @@ async fn session_steady_state_projects_cookie_without_op() {
 
 #[ntex::test]
 async fn session_minted_cookie_verifies_locally_bound_to_route_client() {
-    Database::migrated(async |database| {
-        let op = Arc::new(MockOP::new(client_id()));
-        seed_user(&database.admin, &op.user_id).await;
+    Database::run(async |database| {
+        let app_fixture = AppFixture::mint();
+        let op = Arc::new(MockOP::new(&app_fixture.client_id));
+        seed_user(&app_fixture, database.admin(), &op.user_id).await;
         let user_id = op.user_id.clone();
         let relay_email = format!("{}@relay.zeroship.localhost", Uuid::new_v4().simple());
-        seed_relay_alias(&database.admin, &user_id, &relay_email).await;
+        seed_relay_alias(&app_fixture, database.admin(), &user_id, &relay_email).await;
         let (base, _srv) = boot_mock_op(op.clone()).await;
         let db_cfg = database.config_as("zeroship_gateway", 8);
-        let (state, _files) = build_state(&base, Some(db_cfg.clone()));
+        let (state, _files) = build_state(&app_fixture, &base, Some(db_cfg.clone()));
         let app = test::init_service(anchors_app!(state.clone())).await;
 
         let req = test::TestRequest::post()
@@ -480,7 +491,7 @@ async fn session_minted_cookie_verifies_locally_bound_to_route_client() {
 
         let verifier = state.session_verifier.as_ref().expect("session verifier");
         let claims = verifier
-            .verify(&session_token, client_id())
+            .verify(&session_token, &app_fixture.client_id)
             .expect("the POST /session-minted cookie MUST verify under the route client_id");
         let expected_pws = zeroship_core::auth::derive_pairwise(
             &state.pairwise_salt,
@@ -489,7 +500,7 @@ async fn session_minted_cookie_verifies_locally_bound_to_route_client() {
         );
         assert_eq!(
             claims.app,
-            client_id(),
+            app_fixture.client_id.as_str(),
             "cookie binds to the route client_id (app claim)"
         );
         assert_eq!(claims.sub, expected_pws, "cookie sub is the per-app pws_");
@@ -505,8 +516,10 @@ async fn session_minted_cookie_verifies_locally_bound_to_route_client() {
         );
 
         assert!(
-            verifier.verify(&session_token, bcl_client_id()).is_err(),
-            "a cookie minted for client_id() MUST NOT verify for a different app client_id"
+            verifier
+                .verify(&session_token, &AppFixture::mint().client_id)
+                .is_err(),
+            "a cookie minted for one app client id MUST NOT verify for another"
         );
     })
     .await;

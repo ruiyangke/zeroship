@@ -40,8 +40,8 @@ macro_rules! browser_app {
 }
 use browser_app;
 
-fn state() -> (Arc<GateState>, tempfile::TempDir) {
-    build_state("http://127.0.0.1:1", None)
+fn state(app: &AppFixture) -> (Arc<GateState>, tempfile::TempDir) {
+    build_state(app, "http://127.0.0.1:1", None)
 }
 fn header_str(resp: &ntex::web::WebResponse, name: &str) -> Option<String> {
     resp.headers()

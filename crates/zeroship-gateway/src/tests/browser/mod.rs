@@ -28,9 +28,32 @@ pub const APP_HOST: &str = "myapp.zeroship.ai";
 pub const APP_NAME: &str = "myapp";
 const PAIRWISE_TEST_SALT_SEED: &str = "pairwise-test-salt";
 pub const BCL_REFRESH_APP_HOST: &str = "bcl-refresh.zeroship.ai";
+/// The route name matching [`BCL_REFRESH_APP_HOST`]'s first label.
 pub const BCL_REFRESH_APP_NAME: &str = "bcl-refresh";
-pub const BCL_REFRESH_APP_ID: &str = "app_0000000000000000000000002";
-pub const APP_ID: &str = "app_0000000000000000000000001";
+
+/// A gateway app identity minted by one case.
+///
+/// The app row, its OAuth client and the rows keyed to them are owned by the
+/// case, so cases sharing the migrated database never collide on the app id or
+/// its derived client id. The host and display name are not unique in the
+/// schema, so they stay the shared fixture's constants.
+pub struct AppFixture {
+    pub id: AppId,
+    pub name: String,
+    pub client_id: String,
+}
+
+impl AppFixture {
+    #[must_use]
+    pub fn mint() -> Self {
+        let id = AppId::mint();
+        Self {
+            client_id: zeroship_core::typed_id::app_oauth_client_id(&id),
+            name: format!("{APP_NAME}-{}", id.as_str()),
+            id,
+        }
+    }
+}
 
 fn test_pairwise_salt() -> [u8; 32] {
     zeroship_core::crypto::derive_key(PAIRWISE_TEST_SALT_SEED)
@@ -45,10 +68,18 @@ pub fn test_pairwise_subject(user_id: &UserId, app_host: &str) -> String {
 }
 
 pub fn build_state(
+    app: &AppFixture,
     op_base: &str,
     db: Option<crate::db::DbConfig>,
 ) -> (Arc<GateState>, tempfile::TempDir) {
-    build_state_with_route(op_base, db, APP_ID, APP_NAME, APP_HOST, client_id())
+    build_state_with_route(
+        op_base,
+        db,
+        app.id.as_str(),
+        APP_NAME,
+        APP_HOST,
+        &app.client_id,
+    )
 }
 
 pub fn build_state_with_route(
@@ -198,13 +229,18 @@ pub async fn read_json(resp: ntex::web::WebResponse) -> serde_json::Value {
     serde_json::from_slice(&bytes).expect("json body")
 }
 
-pub fn issue_session_cookie(state: &GateState, sub: &str, scopes: &[String]) -> String {
+pub fn issue_session_cookie(
+    state: &GateState,
+    client_id: &str,
+    sub: &str,
+    scopes: &[String],
+) -> String {
     let token = state
         .session_issuer
         .as_ref()
         .expect("session issuer configured")
         .issue(&session_token::SessionMint {
-            app: client_id(),
+            app: client_id,
             sub,
             credential_iat: 1_700_000_000,
             auth_time: Some(1_700_000_000),
@@ -220,10 +256,19 @@ pub fn issue_session_cookie(state: &GateState, sub: &str, scopes: &[String]) -> 
     format!("{name}={token}")
 }
 pub async fn seed_app_and_client(
+    app: &AppFixture,
     client: &compio_postgres::Client,
     user_id: &UserId,
 ) -> String {
-    seed_app_and_client_for(client, user_id, APP_ID, APP_NAME, APP_HOST, client_id()).await
+    seed_app_and_client_for(
+        client,
+        user_id,
+        app.id.as_str(),
+        &app.name,
+        APP_HOST,
+        &app.client_id,
+    )
+    .await
 }
 pub async fn seed_app_and_client_for(
     client: &compio_postgres::Client,
@@ -236,7 +281,7 @@ pub async fn seed_app_and_client_for(
     client
         .execute(
             "INSERT INTO zeroship.plans (id, name, runtime_limits_json, assignable_by_creator) \
-         VALUES ('free', 'Free', '{}'::jsonb, TRUE)",
+         VALUES ('free', 'Free', '{}'::jsonb, TRUE) ON CONFLICT (id) DO NOTHING",
             &[],
         )
         .await
@@ -277,11 +322,12 @@ pub async fn seed_app_and_client_for(
     email
 }
 pub async fn seed_relay_alias(
+    app: &AppFixture,
     client: &compio_postgres::Client,
     user_id: &UserId,
     relay_email: &str,
 ) {
-    seed_relay_alias_for(client, client_id(), APP_HOST, user_id, relay_email).await;
+    seed_relay_alias_for(client, &app.client_id, APP_HOST, user_id, relay_email).await;
 }
 pub async fn seed_relay_alias_for(
     client: &compio_postgres::Client,
@@ -326,22 +372,12 @@ async fn unowned_project(pg: &compio_postgres::Client) -> String {
 
 pub const REAL_EMAIL: &str = "user@example.com";
 
-pub fn client_id() -> &'static str {
-    static CLIENT: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
-        zeroship_core::typed_id::app_oauth_client_id(&AppId::parse(APP_ID).unwrap())
-    });
-    &CLIENT
-}
-
-pub fn bcl_client_id() -> &'static str {
-    static CLIENT: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
-        zeroship_core::typed_id::app_oauth_client_id(&AppId::parse(BCL_REFRESH_APP_ID).unwrap())
-    });
-    &CLIENT
-}
-
-pub async fn seed_user(client: &compio_postgres::Client, user: &UserId) {
-    seed_app_and_client(client, user).await;
+pub async fn seed_user(
+    app: &AppFixture,
+    client: &compio_postgres::Client,
+    user: &UserId,
+) {
+    seed_app_and_client(app, client, user).await;
 }
 
 pub(crate) use {anchors_app, anchors_bcl_app};

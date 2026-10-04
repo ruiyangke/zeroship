@@ -149,7 +149,7 @@ async fn checked_out_connections_execute_queries_concurrently() {
         );
         let barrier = 711_i64;
         database
-            .admin
+            .admin()
             .query_one("SELECT pg_advisory_lock($1)", &[&barrier])
             .await
             .unwrap();
@@ -169,7 +169,7 @@ async fn checked_out_connections_execute_queries_concurrently() {
         let release = async {
             database.wait_until_blocked(&pids).await;
             let unlocked: bool = database
-                .admin
+                .admin()
                 .query_one("SELECT pg_advisory_unlock($1)", &[&barrier])
                 .await
                 .unwrap()
@@ -184,15 +184,17 @@ async fn checked_out_connections_execute_queries_concurrently() {
 #[compio::test]
 async fn changing_the_database_replaces_the_cache_without_breaking_existing_leases() {
     Database::run(async |database| {
+        let shared = database.base_url().path().trim_start_matches('/').to_owned();
+        let rotated = zeroship_core::typed_id::generate("db");
         let first = checkout(&database.config(1)).await.unwrap();
         let existing = first.acquire().await.unwrap();
         database
-            .admin
-            .batch_execute("CREATE DATABASE rotated")
+            .admin()
+            .batch_execute(&format!("CREATE DATABASE \"{rotated}\""))
             .await
             .unwrap();
-        let mut next_url = database.url.clone();
-        next_url.set_path("/rotated");
+        let mut next_url = database.base_url().clone();
+        next_url.set_path(&rotated);
         let next_config = DbConfig::new(next_url.as_str(), 1);
         let next = checkout(&next_config).await.unwrap();
         assert!(
@@ -201,7 +203,7 @@ async fn changing_the_database_replaces_the_cache_without_breaking_existing_leas
         );
         assert_eq!(
             next.query("SELECT current_database()", &[]).await.unwrap()[0].get::<_, String>(0),
-            "rotated"
+            rotated
         );
         assert_eq!(
             existing
@@ -209,11 +211,17 @@ async fn changing_the_database_replaces_the_cache_without_breaking_existing_leas
                 .await
                 .unwrap()
                 .get::<_, String>(0),
-            "gateway_tests"
+            shared
         );
         assert!(Rc::ptr_eq(&next, &checkout(&next_config).await.unwrap()));
         drop(existing);
         first.close().await;
+        next.close().await;
+        database
+            .admin()
+            .batch_execute(&format!("DROP DATABASE \"{rotated}\" WITH (FORCE)"))
+            .await
+            .unwrap();
     })
     .await;
 }
@@ -221,8 +229,9 @@ async fn changing_the_database_replaces_the_cache_without_breaking_existing_leas
 #[compio::test]
 async fn a_failed_initial_connection_can_retry_after_the_database_is_created() {
     Database::run(async |database| {
-        let mut url = database.url.clone();
-        url.set_path("/created_later");
+        let created = zeroship_core::typed_id::generate("db");
+        let mut url = database.base_url().clone();
+        url.set_path(&created);
         let config = DbConfig::new(url.as_str(), 1);
         let error = checkout(&config).await.unwrap_err();
         assert_eq!(
@@ -230,8 +239,8 @@ async fn a_failed_initial_connection_can_retry_after_the_database_is_created() {
             Some(&compio_postgres::error::SqlState::INVALID_CATALOG_NAME)
         );
         database
-            .admin
-            .batch_execute("CREATE DATABASE created_later")
+            .admin()
+            .batch_execute(&format!("CREATE DATABASE \"{created}\""))
             .await
             .unwrap();
         let pool = checkout(&config)
@@ -239,8 +248,14 @@ async fn a_failed_initial_connection_can_retry_after_the_database_is_created() {
             .expect("retry after creating the database");
         assert_eq!(
             pool.query("SELECT current_database()", &[]).await.unwrap()[0].get::<_, String>(0),
-            "created_later"
+            created
         );
+        pool.close().await;
+        database
+            .admin()
+            .batch_execute(&format!("DROP DATABASE \"{created}\" WITH (FORCE)"))
+            .await
+            .unwrap();
     })
     .await;
 }

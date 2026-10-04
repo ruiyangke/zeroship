@@ -8254,7 +8254,6 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
- "testcontainers",
  "thiserror 2.0.18",
  "toml 0.8.23",
  "tracing",
@@ -8267,6 +8266,7 @@ dependencies = [
  "zeroship-bundle",
  "zeroship-core",
  "zeroship-metering",
+ "zeroship-testkit",
 ]
 
 [[package]]

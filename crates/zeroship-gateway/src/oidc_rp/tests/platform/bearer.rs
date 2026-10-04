@@ -11,7 +11,8 @@ fn request(token: &str) -> ntex::http::Request {
 
 #[ntex::test]
 async fn gateway_forwards_real_access_tokens_but_rejects_identity_tokens() {
-    Database::migrated(async |database| {
+    // Publishes to the platform signing-key registry, so the case owns the database it changes.
+    Database::run_fresh(async |database| {
         let seeded = App::seed(database, REDIRECT_URI).await;
         let provider = Provider::start(database).await;
         let tokens = tokens(&provider, &seeded).await;
@@ -42,7 +43,8 @@ async fn gateway_forwards_real_access_tokens_but_rejects_identity_tokens() {
 
 #[ntex::test]
 async fn resource_audience_is_required_even_when_the_client_id_matches() {
-    Database::migrated(async |database| {
+    // Publishes to the platform signing-key registry, so the case owns the database it changes.
+    Database::run_fresh(async |database| {
         let seeded = App::seed(database, REDIRECT_URI).await;
         let provider = Provider::start(database).await;
         let gateway = Gateway::start(database, &provider, &seeded).await;
@@ -78,7 +80,8 @@ async fn resource_audience_is_required_even_when_the_client_id_matches() {
 // `jti` field would make this token look valid again.
 #[ntex::test]
 async fn access_token_without_jti_is_rejected() {
-    Database::migrated(async |database| {
+    // Publishes to the platform signing-key registry, so the case owns the database it changes.
+    Database::run_fresh(async |database| {
         let seeded = App::seed(database, REDIRECT_URI).await;
         let provider = Provider::start(database).await;
         let gateway = Gateway::start(database, &provider, &seeded).await;
