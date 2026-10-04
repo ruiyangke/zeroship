@@ -17,38 +17,41 @@ const COMPETING: &[&str] = &["ring", "custom-provider"];
 // Target kinds that become, or load into, a process of their own.
 const PROCESS_KINDS: &[&str] = &["bin", "cdylib"];
 
+/// Which roots one `cargo tree` resolve starts from.
 #[derive(Clone, Copy)]
-enum Scope<'a> {
+pub(super) enum Scope<'a> {
     Workspace,
-    Package(&'a str),
+    /// One cargo invocation over these packages, which unifies their features
+    /// the way `cargo build -p a -p b` does.
+    Packages(&'a [&'a str]),
 }
 
 /// Which edges one `cargo tree` resolve admits.
 #[derive(Clone, Copy, Debug)]
-struct Resolve {
+pub(super) struct Resolve {
     /// Dev edges too, which is what `cargo test --workspace` unifies. Without
     /// them the resolve describes what a deployed artifact compiles.
-    include_dev: bool,
+    pub(super) include_dev: bool,
     /// Every member feature, not only the defaults.
-    all_features: bool,
+    pub(super) all_features: bool,
     /// Every target platform rather than the host's, so a dependency declared
     /// under `[target.'cfg(target_os = "macos")'.dependencies]` is read on a
     /// Linux runner too.
-    all_targets: bool,
+    pub(super) all_targets: bool,
 }
 
 impl Resolve {
-    const SHIPPED_ON_HOST: Self = Self {
+    pub(super) const SHIPPED_ON_HOST: Self = Self {
         include_dev: false,
         all_features: false,
         all_targets: false,
     };
 }
 
-// The whole feature tree, not `-i rustls`: inverting on a package the selection
-// never reaches is a Cargo error, and telling that error apart from a real one
-// would mean matching its wording.
-fn feature_tree(root: &Path, scope: Scope<'_>, resolve: Resolve) -> Result<String, String> {
+// The whole feature tree, not `-i <package>`: inverting on a package the
+// selection never reaches is a Cargo error, and telling that error apart from a
+// real one would mean matching its wording.
+pub(super) fn feature_tree(root: &Path, scope: Scope<'_>, resolve: Resolve) -> Result<String, String> {
     let edges = if resolve.include_dev {
         "features"
     } else {
@@ -59,9 +62,16 @@ fn feature_tree(root: &Path, scope: Scope<'_>, resolve: Resolve) -> Result<Strin
         .current_dir(root)
         .args(["tree", "--locked", "-e", edges, "--color", "never"]);
     match scope {
-        Scope::Workspace => command.arg("--workspace"),
-        Scope::Package(name) => command.args(["-p", name]),
-    };
+        Scope::Workspace => {
+            command.arg("--workspace");
+        }
+        Scope::Packages([]) => return Err("an empty package selection".into()),
+        Scope::Packages(names) => {
+            for name in names {
+                command.args(["-p", name]);
+            }
+        }
+    }
     if resolve.all_features {
         command.arg("--all-features");
     }
@@ -78,26 +88,37 @@ fn feature_tree(root: &Path, scope: Scope<'_>, resolve: Resolve) -> Result<Strin
     String::from_utf8(output.stdout).map_err(|error| error.to_string())
 }
 
-/// The rustls features a `cargo tree -e features` output enables, or `None`
-/// when rustls is not in that graph at all.
+/// The features of `package` a `cargo tree -e features` output enables, or
+/// `None` when `package` is not in that graph at all.
 ///
 /// Both patterns anchor the crate name after whitespace or at a line start, so
-/// `futures-rustls v...` and `futures-rustls feature "..."` rows are not read
-/// as rustls' own. Empty output is refused: every tree prints its root.
-fn rustls_features(output: &str) -> Result<Option<BTreeSet<String>>, String> {
+/// for rustls the `futures-rustls v...` and `futures-rustls feature "..."` rows
+/// are not read as rustls' own. Empty output is refused: every tree prints its
+/// root.
+pub(super) fn package_features(
+    output: &str,
+    package: &str,
+) -> Result<Option<BTreeSet<String>>, String> {
     if output.trim().is_empty() {
         return Err("empty cargo tree output".into());
     }
-    let package = regex::Regex::new(r"(?m)(?:^|\s)rustls v[0-9]").unwrap();
-    if !package.is_match(output) {
+    let name = regex::escape(package);
+    let present = regex::Regex::new(&format!(r"(?m)(?:^|\s){name} v[0-9]")).unwrap();
+    if !present.is_match(output) {
         return Ok(None);
     }
-    let row = regex::Regex::new(r#"(?m)(?:^|\s)rustls feature "([A-Za-z0-9_-]+)""#).unwrap();
+    let row =
+        regex::Regex::new(&format!(r#"(?m)(?:^|\s){name} feature "([A-Za-z0-9_-]+)""#)).unwrap();
     Ok(Some(
         row.captures_iter(output)
             .map(|capture| capture[1].to_owned())
             .collect(),
     ))
+}
+
+/// [`package_features`] for rustls.
+fn rustls_features(output: &str) -> Result<Option<BTreeSet<String>>, String> {
+    package_features(output, "rustls")
 }
 
 /// Why rustls' own provider inference would not land on [`SELECTED`], if it
@@ -117,7 +138,7 @@ fn provider_violation(features: &BTreeSet<String>) -> Option<String> {
     ))
 }
 
-fn process_packages(packages: &[&'static Value]) -> Vec<&'static str> {
+pub(super) fn process_packages(packages: &[&'static Value]) -> Vec<&'static str> {
     packages
         .iter()
         .filter(|package| {
@@ -174,7 +195,7 @@ fn every_process_artifact_that_links_rustls_compiles_its_provider() {
     for name in processes {
         let output = feature_tree(
             &repo::root(),
-            Scope::Package(name),
+            Scope::Packages(&[name]),
             Resolve::SHIPPED_ON_HOST,
         )
         .unwrap();
@@ -342,17 +363,17 @@ fn cargo_resolve_exposes_competing_and_missing_providers_by_edge_target_and_pack
     };
     let on_macos = cfg!(target_os = "macos");
 
-    let app = features(Scope::Package("app"), Resolve::SHIPPED_ON_HOST).expect("app links rustls");
+    let app = features(Scope::Packages(&["app"]), Resolve::SHIPPED_ON_HOST).expect("app links rustls");
     assert_eq!(provider_violation(&app), None, "{app:?}");
-    let tested = features(Scope::Package("app"), with_dev).expect("app links rustls");
+    let tested = features(Scope::Packages(&["app"]), with_dev).expect("app links rustls");
     assert!(tested.contains("ring"), "{tested:?}");
     assert!(provider_violation(&tested).is_some());
 
     let desk_here =
-        features(Scope::Package("desk"), Resolve::SHIPPED_ON_HOST).expect("desk links rustls");
+        features(Scope::Packages(&["desk"]), Resolve::SHIPPED_ON_HOST).expect("desk links rustls");
     assert_eq!(desk_here.contains("ring"), on_macos, "{desk_here:?}");
     let desk_anywhere =
-        features(Scope::Package("desk"), on_all_targets).expect("desk links rustls");
+        features(Scope::Packages(&["desk"]), on_all_targets).expect("desk links rustls");
     assert!(desk_anywhere.contains("ring"), "{desk_anywhere:?}");
     assert!(provider_violation(&desk_anywhere).is_some());
 
@@ -369,11 +390,11 @@ fn cargo_resolve_exposes_competing_and_missing_providers_by_edge_target_and_pack
         );
     }
 
-    let svc = features(Scope::Package("svc"), Resolve::SHIPPED_ON_HOST).expect("svc links rustls");
+    let svc = features(Scope::Packages(&["svc"]), Resolve::SHIPPED_ON_HOST).expect("svc links rustls");
     assert!(svc.contains("std"), "{svc:?}");
     assert!(provider_violation(&svc).is_some(), "{svc:?}");
     assert_eq!(
-        features(Scope::Package("bare"), Resolve::SHIPPED_ON_HOST),
+        features(Scope::Packages(&["bare"]), Resolve::SHIPPED_ON_HOST),
         None
     );
 

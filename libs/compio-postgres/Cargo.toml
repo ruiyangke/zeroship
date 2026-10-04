@@ -262,7 +262,7 @@ tempfile = { workspace = true }
 # Self-signed certificates for the in-memory TLS pair in `tls_sansio`'s unit
 # tests. Driving a real handshake is the only way to reach rustls' post-
 # close_notify behaviour, which needs live keys.
-rcgen = "0.14"
+rcgen = { workspace = true }
 
 [[test]]
 name = "tls_live"

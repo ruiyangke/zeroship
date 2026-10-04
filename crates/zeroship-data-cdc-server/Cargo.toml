@@ -47,7 +47,7 @@ tracing = { workspace = true }
 [dev-dependencies]
 # Exercise the public ORM client against the separate relay executable.
 zeroship-data-orm = { workspace = true }
-rcgen = "0.14"
+rcgen = { workspace = true }
 tempfile = { workspace = true }
 url = { workspace = true }
 # The overlay-precedence test in `src/config.rs` builds a `toml::Value` by hand

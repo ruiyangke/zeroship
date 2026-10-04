@@ -4,6 +4,8 @@
 //! is a suite that silently stops running.
 
 mod build_inputs;
+mod crypto_library;
+mod jwt_backend;
 mod testkit_boundaries;
 mod tls_provider;
 mod tokio_boundary;
@@ -11,6 +13,58 @@ mod tokio_boundary;
 use crate::architecture::repo;
 use serde_json::Value;
 use std::collections::BTreeSet;
+use std::path::Path;
+use std::process::Command;
+
+/// A workspace under `root` whose `members` are named among `packages`; the
+/// rest are path dependencies outside it. Each package is `(name, manifest
+/// after [package], files)`, and every file holds an empty `main`. The lockfile
+/// is generated offline, so a resolve over it needs nothing from a registry.
+fn write_fixture_workspace(root: &Path, members: &[&str], packages: &[(&str, &str, &[&str])]) {
+    let quote = |names: Vec<&str>| {
+        names
+            .iter()
+            .map(|name| format!("'{name}'"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let outside = packages
+        .iter()
+        .map(|(name, ..)| *name)
+        .filter(|name| !members.contains(name))
+        .collect();
+    std::fs::write(
+        root.join("Cargo.toml"),
+        format!(
+            "[workspace]\nmembers=[{}]\nexclude=[{}]\nresolver='3'\n",
+            quote(members.to_vec()),
+            quote(outside)
+        ),
+    )
+    .unwrap();
+    for (name, manifest, files) in packages {
+        let package = root.join(name);
+        std::fs::create_dir_all(package.join("src")).unwrap();
+        for file in *files {
+            std::fs::write(package.join(file), "fn main() {}\n").unwrap();
+        }
+        std::fs::write(
+            package.join("Cargo.toml"),
+            format!("[package]\nname='{name}'\nversion='0.1.0'\nedition='2021'\n{manifest}"),
+        )
+        .unwrap();
+    }
+    let output = Command::new(env!("CARGO"))
+        .current_dir(root)
+        .args(["generate-lockfile", "--offline"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
 
 fn dev_only_feature_routes(package: &Value) -> (usize, Vec<String>) {
     let dependencies = package["dependencies"].as_array().expect("dependencies");

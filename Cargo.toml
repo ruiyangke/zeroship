@@ -27,11 +27,14 @@ license = "MIT"
 [workspace.dependencies]
 # Async / I/O
 compio = { version = "0.18", features = ["io", "net", "runtime", "macros", "time"] }
-# Single TLS crypto provider end-to-end: rustls 0.23 + aws-lc-rs. The runtime's
-# WebCrypto already builds on aws-lc-rs (and links aws-lc-sys directly), and
-# compio-postgres wraps aws-lc-rs's key provider to zeroize decrypted client keys.
-# `ring` is still linked for `jsonwebtoken`; what may not happen is rustls
-# compiling it as a provider.
+# One crypto library end to end: aws-lc-rs. rustls 0.23 takes it as its
+# provider, the runtime's WebCrypto builds on it (and links aws-lc-sys
+# directly), compio-postgres wraps its key provider to zeroize decrypted client
+# keys, and the `jsonwebtoken` and `rcgen` entries below select it by feature.
+# No build of this workspace compiles `ring`: `xtask/tests/repository/crypto_library.rs`
+# fails when one would, on any edge, member feature or target. xtask and the
+# packages `exclude` lists above resolve outside this workspace, and outside
+# that check.
 #
 # EXACTLY ONE provider feature may reach rustls in any build. When no process
 # installed a default, rustls picks one from its own features, and `ring` beside
@@ -94,7 +97,14 @@ ed25519-dalek = { version = "2", default-features = false, features = ["std", "f
 aws-lc-rs = "1"
 base64 = "0.22"
 bcrypt = "0.17"
-jsonwebtoken = "9"
+# JWT signing and verification. `aws_lc_rs` is the backend and `rust_crypto` the
+# other one; with both or neither enabled, every jsonwebtoken sign and verify
+# panics. Every build, the workspace and the deployed image alike, resolves this
+# entry with `aws_lc_rs` alone, which `xtask/tests/repository/jwt_backend.rs`
+# checks, so no member adds a feature to it.
+jsonwebtoken = { version = "11", default-features = false, features = ["aws_lc_rs"] }
+# Test certificates. Its default features select `ring`.
+rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }
 openidconnect = { version = "4.0", default-features = false }
 
 # Database

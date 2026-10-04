@@ -412,7 +412,7 @@ fn shipped_builds_compile_no_tokio_runtime() {
 /// # Errors
 /// When there is no such invocation, it selects no package, or it builds the
 /// whole workspace.
-fn dockerfile_build(source: &str) -> Result<Vec<String>, String> {
+pub(super) fn dockerfile_build(source: &str) -> Result<Vec<String>, String> {
     let mut lines = source.lines().skip_while(|line| !line.trim_start().starts_with("RUN cargo build"));
     let first = lines
         .next()

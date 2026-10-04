@@ -96,7 +96,6 @@ futures = { workspace = true }
 # `oidc_verify` module.
 base64 = { workspace = true }
 ed25519-dalek = { workspace = true, features = ["pkcs8", "pem", "rand_core"] }
-jsonwebtoken = { workspace = true }
 rand = "0.8"
 cyper = { workspace = true }
 url = { workspace = true }
@@ -113,6 +112,8 @@ thiserror = { workspace = true }
 chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }
 
 [dev-dependencies]
+# The OAuth and Supabase guard suites sign the bearer tokens they present.
+jsonwebtoken = { workspace = true }
 # The platform database and the Redpanda broker every test process of the
 # worktree shares, and the lifetime measurements of the broker's recipe.
 zeroship-testkit = { workspace = true }
@@ -121,7 +122,7 @@ zeroship-workflow-server = { path = "../zeroship-workflow-server" }
 # The workflow lane holds a payload store, so composing one in a test names the
 # backend it is rooted at.
 zeroship-storage = { workspace = true }
-rcgen = "0.14"
+rcgen = { workspace = true }
 testcontainers = { version = "0.28", default-features = false, features = ["blocking"] }
 toml = { workspace = true }
 # `deploy_test.rs` builds a synthetic `.zship` payload (tar+zstd) and

@@ -515,7 +515,7 @@ pub async fn verify_id_token(
             .at_hash
             .as_deref()
             .ok_or(OidcError::AtHashClaimMissing)?;
-        let expected = oidc_token_hash(alg, input.as_bytes());
+        let expected = oidc_token_hash(alg, input.as_bytes())?;
         if !constant_time_eq(at_hash.as_bytes(), expected.as_bytes()) {
             return Err(OidcError::AtHashMismatch);
         }
@@ -527,7 +527,7 @@ pub async fn verify_id_token(
             .c_hash
             .as_deref()
             .ok_or(OidcError::CHashClaimMissing)?;
-        let expected = oidc_token_hash(alg, input.as_bytes());
+        let expected = oidc_token_hash(alg, input.as_bytes())?;
         if !constant_time_eq(c_hash.as_bytes(), expected.as_bytes()) {
             return Err(OidcError::CHashMismatch);
         }
@@ -546,24 +546,30 @@ fn unix_timestamp() -> Result<i64> {
         .map_err(|_| OidcError::Verify("system clock timestamp overflow".into()))
 }
 
-fn oidc_token_hash(alg: Algorithm, input: &[u8]) -> String {
+/// The `at_hash` / `c_hash` value of `input` for a token signed with `alg`. An
+/// algorithm this match does not name has none, so the binding check refuses
+/// the token instead of comparing against a guessed digest.
+fn oidc_token_hash(alg: Algorithm, input: &[u8]) -> Result<String> {
     match alg {
         Algorithm::RS256 | Algorithm::ES256 | Algorithm::PS256 | Algorithm::HS256 => {
             let digest = Sha256::digest(input);
-            URL_SAFE_NO_PAD.encode(&digest[..16])
+            Ok(URL_SAFE_NO_PAD.encode(&digest[..16]))
         }
         Algorithm::RS384 | Algorithm::ES384 | Algorithm::PS384 | Algorithm::HS384 => {
             let digest = Sha384::digest(input);
-            URL_SAFE_NO_PAD.encode(&digest[..24])
+            Ok(URL_SAFE_NO_PAD.encode(&digest[..24]))
         }
         Algorithm::RS512 | Algorithm::PS512 | Algorithm::HS512 => {
             let digest = Sha512::digest(input);
-            URL_SAFE_NO_PAD.encode(&digest[..32])
+            Ok(URL_SAFE_NO_PAD.encode(&digest[..32]))
         }
         Algorithm::EdDSA => {
             let digest = Sha512::digest(input);
-            URL_SAFE_NO_PAD.encode(&digest[..32])
+            Ok(URL_SAFE_NO_PAD.encode(&digest[..32]))
         }
+        other => Err(OidcError::Verify(format!(
+            "no at_hash/c_hash digest for {other:?}"
+        ))),
     }
 }
 
@@ -713,7 +719,8 @@ mod tests {
             "exp": now_secs() + 300,
             "iat": now_secs(),
             "nonce": "nonce-123",
-            "at_hash": oidc_token_hash(Algorithm::EdDSA, access_token.as_bytes()),
+            "at_hash": oidc_token_hash(Algorithm::EdDSA, access_token.as_bytes())
+                .expect("EdDSA hash"),
         });
         let token = sign(&key, &claims);
 
@@ -773,7 +780,8 @@ mod tests {
             "exp": now_secs() + 300,
             "iat": now_secs(),
             "nonce": "nonce-123",
-            "c_hash": oidc_token_hash(Algorithm::EdDSA, code.as_bytes()),
+            "c_hash": oidc_token_hash(Algorithm::EdDSA, code.as_bytes())
+                .expect("EdDSA hash"),
         });
         let token = sign(&key, &claims);
 

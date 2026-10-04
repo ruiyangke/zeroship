@@ -6,10 +6,10 @@
 //! started with them inherited judges each build script's
 //! `rerun-if-env-changed` against them, because that check reads the
 //! environment of the cargo running the build rather than the one the script
-//! is given. `ring` declares it on the manifest directory, the package name and
-//! the version parts, so such a cargo re-runs `ring`'s build script and
-//! rebuilds every crate above it, and the next cargo started from a shell
-//! rebuilds them back.
+//! is given. A build script that declares it on one of them - `ring`'s does,
+//! on the manifest directory, the package name and the version parts - is
+//! re-run by such a cargo, which rebuilds every crate above it, and the next
+//! cargo started from a shell rebuilds them back.
 use std::process::Command;
 
 /// The prefixes of the variables cargo sets to describe the package whose

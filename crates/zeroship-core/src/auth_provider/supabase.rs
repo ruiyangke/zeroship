@@ -444,7 +444,10 @@ fn map_claims(claims: SupabaseClaims) -> Result<VerifiedToken, SupabaseVerifyErr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    use base64::{
+        engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+        Engine as _,
+    };
     use jsonwebtoken::{encode, EncodingKey, Header};
     use ntex::web::{self, HttpResponse};
     use parking_lot::RwLock;
@@ -475,34 +478,35 @@ MiFLTluv7FTylaF0K2DXcoHOyWm4Ymbpn7LYI/LnP7aJXLIt3D8TKdNRRJ8zMRf+
 w7Lj92s80WVRT9ZqmPwNS5avCy6kManMiqA2IaH2ygLsKMgo89FvLEAIa1u/2Yc7
 IwIDAQAB
 -----END PUBLIC KEY-----"#;
-    const RSA_PRIVATE_PEM: &str = r#"-----BEGIN PRIVATE KEY-----
-MIIEvwIBADANBgkqhkiG9w0BAQEFAASCBKkwggSlAgEAAoIBAQDE0egoM9K1LVeW
-ZAy5tRYLn2BHYJWw56rhJptWcBeTKfmZZ7Ez3IIsNKGZM2SGrmY0gjVz8bBtBmZS
-dNW3DekVT9ayJEwAgHnKlLD5fN6gqrQhjP4hCKalAOkvQamKH+tEhfAdY8HwL4hr
-e07LT2oyIUtOW6/sVPKVoXQrYNdygc7JabhiZumfstgj8uc/tolcsi3cPxMp01FE
-nzMxF/7qb+H6OWHHje/2MeY9hmnrcVo5QjIBk+deP7wm+rqqYxM9//WukjDqnJ32
-/oyde03DsuP3azzRZVFP1mqY/A1Llq8LLqQxqcyKoDYhofbKAuwoyCjz0W8sQAhr
-W7/ZhzsjAgMBAAECggEAD2hpVsBb1fAjQ7Q4ZM9e1vEWne/bOBqiv3aAwZ8L0Wr/
-TbmW3zr7e89w+SfTTlHX0XOCEL4SdC6Ekx7vXiG6Jf92jMKXqpBkOG40fot+eDB0
-4o2BlX9yYEd2ecsXpScDiX08w2g8Vfu6n8Nq8zKX2y3NEejOmF88EGevyveNVjrd
-GipayjVylvKoXOJBBhJwkCd192A4Usi+0LuUSjacMVp7kEKFowpZ32DuUv3vS82E
-Fo1ECR7gP3UEYD3oAqFRuxMN8LSbQa4aKtXRvXmWY87pdlGGYKW/AkWKt5sZ5tW8
-l8XZ5JK103yB75D/nBSjxirMaJPuw2fgGxDIgsPnAQKBgQDi+AhOlHHJHOCly9Sn
-UtKJzh5s9+I5sPiJCUduih2v3U2o87bkM1JKWEDdcCR6SaUG6Dzth9K4piuqBg2g
-S4MYzIQWzJkMFRL7yxlL6FQbUSTfyd4kYZGhjaMDJl3D94SVPrx2y6XBq5ZvppHc
-QXgWqdwhr0/+AF98RwOBnk/KIwKBgQDd/qow98jtfvERXBqpZIwMAHFEp62GKu+c
-BghOFK7LGUZnGAUAyCbxmYKs8cuBUkVIaRQbkK/f45nUcTKMSQDXxQxZPmgEte87
-lcEMWayhU0dfZ4IIiSszA3bkKNqJmYvazWWYSHiiJrMU/bLC4lh+lWwWRJ0EuhQd
-uKvK/X9bAQKBgQCAQqAXH+YJO4trxfr/L1uQym0BMTejWHGqpxa5zc0m882OG2OQ
-I7xuDN9jA5tpi7J5a8X6iRW4iRcFtvP+UI3d9rzyUV5vqH0Y01YRQlI9Oaa33FDv
-iD+O5wZmoki8lGRVHqXMEBs0ja2unJeyu0CMtiKS2oo+xKExDsRZfEgktwKBgQDK
-MUh730OfpM4WfKg//rdbuw9vc7WljPe+SPRJgacOjw/DmGn+I07tIF+X+4baW7+E
-y0goLykxJ5EVoKBki5176RptMlz1ZWvm/mfdQtPr//jy2UjjU2QIS7B+8QLS7wol
-mIxfHirZrZvQk528yQHHEXtn8Mh+5KirxWabNTZJAQKBgQCjCdsy5+r84ZHUbqI2
-aKYbKQHarCd8UclVtQ6KH0WsKYngUbTm7/6o6ULFH7h1m02+jdckFHTJDlnd6A78
-LSJ0kD5O3Q7wnmUdnCZyFsYh7dgqHro84GBSHtQXaxcN04YT0FLdJUYVG1tUEWMy
-chfOO390zPo2KvlyenOqynqSZA==
------END PRIVATE KEY-----"#;
+    // The same key as RSA_N / RSA_E, as the base64 of its PKCS#1 `RSAPrivateKey`
+    // DER, the form `EncodingKey::from_rsa_der` reads.
+    const RSA_PRIVATE_PKCS1_DER: &str = concat!(
+        "MIIEpQIBAAKCAQEAxNHoKDPStS1XlmQMubUWC59gR2CVsOeq4SabVnAXkyn5mWex",
+        "M9yCLDShmTNkhq5mNII1c/GwbQZmUnTVtw3pFU/WsiRMAIB5ypSw+XzeoKq0IYz+",
+        "IQimpQDpL0Gpih/rRIXwHWPB8C+Ia3tOy09qMiFLTluv7FTylaF0K2DXcoHOyWm4",
+        "Ymbpn7LYI/LnP7aJXLIt3D8TKdNRRJ8zMRf+6m/h+jlhx43v9jHmPYZp63FaOUIy",
+        "AZPnXj+8Jvq6qmMTPf/1rpIw6pyd9v6MnXtNw7Lj92s80WVRT9ZqmPwNS5avCy6k",
+        "ManMiqA2IaH2ygLsKMgo89FvLEAIa1u/2Yc7IwIDAQABAoIBAA9oaVbAW9XwI0O0",
+        "OGTPXtbxFp3v2zgaor92gMGfC9Fq/025lt86+3vPcPkn005R19FzghC+EnQuhJMe",
+        "714huiX/dozCl6qQZDhuNH6LfngwdOKNgZV/cmBHdnnLF6UnA4l9PMNoPFX7up/D",
+        "avMyl9stzRHozphfPBBnr8r3jVY63RoqWso1cpbyqFziQQYScJAndfdgOFLIvtC7",
+        "lEo2nDFae5BChaMKWd9g7lL970vNhBaNRAke4D91BGA96AKhUbsTDfC0m0GuGirV",
+        "0b15lmPO6XZRhmClvwJFirebGebVvJfF2eSStdN8ge+Q/5wUo8YqzGiT7sNn4BsQ",
+        "yILD5wECgYEA4vgITpRxyRzgpcvUp1LSic4ebPfiObD4iQlHboodr91NqPO25DNS",
+        "SlhA3XAkekmlBug87YfSuKYrqgYNoEuDGMyEFsyZDBUS+8sZS+hUG1Ek38neJGGR",
+        "oY2jAyZdw/eElT68dsulwauWb6aR3EF4FqncIa9P/gBffEcDgZ5PyiMCgYEA3f6q",
+        "MPfI7X7xEVwaqWSMDABxRKethirvnAYIThSuyxlGZxgFAMgm8ZmCrPHLgVJFSGkU",
+        "G5Cv3+OZ1HEyjEkA18UMWT5oBLXvO5XBDFmsoVNHX2eCCIkrMwN25CjaiZmL2s1l",
+        "mEh4oiazFP2ywuJYfpVsFkSdBLoUHbiryv1/WwECgYEAgEKgFx/mCTuLa8X6/y9b",
+        "kMptATE3o1hxqqcWuc3NJvPNjhtjkCO8bgzfYwObaYuyeWvF+okVuIkXBbbz/lCN",
+        "3fa88lFeb6h9GNNWEUJSPTmmt9xQ74g/jucGZqJIvJRkVR6lzBAbNI2trpyXsrtA",
+        "jLYiktqKPsShMQ7EWXxIJLcCgYEAyjFIe99Dn6TOFnyoP/63W7sPb3O1pYz3vkj0",
+        "SYGnDo8Pw5hp/iNO7SBfl/uG2lu/hMtIKC8pMSeRFaCgZIude+kabTJc9WVr5v5n",
+        "3ULT6//48tlI41NkCEuwfvEC0u8KJZiMXx4q2a2b0JOdvMkBxxF7Z/DIfuSoq8Vm",
+        "mzU2SQECgYEAownbMufq/OGR1G6iNmimGykB2qwnfFHJVbUOih9FrCmJ4FG05u/+",
+        "qOlCxR+4dZtNvo3XJBR0yQ5Z3egO/C0idJA+Tt0O8J5lHZwmchbGIe3YKh66POBg",
+        "Uh7UF2sXDdOGE9BS3SVGFRtbVBFjMnIXzjt/dMz6Nir5cnpzqsp6kmQ=",
+    );
 
     fn now_secs() -> u64 {
         SystemTime::now()
@@ -593,12 +597,10 @@ chfOO390zPo2KvlyenOqynqSZA==
     fn sign_rs256(claims: &Value, kid: &str) -> String {
         let mut header = Header::new(Algorithm::RS256);
         header.kid = Some(kid.to_string());
-        encode(
-            &header,
-            claims,
-            &EncodingKey::from_rsa_pem(RSA_PRIVATE_PEM.as_bytes()).expect("RSA private key"),
-        )
-        .expect("RS256 JWT")
+        let der = STANDARD
+            .decode(RSA_PRIVATE_PKCS1_DER)
+            .expect("RSA private key base64");
+        encode(&header, claims, &EncodingKey::from_rsa_der(&der)).expect("RS256 JWT")
     }
 
     fn unsigned_none_alg_token(claims: &Value) -> String {
@@ -897,6 +899,31 @@ chfOO390zPo2KvlyenOqynqSZA==
         let token = sign_hs256(&claims, JWT_SECRET);
 
         poll_ready(provider.verify_token(&token)).expect_err("expired token must reject");
+    }
+
+    /// `nbf` is validated but not required, so a token may omit it; one that
+    /// carries it as something other than a `NumericDate` is refused rather
+    /// than read as absent.
+    #[test]
+    fn supabase_hs256_rejects_a_non_numeric_nbf() {
+        let provider = hs256_provider();
+        let mut claims = claims(json!("authenticated"));
+        claims["nbf"] = json!("not-a-number");
+        let token = sign_hs256(&claims, JWT_SECRET);
+
+        let err = poll_ready(provider.verify_token(&token))
+            .expect_err("an nbf that is not a NumericDate must reject");
+        assert!(
+            matches!(err, SupabaseVerifyError::Jwt(ref message) if message.contains("nbf")),
+            "got: {err:?}"
+        );
+
+        claims
+            .as_object_mut()
+            .expect("claims object")
+            .remove("nbf");
+        let token = sign_hs256(&claims, JWT_SECRET);
+        poll_ready(provider.verify_token(&token)).expect("a token without nbf verifies");
     }
 
     #[test]

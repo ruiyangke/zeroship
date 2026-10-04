@@ -24,7 +24,7 @@ futures = { workspace = true }
 async-trait = { workspace = true }
 compio-postgres = { workspace = true }
 sha2 = { workspace = true }
-rcgen = "0.14"
+rcgen = { workspace = true }
 url = { workspace = true }
 # Database integration tests are required by ordinary cargo test.
 uuid = { workspace = true }

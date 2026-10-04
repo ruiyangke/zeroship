@@ -222,7 +222,7 @@ runtime_legacy_websocket = []
 # `#[v8_constructor(post_init = ...)]` error spans for malformed shapes
 # (MAC-02, design `docs/archive/macro-constructor-post-init.md` §6.2).
 trybuild = "1.0"
-rcgen = "0.14"
+rcgen = { workspace = true }
 # The live-driver suites take a database of their own on the servers every test
 # process of the worktree shares (`zeroship-testkit`), or start a server a case
 # holds and drops (`testcontainers`) where the server's configuration is the
