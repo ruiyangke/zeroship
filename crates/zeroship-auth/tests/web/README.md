@@ -60,8 +60,8 @@ the specs from the runner.
 
 ## Not in CI, deliberately
 
-`ci.yml` does not run this, exactly as it does not run `tests/e2e_browser/`:
-both need a nix env, real browsers and a live multi-process stack. Run it by
-hand when touching auth UI. The normal Rust suite exercises rendered login
+`ci.yml` does not run this, exactly as it does not run the examples' browser
+suites: both need a nix env, real browsers and a live multi-process stack. Run
+it by hand when touching auth UI. The normal Rust suite exercises rendered login
 markup and response headers. Template source scans are retired; browser checks
 cover computed styles, interaction and accessibility-tree behavior.

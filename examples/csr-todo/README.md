@@ -66,3 +66,14 @@ zeroship deploy ./dist/app.zship --app=<app-id> --control=<url> --token=<token>
 ## Notes on the build output
 
 `worker.modules` lists exactly `index.js` — no `favicon.ico` or other `public/` files. The vite-plugin's worker build copies no public directory; the client build keeps `publicDir`, so `public/*` ends up in `dist/<root>/` and gets cataloged in `assets`.
+
+## Tests
+
+`node --run test` builds the platform services from this checkout, deploys the
+app onto them, starts the Vite dev server beside them, and drives both in
+Chromium (`tests/browser.test.ts`): the list read over `listTodos`, client-only
+todos, and the `searchTodos` stream. Against the deployed app it also checks
+what only the gateway shows: the static shell, the SPA fallback for a deep
+route, and stream frames rendering one at a time. Run it inside `nix develop`
+with Docker available. Logs and failure screenshots stay under
+`tests/.artifacts/`.

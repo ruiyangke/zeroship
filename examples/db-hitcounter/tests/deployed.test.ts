@@ -1,8 +1,7 @@
-import { existsSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
-import { delimiter, join } from "node:path";
+import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import { chromium } from "playwright";
+import { launchChromium } from "@zeroship/example-fixtures";
 import { afterAll, beforeAll, expect, test } from "vitest";
 import { assertUsage, type Usage } from "./billing";
 import { Platform } from "./fixture/settings";
@@ -23,10 +22,7 @@ afterAll(async () => {
 });
 
 test("browser writes persist and are priced through the real metering stream", async () => {
-  const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH
-    ?? (process.env.PATH ?? "").split(delimiter)
-      .flatMap((directory) => ["chromium", "chromium-browser"].map((name) => join(directory, name))).find(existsSync);
-  const browser = await chromium.launch({ headless: true, executablePath });
+  const browser = await launchChromium();
   const page = await browser.newPage();
   let browserRequests = 0;
   await page.route("**/*", async (route) => {

@@ -1,36 +1,18 @@
-import { existsSync } from "node:fs";
-import { delimiter, join } from "node:path";
 import { expect } from "@playwright/test";
-import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
+import { launchChromium, pageFixtures, type PageWatch } from "@zeroship/example-fixtures";
+import type { Browser, BrowserContext, Page } from "playwright";
 import { afterAll, beforeAll, describe, inject, test as base } from "vitest";
 import { targets } from "./targets";
 
 for (const target of targets()) describe(`browser: ${target.name}`, () => {
   let browser: Browser;
-  beforeAll(async () => {
-    const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH
-      ?? (process.env.PATH ?? "").split(delimiter)
-        .flatMap((directory) => ["chromium", "chromium-browser"].map((name) => join(directory, name))).find(existsSync);
-    browser = await chromium.launch({ headless: true, executablePath });
-  });
+  beforeAll(async () => { browser = await launchChromium(); });
   afterAll(async () => { await browser?.close(); });
-  const test = base.extend<{ browser: Browser; page: Page }>({
+  // Every test that takes `page` fails if the page throws or an RPC answers
+  // 400 or more, with the server's own errors from the target's log.
+  const test = base.extend<{ browser: Browser; page: Page; watch: PageWatch }>({
     browser: async ({}, use) => { await use(browser); },
-    page: async ({ task }, use) => {
-      const page = await browser.newPage();
-      const errors: string[] = [];
-      page.on("pageerror", (error) => errors.push(error.message));
-      try {
-        await use(page);
-        expect(errors).toEqual([]);
-      } finally {
-        if (task.result?.state === "fail" || errors.length) {
-          const name = task.name.replace(/[^a-zA-Z0-9_-]/g, "_");
-          await page.screenshot({ path: join(inject("databaseArtifacts"), `${target.name}-${name}.png`), fullPage: true });
-        }
-        await page.close();
-      }
-    },
+    ...pageFixtures(() => browser, target, inject("databaseArtifacts")),
   });
   const uniq = (prefix: string) =>
     `${prefix}-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`;
@@ -57,6 +39,21 @@ for (const target of targets()) describe(`browser: ${target.name}`, () => {
     await expect(page.locator(".item", { hasText: title }).first()).toBeVisible({ timeout: 10_000 });
     return title;
   }
+
+  test("boot settles: the skeleton gives way to the list or the empty state, and no error toast shows", async ({ page }) => {
+    await bootedPage(page);
+    await expect(page.locator("ul.list, div.empty")).toBeVisible({ timeout: 15_000 });
+    await expect(page.locator(".skeleton")).toHaveCount(0);
+    await expect(page.locator(".live.on")).toBeVisible({ timeout: 15_000 });
+    await expect(page.locator(".toast")).toHaveCount(0);
+  });
+
+  test("a created todo is still listed after a full reload, because it reached the database", async ({ page }) => {
+    await bootedPage(page);
+    const title = await addTodo(page);
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await expect(page.locator("ul.list .item", { hasText: title })).toHaveCount(1, { timeout: 15_000 });
+  });
 
   test("initial load does not duplicate bootstrap RPCs", async ({ page }) => {
     const counts = { publicUser: 0, listTodos: 0 };

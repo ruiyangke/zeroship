@@ -2,7 +2,7 @@
   "name": "@zeroship/example-fixtures",
   "version": "0.0.0",
   "private": true,
-  "description": "Shared end-to-end platform, process and issuer fixtures for the example suites",
+  "description": "Shared end-to-end platform, process, issuer and browser fixtures for the example suites",
   "type": "module",
   "exports": {
     ".": {
@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@zeroship/server": "workspace:*",
+    "playwright": "catalog:",
     "selfsigned": "^5.5.0",
     "smol-toml": "^1.8.0",
     "tar": "^7.5.13",

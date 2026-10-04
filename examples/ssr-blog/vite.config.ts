@@ -21,7 +21,13 @@ import { zeroship } from "@zeroship/vite-plugin";
 
 const CLIENT_MANIFEST_VIRTUAL_ID = "virtual:zeroship/client-manifest";
 const CLIENT_MANIFEST_RESOLVED_ID = "\0" + CLIENT_MANIFEST_VIRTUAL_ID;
-const RUNTIME_ORIGIN = "http://localhost:3001";
+// The dev runtime's port, which the document proxy below forwards to. The
+// plugin reads ZEROSHIP_DEV_PORT itself when no devServerPort is passed; this
+// config reads it too and passes it on, so the proxy and the runtime agree.
+// The test fixture (tests/fixture/settings.ts) gives its dev target a free
+// port through it.
+const devServerPort = Number(process.env.ZEROSHIP_DEV_PORT) || 3001;
+const RUNTIME_ORIGIN = `http://localhost:${devServerPort}`;
 export const SSR_DEV_PROXY_PATTERN =
   "^/(?!(@vite/|@react-refresh|@id/|@fs/|__vite_ping|__open-in-editor|src/|node_modules/|assets/|_zs/|__zeroship|.*\\.[\\w]+(?:[?#].*)?$)).*";
 const SSR_DEV_PROXY_RE = new RegExp(SSR_DEV_PROXY_PATTERN);
@@ -48,7 +54,7 @@ function devClientManifestPlugin(): Plugin {
 }
 
 export default defineConfig({
-  plugins: [devClientManifestPlugin(), react(), zeroship()],
+  plugins: [devClientManifestPlugin(), react(), zeroship({ devServerPort })],
   server: {
     proxy: {
       [SSR_DEV_PROXY_PATTERN]: {

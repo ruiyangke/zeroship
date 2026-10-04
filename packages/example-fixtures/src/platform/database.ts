@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { GenericContainer, Wait } from "testcontainers";
 import { stringify } from "smol-toml";
 import { PlatformBase, readManifest, prepare, type FixtureSettings } from "./base";
-import type { Port, Target } from "../common";
+import type { Target, TargetContext } from "../common";
 
 interface SqlResult { exitCode: number; stdout: string; output: string }
 
@@ -38,7 +38,7 @@ export interface DatabaseSettings extends FixtureSettings {
   targets?: {
     devEnvVar: string;
     devMigrate?: boolean;
-    list: (ctx: { dev: Port; ui: Port; gateway: Port }) => Target[];
+    list: (ctx: TargetContext) => Target[];
     probe: (apiUrl: string) => { path: string; body: unknown };
   };
 }
@@ -440,17 +440,11 @@ export class DatabasePlatform extends PlatformBase {
     let targets: Target[] = [];
     if (settings.targets) {
       console.info(`${settings.label} fixture: start local Vite and wait for app dispatch`);
-      const dev = await this.port();
-      const ui = await this.port();
-      await dev.release();
-      await ui.release();
-      processes.start("dev", process.execPath, [vite, "--host", "127.0.0.1", "--port", `${ui.number}`, "--strictPort"], app, {
-        [settings.targets.devEnvVar]: `${dev.number}`, ZEROSHIP_BIN: this.binary("zeroship"),
-      });
-      targets = settings.targets.list({ dev, ui, gateway });
+      const { dev, ui } = await this.startDev(app, vite, settings.targets.devEnvVar);
+      targets = settings.targets.list({ dev, ui, gateway, log: (name) => processes.log(name) });
       for (const target of targets) {
         const probe = settings.targets.probe(target.apiUrl);
-        await this.waitFor(target.name, () => this.httpReady(`${target.apiUrl}${probe.path}`, {
+        await this.waitForTarget(target, () => this.httpReady(`${target.apiUrl}${probe.path}`, {
           method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ json: probe.body }),
         }));
       }

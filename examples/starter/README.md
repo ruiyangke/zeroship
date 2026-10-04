@@ -32,3 +32,13 @@ That file ships without an `app` key, so the first deploy creates an app named
 after the project's `name` and appends its id to the file.
 `--app=<id>`, `--control=<url>`, a positional `.zship` path and `--token=<token>`
 all still work as overrides.
+
+## Tests
+
+`node --run test` builds the platform services from this checkout, deploys the
+app onto them, starts the Vite dev server beside them, and drives both in
+Chromium (`tests/browser.test.ts`): the seeded messages, adding one, and
+reading it back after a reload. `boom` serves as the control: its failure must
+reach the test as a failed RPC with the handler's own error from the server
+log. Run it inside `nix develop` with Docker available. Logs and failure
+screenshots stay under `tests/.artifacts/`.

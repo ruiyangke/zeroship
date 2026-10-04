@@ -6,6 +6,19 @@ export interface Target {
   name: string;
   apiUrl: string;
   uiUrl: string;
+  /** The log the target's server side writes, for a suite that reports from it. */
+  log?: string;
+}
+
+/** What a fixture hands an example's settings to name the targets it serves. */
+export interface TargetContext {
+  /** The gateway a deployed target is reached through. */
+  gateway: Port;
+  /** The dev runtime, and the Vite dev server in front of it. */
+  dev: Port;
+  ui: Port;
+  /** The log the service started under `name` writes: `dev` for Vite and its runtime, `worker` for the deployed app. */
+  log(name: string): string;
 }
 
 /** The S3 endpoint a storage example suite reaches outside the worker. */

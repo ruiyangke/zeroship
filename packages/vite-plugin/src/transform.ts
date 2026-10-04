@@ -1,7 +1,7 @@
 import type { Plugin } from "vite";
 import { relative, extname } from "node:path";
 import MagicString from "magic-string";
-import { ZEROSHIP_ENVIRONMENT } from "./environment.js";
+import { SERVER_PROCEDURE_PACKAGE, ZEROSHIP_ENVIRONMENT } from "./environment.js";
 
 /**
  * Source modules whose named exports the transform recognizes as RPC
@@ -1578,7 +1578,7 @@ export function transformPlugin(state: TransformState): Plugin {
             .join("\n");
 
           s.prepend(
-            `import { __makeServerProcedure as __zsMakeServerProc } from "@zeroship/server";\n` +
+            `import { __makeServerProcedure as __zsMakeServerProc } from "${SERVER_PROCEDURE_PACKAGE}";\n` +
             `function __zsAttachProcedureMeta(target, meta) {\n` +
             `  try {\n` +
             `    const w = __zsMakeServerProc(target, meta);\n` +

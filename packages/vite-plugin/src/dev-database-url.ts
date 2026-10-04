@@ -9,9 +9,9 @@
 // layers (shell, then `.env`) before the dev default applies. A second, re-derived
 // copy of this logic is a silent failure mode, not a duplication nit: the apply
 // reports `applied: [...]`, the dev boot looks healthy, and every `env.db` call
-// still fails with `no such table` — which is exactly what a hardcoded
-// `.zeroship` did to `tests/e2e-browser` when it gave each demo a private state
-// dir. See `gen-types/dev-apply.ts`'s `devSqliteDir`.
+// still fails with `no such table`. A copy that hardcodes `.zeroship` does
+// exactly that whenever `DATABASE_URL` names a private state dir. See
+// `gen-types/dev-apply.ts`'s `devSqliteDir`.
 
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";

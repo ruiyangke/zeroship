@@ -1,9 +1,0 @@
-# Stack descriptor global setup writes for the specs and its teardown removes.
-.stack.json
-
-# Service, build and deploy logs, one directory per run.
-.artifacts/
-
-# Playwright run artifacts.
-test-results/
-playwright-report/

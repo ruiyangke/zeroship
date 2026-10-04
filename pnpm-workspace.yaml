@@ -9,13 +9,6 @@ packages:
   # React 19.
   - "examples/meal-kit/apps/*"
   - "examples/meal-kit/packages/*"
-  # Browser integration suite spanning examples.
-  - "tests/e2e-browser"
-  # Browser suite over the render-mode examples deployed onto a live stack. A
-  # member so its global setup resolves the fixture packages it starts the
-  # stack with, and so `@playwright/test` is the lockfile's copy rather than
-  # whatever runner is on PATH.
-  - "tests/e2e_browser"
   # The migration engine's TypeScript half: the authoring DSL, the CLI and its
   # live host suite, and the three driver shims. The vite-plugin depends on them
   # by `workspace:*` rather than by an absolute path into a sibling checkout that

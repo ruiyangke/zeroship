@@ -40,9 +40,9 @@ const settings: DatabaseSettings = {
   targets: {
     devEnvVar: "DB_TODOS_API_PORT",
     devMigrate: true,
-    list: ({ dev, ui, gateway }) => [
-      { name: "sqlite", apiUrl: dev.url, uiUrl: ui.url },
-      { name: "postgres", apiUrl: `${gateway.url}/apps/dbtodos`, uiUrl: `http://dbtodos.localhost:${gateway.number}` },
+    list: ({ dev, ui, gateway, log }) => [
+      { name: "sqlite", apiUrl: dev.url, uiUrl: ui.url, log: log("dev") },
+      { name: "postgres", apiUrl: `${gateway.url}/apps/dbtodos`, uiUrl: `http://dbtodos.localhost:${gateway.number}`, log: log("worker") },
     ],
     probe: () => ({ path: "/__zeroship/v1/todos.count", body: { userId: "user_doesNotExist0000000" } }),
   },

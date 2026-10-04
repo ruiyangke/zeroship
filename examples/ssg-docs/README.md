@@ -88,3 +88,14 @@ The archive path, the app and the control plane come from `zeroship.jsonc`
 `--app=<app-id>` and `--control=<url>` still override it.
 
 Cold start: instant. Per-request work: one blob fetch from the gateway's content-addressed cache. No V8.
+
+## Tests
+
+`node --run test` builds the platform services from this checkout, deploys the
+app onto them and drives it in Chromium through the gateway
+(`tests/browser.test.ts`). Setup refuses a bundle that declares a worker or
+serves any route from anything but its assets; the suite then checks the
+prerendered pages, that they render the same with JavaScript disabled, and that
+an in-app link loads a new document. `vite dev` serves none of the prerendered
+pages, so there is no dev target. Run it inside `nix develop` with Docker
+available. Logs and failure screenshots stay under `tests/.artifacts/`.

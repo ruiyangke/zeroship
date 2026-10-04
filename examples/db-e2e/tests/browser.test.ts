@@ -1,14 +1,10 @@
-import { existsSync } from "node:fs";
-import { delimiter, join } from "node:path";
-import { chromium } from "playwright";
+import { join } from "node:path";
+import { launchChromium } from "@zeroship/example-fixtures";
 import { expect, test } from "vitest";
 import { target } from "./target";
 
 test("the built example loads in Chromium and reaches the real runtime", async () => {
-  const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH
-    ?? (process.env.PATH ?? "").split(delimiter)
-      .flatMap((directory) => ["chromium", "chromium-browser"].map((name) => join(directory, name))).find(existsSync);
-  const browser = await chromium.launch({ headless: true, executablePath });
+  const browser = await launchChromium();
   const page = await browser.newPage();
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));

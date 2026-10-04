@@ -1,16 +1,11 @@
-import { existsSync, mkdirSync } from "node:fs";
-import { delimiter, join } from "node:path";
-import { chromium } from "playwright";
+import { mkdirSync } from "node:fs";
+import { join } from "node:path";
+import { launchChromium } from "@zeroship/example-fixtures";
 import { expect, inject, test } from "vitest";
 import { targets } from "./targets";
 
-function executable(): string | undefined {
-  return process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH ?? (process.env.PATH ?? "").split(delimiter)
-    .flatMap((directory) => ["chromium", "chromium-browser"].map((name) => join(directory, name))).find(existsSync);
-}
-
 test("the built example loads its browser assets and reaches workflow", async () => {
-  const browser = await chromium.launch({ headless: true, executablePath: executable() });
+  const browser = await launchChromium();
   try {
     for (const target of targets()) {
       const page = await browser.newPage();

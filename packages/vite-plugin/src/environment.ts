@@ -38,6 +38,18 @@ export const ZEROSHIP_MAIN_FIELDS = [...vite.defaultServerMainFields];
  */
 export const ZEROSHIP_BUILD_TARGET = "es2024";
 
+/**
+ * The package the transform imports into every "use server" module to attach
+ * procedure metadata. The optimizer's startup scan reads modules as written,
+ * before any transform, so without help it meets this package, and the
+ * dependencies it imports, only once the first such module loads. Vite then
+ * optimizes again, and the modules already evaluated keep the copies they
+ * imported first: a dependency that holds a context, React Query's client for
+ * one, ends up in two copies that cannot see each other. Naming the package in
+ * the environment's `optimizeDeps.include` bundles it at startup instead.
+ */
+export const SERVER_PROCEDURE_PACKAGE = "@zeroship/server";
+
 const NODEISH_IMPORT_RE = /^(crypto|buffer|path|util|events|stream|os|url|http|https|fs|assert|process|async_hooks|timers|string_decoder|querystring|punycode|net|tls|dns|zlib|worker_threads|diagnostics_channel|perf_hooks|module)(\/.+)?$/;
 
 // ── DevEnvironment ─────────────────────────────────────────────────────────
@@ -192,6 +204,7 @@ export function createZeroshipEnvironmentOptions(
       entries: serverEntry
         ? [serverEntry]
         : ["src/index.{ts,tsx,js,jsx}", "src/server.{ts,js}", "server.{ts,js}"],
+      include: [SERVER_PROCEDURE_PACKAGE],
       // A dependency's CommonJS `require` of a Node built-in reaches the
       // built-in the way the worker build does, rather than through
       // `createRequire`, which the isolate has not got.

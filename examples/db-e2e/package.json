@@ -18,10 +18,10 @@
   "devDependencies": {
     "@types/node": "catalog:",
     "@zeroship/types": "workspace:*",
-    "playwright": "catalog:",
     "vitest": "^4.1.7",
     "typescript": "catalog:",
     "vite": "catalog:",
-    "zeroship": "workspace:*"
+    "zeroship": "workspace:*",
+    "@zeroship/example-fixtures": "workspace:*"
   }
 }

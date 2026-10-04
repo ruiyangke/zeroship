@@ -1,6 +1,6 @@
 import { inject } from "vitest";
 
-export interface Target { name: string; apiUrl: string; uiUrl: string }
+export interface Target { name: string; apiUrl: string; uiUrl: string; log?: string }
 declare module "vitest" {
   export interface ProvidedContext { databaseTargets: Target[]; databaseArtifacts: string }
 }

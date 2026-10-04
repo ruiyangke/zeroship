@@ -43,13 +43,18 @@ The shape we want (v1 flat `resources` map):
     "/[...rest]": {
       "auth": "anonymous",
       "publicly_accessible": true
+    },
+    "rpc:listPosts": {
+      "kind": "query",
+      "auth": "anonymous",
+      "publicly_accessible": true
     }
   },
   "transformer": "json"
 }
 ```
 
-The `/[...rest]` catch-all has no `static` action — a URL-namespace resource without a routing action defaults to worker SSR dispatch. `auth: "anonymous"` + `publicly_accessible: true` satisfies the gateway's secure-by-default check.
+The `/[...rest]` catch-all has no `static` action: a URL-namespace resource without a routing action defaults to worker SSR dispatch. `auth: "anonymous"` + `publicly_accessible: true` satisfies the gateway's secure-by-default check. `rpc:listPosts` carries the same pair from `src/server/config.ts`: the worker calls it in process to render, and the hydrated page calls it again from a browser that holds no session.
 
 ## Client manifest
 
@@ -74,6 +79,7 @@ Type declarations: a triple-slash `<reference types="@zeroship/vite-plugin/types
 | `src/entry-client.tsx` | Hydrates the SSR'd HTML with `hydrateRoot` |
 | `src/entry-server.tsx` | Reference shape — **not used by the build**; `src/server.ts` is the wired-up entry |
 | `src/server.ts` | SSR entry: `export default { fetch }`, returns rendered HTML on every GET |
+| `src/server/config.ts` | Resource policy: `rpc:listPosts` admits the anonymous browser |
 | `src/components/App.tsx` | Top-level component picking PostList or Post by URL |
 | `src/components/PostList.tsx` | The 3-post list page |
 | `src/components/Post.tsx` | Single-post view with prev/next nav |
@@ -84,3 +90,14 @@ Type declarations: a triple-slash `<reference types="@zeroship/vite-plugin/types
 ```bash
 zeroship deploy ./dist/app.zship --app=<app-id> --control=<url> --token=<token>
 ```
+
+## Tests
+
+`node --run test` runs the unit tests in `test/` and the browser suite in
+`tests/`. The browser suite builds the platform services from this checkout,
+deploys the app onto them, starts the Vite dev server beside them, and drives
+both in Chromium: the post list must be in the document the server sends, and a
+post page must hydrate cleanly. Its Prev button navigates only once hydrated,
+and React raises a mismatch as an uncaught error, which fails the test. Run it
+inside `nix develop` with Docker available. Logs and failure screenshots stay
+under `tests/.artifacts/`.

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { parseTypedId } from "@zeroship/server/typed-id";
 import { PlatformBase, readManifest, prepare, type FixtureSettings } from "./base";
 import type { Backing } from "./services";
-import type { Port, Target } from "../common";
+import type { Port, Target, TargetContext } from "../common";
 
 /** The acceptance readiness chain a workflow example exposes to a suite. */
 export interface WorkflowGate {
@@ -27,7 +27,7 @@ export interface WorkflowSettings extends FixtureSettings {
   workerEnv?: (backing: Backing) => NodeJS.ProcessEnv;
   blobs: (backing: Backing, work: string) => Promise<string>;
   dev: { kind: "vite"; envVar: string } | { kind: "serve" };
-  targets: (ctx: { dev: Port; ui: Port; gateway: Port }) => Target[];
+  targets: (ctx: TargetContext) => Target[];
   readiness: (target: Target) => { path: string; init?: RequestInit };
   gate: WorkflowGate;
 }
@@ -185,25 +185,21 @@ export class WorkflowPlatform extends PlatformBase {
     assert.equal(rollout.exitCode, 0, rollout.output);
     await processes.run("deploy", this.binary("zeroship"), ["deploy", bundle, `--app=${id}`, `--control=${control.url}`, `--token=${bearer}`], work, { HOME: work });
 
-    const dev = await this.port();
-    let ui: Port = dev;
+    let dev: Port;
+    let ui: Port;
     if (settings.dev.kind === "vite") {
       console.info(`${settings.label} fixture: start local Vite and wait for app dispatch`);
-      ui = await this.port();
-      await dev.release();
-      await ui.release();
-      processes.start("dev", process.execPath, [vite, "--host", "127.0.0.1", "--port", `${ui.number}`, "--strictPort"], app, {
-        [settings.dev.envVar]: `${dev.number}`, ZEROSHIP_BIN: this.binary("zeroship"),
-      });
+      ({ dev, ui } = await this.startDev(app, vite, settings.dev.envVar));
     } else {
       console.info(`${settings.label} fixture: serve the app bundle locally`);
+      dev = ui = await this.port();
       await dev.release();
       processes.start("dev", this.binary("zeroship"), ["serve", bundle, "--port", String(dev.number)], app, {});
     }
-    const targets = settings.targets({ dev, ui, gateway });
+    const targets = settings.targets({ dev, ui, gateway, log: (name) => processes.log(name) });
     for (const target of targets) {
       const ready = settings.readiness(target);
-      await this.waitFor(target.name, () => this.httpReady(target.apiUrl + ready.path, ready.init));
+      await this.waitForTarget(target, () => this.httpReady(target.apiUrl + ready.path, ready.init));
     }
     // Serving the app is not yet serving workflows. A deployed app reaches
     // env.workflows only once the manager has placed it and the worker host has

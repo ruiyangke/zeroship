@@ -1,24 +1,17 @@
-import { existsSync, mkdirSync } from "node:fs";
-import { delimiter, join } from "node:path";
-import { chromium, type Locator, type Page } from "playwright";
+import { mkdirSync } from "node:fs";
+import { join } from "node:path";
+import { launchChromium } from "@zeroship/example-fixtures";
+import type { Locator, Page } from "playwright";
 import { expect, inject, test } from "vitest";
 import { rpc } from "./rpc";
 import { targets } from "./targets";
-
-function browserExecutable(): string | undefined {
-  if (process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH) return process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH;
-  // NixOS Chromium is linked against the Nix store. Else use Playwright's install.
-  return (process.env.PATH ?? "").split(delimiter)
-    .flatMap((directory) => ["chromium", "chromium-browser"].map((name) => join(directory, name)))
-    .find(existsSync);
-}
 
 function panel(page: Page, title: string): Locator {
   return page.locator("form").filter({ has: page.getByRole("heading", { name: title, exact: true }) });
 }
 
 test("the dashboard controls reach real KV and recover from RPC failure", async () => {
-  const browser = await chromium.launch({ headless: true, executablePath: browserExecutable() });
+  const browser = await launchChromium();
   try {
     for (const target of targets()) {
       console.info(`KV browser: ${target.name}`);

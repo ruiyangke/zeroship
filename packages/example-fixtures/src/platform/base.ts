@@ -15,7 +15,8 @@ import { Parser } from "tar";
 import { GenericContainer, Wait, type StartedTestContainer } from "testcontainers";
 import { typedIdFromStableSeed } from "@zeroship/server/typed-id";
 import { Processes } from "../processes";
-import { reservePort, type Port } from "../common";
+import { reservePort, type Port, type Target } from "../common";
+import { serverErrors } from "../logs";
 import { issuer } from "../issuer";
 
 /** A backing store a primitive example reaches through a binding primitive. */
@@ -73,6 +74,9 @@ export async function readManifest(bundle: string): Promise<any> {
   return JSON.parse(Buffer.concat(chunks).toString());
 }
 
+/** A readiness failure that waiting cannot cure: `waitFor` rethrows it at once. */
+export class Unrecoverable extends Error {}
+
 export abstract class PlatformBase {
   readonly processes: Processes;
   protected readonly root: string;
@@ -114,10 +118,32 @@ export abstract class PlatformBase {
     let lastError: unknown;
     do {
       this.processes.assertAlive();
-      try { if (await ready()) return; } catch (error) { lastError = error; }
+      try { if (await ready()) return; } catch (error) {
+        if (error instanceof Unrecoverable) throw error;
+        lastError = error;
+      }
       await sleep(100, undefined, { signal: this.processes.signal });
     } while (Date.now() < deadline);
     throw new Error(`Not ready: ${label}; logs: ${this.logs}`, { cause: lastError });
+  }
+
+  /**
+   * Wait until `target` serves the app. A target that never does fails with
+   * the server's own errors from its log, which say why where the readiness
+   * answer says only "internal error".
+   */
+  protected async waitForTarget(target: Target, ready: () => Promise<boolean>): Promise<void> {
+    try {
+      await this.waitFor(target.name, ready);
+    } catch (error) {
+      const errors = target.log ? serverErrors(target.log) : [];
+      if (errors.length === 0) throw error;
+      throw new Error([
+        `${(error as Error).message}`,
+        `server errors in ${target.log}:`,
+        ...errors.map((line) => `  ${line}`),
+      ].join("\n"), { cause: error });
+    }
   }
 
   protected async httpReady(url: string, init?: RequestInit): Promise<boolean> {
@@ -159,13 +185,65 @@ export abstract class PlatformBase {
     for (const name of await readdir(this.settings.exampleDir)) {
       if (!exclude.includes(name)) await cp(join(this.settings.exampleDir, name), join(app, name), { recursive: true });
     }
-    await symlink(join(this.settings.exampleDir, "node_modules"), join(app, "node_modules"), "dir");
+    // The copy resolves packages through the example's own node_modules, one
+    // link per entry, and keeps Vite's caches (`.vite`, `.vite-temp`) to
+    // itself: every run optimizes dependencies from nothing, as a fresh
+    // checkout does, and no run reads a cache another run left.
+    const modules = join(this.settings.exampleDir, "node_modules");
+    await mkdir(join(app, "node_modules"));
+    for (const entry of await readdir(modules)) {
+      if (!entry.startsWith(".vite")) await symlink(join(modules, entry), join(app, "node_modules", entry));
+    }
     return { app, vite: join(app, "node_modules/vite/bin/vite.js") };
   }
 
   protected async buildBundle(app: string, vite: string): Promise<string> {
     await this.processes.run("app-build", process.execPath, [vite, "build"], app);
     return join(app, "dist", "app.zship");
+  }
+
+  /**
+   * Start the example's own Vite dev server in its private copy `app`, with
+   * the dev runtime on the port its vite.config.ts reads from `envVar`, and
+   * wait until that runtime answers through Vite's proxy. The dev server
+   * restarts a runtime that dies and gives up after a run of quick deaths.
+   * While the runtime is down its proxy answers with an `UNAVAILABLE` envelope
+   * whose `retryable` says whether it is still trying, so a runtime it gave up
+   * on fails the fixture at once, with the runtime's own words and the dev
+   * log, rather than when the readiness deadline runs out.
+   */
+  protected async startDev(app: string, vite: string, envVar: string): Promise<{ dev: Port; ui: Port }> {
+    const dev = await this.port();
+    const ui = await this.port();
+    await dev.release();
+    await ui.release();
+    this.processes.start("dev", process.execPath, [vite, "--host", "127.0.0.1", "--port", `${ui.number}`, "--strictPort"], app, {
+      [envVar]: `${dev.number}`, ZEROSHIP_BIN: this.binary("zeroship"),
+    });
+    await this.waitFor("the dev runtime behind Vite", () => this.devRuntimeAnswers(ui.url));
+    return { dev, ui };
+  }
+
+  private async devRuntimeAnswers(ui: string): Promise<boolean> {
+    const response = await fetch(`${ui}/__zeroship/v1/__fixture_readiness__`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ json: {} }),
+      signal: AbortSignal.any([this.processes.signal, AbortSignal.timeout(5_000)]),
+    });
+    const body = await response.text();
+    if (response.status !== 503) return true;
+    let envelope: { code?: unknown; retryable?: unknown; message?: unknown; details?: { runtimeOutput?: unknown } };
+    // Anything but the dev server's own JSON envelope is the runtime answering.
+    try { envelope = JSON.parse(body); } catch { return true; }
+    if (envelope.code !== "UNAVAILABLE") return true;
+    const output = envelope.details?.runtimeOutput;
+    if (envelope.retryable === false) {
+      throw new Unrecoverable([
+        `The dev server gave up on its runtime: ${String(envelope.message)}`,
+        ...(Array.isArray(output) ? output.map((line) => `  | ${String(line)}`) : []),
+        `Vite log: ${this.processes.log("dev")}`,
+      ].join("\n"));
+    }
+    throw new Error(String(envelope.message));
   }
 
   protected async startPostgres(image: string, extra: string[] = []): Promise<{ postgres: StartedTestContainer; authority: string; dsn: string }> {

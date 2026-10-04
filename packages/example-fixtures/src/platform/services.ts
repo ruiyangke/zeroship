@@ -3,7 +3,7 @@ import { randomBytes } from "node:crypto";
 import { isTypedId } from "@zeroship/server/typed-id";
 import { PlatformBase, readManifest, prepare, type Backing, type FixtureSettings } from "./base";
 import type { ManagedProcess } from "../processes";
-import type { Port, S3Fixture, Target, WorkerFixture } from "../common";
+import type { Port, S3Fixture, Target, TargetContext, WorkerFixture } from "../common";
 
 export type { Backing } from "./base";
 
@@ -31,9 +31,15 @@ export interface ServicesSettings extends FixtureSettings {
   workerExtraArgs?: (backing: Backing) => string[];
   workerEnv?: (backing: Backing) => NodeJS.ProcessEnv;
   blobs: (backing: Backing, work: string) => Promise<string>;
-  devEnvVar: string;
-  targets: (ctx: { dev: Port; ui: Port; gateway: Port }) => Target[];
-  readiness: (target: Target) => { path: string; body: unknown };
+  /**
+   * The variable the example's vite.config.ts reads for its dev runtime's
+   * port. Without one no local Vite starts, and a target that names `dev` or
+   * `ui` fails the fixture.
+   */
+  devEnvVar?: string;
+  targets: (ctx: TargetContext) => Target[];
+  /** The request a target answers once it serves the app: an RPC POST of `body`, or a GET without one. */
+  readiness: (target: Target) => { path: string; body?: unknown };
   postDeploy?: (ctx: PostDeployContext) => Promise<{ s3?: S3Fixture; worker?: WorkerFixture } | void>;
 }
 
@@ -141,18 +147,24 @@ export class ServicesPlatform extends PlatformBase {
       if (exposed?.worker) this.worker = exposed.worker;
     }
 
-    console.info(`${settings.label} fixture: start local Vite and wait for app dispatch`);
-    const dev = await this.port();
-    const ui = await this.port();
-    await dev.release();
-    await ui.release();
-    processes.start("dev", process.execPath, [vite, "--host", "127.0.0.1", "--port", `${ui.number}`, "--strictPort"], app, {
-      [settings.devEnvVar]: `${dev.number}`, ZEROSHIP_BIN: this.binary("zeroship"),
+    let local: { dev: Port; ui: Port } | undefined;
+    if (settings.devEnvVar) {
+      console.info(`${settings.label} fixture: start local Vite and wait for app dispatch`);
+      local = await this.startDev(app, vite, settings.devEnvVar);
+    }
+    const started = (port: "dev" | "ui"): Port => {
+      if (!local) throw new Error(`${settings.label} fixture starts no local Vite, because its settings name no devEnvVar, so no target can reach ${port}`);
+      return local[port];
+    };
+    const targets = settings.targets({
+      gateway,
+      get dev() { return started("dev"); },
+      get ui() { return started("ui"); },
+      log: (name) => processes.log(name),
     });
-    const targets = settings.targets({ dev, ui, gateway });
     for (const target of targets) {
       const ready = settings.readiness(target);
-      await this.waitFor(target.name, () => this.httpReady(`${target.apiUrl}${ready.path}`, {
+      await this.waitForTarget(target, () => this.httpReady(`${target.apiUrl}${ready.path}`, ready.body === undefined ? undefined : {
         method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ json: ready.body }),
       }));
     }
