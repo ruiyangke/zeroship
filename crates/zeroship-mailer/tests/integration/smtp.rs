@@ -1,6 +1,6 @@
 use crate::support::database::Database;
-use crate::support::message;
 use crate::support::smtp::{Address, SmtpSink};
+use crate::support::{message, recipient};
 use zeroship_mailer::inbound::{InboundHeader, InboundMessage, Mailbox};
 use zeroship_mailer::{forward, suppressions, Mailer, MailerError};
 
@@ -10,15 +10,20 @@ async fn smtp_refusal_is_a_transport_error_and_the_mailer_can_send_again() {
         SmtpSink::run(async |sink| {
             let client = database.connect_as("zeroship_auth").await;
             let mailer = sink.mailer();
-            let mut refused = message();
-            refused.to.email = "reader@refused.test".into();
+            let refused = message(&format!(
+                "refused-{}@refused.test",
+                uuid::Uuid::new_v4().simple()
+            ));
             let error = mailer.send(&client, refused).await.unwrap_err();
             assert!(
                 matches!(error, MailerError::Transport(_)),
                 "wrong SMTP error: {error:?}"
             );
             assert_eq!(sink.inbox().await.total, 0);
-            mailer.send(&client, message()).await.unwrap();
+            mailer
+                .send(&client, message(&recipient("refusal-recovery")))
+                .await
+                .unwrap();
             assert_eq!(
                 sink.delivered().await.message.subject,
                 "Confirm your address"
@@ -34,7 +39,8 @@ async fn transactional_mail_arrives_with_its_envelope_and_mime_bodies() {
     Database::run(async |database| {
         SmtpSink::run(async |sink| {
             let client = database.connect_as("zeroship_auth").await;
-            let email = message();
+            let to = recipient("transactional");
+            let email = message(&to);
             sink.mailer().send(&client, email.clone()).await.unwrap();
             let delivered = sink.delivered().await;
             assert_eq!(
@@ -48,7 +54,7 @@ async fn transactional_mail_arrives_with_its_envelope_and_mime_bodies() {
                 delivered.message.to,
                 vec![Address {
                     name: "Reader".into(),
-                    address: "reader@personal.test".into()
+                    address: to.clone()
                 }]
             );
             assert!(delivered.message.reply_to.is_empty());
@@ -57,7 +63,7 @@ async fn transactional_mail_arrives_with_its_envelope_and_mime_bodies() {
             assert_eq!(delivered.message.text, email.text);
             assert_eq!(delivered.message.html, email.html.unwrap());
             assert_eq!(delivered.header("Received").len(), 1);
-            assert!(delivered.header("Received")[0].contains("for <reader@personal.test>"));
+            assert!(delivered.header("Received")[0].contains(&format!("for <{to}>")));
         })
         .await;
     })
@@ -69,15 +75,16 @@ async fn relay_delivers_to_the_real_inbox_with_alias_headers_and_bounce_sender()
     Database::run(async |database| {
         SmtpSink::run(async |sink| {
             let client = database.connect_as("zeroship_auth").await;
-            let real = "real.user@personal.test";
-            let alias = "receipt@relay.zeroship.test";
+            let tag = uuid::Uuid::new_v4().simple().to_string();
+            let real = format!("real.user-{tag}@personal.test");
+            let alias = format!("receipt-{tag}@relay.zeroship.test");
             let inbound = InboundMessage {
                 from_full: Mailbox {
                     email: "newsletter@shop.test".into(),
                     name: Some("Shop".into()),
                 },
                 to_full: vec![],
-                original_recipient: alias.into(),
+                original_recipient: alias.clone(),
                 subject: "Your receipt".into(),
                 text_body: "Thanks for your order.".into(),
                 html_body: None,
@@ -92,43 +99,43 @@ async fn relay_delivers_to_the_real_inbox_with_alias_headers_and_bounce_sender()
                 .into_iter()
                 .map(|name| InboundHeader {
                     name: name.into(),
-                    value: real.into(),
+                    value: real.clone(),
                 })
                 .collect(),
-                message_id: "inbound-receipt".into(),
+                message_id: format!("inbound-receipt-{tag}"),
             };
             let email =
-                forward::build_forward(&inbound, alias, real, "Shop", "relay.zeroship.test", 1);
+                forward::build_forward(&inbound, &alias, &real, "Shop", "relay.zeroship.test", 1);
             sink.mailer().send(&client, email).await.unwrap();
             let delivered = sink.delivered().await;
             assert_eq!(
                 delivered.message.from,
                 Address {
                     name: "Shop via relay".into(),
-                    address: alias.into()
+                    address: alias.clone()
                 }
             );
             assert_eq!(
                 delivered.message.to,
                 vec![Address {
                     name: "Shop via relay".into(),
-                    address: alias.into()
+                    address: alias.clone()
                 }]
             );
             assert_eq!(
                 delivered.message.reply_to,
                 vec![Address {
                     name: String::new(),
-                    address: alias.into()
+                    address: alias.clone()
                 }]
             );
             // Mailpit records MAIL FROM in Return-Path and RCPT TO in Received.
             assert_eq!(
                 delivered.message.return_path,
-                "bounce+receipt@relay.zeroship.test"
+                format!("bounce+receipt-{tag}@relay.zeroship.test")
             );
             assert_eq!(delivered.header("Received").len(), 1);
-            assert!(delivered.header("Received")[0].contains("for <real.user@personal.test>"));
+            assert!(delivered.header("Received")[0].contains(&format!("for <{real}>")));
             assert_eq!(delivered.header("X-ZS-Relay"), &["1"]);
             for name in ["Delivered-To", "X-Original-To", "Sender"] {
                 assert!(
@@ -143,7 +150,7 @@ async fn relay_delivers_to_the_real_inbox_with_alias_headers_and_bounce_sender()
                     continue;
                 }
                 assert!(
-                    values.iter().all(|value| !value.contains(real)),
+                    values.iter().all(|value| !value.contains(&real)),
                     "real inbox leaked in {name}: {values:?}"
                 );
             }
@@ -163,24 +170,26 @@ async fn a_suppressed_envelope_recipient_is_not_delivered_even_with_an_allowed_h
         SmtpSink::run(async |sink| {
             let client = database.connect_as("zeroship_auth").await;
             let mailer = sink.mailer();
-            let mut email = message();
+            let to = recipient("suppressed-envelope");
+            let mut email = message(&to);
             email.header_to = Some(zeroship_mailer::Address {
                 email: "alias@relay.zeroship.test".into(),
                 name: None,
             });
             email.envelope_from = Some("bounce@relay.zeroship.test".into());
-            suppressions::add(&client, "READER@PERSONAL.TEST", "complaint", None)
+            suppressions::add(&client, &to.to_uppercase(), "complaint", None)
                 .await
                 .unwrap();
             assert!(matches!(mailer.send(&client, email.clone()).await,
-                Err(MailerError::Suppressed(address)) if address == "reader@personal.test"));
+                Err(MailerError::Suppressed(address)) if address == to));
             assert_eq!(sink.inbox().await.total, 0, "suppressed mail reached SMTP");
 
-            email.to.email = "other@personal.test".into();
+            let other = recipient("suppressed-other");
+            email.to.email = other.clone();
             mailer.send(&client, email).await.unwrap();
             let delivered = sink.delivered().await;
             assert_eq!(delivered.header("Received").len(), 1);
-            assert!(delivered.header("Received")[0].contains("for <other@personal.test>"));
+            assert!(delivered.header("Received")[0].contains(&format!("for <{other}>")));
         })
         .await;
     })
@@ -189,7 +198,9 @@ async fn a_suppressed_envelope_recipient_is_not_delivered_even_with_an_allowed_h
 
 #[compio::test]
 async fn failed_suppression_lookup_prevents_delivery_and_a_retry_after_repair_succeeds() {
-    Database::run(async |database| {
+    // Platform-global: the case renames the shared suppression table, so every
+    // reader's lookup fails while it holds.
+    Database::run_fresh(async |database| {
         SmtpSink::run(async |sink| {
             let admin = database.connect().await;
             let client = database.connect_as("zeroship_auth").await;
@@ -201,7 +212,9 @@ async fn failed_suppression_lookup_prevents_delivery_and_a_retry_after_repair_su
                 .await
                 .unwrap();
             assert!(matches!(
-                mailer.send(&client, message()).await,
+                mailer
+                    .send(&client, message(&recipient("failed-lookup")))
+                    .await,
                 Err(MailerError::Transport(_))
             ));
             assert_eq!(
@@ -215,7 +228,10 @@ async fn failed_suppression_lookup_prevents_delivery_and_a_retry_after_repair_su
                 )
                 .await
                 .unwrap();
-            mailer.send(&client, message()).await.unwrap();
+            mailer
+                .send(&client, message(&recipient("lookup-repair")))
+                .await
+                .unwrap();
             assert_eq!(
                 sink.delivered().await.message.subject,
                 "Confirm your address"

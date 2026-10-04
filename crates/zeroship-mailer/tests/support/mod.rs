@@ -3,10 +3,18 @@ pub mod smtp;
 
 use zeroship_mailer::{Address, Email};
 
-pub fn message() -> Email {
+/// A recipient unique to one case, on the domain the Mailpit sink accepts.
+///
+/// Every case mints its own address so a suppression it writes, or a message it
+/// delivers, is scoped to the rows it owns.
+pub fn recipient(label: &str) -> String {
+    format!("{label}-{}@personal.test", uuid::Uuid::new_v4().simple())
+}
+
+pub fn message(to: &str) -> Email {
     Email {
         to: Address {
-            email: "reader@personal.test".into(),
+            email: to.into(),
             name: Some("Reader".into()),
         },
         header_to: None,

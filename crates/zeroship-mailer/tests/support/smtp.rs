@@ -157,7 +157,6 @@ pub struct Address {
 
 #[compio::test]
 async fn assertion_failure_removes_the_owned_smtp_server() {
-    use super::database::container_ids;
     use std::cell::RefCell;
 
     let failed_id = RefCell::new(String::new());
@@ -189,4 +188,23 @@ async fn assertion_failure_removes_the_owned_smtp_server() {
         !container_ids().contains(&*successful_id.borrow()),
         "successful case leaked its SMTP server"
     );
+}
+
+/// Every Docker container id the host knows, for a fixture that proves the
+/// server it started is gone.
+pub(super) fn container_ids() -> Vec<String> {
+    let output = std::process::Command::new("docker")
+        .args(["ps", "--all", "--quiet", "--no-trunc"])
+        .output()
+        .expect("query fixture container lifecycle");
+    assert!(
+        output.status.success(),
+        "Docker container listing failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect()
 }

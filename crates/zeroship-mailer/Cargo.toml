@@ -49,10 +49,10 @@ askama = "0.12"
 # Fixtures own their servers; compio drives the PostgreSQL and HTTP clients.
 compio = { workspace = true, features = ["polling"] }
 futures = { workspace = true }
-tempfile = { workspace = true }
 testcontainers = { version = "0.28", default-features = false, features = ["blocking", "watchdog"] }
-toml = { workspace = true }
 url = { workspace = true }
+# The shared, reaper-owned migrated platform server every database case runs on.
+zeroship-testkit = { path = "../../tests/testkit" }
 
 [lints]
 workspace = true
