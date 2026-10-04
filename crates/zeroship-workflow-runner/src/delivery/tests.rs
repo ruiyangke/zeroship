@@ -1426,27 +1426,42 @@ async fn a_renewal_that_never_answers_ends_the_attempt_on_the_operation_bound() 
 ///
 /// A settlement the manager never acknowledges is retried, and renewal is the
 /// thing that would otherwise keep the attempt alive to retry in: a host whose
-/// renewals all succeed has no expiring authority to stop it. So the phase is
-/// what has to, and this is the case that says so - the retries end, the claim
-/// is not settled, and the attempt reports the failure rather than looping.
+/// renewals all succeed has no expiring authority to stop it. So the operation
+/// bound is what has to, and this is the case that says so - the retries run
+/// until that bound and end there, the claim is not settled, and the attempt
+/// reports the failure rather than looping.
+///
+/// The operation bound is the fixture's own, which the journal commit and the
+/// read every retry makes cannot plausibly miss, so the retries counted are the
+/// loop's and not a measure of how fast the journal answered. The lease the
+/// delivery holds outlasts every bound the attempt runs under, so an attempt
+/// that ends inside it was ended by a bound and not by expiring authority, and
+/// the case is cut at that lease rather than left to loop.
 #[compio::test]
 async fn completion_retries_end_with_the_phase_while_renewal_keeps_succeeding() {
     let fixture = Fixture::new(AppPolicy::default()).await;
     fixture.probe.mode.set(Mode::Complete);
     fixture.metadata.lose_every_ack.set(true);
-    let execution = Duration::from_secs(2);
-    let mut slot = fixture.slot_bounding_operations(execution, Duration::from_millis(100));
-    let started = Instant::now();
-    Box::pin(slot.run(
-        &fixture.app,
-        claimed(&fixture.app, fixture.lease.clone()).await.unwrap(),
-    ))
-    .await
-    .unwrap_err();
-    let elapsed = started.elapsed();
+    let mut slot = fixture.slot(MANAGER_LEASE);
+    let claim = claimed(&fixture.app, fixture.lease.clone()).await.unwrap();
+    let authority = claim.lease.remaining().expect("the delivery holds a live lease");
+    // The commit, the recovery read and the acknowledgement each end on one
+    // operation bound at the latest.
     assert!(
-        elapsed < execution * 3,
-        "the retry loop outlived the phase that had to end it: {elapsed:?}"
+        authority > OPERATION_BOUND * 3,
+        "the premise: the lease outlasts every bound the attempt runs under"
+    );
+    let started = Instant::now();
+    let outcome = compio::time::timeout(authority, Box::pin(slot.run(&fixture.app, claim)))
+        .await
+        .unwrap_or_else(|_| {
+            panic!("the retry loop outlived the lease of {authority:?} it ran under")
+        });
+    let elapsed = started.elapsed();
+    assert_eq!(outcome.unwrap_err(), WorkflowServiceError::Timeout);
+    assert!(
+        elapsed >= OPERATION_BOUND,
+        "the retries ended before the operation bound that ends them: {elapsed:?}"
     );
     assert!(
         fixture.metadata.requests.borrow().len() > 1,
