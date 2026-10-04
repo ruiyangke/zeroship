@@ -56,18 +56,24 @@ for (const target of targets()) describe(`browser: ${target.name}`, () => {
   });
 
   test("initial load does not duplicate bootstrap RPCs", async ({ page }) => {
-    const counts = { publicUser: 0, listTodos: 0 };
+    const counts = { publicUser: 0, listTodos: 0, create: 0 };
     page.on("request", (request) => {
       const url = new URL(request.url());
       if (url.pathname === "/__zeroship/v1/users.public") counts.publicUser += 1;
       if (url.pathname === "/__zeroship/v1/todos.list") counts.listTodos += 1;
+      if (url.pathname === "/__zeroship/v1/todos.create") counts.create += 1;
     });
 
     await bootedPage(page);
     await expect(page.locator(".live.on")).toBeVisible({ timeout: 15_000 });
     await expect.poll(() => counts.publicUser, { timeout: 5_000 }).toBe(1);
     await expect.poll(() => counts.listTodos, { timeout: 5_000 }).toBe(1);
-    await page.waitForTimeout(900);
+
+    // Ordered sentinel: the composer and todos.list both stay gated on the
+    // userId from users.public, so a create request is sent only after both
+    // bootstrap reads.
+    await addTodo(page);
+    await expect.poll(() => counts.create, { timeout: 5_000 }).toBe(1);
 
     expect(counts.publicUser).toBe(1);
     expect(counts.listTodos).toBe(1);
@@ -75,9 +81,10 @@ for (const target of targets()) describe(`browser: ${target.name}`, () => {
 
   test("todo stream emits one snapshot for one committed create", async ({ page }) => {
     await bootedPage(page);
-    const title = uniq("stream");
+    const first = uniq("stream");
+    const second = uniq("stream");
 
-    const frames = await page.evaluate(async (todoTitle) => {
+    const frames = await page.evaluate(async ({ first: firstTitle, second: secondTitle }) => {
       const unwrap = (value: unknown): unknown => {
         if (value && typeof value === "object" && "json" in value) {
           return (value as { json: unknown }).json;
@@ -141,16 +148,21 @@ for (const target of targets()) describe(`browser: ${target.name}`, () => {
       };
 
       await waitFor(() => lines.some((line) => line.startsWith("2:")), 5_000);
-      await postJson("todos.create", { userId: user.id, title: todoTitle, priority: "low" });
-      await waitFor(() => lines.some((line) => line.includes(todoTitle)), 5_000);
-      await new Promise((resolve) => setTimeout(resolve, 700));
+      await postJson("todos.create", { userId: user.id, title: firstTitle, priority: "low" });
+      await waitFor(() => lines.some((line) => line.includes(firstTitle)), 5_000);
+      // Ordered sentinel: the second create's frame can only be sent after the
+      // first's, so a duplicate frame for the first would arrive before it; a
+      // snapshot frame lists every todo, so count only frames carrying the
+      // first title and not the second.
+      await postJson("todos.create", { userId: user.id, title: secondTitle, priority: "low" });
+      await waitFor(() => lines.some((line) => line.includes(secondTitle)), 5_000);
 
       controller.abort();
       await reader.cancel().catch(() => undefined);
       await pump;
 
-      return lines.filter((line) => line.includes(todoTitle));
-    }, title);
+      return lines.filter((line) => line.includes(firstTitle) && !line.includes(secondTitle));
+    }, { first, second });
 
     expect(frames).toHaveLength(1);
   });
